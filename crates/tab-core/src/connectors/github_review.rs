@@ -1120,9 +1120,14 @@ pub async fn link_summary(
                     .filter(|t| t["isResolved"].as_bool() == Some(false))
                     .count() as u32
             });
-            let merge_state = match lower(pr, "mergeable").as_str() {
-                "conflicting" => Some("dirty".to_string()),
-                _ => Some(lower(pr, "mergeStateStatus")).filter(|s| !s.is_empty()),
+            let merge_state = match (
+                lower(pr, "mergeable").as_str(),
+                lower(pr, "mergeStateStatus"),
+            ) {
+                ("conflicting", _) => Some("dirty".to_string()),
+                // Mergeable, but the branch rules haven't been worked out yet.
+                ("mergeable", m) if m.is_empty() || m == "unknown" => Some("mergeable".to_string()),
+                (_, m) => Some(m).filter(|m| !m.is_empty()),
             };
             let summary = LinkSummary {
                 title: str_at(pr, "/title").unwrap_or_default(),
@@ -1134,10 +1139,18 @@ pub async fn link_summary(
                 review_decision: Some(lower(pr, "reviewDecision")).filter(|s| !s.is_empty()),
                 open_threads,
             };
-            LINK_CACHE
-                .lock()
-                .unwrap()
-                .insert(key, (std::time::Instant::now(), summary.clone()));
+            // "unknown" means GitHub is still working out mergeability; don't
+            // keep that, so the next look gets the real state.
+            if summary
+                .merge_state
+                .as_deref()
+                .is_some_and(|m| m != "unknown")
+            {
+                LINK_CACHE
+                    .lock()
+                    .unwrap()
+                    .insert(key, (std::time::Instant::now(), summary.clone()));
+            }
             Ok(summary)
         }
         "issues" => {

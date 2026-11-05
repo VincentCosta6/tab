@@ -148,7 +148,9 @@ function linkStatus(s: LinkSummary): { label: string; tone: Tone } | null {
   if (s.review_decision === "review_required") return { label: "Needs review", tone: "info" };
   if (s.merge_state === "behind") return { label: "Behind base", tone: "warning" };
   if (s.merge_state === "blocked") return { label: "Blocked", tone: "warning" };
-  if (s.merge_state === "clean" || s.merge_state === "unstable" || s.merge_state === "has_hooks") return { label: "Ready to merge", tone: "success" };
+  if (s.merge_state === "clean" || s.merge_state === "has_hooks") return { label: "Ready to merge", tone: "success" };
+  if (s.merge_state === "unstable" || s.merge_state === "mergeable") return { label: "Mergeable", tone: "success" };
+  if (s.state === "open" && (!s.merge_state || s.merge_state === "unknown") && s.review_decision !== undefined) return { label: "Checking…", tone: "neutral" };
   if (s.checks === "passing") return checkStatus.passing;
   return s.state === "open" ? { label: "Open", tone: "success" } : null;
 }
@@ -161,6 +163,9 @@ function useLinkSummary(url: string | null | undefined) {
     enabled: !!link?.summary,
     staleTime: 120_000,
     retry: false,
+    // GitHub works out mergeability lazily: the first look often says
+    // "unknown". Ask again shortly so the badge settles on the real answer.
+    refetchInterval: (q) => (q.state.data?.state === "open" && (!q.state.data.merge_state || q.state.data.merge_state === "unknown") ? 5_000 : false),
   });
   return { link, sum: data };
 }
