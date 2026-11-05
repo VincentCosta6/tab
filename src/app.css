@@ -611,3 +611,9 @@ body.resizing iframe { pointer-events: none; }
 .ctx-pill { padding: 0 6px 0 8px; }
 .ctx-pill-mark { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; color: var(--fg); }
 .composer-project .pj-menu { color: var(--fg); font-size: var(--text-sm); }
+
+/* New chat → chat: the composer moves down to its place instead of flashing there. */
+.work-pane .composer:not(.composer-setup) { view-transition-name: work-composer; }
+::view-transition-group(work-composer) { animation-duration: 380ms; animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1); }
+::view-transition-old(work-composer), ::view-transition-new(work-composer) { height: 100%; }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 220ms; }

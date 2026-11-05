@@ -1,3 +1,4 @@
+import { flushSync } from "react-dom";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, EmptyState, ScorePill, Tabs, TextInput, cx } from "../../design/components";
@@ -223,11 +224,18 @@ export function WorkTab() {
           ))}
         </div>
       </section>
-      <section className="pane">
+      <section className="pane work-pane">
         {selected === NEW ? (
           <NewChat project={project} onStarted={(itemId) => {
-            setView("open");
-            setSelected(itemId);
+            // The composer glides from the middle of the page down to the
+            // chat's foot instead of jumping there.
+            const go = () => flushSync(() => {
+              setView("open");
+              setSelected(itemId);
+            });
+            const doc = document as Document & { startViewTransition?: (f: () => void) => unknown };
+            if (doc.startViewTransition && !matchMedia("(prefers-reduced-motion: reduce)").matches) doc.startViewTransition(go);
+            else go();
           }} />
         ) : selected ? (
           <ItemPane key={selected} id={selected} onActed={advance} onSelect={(id) => ((recheck.current = null), setSelected(id))} />
