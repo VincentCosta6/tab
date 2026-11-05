@@ -153,7 +153,8 @@
 .msg-user .markdown code { background: rgb(127 127 127 / 0.25); color: inherit; }
 .msg-user .markdown pre code { background: none; padding: 0; }
 .msg-user .markdown a, .msg-user .md-code-link { color: inherit; }
-.msg-user { align-self: flex-end; max-width: 80% !important; margin-right: 0 !important; padding: var(--space-2) var(--space-3); border-radius: var(--radius-lg) var(--radius-lg) 4px var(--radius-lg); background: var(--fg); color: var(--bg-raised); white-space: pre-wrap; }
+/* Sized to its text, on the right edge of the 780px reading column. */
+.msg-user { align-self: flex-end; width: fit-content; max-width: min(80%, 600px) !important; margin-left: auto !important; margin-right: max(0px, calc((100% - 780px) / 2)) !important; padding: var(--space-2) var(--space-3); border-radius: var(--radius-lg) var(--radius-lg) 4px var(--radius-lg); background: color-mix(in srgb, var(--fg) 9%, var(--bg-raised)); color: var(--fg); white-space: pre-wrap; }
 .msg-assistant { color: var(--fg); }
 .msg-assistant.streaming::after { content: "▍"; color: var(--fg-subtle); animation: blink 1s steps(2) infinite; }
 @keyframes blink { to { opacity: 0; } }
@@ -423,7 +424,7 @@ body.resizing iframe { pointer-events: none; }
 
 /* A chat in a project takes on the project's color. */
 .has-project .item-head { box-shadow: inset 0 3px 0 var(--project); }
-.has-project .msg-user { background: var(--project); color: #fff; }
+.has-project .msg-user { background: color-mix(in srgb, var(--project) 22%, var(--bg-raised)); }
 .has-project .composer { border-color: color-mix(in srgb, var(--project) 40%, var(--border-strong)); }
 .has-project .composer:focus-within { border-color: var(--project); box-shadow: 0 0 0 3px color-mix(in srgb, var(--project) 18%, transparent); }
 .has-project .composer-foot .btn-primary { background: var(--project); border-color: var(--project); color: #fff; }

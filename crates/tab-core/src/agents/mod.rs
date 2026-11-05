@@ -407,7 +407,11 @@ impl AgentHub {
              - When you learn a durable fact about the project (how it deploys, who owns what, where things \
              live, a decision and why), save it with tab_project_note under a short topic, citing the items \
              it came from. Writing the same topic again replaces the note, so keep it current rather than \
-             adding new ones. Skip anything that's only true for this one task.\n\
+             adding new ones. Skip anything that's only true for this one task, and never note one-off \
+             events (sign-ins, verifications, receipts, codes), credentials or personal account details: \
+             every future chat reads these.\n\
+             - When the person asks to link, file or move something into a project, use tab_set_project; \
+             a note is not a link.\n\
              - When the person wants to connect a service (email, GitHub, ...), set it up for them: \
              tab_list_connections shows each connection's settings. For email, call tab_find_email_server \
              with their address to find the IMAP server instead of asking them for it. Save settings with \

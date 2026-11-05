@@ -219,7 +219,8 @@ pub fn tools() -> Value {
                 "body": { "type": "string" },
                 "priority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
                 "due_in_minutes": { "type": "integer", "minimum": 1 },
-                "url": { "type": "string" }
+                "url": { "type": "string" },
+                "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." }
             }, "required": ["title"] }
         },
         {
@@ -250,8 +251,16 @@ pub fn tools() -> Value {
             } }
         },
         {
+            "name": "tab_set_project",
+            "description": "Put a queue item in a project, or take it out (project null). Use this when the person asks to link, file or move something into a project. Defaults to this chat's item.",
+            "inputSchema": { "type": "object", "properties": {
+                "item_id": { "type": "string" },
+                "project": { "type": ["string", "null"], "description": "Project name or id; null to remove it from its project." }
+            }, "required": ["project"] }
+        },
+        {
             "name": "tab_project_note",
-            "description": "Save a durable fact about a project for future chats: how it deploys, who owns what, where something lives, a decision and why. One note per topic: writing a topic again replaces it. Cite the items it came from.",
+            "description": "Save a durable fact about a project for future chats: how it deploys, who owns what, where something lives, a decision and why. One note per topic: writing a topic again replaces it. Cite the items it came from. Every future chat in the project reads these, so never note one-off events (a sign-in, a verification, a receipt, a code), credentials, codes, or personal account details. To put an item in a project, use tab_set_project instead.",
             "inputSchema": { "type": "object", "properties": {
                 "topic": { "type": "string", "description": "A short, stable topic, e.g. \"deploys\", \"owners\", \"staging env\"." },
                 "text": { "type": "string", "description": "The fact, in one to three sentences." },
@@ -591,11 +600,7 @@ impl McpServer {
                     .as_i64()
                     .map(|m| Utc::now() + chrono::Duration::minutes(m.max(1)));
                 // Follow-ups land in the same project as the chat's task.
-                let project_id = self
-                    .session_item(session, &json!({}))
-                    .ok()
-                    .and_then(|id| self.store.get(&id).ok().flatten())
-                    .and_then(|i| i.project_id);
+                let project_id = self.project_arg(session, &args)?.map(|p| p.id);
                 let item = self
                     .engine
                     .create_task(NewTask {
@@ -702,6 +707,35 @@ impl McpServer {
                         .collect::<Vec<_>>(),
                     "recent_items": self.store.project_items(&p.id, since, 15)?.iter().map(brief).collect::<Vec<_>>(),
                 }))?))
+            }
+            "tab_set_project" => {
+                let item_id = self.session_item(session, &args)?;
+                let project = match args["project"].as_str().filter(|v| !v.trim().is_empty()) {
+                    None => None,
+                    Some(name) => Some(self.store.project_find(name)?.ok_or_else(|| {
+                        let names: Vec<_> = self.store.projects().unwrap_or_default().into_iter().map(|p| p.name).collect();
+                        anyhow::anyhow!(
+                            "no project named {name}. Projects: {}. The person creates new ones in tab.",
+                            if names.is_empty() { "none yet".to_string() } else { names.join(", ") }
+                        )
+                    })?),
+                };
+                let item = self
+                    .store
+                    .item_set_project(
+                        &item_id,
+                        project.as_ref().map(|p| p.id.as_str()),
+                        Utc::now(),
+                    )?
+                    .ok_or_else(|| anyhow::anyhow!("no item {item_id}"))?;
+                let _ = self.events.send(EngineEvent::ItemChanged {
+                    change: crate::engine::Change::Updated,
+                    item: item.clone(),
+                });
+                Ok(text(match project {
+                    Some(p) => format!("Moved \"{}\" into {}.", item.event.title, p.name),
+                    None => format!("Took \"{}\" out of its project.", item.event.title),
+                }))
             }
             "tab_project_note" => {
                 let topic = s("topic").ok_or_else(|| anyhow::anyhow!("topic is required"))?;
@@ -995,7 +1029,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 15);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 16);
 
         // Create a task, a ticket to find, then file it under Found on the task.
         let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}});
