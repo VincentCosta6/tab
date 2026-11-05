@@ -520,3 +520,18 @@ body.resizing iframe { pointer-events: none; }
 .ask-suggestions { padding: 0 var(--space-6) var(--space-2); }
 .ask .composer { margin-top: 0; }
 .model-picker.mode-auto { color: var(--tone-success-fg); }
+
+/* GitHub's colours on the review Actions menu. */
+.rv-menu-item.gh-merge svg { color: #2da44e; }
+.rv-menu-item.gh-open svg { color: #2da44e; }
+.rv-menu-item.gh-close, .rv-menu-item.gh-close svg { color: #cf222e; }
+.rv-menu-item.gh-muted svg { color: var(--fg-muted); }
+.rv-menu-item.gh-merge:not(:disabled) { font-weight: 500; }
+.rv-menu-item:disabled svg { color: var(--fg-subtle); }
+@media (prefers-color-scheme: dark) {
+  .rv-menu-item.gh-merge svg, .rv-menu-item.gh-open svg { color: #3fb950; }
+  .rv-menu-item.gh-close, .rv-menu-item.gh-close svg { color: #f85149; }
+}
+.rv-menu-note { display: flex; align-items: center; gap: 6px; padding: 6px 10px 4px; font-size: var(--text-xs); color: #cf222e; }
+.rv-menu-note.warn { color: var(--tone-warning-fg); }
+@media (prefers-color-scheme: dark) { .rv-menu-note:not(.warn) { color: #f85149; } }

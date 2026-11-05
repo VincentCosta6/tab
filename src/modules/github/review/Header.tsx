@@ -152,6 +152,23 @@ function SubmitReview({ onClose }: { onClose: () => void }) {
   );
 }
 
+/**
+ * Why GitHub wouldn't merge this right now, like its greyed-out merge button:
+ * conflicts, or branch rules (required reviews or checks) not met.
+ */
+function mergeBlock(pr: { mergeable: string; merge_state: string; review_decision: string | null }): { blocked: string | null; warn: string | null } {
+  if (pr.mergeable === "conflicting" || pr.merge_state === "dirty") return { blocked: "Merge conflicts must be resolved first", warn: null };
+  if (pr.merge_state === "blocked") {
+    if (pr.review_decision === "changes_requested") return { blocked: "Changes requested", warn: null };
+    if (pr.review_decision === "review_required") return { blocked: "Review required by branch rules", warn: null };
+    return { blocked: "Required checks haven't passed", warn: null };
+  }
+  if (pr.merge_state === "behind") return { blocked: "Branch is out of date with its base", warn: null };
+  if (pr.merge_state === "unknown" || pr.mergeable === "unknown") return { blocked: "GitHub is still checking mergeability", warn: null };
+  if (pr.merge_state === "unstable") return { blocked: null, warn: "Some checks are failing, but none are required" };
+  return { blocked: null, warn: null };
+}
+
 function copy(text: string) {
   navigator.clipboard?.writeText(text).catch(() => {});
 }
@@ -168,6 +185,7 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
   const pills = statusPills(pr);
   const state = statePill(pr);
   const open = pr.state === "open";
+  const { blocked, warn } = mergeBlock(pr);
 
   useEffect(() => {
     if (!pr.sample) api.vscodeAvailable().then(setVscode).catch(() => setVscode(false));
@@ -177,8 +195,8 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
     setMenu(false);
     f().then(() => done && notify(done, "success")).catch((e) => notify(String(e), "danger"));
   };
-  const item = (icon: string, label: string, onClick: () => void, opts: { disabled?: boolean; danger?: boolean; hint?: string } = {}) => (
-    <button className={cx("rv-menu-item", opts.danger && "text-danger")} disabled={opts.disabled} onClick={onClick}>
+  const item = (icon: string, label: string, onClick: () => void, opts: { disabled?: boolean; danger?: boolean; hint?: string; tone?: "merge" | "open" | "close" | "muted" } = {}) => (
+    <button className={cx("rv-menu-item", opts.tone && `gh-${opts.tone}`, opts.danger && !opts.tone && "text-danger")} disabled={opts.disabled} onClick={onClick} title={opts.disabled ? opts.hint : undefined}>
       <Icon name={icon} size={14} />
       <span>{label}</span>
       {opts.hint && <span className="subtle rv-menu-hint">{opts.hint}</span>}
@@ -211,6 +229,17 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
           <Button size="sm" icon="more" onClick={() => setMenu((m) => !m)}>Actions</Button>
           {menu && (
             <div className="rv-menu rv-menu-right">
+              {open && !pr.draft && (
+                <>
+                  {blocked && <div className="rv-menu-note"><Icon name="x-circle" size={13} /> {blocked}</div>}
+                  {!blocked && warn && <div className="rv-menu-note warn"><Icon name="dot" size={13} /> {warn}</div>}
+                  {item("git-merge", "Squash and merge", merge("squash", "Squash and merge"), { tone: "merge", disabled: !!blocked, hint: blocked ?? undefined })}
+                  {item("git-merge", "Create a merge commit", merge("merge", "Create a merge commit"), { tone: "merge", disabled: !!blocked, hint: blocked ?? undefined })}
+                  {item("git-merge", "Rebase and merge", merge("rebase", "Rebase and merge"), { tone: "merge", disabled: !!blocked, hint: blocked ?? undefined })}
+                  {pr.merge_state === "behind" && item("arrow-down", `Update branch from ${pr.base_ref}`, run(() => act({ type: "update_branch" }), "Branch update started"))}
+                  <div className="rv-menu-sep" />
+                </>
+              )}
               {item("external", "View on GitHub", run(() => openUrl(pr.url)))}
               {item("code", "Open in VS Code", run(() => api.workspaceOpen(pr.repo, pr.number, "vscode")), { disabled: !local || pr.sample || !vscode, hint: !vscode && !pr.sample ? "code not found" : undefined })}
               {item("folder", "Show checkout folder", run(() => api.workspaceOpen(pr.repo, pr.number, "folder")), { disabled: !local || pr.sample })}
@@ -218,24 +247,16 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
               {item("terminal", "Copy checkout command", run(async () => copy(`gh pr checkout ${pr.number} --repo ${pr.repo}`), "Copied"))}
               <div className="rv-menu-sep" />
               {item("refresh", "Refresh", () => { setMenu(false); onRefresh(); })}
-              {open && pr.merge_state === "behind" && item("arrow-down", `Update branch from ${pr.base_ref}`, run(() => act({ type: "update_branch" }), "Branch update started"))}
+              {open && pr.draft && pr.merge_state === "behind" && item("arrow-down", `Update branch from ${pr.base_ref}`, run(() => act({ type: "update_branch" }), "Branch update started"))}
               {open && (pr.draft
-                ? item("eye", "Mark ready for review", run(() => act({ type: "set_draft", draft: false }), "Ready for review"))
-                : item("git-pull-request-draft", "Convert to draft", run(() => act({ type: "set_draft", draft: true }), "Converted to draft")))}
-              {open && !pr.draft && (
-                <>
-                  <div className="rv-menu-sep" />
-                  {item("git-merge", "Squash and merge", merge("squash", "Squash and merge"))}
-                  {item("git-merge", "Create a merge commit", merge("merge", "Create a merge commit"))}
-                  {item("git-merge", "Rebase and merge", merge("rebase", "Rebase and merge"))}
-                </>
-              )}
+                ? item("git-pull-request", "Mark ready for review", run(() => act({ type: "set_draft", draft: false }), "Ready for review"), { tone: "open" })
+                : item("git-pull-request-draft", "Convert to draft", run(() => act({ type: "set_draft", draft: true }), "Converted to draft"), { tone: "muted" }))}
               <div className="rv-menu-sep" />
-              {pr.state === "closed" && item("undo", "Reopen pull request", run(() => act({ type: "set_state", state: "open" }), "Reopened"))}
+              {pr.state === "closed" && item("git-pull-request", "Reopen pull request", run(() => act({ type: "set_state", state: "open" }), "Reopened"), { tone: "open" })}
               {open && item("git-pull-request-closed", "Close pull request", () => {
                 setMenu(false);
                 setConfirm({ title: "Close this pull request?", body: "You can reopen it later.", confirm: "Close pull request", danger: true, run: () => act({ type: "set_state", state: "closed" }) });
-              }, { danger: true })}
+              }, { danger: true, tone: "close" })}
             </div>
           )}
         </div>
