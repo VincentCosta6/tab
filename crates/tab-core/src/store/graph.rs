@@ -50,6 +50,83 @@ pub(crate) fn link_item(
     Ok(())
 }
 
+/// Entities for a GitHub PR or issue URL: its repo and the PR or issue itself,
+/// keyed exactly as the GitHub connector keys them so they are the same nodes.
+pub(crate) fn github_refs(url: &str) -> Vec<EntityRef> {
+    let Some(rest) = url
+        .trim()
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.trim().strip_prefix("http://github.com/"))
+    else {
+        return Vec::new();
+    };
+    let parts: Vec<&str> = rest.split(['/', '?', '#']).collect();
+    let [owner, repo, kind, number, ..] = parts[..] else {
+        return Vec::new();
+    };
+    let kind = match kind {
+        "pull" => "pull_request",
+        "issues" => "issue",
+        _ => return Vec::new(),
+    };
+    if owner.is_empty()
+        || repo.is_empty()
+        || number.is_empty()
+        || !number.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Vec::new();
+    }
+    let full = format!("{owner}/{repo}");
+    vec![
+        EntityRef::new("repo", format!("github:{full}"), full.clone(), "in"),
+        EntityRef::new(
+            kind,
+            format!("github:{full}#{number}"),
+            format!("{full}#{number}"),
+            "about",
+        ),
+    ]
+}
+
+/// Adds entities to an item without touching what it already links to, and
+/// joins each new one to the others on the item with `co_occurs` edges.
+pub(crate) fn add_refs(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    refs: &[EntityRef],
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    for r in refs {
+        let id: i64 = tx.query_row(
+            "INSERT INTO entities (kind, key, label, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT (kind, key) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at
+             RETURNING id",
+            params![r.kind, r.key, r.label, ts(now)],
+            |row| row.get(0),
+        )?;
+        let added = tx.execute(
+            "INSERT OR IGNORE INTO item_entities (item_id, entity_id, rel) VALUES (?1, ?2, ?3)",
+            params![item_id, id, r.rel],
+        )?;
+        if added == 0 {
+            continue;
+        }
+        let others: Vec<i64> = tx
+            .prepare("SELECT entity_id FROM item_entities WHERE item_id = ?1 AND entity_id != ?2")?
+            .query_map(params![item_id, id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        for o in others {
+            let (a, b) = (id.min(o), id.max(o));
+            tx.execute(
+                "INSERT INTO edges (src, dst, rel, weight, updated_at) VALUES (?1, ?2, 'co_occurs', 1, ?3)
+                 ON CONFLICT (src, dst, rel) DO UPDATE SET weight = weight + 1, updated_at = excluded.updated_at",
+                params![a, b, ts(now)],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Two entity ids and how many items they share.
 pub type GraphEdge = (i64, i64, i64);
 
