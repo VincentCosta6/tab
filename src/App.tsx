@@ -78,7 +78,7 @@ function Shell() {
   return (
     <div className="shell">
       <nav className="nav">
-        <div className="nav-brand" title="TAB Annihilates Backlogs"><TabMark size={26} /></div>
+        <div className="nav-brand" title="TAB Annihilates Backlogs"><TabMark size={36} /></div>
         <div className="nav-group">{visible.filter((t) => !t.footer).map(navButton)}</div>
         <div className="nav-group nav-footer">
           <UsageMeter onSettings={() => setActive("settings")} />
