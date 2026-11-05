@@ -173,7 +173,7 @@ export interface SessionMessage {
   id: number;
   session_id: string;
   role: "user" | "assistant" | "tool" | "system";
-  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request";
+  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request" | "suggestion";
   content: string;
   meta: any;
   created_at: string;
@@ -340,6 +340,7 @@ export interface AgentConfig {
   model: string | null;
   workdir: string | null;
   permission_mode: string;
+  suggest_replies?: boolean;
   opencode_url: string | null;
   budget: BudgetConfig;
 }

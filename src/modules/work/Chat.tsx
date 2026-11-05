@@ -277,6 +277,7 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
 }
 
 function MessageView({ m, result, onSend }: { m: SessionMessage; result?: SessionMessage; onSend?: (text: string) => void }) {
+  if (m.kind === "suggestion") return null;
   if (m.role === "user") {
     const images: string[] = Array.isArray(m.meta?.attachments) ? m.meta.attachments : [];
     return (
@@ -624,10 +625,14 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   const [images, setImages] = useState<string[]>([]);
   const [uploading, setUploading] = useState(0);
   const [dragging, setDragging] = useState(false);
+  // A file is being dragged anywhere over the window: show where it can go.
+  const [armed, setArmed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const file = useRef<HTMLInputElement>(null);
   const running = !!chat?.running;
+  const last = chat?.messages[chat.messages.length - 1];
+  const suggestion = !running && last?.kind === "suggestion" && config?.agent.suggest_replies !== false ? last.content : "";
   const slash = useSlashMenu(text);
   const pickSlash = (name: string) => (setText(`/${name} `), slash.close(), ref.current?.focus());
 
@@ -641,6 +646,28 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   useEffect(() => {
     if (autoFocus) ref.current?.focus();
   }, [autoFocus]);
+
+  useEffect(() => {
+    let depth = 0;
+    const hasFile = (e: DragEvent) => !!e.dataTransfer && [...e.dataTransfer.items].some((i) => i.kind === "file");
+    const enter = (e: DragEvent) => hasFile(e) && (depth++, setArmed(true));
+    const leave = (e: DragEvent) => hasFile(e) && --depth <= 0 && ((depth = 0), setArmed(false));
+    const end = () => ((depth = 0), setArmed(false), setDragging(false));
+    // Dropping outside a composer must not navigate the webview to the file.
+    const over = (e: DragEvent) => hasFile(e) && e.preventDefault();
+    window.addEventListener("dragenter", enter);
+    window.addEventListener("dragleave", leave);
+    window.addEventListener("dragover", over);
+    window.addEventListener("drop", end);
+    window.addEventListener("dragend", end);
+    return () => {
+      window.removeEventListener("dragenter", enter);
+      window.removeEventListener("dragleave", leave);
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("drop", end);
+      window.removeEventListener("dragend", end);
+    };
+  }, []);
 
   const add = async (files: File[]) => {
     const imgs = files.filter((f) => imageTypes.includes(f.type));
@@ -661,7 +688,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
 
   const submit = () => {
     const t = text.trim();
-    if ((!t && !images.length) || running || uploading) return;
+    if ((!t && !images.length) || uploading) return;
     setText("");
     setImages([]);
     setError(null);
@@ -679,7 +706,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
 
   return (
     <div
-      className={cx("composer", dragging && "dragging")}
+      className={cx("composer", armed && "drop-armed", dragging && "dragging")}
       onDragOver={(e) => {
         if (![...e.dataTransfer.items].some((i) => i.kind === "file")) return;
         e.preventDefault();
@@ -693,6 +720,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
         void add([...e.dataTransfer.files]);
       }}
     >
+      {armed && <div className="composer-drop"><Icon name="plus" size={14} /> Drop images to attach</div>}
       {(images.length > 0 || uploading > 0) && (
         <div className="composer-images">
           <Thumbs srcs={images} size={56} onRemove={(i) => setImages((xs) => xs.filter((_, j) => j !== i))} />
@@ -703,7 +731,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
         ref={ref}
         rows={1}
         value={text}
-        placeholder={placeholder}
+        placeholder={suggestion || (running ? "Steer the agent while it works…" : placeholder)}
         onChange={(e) => setText(e.target.value)}
         onPaste={(e) => {
           const files = [...e.clipboardData.files];
@@ -713,6 +741,8 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
         }}
         onKeyDown={(e) => {
           if (slash.open && slash.handleKey(e, pickSlash)) return;
+          // Tab takes the suggested reply; Enter then sends it.
+          if (e.key === "Tab" && !e.shiftKey && !text && suggestion) return (e.preventDefault(), setText(suggestion));
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) (e.preventDefault(), submit());
         }}
       />
@@ -727,6 +757,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
         </div>
       )}
       {error && <div className="composer-error">{error}</div>}
+      {suggestion && !text && <div className="composer-suggest subtle"><kbd>Tab</kbd> to use the suggested reply, then <kbd>Enter</kbd> to send</div>}
       <div className="composer-foot">
         <span className="subtle composer-agent">
           <button className="bar-icon" onClick={() => file.current?.click()} title="Attach images (or paste or drop them)" aria-label="Attach images"><Icon name="plus" size={14} /></button>
@@ -736,10 +767,11 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
           {extra}
           {chat?.messages && <ContextMeter messages={chat.messages} />}
         </span>
-        {running && chat?.session ? (
+        {running && chat?.session && (
           <Button size="sm" icon="stop" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
-        ) : (
-          <Button size="sm" variant="primary" icon="arrow-up" disabled={(!text.trim() && !images.length) || uploading > 0} onClick={submit}>Send</Button>
+        )}
+        {(
+          <Button size="sm" variant="primary" icon="arrow-up" disabled={(!text.trim() && !images.length) || uploading > 0} onClick={submit}>{running ? "Steer" : "Send"}</Button>
         )}
       </div>
     </div>
