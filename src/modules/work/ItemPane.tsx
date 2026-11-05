@@ -14,6 +14,7 @@ import { ContextDrawer } from "./ContextDrawer";
 import { ReadModeSwitch, Reader, useHasRich, useReadMode } from "./Reader";
 import { ProjectPicker, useProjectTint } from "./Projects";
 import { SnoozeMenu } from "./SnoozeMenu";
+import { Timeline } from "./Timeline";
 
 const ReviewView = lazy(() => import("../github/review/Workspace"));
 
@@ -29,7 +30,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   const tint = useProjectTint(item?.project_id);
   const chatCount = chat?.messages.filter((m) => m.role === "user" || (m.role === "assistant" && m.kind === "text")).length ?? 0;
   // Mail is for reading: open on the message. Everything else opens on the chat.
-  const [tab, setTab] = useState<"content" | "chat">(() => (id && item?.kind.startsWith("email.") ? "content" : "chat"));
+  const [tab, setTab] = useState<"content" | "chat" | "timeline">(() => (id && item?.kind.startsWith("email.") ? "content" : "chat"));
   useEffect(() => {
     if (item?.kind.startsWith("email.") && !chatCount) setTab("content");
     // Only when the item first loads.
@@ -118,9 +119,9 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         onSelect={onSelect}
         left={
           <div className="pane-tabs" role="tablist">
-            {(["content", "chat"] as const).map((t) => (
+            {(["content", "chat", "timeline"] as const).map((t) => (
               <button key={t} role="tab" aria-selected={tab === t} className={cx("pane-tab", tab === t && "active")} onClick={() => setTab(t)}>
-                {t === "chat" ? "Chat" : item.kind.startsWith("email.") ? "Email" : "Details"}
+                {t === "chat" ? "Chat" : t === "timeline" ? "Timeline" : item.kind.startsWith("email.") ? "Email" : "Details"}
                 {t === "chat" && chatCount > 0 && <span className="pane-tab-count">{chatCount}</span>}
               </button>
             ))}
@@ -128,7 +129,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         }
         right={tab === "content" && <RichSwitch item={item} mode={readMode} onChange={setReadMode} />}
       />
-      <ChatView item={item} body={<Reader item={item} mode={readMode} />} showBody={tab === "content"} onSent={() => setTab("chat")} />
+      <ChatView item={item} body={tab === "timeline" ? <Timeline itemId={item.id} /> : <Reader item={item} mode={readMode} />} showBody={tab !== "chat"} onSent={() => setTab("chat")} />
     </div>
   );
 }

@@ -33,8 +33,8 @@ use crate::config::ConnectorConfig;
 use crate::connector::{Connector, ConnectorContext, ConnectorFactory};
 use crate::gateway::Gateway;
 use crate::model::{
-    Block, ConnectorDescriptor, ConnectorStatus, EntityRef, Field, IncomingEvent, KindInfo,
-    QueueItem, SettingField, SettingKind, Tone,
+    ActionField, ActionInfo, Block, ConnectorDescriptor, ConnectorStatus, Effect, EntityRef, Field,
+    FieldType, IncomingEvent, KindInfo, QueueItem, SettingField, SettingKind, Tone,
 };
 
 type Imap = Session<TlsStream<TcpStream>>;
@@ -47,6 +47,59 @@ const FIRST_SYNC_DAYS: i64 = 7;
 const FIRST_SYNC_MAX: usize = 100;
 
 pub struct EmailFactory;
+
+fn message_fields() -> Vec<ActionField> {
+    vec![
+        ActionField::new("folder", "Folder", FieldType::Text)
+            .required()
+            .default("{{item.metadata.folder}}"),
+        ActionField::new("uid", "Message", FieldType::Number)
+            .required()
+            .help("The message's IMAP UID. Filled in from the item.")
+            .default("{{item.metadata.uid}}"),
+    ]
+}
+
+/// What workflows can do with mail. Each is one short IMAP session.
+pub fn actions() -> Vec<ActionInfo> {
+    vec![
+        ActionInfo::new(
+            "message.mark_read",
+            "Mark read",
+            "check",
+            Effect::Write,
+            "Marks the email read on the server.",
+        )
+        .inputs(message_fields())
+        .for_kinds(&["email.*"]),
+        ActionInfo::new(
+            "message.flag",
+            "Flag",
+            "pin",
+            Effect::Write,
+            "Flags (stars) the email so it stands out in your mail app.",
+        )
+        .inputs(message_fields())
+        .for_kinds(&["email.*"]),
+        ActionInfo::new(
+            "message.move",
+            "Move to folder",
+            "folder",
+            Effect::Destructive,
+            "Moves the email to another folder, such as Archive.",
+        )
+        .inputs({
+            let mut f = message_fields();
+            f.push(
+                ActionField::new("to", "Move to", FieldType::Text)
+                    .required()
+                    .default("Archive"),
+            );
+            f
+        })
+        .for_kinds(&["email.*"]),
+    ]
+}
 
 fn setting(key: &str, label: &str, kind: SettingKind, help: &str, required: bool) -> SettingField {
     SettingField {
@@ -91,6 +144,7 @@ impl ConnectorFactory for EmailFactory {
                 "Marking an item done marks the email read".into(),
             ],
             builtin: false,
+            actions: actions(),
         }
     }
 
@@ -1025,6 +1079,44 @@ impl Connector for EmailConnector {
             .await?;
         let _ = imap.logout().await;
         Ok(())
+    }
+
+    async fn act(
+        &self,
+        action: &str,
+        input: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let folder = input["folder"].as_str().unwrap_or_default().trim();
+        anyhow::ensure!(!folder.is_empty(), "folder is required");
+        let uid = input["uid"]
+            .as_u64()
+            .or_else(|| input["uid"].as_str().and_then(|s| s.trim().parse().ok()))
+            .ok_or_else(|| anyhow::anyhow!("uid must be a message UID"))?;
+        let mut imap = connect(&self.settings).await?;
+        imap.select(folder).await?;
+        let result = match action {
+            "message.mark_read" | "message.flag" => {
+                let flag = if action == "message.flag" {
+                    "\\Flagged"
+                } else {
+                    "\\Seen"
+                };
+                imap.uid_store(uid.to_string(), format!("+FLAGS ({flag})"))
+                    .await?
+                    .try_collect::<Vec<_>>()
+                    .await?;
+                json!({})
+            }
+            "message.move" => {
+                let to = input["to"].as_str().unwrap_or_default().trim();
+                anyhow::ensure!(!to.is_empty(), "say which folder to move it to");
+                imap.uid_mv(uid.to_string(), to).await?;
+                json!({ "folder": to })
+            }
+            other => anyhow::bail!("email has no action {other}"),
+        };
+        let _ = imap.logout().await;
+        Ok(result)
     }
 
     /// The whole message, formatted, fetched once from the server and cached.

@@ -17,7 +17,10 @@ use async_trait::async_trait;
 use crate::config::ConnectorConfig;
 use crate::connector::{Connector, ConnectorContext, ConnectorFactory};
 use crate::gateway::Gateway;
-use crate::model::{ConnectorDescriptor, KindInfo, SettingField, SettingKind, Tone};
+use crate::model::{
+    ActionField, ActionInfo, ConnectorDescriptor, Effect, FieldType, KindInfo, SettingField,
+    SettingKind, Tone,
+};
 
 pub struct TabFactory;
 
@@ -63,6 +66,7 @@ impl ConnectorFactory for TabFactory {
                 "Optional search by meaning, with a local model".into(),
             ],
             builtin: true,
+            actions: actions(),
         }
     }
 
@@ -73,6 +77,51 @@ impl ConnectorFactory for TabFactory {
     ) -> Option<anyhow::Result<Arc<dyn Connector>>> {
         Some(Ok(Arc::new(TabConnector)))
     }
+}
+
+/// tab's own actions. They change the queue, never anything upstream (except
+/// Done, which lets the item's connector react as it would to a click), and
+/// the workflow runtime runs them itself, since they need the engine.
+pub fn actions() -> Vec<ActionInfo> {
+    let item = || {
+        ActionField::new("item_id", "Item", FieldType::Text)
+            .required()
+            .help("Defaults to the item that started the run.")
+            .default("{{item.id}}")
+    };
+    vec![
+        ActionInfo::new("task.create", "Create a task", "check-square", Effect::Write,
+            "Adds a task to your queue, optionally scheduled for later.")
+            .inputs(vec![
+                ActionField::new("title", "Title", FieldType::Text).required(),
+                ActionField::new("body", "Notes", FieldType::LongText),
+                ActionField::new("priority", "Priority", FieldType::Select)
+                    .options(&["low", "normal", "high", "urgent"])
+                    .default("normal"),
+                ActionField::new("due_in_minutes", "Due in (minutes)", FieldType::Number)
+                    .help("Leave empty for now. Scheduled tasks sleep until they're due."),
+                ActionField::new("url", "Link", FieldType::Text).default("{{item.url}}"),
+                ActionField::new("project", "Project", FieldType::Text).help("Project name. Optional."),
+            ])
+            .outputs(vec![ActionField::new("item_id", "New task", FieldType::Text)]),
+        ActionInfo::new("item.snooze", "Snooze", "clock", Effect::Write,
+            "Hides an item until later. It comes back on its own.")
+            .inputs(vec![
+                item(),
+                ActionField::new("minutes", "For (minutes)", FieldType::Number).required().default("240"),
+            ]),
+        ActionInfo::new("item.done", "Mark done", "check", Effect::Write,
+            "Marks an item done. Its connection reacts as it does when you click Done (GitHub marks the notification read, email marks the message read).")
+            .inputs(vec![item()]),
+        ActionInfo::new("item.reopen", "Reopen", "undo", Effect::Write, "Puts a done or snoozed item back in the queue.")
+            .inputs(vec![item()]),
+        ActionInfo::new("item.set_project", "Put in project", "folder", Effect::Write,
+            "Files an item under one of your projects.")
+            .inputs(vec![
+                item(),
+                ActionField::new("project", "Project", FieldType::Text).required().help("Project name, or empty to take it out."),
+            ]),
+    ]
 }
 
 pub struct TabConnector;

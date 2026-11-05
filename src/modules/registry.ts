@@ -12,6 +12,7 @@ import { githubLinks } from "./github/pulls";
 import { registerLinks } from "../lib/links";
 import { SettingsTab } from "./settings/SettingsTab";
 import { WorkTab } from "./work/WorkTab";
+import { WorkflowsTab } from "./workflows/WorkflowsTab";
 
 export interface TabDef {
   id: string;
@@ -40,6 +41,7 @@ export const modules: TabModule[] = [
     // Sample data includes PRs, so the review tool can be tried without a token.
     tabs: [{ id: "reviews", label: "Reviews", icon: "git-pull-request", component: ReviewsTab, shortcut: "3", when: installed("github") }],
   },
+  { id: "core.workflows", tabs: [{ id: "workflows", label: "Workflows", icon: "workflow", component: WorkflowsTab, shortcut: "5" }] },
   { id: "core.connections", tabs: [{ id: "connections", label: "Connections", icon: "plug", component: ConnectionsTab, shortcut: "4", footer: true }] },
   { id: "core.settings", tabs: [{ id: "settings", label: "Settings", icon: "settings", component: SettingsTab, footer: true }] },
 ];

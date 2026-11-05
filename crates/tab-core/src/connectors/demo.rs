@@ -30,6 +30,7 @@ impl ConnectorFactory for DemoFactory {
             category: "built_in".into(),
             features: vec![],
             builtin: false,
+            actions: vec![],
         }
     }
 

@@ -21,8 +21,8 @@ use crate::config::ConnectorConfig;
 use crate::connector::{Connector, ConnectorContext, ConnectorFactory};
 use crate::gateway::{Call, Gateway, GatewayError};
 use crate::model::{
-    Block, ConnectorDescriptor, ConnectorStatus, EntityRef, Field, IncomingEvent, KindInfo, Link,
-    QueueItem, SettingField, SettingKind, Tone,
+    ActionField, ActionInfo, Block, ConnectorDescriptor, ConnectorStatus, Effect, EntityRef, Field,
+    FieldType, IncomingEvent, KindInfo, Link, QueueItem, SettingField, SettingKind, Tone,
 };
 use crate::ratelimit::RateLimitSpec;
 
@@ -78,6 +78,7 @@ impl ConnectorFactory for GithubFactory {
                 "Marking an item done marks the notification read".into(),
             ],
             builtin: false,
+            actions: actions(),
         }
     }
 
@@ -100,6 +101,192 @@ impl ConnectorFactory for GithubFactory {
                 "Sign in with the GitHub CLI (gh auth login) or add a personal access token."
             )),
         })
+    }
+}
+
+fn repo_field() -> ActionField {
+    ActionField::new("repo", "Repository", FieldType::Text)
+        .required()
+        .help("owner/name")
+        .default("{{item.metadata.repo}}")
+}
+
+fn number_field() -> ActionField {
+    ActionField::new("number", "PR or issue number", FieldType::Number)
+        .required()
+        .default("{{item.metadata.number}}")
+}
+
+/// What workflows can do on GitHub. Every one is a single REST call through
+/// the gateway, spending from the `core` bucket.
+pub fn actions() -> Vec<ActionInfo> {
+    let url = || ActionField::new("url", "Link", FieldType::Text);
+    vec![
+        ActionInfo::new(
+            "pr.get",
+            "Read a pull request",
+            "git-pull-request",
+            Effect::Read,
+            "Fetches a PR's state, branches, author and size, for conditions in later steps.",
+        )
+        .inputs(vec![repo_field(), number_field()])
+        .outputs(vec![
+            ActionField::new("state", "State (open, closed, merged)", FieldType::Text),
+            ActionField::new("draft", "Draft", FieldType::Bool),
+            ActionField::new("author", "Author", FieldType::Text),
+            ActionField::new("base", "Base branch", FieldType::Text),
+            ActionField::new("head", "Head branch", FieldType::Text),
+            ActionField::new("additions", "Lines added", FieldType::Number),
+            ActionField::new("deletions", "Lines removed", FieldType::Number),
+            ActionField::new("labels", "Labels", FieldType::List),
+            url(),
+        ])
+        .spends("github/core")
+        .for_kinds(&["github.*"]),
+        ActionInfo::new(
+            "issue.comment",
+            "Comment",
+            "message",
+            Effect::Write,
+            "Posts a comment on a pull request or issue, as you.",
+        )
+        .inputs(vec![
+            repo_field(),
+            number_field(),
+            ActionField::new("body", "Comment", FieldType::LongText)
+                .required()
+                .help("Markdown."),
+        ])
+        .outputs(vec![url()])
+        .spends("github/core")
+        .for_kinds(&["github.*"]),
+        ActionInfo::new(
+            "issue.add_labels",
+            "Add labels",
+            "pin",
+            Effect::Write,
+            "Adds labels to a pull request or issue. Labels that don't exist yet are created.",
+        )
+        .inputs(vec![
+            repo_field(),
+            number_field(),
+            ActionField::new("labels", "Labels", FieldType::List)
+                .required()
+                .help("Comma separated."),
+        ])
+        .spends("github/core")
+        .for_kinds(&["github.*"]),
+        ActionInfo::new(
+            "pr.request_reviewers",
+            "Request reviewers",
+            "user",
+            Effect::Write,
+            "Asks people to review a pull request.",
+        )
+        .inputs(vec![
+            repo_field(),
+            number_field(),
+            ActionField::new("reviewers", "Reviewers", FieldType::List)
+                .required()
+                .help("GitHub logins, comma separated."),
+        ])
+        .spends("github/core")
+        .for_kinds(&[
+            "github.review_requested",
+            "github.ci_failed",
+            "github.activity",
+        ]),
+        ActionInfo::new(
+            "issue.create",
+            "Open an issue",
+            "circle-dot",
+            Effect::Write,
+            "Opens a new issue in a repository.",
+        )
+        .inputs(vec![
+            ActionField::new("repo", "Repository", FieldType::Text)
+                .required()
+                .help("owner/name"),
+            ActionField::new("title", "Title", FieldType::Text).required(),
+            ActionField::new("body", "Description", FieldType::LongText),
+            ActionField::new("labels", "Labels", FieldType::List),
+        ])
+        .outputs(vec![
+            ActionField::new("number", "Issue number", FieldType::Number),
+            url(),
+        ])
+        .spends("github/core"),
+        ActionInfo::new(
+            "pr.merge",
+            "Merge a pull request",
+            "git-merge",
+            Effect::Destructive,
+            "Merges a pull request. GitHub refuses if checks or reviews block it.",
+        )
+        .inputs(vec![
+            repo_field(),
+            number_field(),
+            ActionField::new("method", "Merge method", FieldType::Select)
+                .options(&["squash", "merge", "rebase"])
+                .default("squash"),
+        ])
+        .outputs(vec![ActionField::new(
+            "sha",
+            "Merge commit",
+            FieldType::Text,
+        )])
+        .spends("github/core")
+        .for_kinds(&["github.review_requested", "github.activity"]),
+        ActionInfo::new(
+            "issue.close",
+            "Close",
+            "x-circle",
+            Effect::Destructive,
+            "Closes a pull request or issue without merging.",
+        )
+        .inputs(vec![repo_field(), number_field()])
+        .spends("github/core")
+        .for_kinds(&["github.*"]),
+    ]
+}
+
+/// `owner/name`, checked so a template can't point the call somewhere else.
+fn repo_arg(input: &serde_json::Value) -> anyhow::Result<String> {
+    let repo = input["repo"].as_str().unwrap_or_default().trim();
+    let ok = repo.split('/').count() == 2
+        && repo.split('/').all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        });
+    anyhow::ensure!(ok, "repo must look like owner/name, got {repo:?}");
+    Ok(repo.to_string())
+}
+
+fn number_arg(input: &serde_json::Value) -> anyhow::Result<u64> {
+    let n = &input["number"];
+    n.as_u64()
+        .or_else(|| {
+            n.as_str()
+                .and_then(|s| s.trim().trim_start_matches('#').parse().ok())
+        })
+        .ok_or_else(|| anyhow::anyhow!("number must be a PR or issue number, got {n}"))
+}
+
+fn list_arg(v: &serde_json::Value) -> Vec<String> {
+    match v {
+        serde_json::Value::Array(a) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::trim).map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .collect(),
+        serde_json::Value::String(s) => s
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -476,6 +663,142 @@ impl Connector for GithubConnector {
             ))
             .await?;
         Ok(())
+    }
+
+    async fn act(
+        &self,
+        action: &str,
+        input: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let send = |method: Method, purpose: &str, url: String, body: Option<serde_json::Value>| {
+            let mut call = Call::new(method, "github", "github", purpose, url);
+            if let Some(b) = body {
+                call = call.json(b);
+            }
+            self.gateway.send(call)
+        };
+        match action {
+            "pr.get" => {
+                let (repo, n) = (repo_arg(input)?, number_arg(input)?);
+                // Short cache: a workflow reading the PR it was triggered by
+                // shouldn't cost a call per step.
+                let call = Call::get(
+                    "github",
+                    "github",
+                    "workflow: read PR",
+                    format!("{API}/repos/{repo}/pulls/{n}"),
+                )
+                .cache(Duration::from_secs(60));
+                let p: PullOrIssue = self.gateway.send(call).await?.json()?;
+                let state = if p.merged == Some(true) {
+                    "merged"
+                } else {
+                    p.state.as_str()
+                };
+                Ok(json!({
+                    "state": state,
+                    "draft": p.draft.unwrap_or(false),
+                    "author": p.user.map(|u| u.login),
+                    "base": p.base.map(|b| b.name),
+                    "head": p.head.map(|h| h.name),
+                    "additions": p.additions,
+                    "deletions": p.deletions,
+                    "labels": p.labels.into_iter().map(|l| l.name).collect::<Vec<_>>(),
+                    "url": p.html_url,
+                    "title": p.title,
+                }))
+            }
+            "issue.comment" => {
+                let (repo, n) = (repo_arg(input)?, number_arg(input)?);
+                let body = input["body"].as_str().unwrap_or_default().trim();
+                anyhow::ensure!(!body.is_empty(), "the comment is empty");
+                let r = send(
+                    Method::POST,
+                    "workflow: comment",
+                    format!("{API}/repos/{repo}/issues/{n}/comments"),
+                    Some(json!({ "body": body })),
+                )
+                .await?;
+                let v: serde_json::Value = r.json()?;
+                Ok(json!({ "url": v["html_url"] }))
+            }
+            "issue.add_labels" => {
+                let (repo, n) = (repo_arg(input)?, number_arg(input)?);
+                let labels = list_arg(&input["labels"]);
+                anyhow::ensure!(!labels.is_empty(), "no labels given");
+                send(
+                    Method::POST,
+                    "workflow: add labels",
+                    format!("{API}/repos/{repo}/issues/{n}/labels"),
+                    Some(json!({ "labels": labels })),
+                )
+                .await?;
+                Ok(json!({ "labels": labels }))
+            }
+            "pr.request_reviewers" => {
+                let (repo, n) = (repo_arg(input)?, number_arg(input)?);
+                let reviewers = list_arg(&input["reviewers"]);
+                anyhow::ensure!(!reviewers.is_empty(), "no reviewers given");
+                send(
+                    Method::POST,
+                    "workflow: request reviewers",
+                    format!("{API}/repos/{repo}/pulls/{n}/requested_reviewers"),
+                    Some(json!({ "reviewers": reviewers })),
+                )
+                .await?;
+                Ok(json!({ "reviewers": reviewers }))
+            }
+            "issue.create" => {
+                let repo = repo_arg(input)?;
+                let title = input["title"].as_str().unwrap_or_default().trim();
+                anyhow::ensure!(!title.is_empty(), "the issue needs a title");
+                let mut body = json!({ "title": title });
+                if let Some(b) = input["body"].as_str().filter(|b| !b.trim().is_empty()) {
+                    body["body"] = b.into();
+                }
+                let labels = list_arg(&input["labels"]);
+                if !labels.is_empty() {
+                    body["labels"] = json!(labels);
+                }
+                let r = send(
+                    Method::POST,
+                    "workflow: open issue",
+                    format!("{API}/repos/{repo}/issues"),
+                    Some(body),
+                )
+                .await?;
+                let v: serde_json::Value = r.json()?;
+                Ok(json!({ "number": v["number"], "url": v["html_url"] }))
+            }
+            "pr.merge" => {
+                let (repo, n) = (repo_arg(input)?, number_arg(input)?);
+                let method = match input["method"].as_str().unwrap_or("squash") {
+                    m @ ("merge" | "squash" | "rebase") => m,
+                    m => anyhow::bail!("unknown merge method {m}"),
+                };
+                let r = send(
+                    Method::PUT,
+                    "workflow: merge PR",
+                    format!("{API}/repos/{repo}/pulls/{n}/merge"),
+                    Some(json!({ "merge_method": method })),
+                )
+                .await?;
+                let v: serde_json::Value = r.json()?;
+                Ok(json!({ "sha": v["sha"] }))
+            }
+            "issue.close" => {
+                let (repo, n) = (repo_arg(input)?, number_arg(input)?);
+                send(
+                    Method::PATCH,
+                    "workflow: close",
+                    format!("{API}/repos/{repo}/issues/{n}"),
+                    Some(json!({ "state": "closed" })),
+                )
+                .await?;
+                Ok(json!({}))
+            }
+            other => anyhow::bail!("GitHub has no action {other}"),
+        }
     }
 
     async fn is_resolved(&self, item: &QueueItem) -> anyhow::Result<bool> {
