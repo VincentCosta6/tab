@@ -138,6 +138,7 @@ pub trait Host: Send + Sync + 'static {
         action: &str,
         input: &Value,
         chain: &[String],
+        workflow: &str,
     ) -> anyhow::Result<(Value, Option<String>)>;
     fn publish(&self, e: EngineEvent);
 }
@@ -666,7 +667,9 @@ impl Runtime {
                             }
                             let fut = async {
                                 if connector == crate::connectors::tab::SOURCE {
-                                    self.host.tab_action(action, &rendered, &chain).await
+                                    self.host
+                                        .tab_action(action, &rendered, &chain, &w.name)
+                                        .await
                                 } else {
                                     let c = self.host.connector(connector).ok_or_else(|| {
                                         anyhow::anyhow!(

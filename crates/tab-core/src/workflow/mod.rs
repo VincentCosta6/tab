@@ -828,6 +828,39 @@ pub fn fill_defaults(w: &mut Workflow, catalog: &[ConnectorInfo]) {
     }
 }
 
+/// Who is saving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavedBy {
+    Person,
+    Agent,
+}
+
+/// Gets a workflow ready to store: fills in action defaults, validates it,
+/// and applies who may turn what on. An agent's save is always off and can
+/// never allow destructive steps; a workflow with errors is stored off.
+/// Returns the workflow to store and the issues found.
+pub fn prepare_save(
+    mut w: Workflow,
+    by: SavedBy,
+    catalog: &[ConnectorInfo],
+    saved: &[Workflow],
+) -> (Workflow, Vec<Issue>) {
+    let existing = saved.iter().find(|o| !w.id.is_empty() && o.id == w.id);
+    if by == SavedBy::Agent {
+        w.enabled = false;
+        w.allow_destructive = existing.is_some_and(|e| e.allow_destructive);
+        if existing.is_none() {
+            w.created_by = "agent".into();
+        }
+    }
+    fill_defaults(&mut w, catalog);
+    let issues = validate(&w, catalog, saved);
+    if issues.iter().any(|i| i.error) {
+        w.enabled = false;
+    }
+    (w, issues)
+}
+
 /// Counts by status, for the list view.
 pub fn tally(runs: &[Run]) -> HashMap<RunStatus, usize> {
     let mut m = HashMap::new();

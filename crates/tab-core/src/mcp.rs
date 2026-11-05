@@ -17,6 +17,9 @@
 //!   `tab_ask_for_secret`, `tab_test_connection`: the setup assistant. Agents
 //!   fill in everything but secrets; secrets go through a card in the chat
 //!   that the person types into, so the agent never sees them.
+//! * `tab_list_actions`, `tab_list_workflows`, `tab_save_workflow`,
+//!   `tab_test_workflow`: build workflows. Agents draft and dry-run them;
+//!   only the person turns one on.
 //! * `approve`: Claude Code's `--permission-prompt-tool`; asks the person.
 
 use std::sync::Arc;
@@ -38,6 +41,7 @@ use crate::model::{
     ProjectNote, QueueItem, SettingKind,
 };
 use crate::store::Store;
+use crate::workflow::{self, Run, SavedBy, Workflow};
 
 /// What the MCP server needs from the running engine.
 #[async_trait]
@@ -56,6 +60,14 @@ pub trait EngineAccess: Send + Sync + 'static {
     /// Saves one connection and restarts the engine with it.
     async fn save_connector(&self, _id: &str, _cfg: ConnectorConfig) -> anyhow::Result<()> {
         anyhow::bail!("connections can't be changed from here")
+    }
+    /// Dry-runs a workflow, on an item if given. Nothing changes.
+    async fn dry_run_workflow(
+        &self,
+        _w: Workflow,
+        _item_id: Option<String>,
+    ) -> anyhow::Result<Run> {
+        anyhow::bail!("workflows can't be tested from here")
     }
 }
 
@@ -308,6 +320,36 @@ pub fn tools() -> Value {
             }, "required": ["connector_id"] }
         },
         {
+            "name": "tab_list_actions",
+            "description": "What workflows can start on and do: every connection's item kinds (triggers) and actions, with each action's inputs, outputs and effect (read, write, destructive), plus the template variables a step can use. Call this before drafting a workflow.",
+            "inputSchema": { "type": "object", "properties": {
+                "connector_id": { "type": "string", "description": "Only this connection's. Optional." }
+            } }
+        },
+        {
+            "name": "tab_list_workflows",
+            "description": "The person's workflows with their full JSON definitions, whether each is on, and their last few runs.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow_id": { "type": "string", "description": "Just this one, with more runs." }
+            } }
+        },
+        {
+            "name": "tab_save_workflow",
+            "description": "Create or update a workflow from its JSON definition. Pass id to update one. It is checked first (actions exist, required inputs are set, templates only read earlier steps, it can't loop with other workflows) and not saved if anything is wrong; fix what it says and try again. It's always saved turned off: the person reviews it in the Workflows tab and turns it on. Missing inputs get the action's defaults.\n\nShape: {\"name\", \"description\", \"trigger\": {\"type\":\"item\",\"changes\":[\"ingested\"],\"sources\":[\"github\"],\"kinds\":[\"github.review_requested\"],\"when\":[conditions]} | {\"type\":\"signal\",\"name\"} | {\"type\":\"schedule\",\"every_minutes\"} | {\"type\":\"manual\"}, \"steps\": [{\"id\":\"pr\",\"type\":\"action\",\"connector\":\"github\",\"action\":\"pr.get\",\"input\":{...},\"when\":[conditions]}, {\"id\":\"small\",\"type\":\"filter\",\"conditions\":[...]}, {\"id\":\"vals\",\"type\":\"set\",\"values\":{...}}, {\"id\":\"tell\",\"type\":\"emit\",\"signal\":\"name\",\"payload\":{...}}], \"limits\": {\"max_runs_per_hour\":30,\"cooldown_minutes\":0}}. A condition is {\"field\":\"item.kind\",\"op\":\"equals|not_equals|contains|not_contains|starts_with|matches|in|gt|lt|exists|missing\",\"value\":...}. Changes: ingested, updated, ranked, snoozed, woke, done, reopened. Templates: {{item.title}}, {{item.metadata.repo}}, {{item.score}}, {{steps.<id>.<output>}}, {{signal.<key>}}, {{now}}.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow": { "type": "object", "description": "The workflow definition. Include id to update." }
+            }, "required": ["workflow"] }
+        },
+        {
+            "name": "tab_test_workflow",
+            "description": "Dry-run a workflow (saved, by id, or a draft definition) on a queue item and get each step's inputs and outputs. Reads (like reading a PR) really run; writes are only shown. Use it to check templates and conditions before handing the workflow to the person.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow_id": { "type": "string" },
+                "workflow": { "type": "object", "description": "A draft definition, instead of workflow_id." },
+                "item_id": { "type": "string", "description": "The item to run it on, from tab_search. Optional for schedule and signal triggers." }
+            } }
+        },
+        {
             "name": "approve",
             "description": "Permission prompt: asks the person in tab whether a tool call may run.",
             "inputSchema": { "type": "object", "properties": {
@@ -335,6 +377,22 @@ fn missing_required(info: &ConnectorInfo, cfg: &ConnectorConfig) -> Vec<String> 
 }
 
 impl McpServer {
+    /// Connector types with their actions. Falls back to the registry, not
+    /// installed, when the engine can't say.
+    async fn catalog(&self) -> Vec<ConnectorInfo> {
+        match self.engine.connectors().await {
+            Ok(c) => c,
+            Err(_) => crate::connectors::registry()
+                .into_iter()
+                .map(|f| ConnectorInfo {
+                    descriptor: f.descriptor(),
+                    enabled: false,
+                    status: crate::model::ConnectorStatus::Disabled,
+                })
+                .collect(),
+        }
+    }
+
     async fn connector_info(&self, id: &str) -> anyhow::Result<ConnectorInfo> {
         self.engine
             .connectors()
@@ -552,6 +610,10 @@ impl McpServer {
                         "summary": c.summary, "item": c.ref_item.as_deref().map(brief),
                     })).collect::<Vec<_>>(),
                     "related": ctx.related.iter().map(brief).collect::<Vec<_>>(),
+                    "timeline": self.store.activity_for(&id, 60)?.iter().map(|a| json!({
+                        "when": a.at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                        "what": a.title, "by": a.by, "on": a.via,
+                    })).collect::<Vec<_>>(),
                 }))?))
             }
             "tab_add_found" | "tab_attach_context" => {
@@ -1002,6 +1064,127 @@ impl McpServer {
                 };
                 Ok(text(verdict.to_string()))
             }
+            "tab_list_actions" => {
+                let only = s("connector_id");
+                let changes = [
+                    "ingested", "updated", "ranked", "snoozed", "woke", "done", "reopened",
+                ];
+                let connections: Vec<Value> = self
+                    .catalog()
+                    .await
+                    .into_iter()
+                    .filter(|c| only.as_ref().is_none_or(|o| *o == c.descriptor.id))
+                    .map(|c| {
+                        json!({
+                            "id": c.descriptor.id,
+                            "name": c.descriptor.name,
+                            "installed": c.enabled,
+                            "item_kinds": c.descriptor.kinds.iter().map(|k| json!({ "kind": k.kind, "label": k.label })).collect::<Vec<_>>(),
+                            "actions": c.descriptor.actions,
+                        })
+                    })
+                    .collect();
+                Ok(text(serde_json::to_string_pretty(&json!({
+                    "item_changes": changes,
+                    "connections": connections,
+                    "templates": {
+                        "item": "The item that started the run: item.id, item.title, item.body, item.kind, item.source, item.actor, item.context, item.url, item.score, item.urgency, item.state, item.metadata.<key> (GitHub: repo, number, reason, subject_type; email: folder, uid).",
+                        "steps": "steps.<step id>.<output key> for an earlier step's output.",
+                        "signal": "signal.<key> for a signal trigger's payload.",
+                        "trigger": "trigger.type, trigger.change.",
+                        "now": "The time, RFC 3339.",
+                    },
+                    "rules": "Effects: read runs in dry runs too; write changes something; destructive (merge, close, move mail) stays blocked until the person allows it on that workflow. A workflow can't start itself again through its own changes, chains stop after 3 workflows, the same trigger runs once, and each workflow has an hourly run limit.",
+                }))?))
+            }
+            "tab_list_workflows" => {
+                let all = self.store.workflows()?;
+                let one = s("workflow_id");
+                let out: Vec<Value> = all
+                    .iter()
+                    .filter(|w| one.as_ref().is_none_or(|o| *o == w.id))
+                    .map(|w| {
+                        let runs = self
+                            .store
+                            .workflow_runs(Some(&w.id), if one.is_some() { 10 } else { 3 })
+                            .unwrap_or_default();
+                        json!({
+                            "summary": workflow::describe_trigger(&w.trigger),
+                            "definition": w,
+                            "recent_runs": runs.iter().map(|r| json!({
+                                "status": r.status, "trigger": r.trigger, "dry_run": r.dry_run, "error": r.error,
+                                "when": r.started_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                                "steps": r.steps.iter().map(|s| json!({ "id": s.id, "status": s.status, "error": s.error })).collect::<Vec<_>>(),
+                            })).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                Ok(text(serde_json::to_string_pretty(&out)?))
+            }
+            "tab_save_workflow" => {
+                let w: Workflow = serde_json::from_value(args["workflow"].clone())
+                    .map_err(|e| anyhow::anyhow!("that isn't a workflow definition: {e}"))?;
+                let saved = self.store.workflows()?;
+                if !w.id.is_empty() && !saved.iter().any(|o| o.id == w.id) {
+                    anyhow::bail!("no workflow {}; leave id out to create one", w.id);
+                }
+                let catalog = self.catalog().await;
+                let (w, issues) = workflow::prepare_save(w, SavedBy::Agent, &catalog, &saved);
+                let errors: Vec<_> = issues.iter().filter(|i| i.error).collect();
+                if !errors.is_empty() {
+                    let list: Vec<String> = errors
+                        .iter()
+                        .map(|i| match &i.at {
+                            Some(a) => format!("- {a}: {}", i.message),
+                            None => format!("- {}", i.message),
+                        })
+                        .collect();
+                    anyhow::bail!("Not saved. Fix these and save again:\n{}", list.join("\n"));
+                }
+                let w = self.store.workflow_save(&w, "agent", Utc::now())?;
+                let _ = self.events.send(EngineEvent::WorkflowsChanged {
+                    id: w.id.clone(),
+                    by: "agent".into(),
+                });
+                let warnings: Vec<String> =
+                    issues.iter().map(|i| format!("- {}", i.message)).collect();
+                Ok(text(format!(
+                    "Saved \"{}\" (id {}, version {}), turned off. It's open in the person's Workflows tab; tell them what it does and that they turn it on there.{}",
+                    w.name,
+                    w.id,
+                    w.version,
+                    if warnings.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\nWorth mentioning:\n{}", warnings.join("\n"))
+                    }
+                )))
+            }
+            "tab_test_workflow" => {
+                let w: Workflow = match (
+                    s("workflow_id"),
+                    args.get("workflow").filter(|v| v.is_object()),
+                ) {
+                    (Some(id), _) => self
+                        .store
+                        .workflow_get(&id)?
+                        .ok_or_else(|| anyhow::anyhow!("no workflow {id}"))?,
+                    (None, Some(def)) => {
+                        let mut w: Workflow = serde_json::from_value(def.clone()).map_err(|e| {
+                            anyhow::anyhow!("that isn't a workflow definition: {e}")
+                        })?;
+                        workflow::fill_defaults(&mut w, &self.catalog().await);
+                        w
+                    }
+                    (None, None) => anyhow::bail!("pass workflow_id or workflow"),
+                };
+                let run = self.engine.dry_run_workflow(w, s("item_id")).await?;
+                Ok(text(serde_json::to_string_pretty(&json!({
+                    "status": run.status,
+                    "error": run.error,
+                    "steps": run.steps,
+                }))?))
+            }
             _ => anyhow::bail!("unknown tool {name}"),
         }
     }
@@ -1089,7 +1272,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 16);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 20);
 
         // Create a task, a ticket to find, then file it under Found on the task.
         let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}});
@@ -1396,5 +1579,84 @@ mod tests {
             .json()
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn agents_draft_workflows_but_never_turn_them_on() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, mut rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let server = McpServer {
+            store: store.clone(),
+            hub,
+            engine: Arc::new(NoEngine(store.clone())),
+            events,
+            token: "t".into(),
+        };
+        let listed = server
+            .call(
+                None,
+                "tab_list_actions",
+                json!({ "connector_id": "github" }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            listed["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("pr.request_reviewers")
+        );
+
+        let draft = json!({
+            "name": "Snooze bots",
+            "enabled": true,
+            "allow_destructive": true,
+            "trigger": { "type": "item", "changes": ["ingested"], "sources": ["github"], "when": [{ "field": "item.actor", "op": "matches", "value": "*[bot]" }] },
+            "steps": [{ "id": "later", "type": "action", "connector": "tab", "action": "item.snooze", "input": { "minutes": 600 } }]
+        });
+        let saved = server
+            .call(None, "tab_save_workflow", json!({ "workflow": draft }))
+            .await
+            .unwrap();
+        assert!(
+            saved["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("turned off")
+        );
+        let w = &store.workflows().unwrap()[0];
+        assert!(
+            !w.enabled && !w.allow_destructive,
+            "only the person turns these on"
+        );
+        assert_eq!(w.created_by, "agent");
+        // The item input was filled from the action's default.
+        let crate::workflow::StepKind::Action { input, .. } = &w.steps[0].kind else {
+            panic!()
+        };
+        assert_eq!(input["item_id"], "{{item.id}}");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::WorkflowsChanged { .. })
+        ));
+
+        // A task on every new item would feed itself: refused with the reason.
+        let looping = json!({
+            "name": "Echo",
+            "trigger": { "type": "item", "changes": ["ingested"] },
+            "steps": [{ "id": "t", "type": "action", "connector": "tab", "action": "task.create", "input": { "title": "again" } }]
+        });
+        let err = server
+            .call(None, "tab_save_workflow", json!({ "workflow": looping }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("could loop"), "{err}");
+        assert_eq!(store.workflows().unwrap().len(), 1);
     }
 }

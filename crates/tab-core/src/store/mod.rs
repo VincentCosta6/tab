@@ -4,6 +4,7 @@
 //! Search uses FTS5 with the trigram tokenizer, so substring search works
 //! ("checko" finds "#incident-checkout") across items and entities.
 
+mod activity;
 mod context;
 mod graph;
 mod http;
@@ -46,6 +47,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/007_projects.sql"),
     include_str!("migrations/008_embeddings.sql"),
     include_str!("migrations/009_workflows.sql"),
+    include_str!("migrations/010_item_activity.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {

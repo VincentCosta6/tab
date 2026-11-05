@@ -715,6 +715,27 @@ pub struct Approval {
     pub input: serde_json::Value,
 }
 
+/// One thing that happened to an item, for its timeline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Activity {
+    pub id: i64,
+    pub item_id: String,
+    pub at: DateTime<Utc>,
+    /// `arrived`, `updated`, `snoozed`, `woke`, `done`, `reopened`,
+    /// `finished_upstream`, `project`, `linked`, `session_started`,
+    /// `session_needs_input`, `session_failed`, `workflow_run`.
+    pub kind: String,
+    pub title: String,
+    /// `you`, `agent`, `upstream`, `workflow:<name>`, or who sent it.
+    pub by: Option<String>,
+    #[serde(default)]
+    pub detail: serde_json::Value,
+    /// Set when it happened on a linked item (a PR in the task's context),
+    /// with that item's title.
+    #[serde(default)]
+    pub via: Option<String>,
+}
+
 /// A task created in tab, by the person or an agent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct NewTask {
