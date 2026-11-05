@@ -134,7 +134,7 @@ Scaling notes: writes are tiny and serialized behind one connection; when reads 
 
 ## Modules and the design system (built)
 
-The UI is a set of **modules** (`src/modules/registry.ts`). A module contributes tabs today; next it can contribute item surfaces (by kind prefix), settings panes, automation actions and custom block renderers. The core app is itself three modules: Work, Connections and Settings. GitHub's review tool will be a module that adds a "GitHub" tab and a review surface for `github.review_requested` items.
+The UI is a set of **modules** (`src/modules/registry.ts`). A module contributes tabs today; next it can contribute item surfaces (by kind prefix), settings panes, automation actions and custom block renderers. The core app is itself three modules: Work, Connections and Settings. GitHub's review workspace is a module that adds the Reviews tab and a review surface for PR items.
 
 The design system (`src/design/`) is the only source of styling:
 - `tokens.css`: color, type, spacing, radius tokens with light and dark themes. Six semantic **tones** (neutral, accent, info, success, warning, danger) are the only way connectors influence color.
@@ -195,15 +195,17 @@ Agent-agnostic by design. The only hard requirement is that the agent's terminal
 - `needs_input` and `needs_review` become queue items (kinds `agent.needs_input`, `agent.needs_review`) ranked like everything else; the detail pane embeds the live terminal, and `Choices` blocks become one-click answers.
 - Transcripts are stored as files and linked into the graph (agent_session entity ↔ repo, PR, items it touched).
 
-## GitHub review tool (built: diff and line comments)
+## GitHub review workspace (built)
 
-Built: the GitHub module adds a Reviews tab (shown while GitHub or sample data is installed) and a Review action on PR items. Monaco is bundled locally with its workers. PR metadata is cached briefly; file contents are fetched by commit SHA and cached for a month; comments post to `pulls/{n}/comments` through the gateway. Below is the remaining design.
+Opening a PR (Reviews tab, or Review on a PR item) boots an editor-style workspace around it.
 
-A module that adds a review surface for PR items and a GitHub tab.
-
-- **Monaco** (the VS Code editor) diff view with a file tree, syntax highlighting for common languages out of the box, and language intelligence later via LSP sidecars.
-- Inline comments, suggestions and a pending review submitted in one batch. All reads cached through the gateway (PR files keyed by head SHA, so they never go stale); writes audited.
-- Uses the same tokens and components as the rest of the app; Monaco gets a theme generated from `tokens.css`.
+- **Boot.** `workspace.rs` clones the repository once per computer (blobless, `workspaces/<owner>/<name>/repo` under the app data dir), fetches `refs/pull/<n>/head` (forks work) and checks the head out into a worktree of its own (`pr-<n>`). git's `--progress` output streams to the UI as `tab://workspace` events. The token reaches git through `GIT_CONFIG_*` environment variables per command, never `.git/config`. The diff base is the merge base, like github.com. Without git (or if the clone fails) you can review through the API instead.
+- **Layout.** Header with PR state and what blocks merging (CI, conflicts, open threads, review decision, behind base, ready to merge / ready for review), an Actions menu (view on GitHub, open in VS Code, show folder, copy branch / checkout command, update branch, draft / ready, merge three ways, close / reopen) and Submit review. An activity bar switches between Explorer (the whole repo, changed files marked), Search (`git grep` over the checkout, case / word / regex / include globs), Files changed (viewed checkboxes and progress, auto-read toggle) and Review threads. Editor tabs hold Changes (every diff stacked, mounted lazily), Overview, and files opened from the explorer, search or go to definition.
+- **Diffs.** Monaco diff editors, split or unified, unchanged regions collapsed. Click or drag in the gutter (or select lines and press Ctrl Shift M) to comment on a line or range, on either side. Threads render inline under their lines: view zones reserve the space and real React cards sit in an overlay, so inputs behave normally.
+- **Comments.** A markdown composer with a toolbar, preview, keyboard shortcuts and **Suggest** (a `suggestion` block prefilled with the selected lines, rendered as a change). "Add single comment" posts now; "Start a review" adds to the viewer's pending review on GitHub, so drafts follow you across machines. Replies, edits, deletes, resolve / unresolve. Submit review sends Comment, Approve or Request changes with a summary; Discard deletes the pending review.
+- **Viewed files** sync with GitHub's own viewed state (`markFileAsViewed`), including "changed since last view". With auto-read on, a file is marked viewed once its end scrolls past the top of the view.
+- **Language features.** Every TS/JS/JSON file in the checkout is loaded as a Monaco model at `file:///<path>`, so hover, go to definition (opens a tab), references and peek work across the repository. Other languages get highlighting and "Search the repository for this". LSP sidecars for other languages are the next step.
+- **Data.** One GraphQL query reads the PR, checks rollup, review threads (with resolved / outdated state), the pending review and viewed states; REST adds rename info. Every call goes through the gateway and is audited. Actions apply optimistically, run one at a time, and refetch the PR. Sample PRs simulate the boot and keep edits local.
 
 ## Security
 

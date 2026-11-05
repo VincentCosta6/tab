@@ -13,7 +13,7 @@ import { ChatView } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
 import { SnoozeMenu } from "./SnoozeMenu";
 
-const ReviewView = lazy(() => import("../github/ReviewView"));
+const ReviewView = lazy(() => import("../github/review/Workspace"));
 
 /** An item: header and actions, its rolled-up context, and a chat with an agent about it. */
 export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: string) => void; onSelect: (id: string) => void }) {
@@ -51,9 +51,11 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
 
   if (reviewing && pull)
     return (
-      <Suspense fallback={<div className="pane-loading"><div className="skeleton" /></div>}>
-        <ReviewView repo={pull.repo} number={pull.number} sample={item.source === "demo"} onBack={() => setReviewing(false)} />
-      </Suspense>
+      <div className="rv-takeover">
+        <Suspense fallback={<div className="pane-loading"><div className="skeleton" /></div>}>
+          <ReviewView repo={pull.repo} number={pull.number} sample={item.source === "demo"} onBack={() => setReviewing(false)} />
+        </Suspense>
+      </div>
     );
 
   const k = kind(item.kind);

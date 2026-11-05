@@ -4,7 +4,7 @@
 import type {
   GhLoginCode, GhStatus,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
-  Session, SessionMessage, TabConfig, Urgency, UsageRow,
+  PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
@@ -262,6 +262,9 @@ export const mockApi = {
     listeners.add(cb);
     return () => listeners.delete(cb);
   },
+  onWorkspace(_cb: (p: WorkspaceProgress) => void) {
+    return () => {};
+  },
   onGhCode(cb: (c: GhLoginCode) => void) {
     ghCodeListeners.add(cb);
     return () => void ghCodeListeners.delete(cb);
@@ -335,16 +338,45 @@ function pressure(): Pressure[] {
   ];
 }
 
-function samplePull(repo: string, number: number) {
+function samplePull(repo: string, number: number): PullReview {
   const before = `import { Charge } from "./types";\nimport { stripe } from "./clients";\n\nexport async function capture(charge: Charge) {\n  const result = await stripe.charges.capture(charge.id);\n  if (result.status !== "succeeded") {\n    throw new Error(\`capture failed: \${result.status}\`);\n  }\n  return result;\n}\n`;
-  const after = `import { Charge } from "./types";\nimport { stripe } from "./clients";\nimport { backoff } from "./backoff";\n\nconst MAX_ATTEMPTS = 4;\n\nexport async function capture(charge: Charge) {\n  for (let attempt = 1; ; attempt++) {\n    try {\n      const result = await stripe.charges.capture(charge.id, {\n        idempotencyKey: \`capture-\${charge.id}\`,\n      });\n      if (result.status !== "succeeded") {\n        throw new Error(\`capture failed: \${result.status}\`);\n      }\n      return result;\n    } catch (err) {\n      if (attempt >= MAX_ATTEMPTS || !isRetryable(err)) throw err;\n      await backoff(attempt);\n    }\n  }\n}\n`;
+  const after = `import { Charge } from "./types";\nimport { stripe } from "./clients";\nimport { backoff } from "./backoff";\n\nconst MAX_ATTEMPTS = 4;\n\nexport async function capture(charge: Charge) {\n  for (let attempt = 1; ; attempt++) {\n    try {\n      const result = await stripe.charges.capture(charge.id, {\n        idempotencyKey: \`capture-\${charge.id}\`,\n      });\n      if (result.status !== "succeeded") {\n        throw new Error(\`capture failed: \${result.status}\`);\n      }\n      return result;\n    } catch (err) {\n      if (attempt >= MAX_ATTEMPTS || !isRetryable(err)) throw err;\n      await backoff(attempt);\n    }\n  }\n}\n\nfunction isRetryable(err: unknown) {\n  return err instanceof Error && /timeout|ECONNRESET|rate limit/i.test(err.message);\n}\n`;
+  const backoff = `/** Exponential backoff with full jitter, capped at 8 seconds. */\nexport function backoff(attempt: number) {\n  const ceiling = Math.min(8000, 250 * 2 ** attempt);\n  return new Promise((resolve) => setTimeout(resolve, Math.random() * ceiling));\n}\n`;
+  const testBefore = `import { capture } from "../src/capture";\n\ntest("captures a charge", async () => {\n  await expect(capture(fixture("ch_ok"))).resolves.toMatchObject({ status: "succeeded" });\n});\n`;
+  const testAfter = testBefore + `\ntest("retries timeouts with the same idempotency key", async () => {\n  const calls = mockStripe(["timeout", "timeout", "succeeded"]);\n  await capture(fixture("ch_flaky"));\n  expect(calls.map((c) => c.idempotencyKey)).toEqual(Array(3).fill("capture-ch_flaky"));\n});\n`;
+  const f = (filename: string, status: string, additions: number, deletions: number, original: string, modified: string) =>
+    ({ filename, status, additions, deletions, previous_filename: null, viewed: "unviewed", original, modified });
   return {
-    repo, number, title: "Retry payment capture with idempotency keys", author: "dana-k", url: `https://github.com/${repo}/pull/${number}`,
-    base_sha: "sample-base", head_sha: "sample-head", sample: true,
+    repo, number, node_id: "sample", title: "Retry payment capture with idempotency keys",
+    body: "Captures sometimes time out on Stripe's side and we drop the charge.\n\nThis retries timeouts and connection resets up to four times with jittered backoff, and sends an idempotency key so a retry can't double-capture.\n\n- `capture()` retries transient errors\n- new `backoff()` helper\n- test for the retry path",
+    author: "dana-k", author_avatar: null, url: `https://github.com/${repo}/pull/${number}`,
+    state: "open", draft: false, base_ref: "main", head_ref: "dana/capture-retries", head_repo: repo,
+    base_sha: "sample-base", head_sha: "sample-head", additions: 29, deletions: 4, commits: 3, created_at: ago(180),
+    mergeable: "mergeable", merge_state: "unstable", review_decision: "review_required",
+    checks: { state: "failure", runs: [
+      { name: "lint", status: "completed", conclusion: "success", url: null },
+      { name: "unit-tests (node 22)", status: "completed", conclusion: "failure", url: null },
+      { name: "build", status: "completed", conclusion: "success", url: null },
+    ] },
+    labels: [{ name: "payments", color: "0e8a16" }], reviewers: ["you"], viewer: "you", viewer_can_update: true,
     files: [
-      { filename: "src/capture.ts", status: "modified", additions: 18, deletions: 4, original: before, modified: after },
-      { filename: "src/backoff.ts", status: "added", additions: 5, deletions: 0, original: "", modified: "export function backoff(attempt: number) {\n  const ceiling = Math.min(8000, 250 * 2 ** attempt);\n  return new Promise((r) => setTimeout(r, Math.random() * ceiling));\n}\n" },
+      f("src/capture.ts", "modified", 18, 4, before, after),
+      f("src/backoff.ts", "added", 5, 0, "", backoff),
+      f("test/capture.test.ts", "modified", 6, 0, testBefore, testAfter),
     ],
-    comments: [{ id: 1, path: "src/capture.ts", line: 18, side: "RIGHT", body: "Should card_declined ever be retried?", user: "dana-k", created_at: ago(60) }],
+    threads: [{
+      id: "sample-thread-1", path: "src/capture.ts", line: 19, start_line: null, original_line: 19, side: "RIGHT",
+      resolved: false, outdated: false, can_resolve: true, can_reply: true, diff_hunk: null,
+      comments: [{ id: "sample-comment-1", database_id: 1, author: "dana-k", avatar: null, body: "Should `card_declined` ever be retried? I think this regex is enough but worth a second look.", created_at: ago(60), pending: false, url: null, viewer_did_author: false }],
+    }],
+    pending_review: null,
+    sample_tree: [
+      { path: "README.md", content: "# payments\n\nCharges, captures and refunds for acme.\n" },
+      { path: "package.json", content: "{\n  \"name\": \"@acme/payments\",\n  \"private\": true,\n  \"scripts\": { \"test\": \"vitest\" }\n}\n" },
+      { path: "src/types.ts", content: "export interface Charge {\n  id: string;\n  amount: number;\n  currency: string;\n}\n" },
+      { path: "src/clients.ts", content: "import Stripe from \"stripe\";\n\nexport const stripe = new Stripe(process.env.STRIPE_KEY!);\n" },
+      { path: "src/refund.ts", content: "import { Charge } from \"./types\";\nimport { stripe } from \"./clients\";\n\nexport async function refund(charge: Charge) {\n  return stripe.refunds.create({ charge: charge.id });\n}\n" },
+    ],
+    sample: true,
   };
 }

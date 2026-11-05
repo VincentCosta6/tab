@@ -4,7 +4,7 @@ import { useItems } from "../../lib/hooks";
 import { QueueRow } from "../work/WorkTab";
 import { parsePullUrl } from "./pulls";
 
-const ReviewView = lazy(() => import("./ReviewView"));
+const ReviewView = lazy(() => import("./review/Workspace"));
 
 /** The GitHub module's tab: pull requests waiting on you, opened in the built-in editor. */
 export function ReviewsTab() {

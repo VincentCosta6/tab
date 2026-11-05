@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde::Serialize;
 use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint};
-use tab_core::connectors::github_review::{self, NewComment, PullReview};
+use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
 use tab_core::connectors::registry;
 use tab_core::gateway::RateLimitState;
 use tab_core::mcp::{EngineAccess, McpServer};
@@ -18,6 +18,7 @@ use tab_core::model::{
 };
 use tab_core::ratelimit::Pressure;
 use tab_core::store::{AuditEntry, AuditQuery, UsageRow};
+use tab_core::workspace::{self, SearchHit, SearchQuery, Target, Workspace, Workspaces};
 use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::{Mutex, RwLock, broadcast};
@@ -36,6 +37,7 @@ struct AppState {
     mcp_url: std::sync::Mutex<Option<String>>,
     config: Mutex<TabConfig>,
     config_path: PathBuf,
+    workspaces: Arc<Workspaces>,
 }
 
 /// Lets the MCP server reach whichever engine is running now.
@@ -380,32 +382,120 @@ async fn github_file(
         .map_err(err)
 }
 
-#[allow(clippy::too_many_arguments)]
 #[tauri::command]
-async fn github_comment(
+async fn github_review_action(
+    state: State<'_, AppState>,
+    pr: PrRef,
+    action: ReviewAction,
+) -> CmdResult<()> {
+    github_review::act(&state.gateway, &pr, action)
+        .await
+        .map_err(err)
+}
+
+// --- Review workspace (local checkout) ------------------------------------
+
+impl AppState {
+    /// The token git uses to clone: the GitHub connection's, else gh's.
+    async fn github_token(&self) -> Option<String> {
+        let from_config = self
+            .config
+            .lock()
+            .await
+            .connectors
+            .get("github")
+            .and_then(|c| c.str("token").map(str::to_string));
+        match from_config {
+            Some(t) => Some(t),
+            None => tauri::async_runtime::spawn_blocking(tab_core::gh::token)
+                .await
+                .ok()
+                .flatten(),
+        }
+    }
+}
+
+/// Clones the repo and checks out the PR. Progress arrives as `tab://workspace` events.
+#[tauri::command]
+async fn review_workspace_prepare(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    target: Target,
+) -> CmdResult<Workspace> {
+    let token = state.github_token().await;
+    state
+        .workspaces
+        .prepare(&target, token, move |p| {
+            let _ = app.emit("tab://workspace", &p);
+        })
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn review_workspace_file(
+    state: State<'_, AppState>,
+    repo: String,
+    sha: String,
+    path: String,
+) -> CmdResult<String> {
+    state.workspaces.read(&repo, &sha, &path).await.map_err(err)
+}
+
+#[tauri::command]
+async fn review_workspace_files(
     state: State<'_, AppState>,
     repo: String,
     number: u64,
-    commit_id: String,
-    path: String,
-    line: u32,
-    side: String,
-    body: String,
+    paths: Vec<String>,
+) -> CmdResult<Vec<(String, String)>> {
+    state
+        .workspaces
+        .read_many(&repo, number, &paths)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn review_workspace_search(
+    state: State<'_, AppState>,
+    repo: String,
+    number: u64,
+    query: SearchQuery,
+) -> CmdResult<Vec<SearchHit>> {
+    state
+        .workspaces
+        .search(&repo, number, &query)
+        .await
+        .map_err(err)
+}
+
+/// Opens the PR's checkout in VS Code (`vscode`) or the file manager (`folder`).
+#[tauri::command]
+async fn review_workspace_open(
+    state: State<'_, AppState>,
+    repo: String,
+    number: u64,
+    target: String,
+    path: Option<String>,
+    line: Option<u32>,
 ) -> CmdResult<()> {
-    github_review::comment(
-        &state.gateway,
-        NewComment {
-            repo: &repo,
-            number,
-            commit_id: &commit_id,
-            path: &path,
-            line,
-            side: &side,
-            body: &body,
-        },
-    )
-    .await
-    .map_err(err)
+    let dir = state.workspaces.worktree(&repo, number).map_err(err)?;
+    if !dir.exists() {
+        return Err("This pull request hasn't been checked out on this computer yet.".into());
+    }
+    match target.as_str() {
+        "vscode" => {
+            workspace::open_in_vscode(&dir, path.as_deref().map(|p| (p, line.unwrap_or(1))))
+                .map_err(err)
+        }
+        _ => tauri_plugin_opener::open_path(&dir, None::<&str>).map_err(err),
+    }
+}
+
+#[tauri::command]
+async fn review_vscode_available() -> CmdResult<bool> {
+    Ok(workspace::vscode().is_some())
 }
 
 #[tauri::command]
@@ -583,6 +673,7 @@ pub fn run() {
                 mcp_url: std::sync::Mutex::new(None),
                 config: Mutex::new(config.clone()),
                 config_path,
+                workspaces: Arc::new(Workspaces::new(data_dir.join("workspaces"))),
             };
             tauri::async_runtime::block_on(async {
                 state.restart(&config).await;
@@ -641,7 +732,13 @@ pub fn run() {
             gh_install,
             github_pull,
             github_file,
-            github_comment,
+            github_review_action,
+            review_workspace_prepare,
+            review_workspace_file,
+            review_workspace_files,
+            review_workspace_search,
+            review_workspace_open,
+            review_vscode_available,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
