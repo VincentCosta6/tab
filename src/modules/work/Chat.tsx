@@ -556,6 +556,12 @@ const slashDescriptions: Record<string, string> = {
   context: "Show what's using the context window",
   cost: "Show this session's cost and duration",
   init: "Write a CLAUDE.md for this codebase",
+  mcp: "Summarise the MCP servers this agent has",
+  status: "Show the agent's version, model and account",
+  memory: "Show the memory files loaded",
+  agents: "List the subagents available",
+  hooks: "List the hooks configured",
+  model: "Show the model in use",
   review: "Review a pull request",
   "pr-comments": "Fetch the comments on a pull request",
   "security-review": "Review the pending changes for security issues",
@@ -563,8 +569,8 @@ const slashDescriptions: Record<string, string> = {
   todos: "List the current todo items",
 };
 // Terminal-only commands that do nothing useful in a headless turn.
-const interactiveOnly = new Set(["config", "permissions", "login", "logout", "vim", "help", "exit", "quit", "clear", "theme", "terminal-setup", "doctor", "ide", "resume", "status", "statusline", "upgrade", "bug", "feedback", "memory", "agents", "mcp", "hooks", "model", "add-dir", "export", "privacy-settings", "output-style", "plugin", "install-github-app", "migrate-installer", "rewind", "keybindings-help"]);
-const fallbackSlash = ["compact", "context", "cost", "init", "review", "pr-comments", "security-review"];
+const interactiveOnly = new Set(["config", "permissions", "login", "logout", "vim", "exit", "quit", "theme", "terminal-setup", "ide", "resume", "statusline", "upgrade", "bug", "feedback", "privacy-settings", "output-style", "install-github-app", "migrate-installer", "rewind", "add-dir", "export", "clear"]);
+const fallbackSlash = ["compact", "context", "cost", "mcp", "status", "init", "review", "pr-comments", "security-review"];
 
 /**
  * The `/` menu: Claude Code's commands, custom commands and skills, as it
