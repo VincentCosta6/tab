@@ -224,7 +224,7 @@ export function WorkTab() {
       </section>
       <section className="pane">
         {selected === NEW ? (
-          <NewChat onStarted={(itemId) => {
+          <NewChat project={project} onStarted={(itemId) => {
             setView("open");
             setSelected(itemId);
           }} />

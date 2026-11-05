@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { TabMark } from "../../design/brands";
 import { Icon } from "../../design/icons";
@@ -22,13 +22,18 @@ const starters = [
  * Asking about something already in the queue ("work on PAY-12") lets the
  * agent find it and attach it as context.
  */
-export function NewChat({ onStarted }: { onStarted: (itemId: string) => void }) {
+export function NewChat({ onStarted, project: filtered }: { onStarted: (itemId: string) => void; project?: string | null }) {
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // The last project picked here is where the next chat goes too.
   const [project, setProject] = useRememberedProject("tab.newChatProject");
   const tint = useProjectTint(project);
+  // Looking at one project's queue means new chats go there too.
+  useEffect(() => {
+    if (filtered) setProject(filtered);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filtered]);
 
   const send = async (text: string) => {
     setBusy(true);
