@@ -1044,7 +1044,29 @@ pub struct LinkSummary {
     /// `passing`, `failing` or `pending`, for PRs and commits with checks.
     pub checks: Option<String>,
     pub updated_at: Option<String>,
+    /// PRs: GitHub's merge state (`clean`, `blocked`, `dirty`, `behind`,
+    /// `unstable`, `unknown`), the review decision, and how many review
+    /// threads are still unresolved.
+    pub merge_state: Option<String>,
+    pub review_decision: Option<String>,
+    pub open_threads: Option<u32>,
 }
+
+const LINK_PULL_QUERY: &str = r#"
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      title state isDraft merged updatedAt mergeable mergeStateStatus reviewDecision
+      author { login }
+      reviewThreads(first: 100) { nodes { isResolved } }
+      commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+    }
+  }
+}"#;
+
+type LinkCache = std::collections::HashMap<String, (std::time::Instant, LinkSummary)>;
+static LINK_CACHE: std::sync::LazyLock<std::sync::Mutex<LinkCache>> =
+    std::sync::LazyLock::new(Default::default);
 
 /// `what` is `pull`, `issues` or `commit`, as in the github.com path.
 pub async fn link_summary(
@@ -1060,34 +1082,63 @@ pub async fn link_summary(
     match what {
         "pull" => {
             let n: u64 = id.parse()?;
-            let pr: Value = fetch(
+            let key = format!("{repo}#{n}");
+            if let Some((at, s)) = LINK_CACHE.lock().unwrap().get(&key)
+                && at.elapsed() < ttl
+            {
+                return Ok(s.clone());
+            }
+            let (owner, name) = split_repo(repo)?;
+            let data = graphql(
+                gw,
                 "link: pull request",
-                format!("{API}/repos/{repo}/pulls/{n}"),
+                LINK_PULL_QUERY,
+                json!({ "owner": owner, "name": name, "number": n }),
             )
-            .await?
-            .json()?;
+            .await?;
+            let pr = &data["repository"]["pullRequest"];
+            anyhow::ensure!(!pr.is_null(), "{repo}#{n} wasn't found");
             let state = if pr["merged"].as_bool() == Some(true) {
                 "merged"
-            } else if pr["state"] == "closed" {
+            } else if pr["state"] == "CLOSED" {
                 "closed"
-            } else if pr["draft"].as_bool() == Some(true) {
+            } else if pr["isDraft"].as_bool() == Some(true) {
                 "draft"
             } else {
                 "open"
             };
-            let checks = match str_at(&pr, "/head/sha") {
-                Some(sha) if state == "open" || state == "draft" => {
-                    commit_checks(gw, repo, &sha).await
+            let checks = str_at(pr, "/commits/nodes/0/commit/statusCheckRollup/state").map(|s| {
+                match s.as_str() {
+                    "SUCCESS" => "passing",
+                    "FAILURE" | "ERROR" => "failing",
+                    _ => "pending",
                 }
-                _ => None,
+                .to_string()
+            });
+            let open_threads = pr["reviewThreads"]["nodes"].as_array().map(|ts| {
+                ts.iter()
+                    .filter(|t| t["isResolved"].as_bool() == Some(false))
+                    .count() as u32
+            });
+            let merge_state = match lower(pr, "mergeable").as_str() {
+                "conflicting" => Some("dirty".to_string()),
+                _ => Some(lower(pr, "mergeStateStatus")).filter(|s| !s.is_empty()),
             };
-            Ok(LinkSummary {
-                title: str_at(&pr, "/title").unwrap_or_default(),
+            let summary = LinkSummary {
+                title: str_at(pr, "/title").unwrap_or_default(),
                 state: state.into(),
-                author: str_at(&pr, "/user/login"),
+                author: str_at(pr, "/author/login"),
                 checks,
-                updated_at: str_at(&pr, "/updated_at"),
-            })
+                updated_at: str_at(pr, "/updatedAt"),
+                merge_state,
+                review_decision: Some(lower(pr, "reviewDecision")).filter(|s| !s.is_empty()),
+                open_threads,
+            };
+            LINK_CACHE
+                .lock()
+                .unwrap()
+                .insert(key, (std::time::Instant::now(), summary.clone()));
+            Ok(summary)
         }
         "issues" => {
             let n: u64 = id.parse()?;
@@ -1100,6 +1151,9 @@ pub async fn link_summary(
                 author: str_at(&i, "/user/login"),
                 checks: None,
                 updated_at: str_at(&i, "/updated_at"),
+                merge_state: None,
+                review_decision: None,
+                open_threads: None,
             })
         }
         "commit" => {
@@ -1116,6 +1170,9 @@ pub async fn link_summary(
                 author: str_at(&c, "/author/login").or_else(|| str_at(&c, "/commit/author/name")),
                 checks: commit_checks(gw, repo, id).await,
                 updated_at: str_at(&c, "/commit/committer/date"),
+                merge_state: None,
+                review_decision: None,
+                open_threads: None,
             })
         }
         _ => anyhow::bail!("tab doesn't summarise GitHub {what} links"),

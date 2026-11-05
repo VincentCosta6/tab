@@ -23,9 +23,11 @@ export function ContextDrawer({ item, onSelect, left, right }: { item: QueueItem
   const { data: ctx } = useItemContext(item.id);
   const [open, setOpen] = useState(false);
   const entries = ctx?.entries ?? [];
-  const context = entries.filter((e) => e.section === "context").sort((a, b) => Number(b.pinned) - Number(a.pinned));
-  const found = entries.filter((e) => e.section === "found");
-  const related = ctx?.related ?? [];
+  // The item itself is the task, never its own context.
+  const self = (e: ContextEntry) => e.ref_item?.id === item.id || (!!e.url && !!item.url && sameLink(e.url, item.url));
+  const context = entries.filter((e) => e.section === "context" && !self(e)).sort((a, b) => Number(b.pinned) - Number(a.pinned));
+  const found = entries.filter((e) => e.section === "found" && !self(e));
+  const related = (ctx?.related ?? []).filter((r) => r.id !== item.id);
   const foundCount = found.length + related.length;
   const agentFound = found.filter((f) => f.added_by === "agent").length;
 
@@ -43,15 +45,21 @@ export function ContextDrawer({ item, onSelect, left, right }: { item: QueueItem
         <div className="pane-toolbar-left">{left}</div>
         <div className="pane-toolbar-right">
           {right}
+          {context.length > 0 && (
+            <div className="ctx-pills">
+              {context.slice(0, 3).map((e) => <ContextChip key={e.id} entry={e} onSelect={onSelect} />)}
+              {context.length > 3 && <button className="ctx-pill more" onClick={() => setOpen(true)}>+{context.length - 3}</button>}
+            </div>
+          )}
           <button
             className={cx("ctx-toggle", open && "active")}
             onClick={() => setOpen((v) => !v)}
             aria-expanded={open}
-            title={`Context: ${context.length + 1} given to the agent, ${foundCount} found`}
+            title={`Context: ${context.length} given to the agent, ${foundCount} found`}
           >
             <Icon name="graph" size={13} />
             Context
-            <span className="ctx-count">{context.length + 1}</span>
+            {context.length > 0 && <span className="ctx-count">{context.length}</span>}
             {foundCount > 0 && <span className={cx("ctx-count", agentFound > 0 && "fresh")} title="Found">+{foundCount}</span>}
             <Icon name="chevron-down" size={12} className="ctx-chevron" />
           </button>
@@ -62,7 +70,6 @@ export function ContextDrawer({ item, onSelect, left, right }: { item: QueueItem
           <section>
             <h4 className="label-sm">Context <span className="subtle">· given to the agent with every message</span></h4>
             <div className="cc-list">
-              <ItemCard item={item} note="This item" noDetails />
               {context.map((e) => (
                 <EntryCard key={e.id} entry={e} onSelect={onSelect}>
                   <IconButton icon="pin" label={e.pinned ? "Unpin" : "Pin"} active={e.pinned} onClick={() => pin(e)} />
@@ -95,6 +102,12 @@ export function ContextDrawer({ item, onSelect, left, right }: { item: QueueItem
   );
 }
 
+/** Two links to the same thing, ignoring query, fragment and subpages like a PR's /files. */
+function sameLink(a: string, b: string) {
+  const c = (u: string) => parseLink(u)?.canonical ?? u.split(/[?#]/)[0].replace(/\/$/, "");
+  return c(a) === c(b);
+}
+
 function IconButton({ icon, label, onClick, active }: { icon: string; label: string; onClick: () => void; active?: boolean }) {
   return (
     <button className={cx("icon-btn", active && "active")} title={label} aria-label={label} onClick={onClick}>
@@ -117,14 +130,66 @@ const checkStatus: Record<string, { label: string; tone: Tone }> = {
   passing: { label: "CI passing", tone: "success" },
 };
 
-/** One badge for a linked PR or issue: why it matters most first. */
+/**
+ * One badge for a linked PR or issue: the thing that most decides what
+ * happens next, like GitHub's merge box. Merged or closed, then conflicts,
+ * failing CI, changes requested, unresolved threads, CI running, review
+ * needed, and finally ready to merge.
+ */
 function linkStatus(s: LinkSummary): { label: string; tone: Tone } | null {
   if (s.state === "merged") return { label: "Merged", tone: "accent" };
   if (s.state === "closed") return { label: "Closed", tone: "neutral" };
-  if (s.checks && s.checks !== "passing") return checkStatus[s.checks];
+  if (s.merge_state === "dirty") return { label: "Conflicts", tone: "danger" };
+  if (s.checks === "failing") return checkStatus.failing;
+  if (s.review_decision === "changes_requested") return { label: "Changes requested", tone: "danger" };
+  if (s.open_threads) return { label: `${s.open_threads} open thread${s.open_threads === 1 ? "" : "s"}`, tone: "warning" };
   if (s.state === "draft") return { label: "Draft", tone: "neutral" };
-  if (s.checks) return checkStatus[s.checks];
+  if (s.checks === "pending") return checkStatus.pending;
+  if (s.review_decision === "review_required") return { label: "Needs review", tone: "info" };
+  if (s.merge_state === "behind") return { label: "Behind base", tone: "warning" };
+  if (s.merge_state === "blocked") return { label: "Blocked", tone: "warning" };
+  if (s.merge_state === "clean" || s.merge_state === "unstable" || s.merge_state === "has_hooks") return { label: "Ready to merge", tone: "success" };
+  if (s.checks === "passing") return checkStatus.passing;
   return s.state === "open" ? { label: "Open", tone: "success" } : null;
+}
+
+function useLinkSummary(url: string | null | undefined) {
+  const link = parseLink(url);
+  const { data } = useQuery({
+    queryKey: ["link-summary", link?.canonical ?? ""],
+    queryFn: () => link!.summary!(),
+    enabled: !!link?.summary,
+    staleTime: 120_000,
+    retry: false,
+  });
+  return { link, sum: data };
+}
+
+/**
+ * A direct context entry, in the bar above the chat so it's one click away:
+ * what it is, a short name and one status badge.
+ */
+function ContextChip({ entry: e, onSelect }: { entry: ContextEntry; onSelect: (id: string) => void }) {
+  const { kind } = useApp();
+  const url = e.url ?? e.ref_item?.url;
+  const { link, sum } = useLinkSummary(url);
+  const item = e.ref_item;
+  const k = item ? kind(item.kind) : null;
+  const ref = link?.title.split(" ").pop() ?? "";
+  const name = sum?.title ? `${ref.startsWith("#") ? `${ref} ` : ""}${sum.title}` : item?.title ?? (link && (!e.title || e.title === e.url) ? link.title : e.title);
+  const status = sum ? linkStatus(sum) : item ? statusOf(item) : null;
+  const open = () => {
+    if (link?.open?.()) return;
+    if (item) return onSelect(item.id);
+    if (url) void openLink(url);
+  };
+  return (
+    <button className="ctx-pill" onClick={open} title={[link?.label ?? k?.label, name, status?.label].filter(Boolean).join(" · ")}>
+      {link ? <SourceGlyph kind={link.kind} source={link.source} icon={link.icon} size={16} /> : item && k ? <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={16} /> : <Icon name="link" size={12} />}
+      <span className="ctx-pill-name">{name}</span>
+      {status && <Badge tone={status.tone}>{status.label}</Badge>}
+    </button>
+  );
 }
 
 function statusOf(item: QueueItem): { label: string; tone: Tone } | null {
@@ -228,14 +293,7 @@ function EntryCard({ entry: e, onSelect, children }: { entry: ContextEntry; onSe
     host = e.url ?? "";
   }
   // A link a module understands shows as what it is: a GitHub PR, not "Link".
-  const link = parseLink(e.url);
-  const { data: sum } = useQuery({
-    queryKey: ["link-summary", link?.canonical ?? ""],
-    queryFn: () => link!.summary!(),
-    enabled: !!link?.summary,
-    staleTime: 120_000,
-    retry: false,
-  });
+  const { link, sum } = useLinkSummary(e.url);
   const bare = !e.title || e.title === e.url;
   // "#968 · Retry webhooks" from GitHub, else the link's own title.
   const ref = link?.title.split(" ").pop() ?? "";

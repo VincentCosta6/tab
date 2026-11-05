@@ -563,10 +563,12 @@ impl McpServer {
                             .ok_or_else(|| anyhow::anyhow!("no item {r}"))?,
                     ),
                     // A link to something in the queue attaches that item.
-                    None => s("url")
-                        .and_then(|u| self.store.item_by_url(&u).ok().flatten())
-                        .filter(|i| i.id != item_id),
+                    None => s("url").and_then(|u| self.store.item_by_url(&u).ok().flatten()),
                 };
+                anyhow::ensure!(
+                    ref_item.as_ref().is_none_or(|i| i.id != item_id),
+                    "that's this task itself; it's already what the chat is about"
+                );
                 let ref_item_id = ref_item.as_ref().map(|i| i.id.clone());
                 let title = s("title")
                     .or(ref_item.as_ref().map(|i| i.event.title.clone()))

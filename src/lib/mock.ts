@@ -214,7 +214,7 @@ export const mockApi = {
         }
         case "github_link_summary":
           return args.what === "pull"
-            ? { title: "Retry webhook deliveries with exponential backoff", state: "open", author: "dana-k", checks: "failing", updated_at: new Date(Date.now() - 3_600_000).toISOString() }
+            ? { title: "Retry webhook deliveries with exponential backoff", state: "open", author: "dana-k", checks: "passing", updated_at: new Date(Date.now() - 3_600_000).toISOString(), merge_state: "blocked", review_decision: "review_required", open_threads: 2 }
             : { title: "Sample " + args.what, state: "open", author: "sam", checks: null, updated_at: null };
         case "start_dictation": throw "Dictation needs the desktop app.";
         case "attachment_save": return URL.createObjectURL(new Blob([args.bytes]));
@@ -383,7 +383,7 @@ let gh: GhStatus = { installed: false, path: null, version: null, logged_in: fal
 const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
 
 // A link an agent attached, to show links rendered by what they point at.
-let contexts: ContextEntry[] = items.slice(0, 4).map((i) => ({ id: `ctx-seed-${i.id}`, item_id: i.id, section: "found", pinned: false, ref_item: null, url: "https://github.com/acme/payments/pull/491", title: "https://github.com/acme/payments/pull/491", summary: null, added_by: "agent", created_at: new Date().toISOString() }));
+let contexts: ContextEntry[] = items.slice(0, 4).map((i) => ({ id: `ctx-seed-${i.id}`, item_id: i.id, section: "context", pinned: false, ref_item: null, url: "https://github.com/acme/payments/pull/491", title: "https://github.com/acme/payments/pull/491", summary: null, added_by: "agent", created_at: new Date().toISOString() }));
 let projects: Project[] = [
   { id: "p-pay", name: "Payments", color: "#7c5cff", icon: "zap", created_at: ago(9000) },
   { id: "p-sec", name: "SOC 2", color: "#e5484d", icon: "shield", created_at: ago(9000) },

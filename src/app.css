@@ -595,3 +595,12 @@ body.resizing iframe { pointer-events: none; }
 .dictation { position: relative; display: inline-flex; flex: none; }
 .dictation-note { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 40; width: max-content; max-width: 260px; white-space: normal; padding: 6px 8px; border-radius: 8px; background: var(--bg-raised); border: 1px solid var(--border); box-shadow: var(--shadow-sm); color: var(--fg); font-size: var(--text-xs); }
 .composer-foot .cw-pop { white-space: normal; width: 320px; }
+
+/* Direct context, one click away above the chat. */
+.ctx-pills { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.ctx-pill { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 6px 0 4px; max-width: 340px; min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); color: var(--fg); font: inherit; font-size: var(--text-xs); cursor: pointer; flex: 0 1 auto; }
+.ctx-pill:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+.ctx-pill.more { padding: 0 8px; color: var(--fg-muted); flex: none; }
+.ctx-pill-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ctx-pill .badge { flex: none; }
+.ctx-pill .source-glyph { flex: none; }
