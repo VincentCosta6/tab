@@ -770,9 +770,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
         {running && chat?.session && (
           <Button size="sm" icon="stop" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
         )}
-        {(
-          <Button size="sm" variant="primary" icon="arrow-up" disabled={(!text.trim() && !images.length) || uploading > 0} onClick={submit}>{running ? "Steer" : "Send"}</Button>
-        )}
+        <Button size="sm" variant="primary" icon="arrow-up" disabled={(!text.trim() && !images.length) || uploading > 0} onClick={submit}>{running ? "Steer" : "Send"}</Button>
       </div>
     </div>
   );
