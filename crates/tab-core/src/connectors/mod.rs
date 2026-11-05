@@ -1,14 +1,15 @@
 //! Built-in connectors. Each file is one integration; [`registry`] lists them all.
 
+#[cfg(test)]
 mod demo;
 pub mod email;
 mod github;
 pub mod github_review;
-mod planned;
 pub mod tab;
 
 use std::sync::Arc;
 
+#[cfg(test)]
 pub use demo::{DemoConnector, DemoFactory};
 pub use email::{EmailConnector, EmailFactory};
 pub use github::{GithubConnector, GithubFactory};
@@ -20,14 +21,22 @@ use crate::gateway::Gateway;
 
 /// Every connector type the app knows about, in display order.
 pub fn registry() -> Vec<Box<dyn ConnectorFactory>> {
+    #[allow(unused_mut)]
     let mut v: Vec<Box<dyn ConnectorFactory>> = vec![
         Box::new(TabFactory),
         Box::new(GithubFactory),
         Box::new(EmailFactory),
-        Box::new(DemoFactory),
     ];
-    v.extend(planned::factories());
+    // Sample data only feeds the engine's tests.
+    #[cfg(test)]
+    v.push(Box::new(DemoFactory));
     v
+}
+
+/// Whether tab still has a connector with this id. Items from one it
+/// dropped (like the old sample data) are cleared on start.
+pub fn known(id: &str) -> bool {
+    registry().iter().any(|f| f.descriptor().id == id)
 }
 
 /// Connectors that failed to build, as `(connector id, message)`.

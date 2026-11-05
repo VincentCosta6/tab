@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Button, Kbd, TextInput, Toggle, cx } from "../../design/components";
+import { Button, Kbd, TextInput, cx } from "../../design/components";
 import { Brand, TabMark } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
@@ -125,14 +125,6 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
                   onSignedIn={() => set((c) => void (c.connectors.github = { enabled: true, settings: { ...(c.connectors.github?.settings ?? {}) } }))}
                 />
               </div>
-            </div>
-            <div className="onboarding-connector">
-              <Icon name="sparkles" size={22} />
-              <div style={{ flex: 1 }}>
-                <strong>Sample data</strong>
-                <p className="subtle">Realistic work from every kind of source, so the queue has something in it while you try tab.</p>
-              </div>
-              <Toggle label="Sample data" checked={!!draft.connectors.demo?.enabled} onChange={(v) => set((c) => void (c.connectors.demo = { enabled: v, settings: {} }))} />
             </div>
           </div>
         )}

@@ -114,7 +114,10 @@ impl Core {
         match self.store.sources() {
             Ok(sources) => {
                 for source in sources {
-                    if source != "tab" && cfg.connector(&source).is_none() {
+                    if source != "tab"
+                        && (cfg.connector(&source).is_none()
+                            || !tab_core::connectors::known(&source))
+                    {
                         match self.store.remove_source(&source) {
                             Ok(n) => tracing::info!(
                                 source,
