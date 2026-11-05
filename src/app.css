@@ -506,6 +506,8 @@ body.resizing iframe { pointer-events: none; }
 .ask-node-title .subtle { font-size: var(--text-xs); text-transform: capitalize; }
 .ask-node section { display: grid; gap: 6px; }
 .ask-node .label-sm { margin: 0; }
+.ask-lead { display: grid; gap: var(--space-2); }
+.ask-lead .reader-body { max-height: 320px; overflow-y: auto; }
 .ask-note { margin: 0; font-size: var(--text-sm); line-height: 1.45; }
 .ask-note strong { text-transform: uppercase; font-size: var(--text-xs); letter-spacing: 0.04em; color: var(--fg-muted); margin-right: 4px; }
 .ask-connected { display: flex; flex-wrap: wrap; gap: 6px; }
