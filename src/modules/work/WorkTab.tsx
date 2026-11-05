@@ -6,9 +6,9 @@ import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
-import { useItems } from "../../lib/hooks";
+import { useAgentActivity, useItems } from "../../lib/hooks";
 import { keys } from "../../lib/query";
-import type { ItemState, QueueItem, Urgency } from "../../lib/types";
+import type { AgentActivity, ItemState, QueueItem, Urgency } from "../../lib/types";
 import { takePendingOpen } from "./Chat";
 import { ItemPane } from "./ItemPane";
 import { NewChat } from "./NewChat";
@@ -163,6 +163,7 @@ export function WorkTab() {
     return () => window.removeEventListener("keydown", onKey);
   }, [move]);
 
+  const activity = useAgentActivity();
   const grouped = useMemo(() => {
     if (view !== "open" || query) return [{ urgency: null as Urgency | null, items: visible }];
     return urgencyOrder
@@ -216,7 +217,7 @@ export function WorkTab() {
             <div key={g.urgency ?? "all"}>
               {g.urgency && <div className={cx("urgency-group", `urgency-${g.urgency}`)}>{urgencyHeading[g.urgency]}</div>}
               {g.items.map((i) => (
-                <QueueRow key={i.id} item={i} selected={i.id === selected} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
+                <QueueRow key={i.id} item={i} agent={activity.get(i.id)} selected={i.id === selected} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
               ))}
             </div>
           ))}
@@ -242,8 +243,11 @@ export function WorkTab() {
  * One queue row. Hover actions sit in an overlay on the right edge, on top
  * of the score and time, so showing them never moves or wraps any content.
  */
-export function QueueRow({ item, selected, onSelect, onAct, compact }: {
+const agentText: Record<string, string> = { working: "Agent working", needs_input: "Agent needs you", failed: "Agent failed" };
+
+export function QueueRow({ item, agent, selected, onSelect, onAct, compact }: {
   item: QueueItem;
+  agent?: AgentActivity;
   selected: boolean;
   onSelect: () => void;
   onAct?: (a: "done" | "reopen" | { snooze: number }) => void;
@@ -254,10 +258,17 @@ export function QueueRow({ item, selected, onSelect, onAct, compact }: {
   const [menu, setMenu] = useState(false);
   return (
     <div id={compact ? undefined : `row-${item.id}`} role="option" aria-selected={selected} className={cx("row", selected && "selected", menu && "menu-open", compact && "compact")} onClick={onSelect}>
-      <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={compact ? 24 : 28} />
+      <span className="row-glyph">
+        <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={compact ? 24 : 28} />
+        {agent && <span className={cx("agent-dot", `agent-${agent.status}`)} title={agentText[agent.status]} />}
+      </span>
       <div className="row-main">
         <div className="row-title">{item.title}</div>
-        <div className="row-meta"><ProjectChip id={item.project_id} />{[item.actor, item.context].filter(Boolean).join(" · ")}</div>
+        <div className="row-meta">
+          <ProjectChip id={item.project_id} />
+          {agent && <span className={cx("row-agent", `agent-${agent.status}`)}>{agentText[agent.status]}</span>}
+          {[item.actor, item.context].filter(Boolean).join(" · ")}
+        </div>
         {!compact && item.body && <div className="row-snippet">{item.body}</div>}
       </div>
       <div className="row-side">

@@ -50,6 +50,9 @@ pub(crate) fn link_item(
     Ok(())
 }
 
+/// Two entity ids and how many items they share.
+pub type GraphEdge = (i64, i64, i64);
+
 const ENTITY_COLS: &str = "e.id, e.kind, e.key, e.label, (SELECT COUNT(*) FROM item_entities ie WHERE ie.entity_id = e.id)";
 
 fn row_to_entity(r: &rusqlite::Row<'_>) -> rusqlite::Result<Entity> {
@@ -165,6 +168,51 @@ impl Store {
         Ok(rows)
     }
 
+    /// A drawable slice of the graph: the `limit` busiest entities (in one
+    /// project's items, or everywhere), and how many items each pair shares.
+    /// Projects are nodes too, so their work clusters around them.
+    pub fn graph_view(
+        &self,
+        project_id: Option<&str>,
+        since: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Entity>, Vec<GraphEdge>)> {
+        let conn = self.conn();
+        // The items in scope, as a reusable subquery.
+        let scope = "SELECT id FROM items WHERE (?1 IS NULL OR project_id = ?1) AND (?2 IS NULL OR occurred_at >= ?2)";
+        let since = since.map(ts);
+        let nodes: Vec<Entity> = conn
+            .prepare(&format!(
+                "SELECT e.id, e.kind, e.key, e.label, COUNT(*) AS n
+                 FROM item_entities ie JOIN entities e ON e.id = ie.entity_id
+                 WHERE ie.item_id IN ({scope})
+                 GROUP BY e.id ORDER BY n DESC, e.label LIMIT ?3"
+            ))?
+            .query_map(params![project_id, since, limit], row_to_entity)?
+            .collect::<Result<_, _>>()?;
+        if nodes.is_empty() {
+            return Ok((nodes, Vec::new()));
+        }
+        let ids = nodes
+            .iter()
+            .map(|e| e.id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        // Ids are integers we just read, so inlining them is safe.
+        let edges = conn
+            .prepare(&format!(
+                "SELECT a.entity_id, b.entity_id, COUNT(*) FROM item_entities a
+                 JOIN item_entities b ON b.item_id = a.item_id AND a.entity_id < b.entity_id
+                 WHERE a.entity_id IN ({ids}) AND b.entity_id IN ({ids}) AND a.item_id IN ({scope})
+                 GROUP BY a.entity_id, b.entity_id"
+            ))?
+            .query_map(params![project_id, since], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok((nodes, edges))
+    }
+
     /// Entities most connected to the given one.
     pub fn neighbors(&self, entity_id: i64, limit: usize) -> anyhow::Result<Vec<(Entity, f64)>> {
         let conn = self.conn();
@@ -199,6 +247,39 @@ mod tests {
             entities: refs,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn graph_view_scopes_to_a_project() {
+        let s = Store::in_memory().unwrap();
+        let now = Utc::now();
+        let p = s
+            .project_save(None, "Payments", "#7c5cff", "zap", now)
+            .unwrap();
+        let dana = || EntityRef::new("person", "github:dana", "Dana", "from");
+        let pay = || EntityRef::new("repo", "github:acme/payments", "acme/payments", "in");
+        let web = || EntityRef::new("repo", "github:acme/web", "acme/web", "in");
+        let id = |u| match u {
+            crate::store::Upsert::Inserted(i) => i.id,
+            _ => unreachable!(),
+        };
+        let a = id(s.upsert(&ev("a", vec![dana(), pay()]), now).unwrap());
+        id(s.upsert(&ev("b", vec![dana(), web()]), now).unwrap());
+        s.item_set_project(&a, Some(&p.id), now).unwrap();
+
+        let (nodes, edges) = s.graph_view(None, None, 50).unwrap();
+        assert_eq!(nodes.len(), 4, "dana, two repos, the project");
+        assert_eq!(nodes[0].label, "Dana");
+        assert_eq!(
+            edges.len(),
+            4,
+            "dana-payments, dana-web, and the project with dana and payments"
+        );
+
+        let (nodes, _) = s.graph_view(Some(&p.id), None, 50).unwrap();
+        let labels: Vec<_> = nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(!labels.contains(&"acme/web"), "{labels:?}");
+        assert_eq!(nodes.len(), 3);
     }
 
     #[test]

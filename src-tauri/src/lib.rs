@@ -550,9 +550,11 @@ async fn approval_resolve(
     id: String,
     decision: String,
     message: Option<String>,
+    answers: Option<serde_json::Value>,
 ) -> CmdResult<bool> {
     let d = match decision.as_str() {
         "allow" => Decision::Allow,
+        "answer" => Decision::Answer(answers.unwrap_or_default()),
         "always" => Decision::AllowAlways,
         _ => Decision::Deny(message.unwrap_or_else(|| "The person declined.".into())),
     };
@@ -578,6 +580,160 @@ async fn mcp_info(state: State<'_, AppState>) -> CmdResult<McpInfo> {
 }
 
 // --- Agent spend ---------------------------------------------------------
+
+/// A slice of the knowledge graph to draw, optionally one project's and
+/// optionally only recent activity.
+#[tauri::command]
+async fn graph_view(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    days: Option<i64>,
+    limit: Option<usize>,
+) -> CmdResult<serde_json::Value> {
+    let since = days.map(|d| Utc::now() - chrono::Duration::days(d.max(1)));
+    let (nodes, edges) = state
+        .store
+        .graph_view(
+            project_id.as_deref(),
+            since,
+            limit.unwrap_or(150).clamp(10, 500),
+        )
+        .map_err(err)?;
+    Ok(serde_json::json!({
+        "nodes": nodes,
+        "edges": edges.iter().map(|(a, b, w)| serde_json::json!({ "src": a, "dst": b, "weight": w })).collect::<Vec<_>>(),
+    }))
+}
+
+/// One node's neighbours and recent items, for the side panel.
+#[tauri::command]
+async fn graph_node(state: State<'_, AppState>, id: i64) -> CmdResult<serde_json::Value> {
+    let entity = state.store.entity(id).map_err(err)?.ok_or("no such node")?;
+    let connected = state.store.co_entities(id, None, None, 12).map_err(err)?;
+    let items = state.store.entity_items(id, None, 12).map_err(err)?;
+    let notes = match entity
+        .key
+        .strip_prefix("project:")
+        .filter(|_| entity.kind == "project")
+    {
+        Some(p) => state.store.project_notes(p).map_err(err)?,
+        None => Vec::new(),
+    };
+    Ok(serde_json::json!({
+        "entity": entity,
+        "connected": connected.iter().map(|(e, n)| serde_json::json!({ "entity": e, "shared": n })).collect::<Vec<_>>(),
+        "items": items,
+        "notes": notes,
+    }))
+}
+
+fn ask_chat_key(project_id: Option<&str>) -> String {
+    format!("ask:{}", project_id.unwrap_or("all"))
+}
+
+#[tauri::command]
+async fn ask_chat_open(state: State<'_, AppState>, project_id: Option<String>) -> CmdResult<Chat> {
+    let session = state
+        .store
+        .session_for_key(&ask_chat_key(project_id.as_deref()))
+        .map_err(err)?;
+    let (messages, approvals, running) = match &session {
+        Some(s) => (
+            state.store.messages(&s.id).map_err(err)?,
+            state.hub.pending_approvals(&s.id),
+            state.hub.is_running(&s.id),
+        ),
+        None => (Vec::new(), Vec::new(), false),
+    };
+    Ok(Chat {
+        session,
+        messages,
+        approvals,
+        running,
+    })
+}
+
+/// A question from the Ask page: one ongoing chat per project (or for
+/// everything), about what tab knows, with the nodes the person selected.
+#[tauri::command]
+async fn ask_chat_send(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    text: String,
+    focus: Option<Vec<String>>,
+) -> CmdResult<Session> {
+    let mut text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("message is empty".into());
+    }
+    if state.hub.config().kind.is_none() {
+        return Err("Set up an agent first (Settings → Agent).".into());
+    }
+    let project = match &project_id {
+        Some(p) => state.store.project_find(p).map_err(err)?,
+        None => None,
+    };
+    if let Some(f) = focus.filter(|f| !f.is_empty()) {
+        text = format!("(Selected in the graph: {})\n\n{text}", f.join(", "));
+    }
+    let brief = format!(
+        "This chat is on tab's Ask page: the person is looking at their knowledge graph (projects, repos, \
+         people, PRs, tickets, email contacts and how they connect) and asking about their work. Answer \
+         from what tab knows: tab_graph_search and tab_graph_expand for the graph, tab_search for items \
+         (with a time window when they mean recent work), tab_project for a project's notes and recent \
+         work. Name the items you rely on. {}",
+        match &project {
+            Some(p) => format!(
+                "They have the graph filtered to the project \"{}\"; scope to it unless they ask wider (tab_search with project \"{}\").",
+                p.name, p.name
+            ),
+            None => "They're looking at everything, across projects.".to_string(),
+        }
+    );
+    let title = match &project {
+        Some(p) => format!("Ask · {}", p.name),
+        None => "Ask".to_string(),
+    };
+    let cwd = state.hub.workdir();
+    let session = state
+        .hub
+        .session_for_key(&ask_chat_key(project_id.as_deref()), &title, &cwd, &brief)
+        .map_err(err)?;
+    state.hub.send(&session.id, &text).map_err(err)?;
+    Ok(session)
+}
+
+/// Items whose agent is busy, waiting on the person, or failed, for the
+/// queue rows and the nav.
+#[tauri::command]
+async fn agent_activity(state: State<'_, AppState>) -> CmdResult<Vec<serde_json::Value>> {
+    let sessions = state.store.sessions_recent(300).map_err(err)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for s in sessions {
+        let Some(item) = s.item_id.clone() else {
+            continue;
+        };
+        // Newest session per item only.
+        if !seen.insert(item.clone()) {
+            continue;
+        }
+        let waiting = !state.hub.pending_approvals(&s.id).is_empty();
+        let status = if waiting {
+            "needs_input".to_string()
+        } else {
+            serde_json::to_value(s.status)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default()
+        };
+        if status == "idle" {
+            continue;
+        }
+        out.push(serde_json::json!({ "item_id": item, "agent": s.agent, "status": status, "updated_at": s.updated_at }));
+    }
+    Ok(out)
+}
 
 /// Search by meaning: off, downloading, indexing (with progress) or ready.
 #[tauri::command]
@@ -1129,6 +1285,11 @@ pub fn run() {
             project_delete,
             item_set_project,
             search_index_status,
+            agent_activity,
+            graph_view,
+            graph_node,
+            ask_chat_open,
+            ask_chat_send,
             project_notes,
             project_note_save,
             project_note_delete,

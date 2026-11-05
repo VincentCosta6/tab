@@ -58,6 +58,7 @@ export const keys = {
   connectors: ["connectors"] as const,
   config: ["config"] as const,
   projects: ["projects"] as const,
+  agentActivity: ["agent-activity"] as const,
   notes: (projectId: string) => ["notes", projectId] as const,
   pressure: ["pressure"] as const,
   pull: (repo: string, n: number) => ["pull", repo, n] as const,
@@ -97,6 +98,7 @@ function LiveEvents() {
   const qc = useQueryClient();
   useEffect(() => {
     let reload: number | undefined;
+    let activity: number | undefined;
     let off: (() => void) | undefined;
     onEngineEvent((e) => {
       switch (e.type) {
@@ -120,6 +122,14 @@ function LiveEvents() {
         case "project_changed":
           qc.invalidateQueries({ queryKey: keys.notes(e.project_id) });
           break;
+        case "approval_requested":
+        case "approval_resolved":
+        case "session_changed":
+          clearTimeout(activity);
+          activity = window.setTimeout(() => qc.invalidateQueries({ queryKey: keys.agentActivity }), 150);
+          break;
+      }
+      switch (e.type) {
         case "session_changed": {
           const s = e.session;
           if (!s.item_id) {

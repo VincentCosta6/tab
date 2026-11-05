@@ -4,7 +4,7 @@
 
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
+  AgentActivity, GraphNode, GraphView, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, Session, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
 } from "./types";
 import { mockApi } from "./mock";
@@ -41,6 +41,11 @@ export const api = {
   createTask: (task: NewTask) => call<QueueItem>("create_task", { task }),
   chatOpen: (itemId: string) => call<Chat>("chat_open", { itemId }),
   chatSend: (itemId: string | null, text: string, projectId?: string | null) => call<ChatStarted>("chat_send", { itemId, text, projectId: projectId ?? null }),
+  agentActivity: () => call<AgentActivity[]>("agent_activity"),
+  graphView: (projectId: string | null, days: number | null, limit?: number) => call<GraphView>("graph_view", { projectId, days, limit: limit ?? null }),
+  graphNode: (id: number) => call<GraphNode>("graph_node", { id }),
+  askChatOpen: (projectId: string | null) => call<Chat>("ask_chat_open", { projectId }),
+  askChatSend: (projectId: string | null, text: string, focus: string[]) => call<Session>("ask_chat_send", { projectId, text, focus }),
   searchIndexStatus: () => call<IndexStatus>("search_index_status"),
   projectsList: () => call<Project[]>("projects_list"),
   projectSave: (p: { id?: string; name: string; color: string; icon: string }) =>
@@ -57,8 +62,8 @@ export const api = {
   setAgentModel: (model: string | null) => call<TabConfig>("set_agent_model", { model }),
   connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),
   chatStop: (sessionId: string) => call<void>("chat_stop", { sessionId }),
-  approvalResolve: (id: string, decision: "allow" | "always" | "deny", message?: string) =>
-    call<boolean>("approval_resolve", { id, decision, message: message ?? null }),
+  approvalResolve: (id: string, decision: "allow" | "always" | "deny" | "answer", message?: string, answers?: Record<string, string>) =>
+    call<boolean>("approval_resolve", { id, decision, message: message ?? null, answers: answers ?? null }),
   detectAgents: () => call<AgentProbe[]>("detect_agents"),
   usageSummary: () => call<UsageSummary>("usage_summary"),
   ghStatus: () => call<GhStatus>("gh_status"),

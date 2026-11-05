@@ -935,6 +935,14 @@ impl McpServer {
                     .request_approval(session, &tool, summarize_tool(&tool, &input), input.clone())
                     .await;
                 let verdict = match decision {
+                    // AskUserQuestion gets the person's picks back in its input.
+                    Decision::Answer(answers) => {
+                        let mut input = input;
+                        if let Some(o) = input.as_object_mut() {
+                            o.insert("answers".into(), answers);
+                        }
+                        json!({ "behavior": "allow", "updatedInput": input })
+                    }
                     Decision::Allow | Decision::AllowAlways => {
                         json!({ "behavior": "allow", "updatedInput": input })
                     }

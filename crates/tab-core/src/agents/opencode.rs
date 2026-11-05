@@ -332,7 +332,7 @@ fn handle_event(hub: &Arc<AgentHub>, s: &Arc<Server>, v: &Value) {
                     )
                     .await;
                 let (reply, message) = match d {
-                    Decision::Allow => ("once", None),
+                    Decision::Allow | Decision::Answer(_) => ("once", None),
                     Decision::AllowAlways => ("always", None),
                     Decision::Deny(m) => ("reject", Some(m)),
                 };

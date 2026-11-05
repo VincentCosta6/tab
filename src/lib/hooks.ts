@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { keys } from "./query";
-import type { Chat, ItemState, TabConfig } from "./types";
+import type { AgentActivity, Chat, ItemState, TabConfig } from "./types";
 
 export function useItems(state: ItemState, query: string) {
   return useQuery({
@@ -74,6 +74,12 @@ export function useSaveConfig() {
       await qc.invalidateQueries({ queryKey: keys.allItems });
     },
   });
+}
+
+/** Busy, waiting or failed agents by item. Kept live by session events. */
+export function useAgentActivity(): Map<string, AgentActivity> {
+  const { data = [] } = useQuery({ queryKey: keys.agentActivity, queryFn: api.agentActivity, staleTime: 0, refetchInterval: 30_000 });
+  return new Map(data.map((a) => [a.item_id, a]));
 }
 
 /** Polls quickly while the index is busy, slowly otherwise. */

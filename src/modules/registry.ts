@@ -5,6 +5,7 @@
 
 import type { ComponentType } from "react";
 import type { ConnectorInfo } from "../lib/types";
+import { AskTab } from "./ask/AskTab";
 import { ConnectionsTab } from "./connections/ConnectionsTab";
 import { ReviewsTab } from "./github/ReviewsTab";
 import { SettingsTab } from "./settings/SettingsTab";
@@ -31,12 +32,13 @@ const installed = (...ids: string[]) => (cs: ConnectorInfo[]) => cs.some((c) => 
 
 export const modules: TabModule[] = [
   { id: "core.work", tabs: [{ id: "work", label: "Work", icon: "inbox", component: WorkTab, shortcut: "1" }] },
+  { id: "core.ask", tabs: [{ id: "ask", label: "Ask", icon: "graph", component: AskTab, shortcut: "2" }] },
   {
     id: "github",
     // Sample data includes PRs, so the review tool can be tried without a token.
-    tabs: [{ id: "reviews", label: "Reviews", icon: "git-pull-request", component: ReviewsTab, shortcut: "2", when: installed("github", "demo") }],
+    tabs: [{ id: "reviews", label: "Reviews", icon: "git-pull-request", component: ReviewsTab, shortcut: "3", when: installed("github", "demo") }],
   },
-  { id: "core.connections", tabs: [{ id: "connections", label: "Connections", icon: "plug", component: ConnectionsTab, shortcut: "3", footer: true }] },
+  { id: "core.connections", tabs: [{ id: "connections", label: "Connections", icon: "plug", component: ConnectionsTab, shortcut: "4", footer: true }] },
   { id: "core.settings", tabs: [{ id: "settings", label: "Settings", icon: "settings", component: SettingsTab, footer: true }] },
 ];
 

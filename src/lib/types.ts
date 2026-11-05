@@ -20,6 +20,16 @@ export type Block =
 
 export interface EntityRef { kind: string; key: string; label: string; rel: string }
 
+/** A knowledge graph node; `item_count` is how many items mention it (in scope). */
+export interface Entity { id: number; kind: string; key: string; label: string; item_count: number }
+export interface GraphView { nodes: Entity[]; edges: { src: number; dst: number; weight: number }[] }
+export interface GraphNode {
+  entity: Entity;
+  connected: { entity: Entity; shared: number }[];
+  items: QueueItem[];
+  notes: ProjectNote[];
+}
+
 export interface Ranking {
   score: number;
   base_score: number;
@@ -50,6 +60,9 @@ export interface QueueItem {
   created_at: string;
   updated_at: string;
 }
+
+/** An item whose agent isn't idle. */
+export interface AgentActivity { item_id: string; agent: AgentKind; status: SessionStatus; updated_at: string }
 
 /** Search by meaning: what the local index is doing. */
 export type IndexStatus =

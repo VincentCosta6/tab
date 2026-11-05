@@ -38,6 +38,8 @@ pub enum Decision {
     Allow,
     AllowAlways,
     Deny(String),
+    /// Answers to AskUserQuestion, by question text.
+    Answer(serde_json::Value),
 }
 
 /// Where agents reach tab's MCP server.
@@ -342,6 +344,7 @@ impl AgentHub {
         let verdict = match &decision {
             Decision::Allow => "Allowed".to_string(),
             Decision::AllowAlways => "Always allowed".to_string(),
+            Decision::Answer(_) => "Answered".to_string(),
             Decision::Deny(why) => format!("Denied: {why}"),
         };
         self.post(
@@ -396,6 +399,8 @@ impl AgentHub {
              - Something that might matter but isn't directly part of the work (a similar old PR, a related \
              discussion) goes under Found with tab_add_found, for the person to decide. Don't attach things \
              that are only loosely connected; a few direct links beat a big web.\n\
+             - To ask the person to choose between options, use AskUserQuestion: tab shows the question \
+             with buttons in the chat and returns their answers.\n\
              - If the work splits into follow-ups, create them with tab_create_task.\n\
              - tab_search matches by keyword and by meaning. Give it a window (within_days, or since/until) \
              and project: \"current\" when the person means recent or this project's work; it widens on its \

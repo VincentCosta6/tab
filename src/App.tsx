@@ -3,7 +3,7 @@ import { Icon } from "./design/icons";
 import { TabMark } from "./design/brands";
 import { cx } from "./design/components";
 import { AppProvider, useApp } from "./lib/app-context";
-import { useConfig } from "./lib/hooks";
+import { useAgentActivity, useConfig } from "./lib/hooks";
 import { QueryProvider } from "./lib/query";
 import { Onboarding } from "./modules/onboarding/Onboarding";
 import { tabs } from "./modules/registry";
@@ -58,7 +58,10 @@ function Shell() {
 
   const navButton = (t: (typeof tabs)[number]) => (
     <button key={t.id} className={cx("nav-item", t.id === tab.id && "active")} onClick={() => setActive(t.id)} title={t.shortcut ? `${t.label} (Ctrl ${t.shortcut})` : t.label}>
-      <Icon name={t.icon} size={18} />
+      <span className="nav-icon">
+        <Icon name={t.icon} size={18} />
+        {t.id === "work" && <AgentBadge />}
+      </span>
       <span>{t.label}</span>
     </button>
   );
@@ -80,4 +83,15 @@ function Shell() {
       {onboarding && <Onboarding onClose={() => setOnboarding(false)} />}
     </div>
   );
+}
+
+/** On Work: how many agents need the person (amber) or are working (pulse). */
+function AgentBadge() {
+  const activity = useAgentActivity();
+  const all = [...activity.values()];
+  const needs = all.filter((a) => a.status === "needs_input").length;
+  const working = all.filter((a) => a.status === "working").length;
+  if (needs) return <span className="nav-badge needs" title={`${needs} agent${needs > 1 ? "s" : ""} need${needs > 1 ? "" : "s"} you`}>{needs}</span>;
+  if (working) return <span className="nav-badge working" title={`${working} agent${working > 1 ? "s" : ""} working`} />;
+  return null;
 }

@@ -4,7 +4,7 @@
 import type {
   GhLoginCode, GhStatus, LspServer,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
-  Project, ProjectNote, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
+  Entity, GraphView, Project, ProjectNote, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
@@ -145,6 +145,30 @@ export const mockApi = {
   async invoke<T>(cmd: string, args: Record<string, any> = {}): Promise<T> {
     const r = await (async () => {
       switch (cmd) {
+        case "agent_activity": return sessions.filter((s) => s.item_id && s.status !== "idle").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));
+        case "graph_view": return mockGraph(args.projectId ?? null, args.days ?? null);
+        case "graph_node": {
+          const g = mockGraph(null, null);
+          const entity = g.nodes.find((n) => n.id === args.id)!;
+          const near = g.edges.filter((e) => e.src === args.id || e.dst === args.id).sort((a, b) => b.weight - a.weight);
+          const connected = near.map((e) => ({ entity: g.nodes.find((n) => n.id === (e.src === args.id ? e.dst : e.src))!, shared: e.weight }));
+          const hits = items.filter((i) => (entity.kind === "project" ? `project:${i.project_id}` === entity.key : i.entities.some((x) => x.key === entity.key)));
+          return { entity, connected: connected.slice(0, 12), items: hits.slice(0, 12), notes: notes.filter((n) => `project:${n.project_id}` === entity.key) };
+        }
+        case "ask_chat_open": {
+          const session = sessions.find((s) => s.cwd === `ask:${args.projectId ?? "all"}`) ?? null;
+          return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: false } satisfies Chat;
+        }
+        case "ask_chat_send": {
+          const key = `ask:${args.projectId ?? "all"}`;
+          let session = sessions.find((s) => s.cwd === key);
+          if (!session) {
+            session = { id: `sess-${Date.now()}`, item_id: null, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: "Ask", status: "working", cwd: key, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+            sessions.push(session);
+          }
+          simulateAskTurn(session, String(args.text), args.focus ?? []);
+          return session;
+        }
         case "search_index_status": {
           const on = !!config.connectors.tab?.settings?.semantic_search;
           if (!on) return { state: "off" };
@@ -408,6 +432,50 @@ function simulateTurn(session: Session, item: QueueItem, text: string) {
     }
     post(session, "assistant", "text", reply);
     post(session, "system", "result", "", { cost_usd: 0.021, duration_ms: 8400 });
+    status(session, "idle");
+  })();
+}
+
+/** The demo items' entities as a graph, with projects as nodes. */
+function mockGraph(projectId: string | null, days: number | null): GraphView {
+  const since = days ? Date.now() - days * 86_400_000 : 0;
+  const scoped = items.filter((i) => (!projectId || i.project_id === projectId) && Date.parse(i.occurred_at) >= since);
+  const ids = new Map<string, Entity>();
+  const node = (kind: string, key: string, label: string) => {
+    let n = ids.get(key);
+    if (!n) ids.set(key, (n = { id: ids.size + 1, kind, key, label, item_count: 0 }));
+    n.item_count++;
+    return n.id;
+  };
+  const weights = new Map<string, number>();
+  for (const i of scoped) {
+    const here = i.entities.map((e) => node(e.kind, e.key, e.label));
+    const p = projects.find((x) => x.id === i.project_id);
+    if (p) here.push(node("project", `project:${p.id}`, p.name));
+    const uniq = [...new Set(here)].sort((a, b) => a - b);
+    uniq.forEach((a, k) => uniq.slice(k + 1).forEach((b) => weights.set(`${a}-${b}`, (weights.get(`${a}-${b}`) ?? 0) + 1)));
+  }
+  return {
+    nodes: [...ids.values()],
+    edges: [...weights].map(([k, weight]) => { const [src, dst] = k.split("-").map(Number); return { src, dst, weight }; }),
+  };
+}
+
+function simulateAskTurn(session: Session, text: string, focus: string[]) {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    post(session, "user", "text", focus.length ? `(Selected in the graph: ${focus.join(", ")})\n\n${text}` : text);
+    status(session, "working");
+    await sleep(400);
+    post(session, "assistant", "tool", `tab: tab_graph_search: ${focus[0] ?? "payments"}`, { tool: "mcp__tab__tab_graph_search" });
+    post(session, "tool", "tool_result", "3 matches");
+    const reply = `**${focus[0] ?? "acme/payments"}** sits at the center of the Payments work: Dana reviews most of its PRs, and the checkout incident and the idempotency-keys PR both touch it.\n\n- Open now: the p99 latency on /checkout and Dana's review request.\n- The project note says deploys go through staging on Tuesdays and Thursdays.`;
+    for (let i = 0; i < reply.length; i += 14) {
+      emit({ type: "session_delta", session_id: session.id, text: reply.slice(i, i + 14) });
+      await sleep(25);
+    }
+    post(session, "assistant", "text", reply);
+    post(session, "system", "result", "", { cost_usd: 0.009, duration_ms: 4100 });
     status(session, "idle");
   })();
 }

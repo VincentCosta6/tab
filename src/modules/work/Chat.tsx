@@ -235,6 +235,11 @@ function MessageView({ m, result, onSend }: { m: SessionMessage; result?: Sessio
   if (m.role === "user") return <div className="msg msg-user">{/```|\]\(/.test(m.content) ? <Markdown text={m.content} /> : m.content}</div>;
   if (m.kind === "secret_request") return m.meta?.superseded ? null : <SecretCard m={m} onSend={onSend} />;
   if (m.kind === "text") return <div className="msg msg-assistant"><Markdown text={m.content} /></div>;
+  if (m.kind === "tool" && m.meta?.tool === "AskUserQuestion") {
+    // Answered through tab (or still waiting on its card): the card did the talking.
+    if (!result || !result.meta?.is_error) return null;
+    return <QuestionCard m={m} answered={false} onSend={onSend} />;
+  }
   if (m.kind === "tool")
     return (
       <details className={cx("msg-tool", result?.meta?.is_error && "failed")}>
@@ -254,6 +259,81 @@ function MessageView({ m, result, onSend }: { m: SessionMessage; result?: Sessio
     return <div className="msg-note">{[secs != null && `${secs}s`, cost != null && `$${Number(cost).toFixed(3)}`].filter(Boolean).join(" · ")}</div>;
   }
   return <div className="msg-note">{m.content}</div>;
+}
+
+interface Question { question: string; header?: string; multiSelect?: boolean; options?: { label: string; description?: string }[] }
+
+/** The agent's questions with option buttons. Calls back with label(s) per question. */
+function QuestionForm({ questions, done, onSubmit }: { questions: Question[]; done: boolean; onSubmit: (answers: Record<string, string>) => void }) {
+  const [picked, setPicked] = useState<Record<number, string[]>>({});
+  const [sent, setSent] = useState(done);
+  const toggle = (qi: number, label: string, multi?: boolean) =>
+    setPicked((p) => {
+      const cur = p[qi] ?? [];
+      return { ...p, [qi]: multi ? (cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label]) : [label] };
+    });
+  const submit = (all: Record<number, string[]>) => {
+    const answers: Record<string, string> = {};
+    questions.forEach((q, i) => all[i]?.length && (answers[q.question] = all[i].join(", ")));
+    if (!Object.keys(answers).length) return;
+    setSent(true);
+    onSubmit(answers);
+  };
+  const single = questions.length === 1 && !questions[0].multiSelect;
+  return (
+    <div className={cx("question-card", sent && "sent")}>
+      {questions.map((q, qi) => (
+        <div key={qi} className="question">
+          {q.header && <span className="label-sm">{q.header}</span>}
+          <div className="question-text">{q.question}</div>
+          <div className="question-options">
+            {(q.options ?? []).map((o) => (
+              <button
+                key={o.label}
+                className={cx("question-option", picked[qi]?.includes(o.label) && "active")}
+                disabled={sent}
+                onClick={() => (single ? submit({ [qi]: [o.label] }) : toggle(qi, o.label, q.multiSelect))}
+              >
+                <span>{o.label}</span>
+                {o.description && <small>{o.description}</small>}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+      {!single && !sent && <Button size="sm" variant="primary" disabled={!Object.values(picked).some((v) => v.length)} onClick={() => submit(picked)}>Answer</Button>}
+    </div>
+  );
+}
+
+/**
+ * AskUserQuestion that reached tab as a permission request: answering
+ * returns the picks to the agent directly.
+ */
+function QuestionApproval({ approval }: { approval: Approval }) {
+  const questions: Question[] = (approval.input as { questions?: Question[] })?.questions ?? [];
+  return (
+    <div>
+      <QuestionForm questions={questions} done={false} onSubmit={(answers) => void api.approvalResolve(approval.id, "answer", undefined, answers)} />
+      <button className="link-btn question-skip" onClick={() => void api.approvalResolve(approval.id, "deny", "The person skipped the question; ask in text instead.")}>Skip and answer in text</button>
+    </div>
+  );
+}
+
+/**
+ * AskUserQuestion that the agent ran without asking tab (so it got no
+ * answer): show the question anyway, and send a pick as the next message.
+ */
+function QuestionCard({ m, answered, onSend }: { m: SessionMessage; answered: boolean; onSend?: (text: string) => void }) {
+  const questions: Question[] = m.meta?.input?.questions ?? [];
+  if (!questions.length) return null;
+  return (
+    <QuestionForm
+      questions={questions}
+      done={answered || !onSend}
+      onSubmit={(a) => onSend?.(Object.entries(a).map(([q, v]) => (questions.length > 1 ? `${q} ${v}` : v)).join("\n"))}
+    />
+  );
 }
 
 const MASK = "••••••••";
@@ -316,6 +396,11 @@ function SecretCard({ m, onSend }: { m: SessionMessage; onSend?: (text: string) 
 }
 
 function ApprovalCard({ approval }: { approval: Approval }) {
+  if (approval.tool === "AskUserQuestion") return <QuestionApproval approval={approval} />;
+  return <ToolApproval approval={approval} />;
+}
+
+function ToolApproval({ approval }: { approval: Approval }) {
   const [busy, setBusy] = useState(false);
   const answer = async (d: "allow" | "always" | "deny") => {
     setBusy(true);
