@@ -10,6 +10,7 @@ mod http;
 mod items;
 mod previews;
 mod sessions;
+mod usage;
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -19,6 +20,7 @@ use rusqlite::Connection;
 
 pub use http::{AuditEntry, AuditQuery, CachedResponse, UsageRow};
 pub use items::Upsert;
+pub use usage::{NewUsage, PlanWindow, UsageSummary};
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -29,6 +31,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/001_init.sql"),
     include_str!("migrations/002_tasks_context_sessions.sql"),
     include_str!("migrations/003_previews.sql"),
+    include_str!("migrations/004_agent_usage.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {

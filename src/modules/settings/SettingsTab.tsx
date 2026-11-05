@@ -131,6 +131,25 @@ export function SettingsTab() {
         </Card>
       </Section>
 
+      <Section title="Spend limits" description="Costs come from what the agent reports: real spend on an API key, or the API-equivalent figure on a Claude plan. Leave a limit empty for none.">
+        <Card>
+          <FormRow label="Daily limit" help="New chat turns are refused once today's spend reaches this.">
+            <DollarInput value={draft.agent.budget.daily_usd} onChange={(v) => set((c) => void (c.agent.budget.daily_usd = v))} />
+          </FormRow>
+          <FormRow label="Monthly limit">
+            <DollarInput value={draft.agent.budget.monthly_usd} onChange={(v) => set((c) => void (c.agent.budget.monthly_usd = v))} />
+          </FormRow>
+          <FormRow label="Per turn" help="Claude Code stops a single turn past this.">
+            <DollarInput value={draft.agent.budget.per_turn_usd} onChange={(v) => set((c) => void (c.agent.budget.per_turn_usd = v))} />
+          </FormRow>
+          <FormRow label="Save plan headroom" help="On a Claude plan, reading the queue pauses once a usage window passes this, so the rest is yours.">
+            <select className="select" value={String(draft.agent.budget.ranker_plan_cap)} onChange={(e) => set((c) => void (c.agent.budget.ranker_plan_cap = Number(e.target.value)))}>
+              {[0.5, 0.6, 0.7, 0.8, 0.9, 1].map((v) => <option key={v} value={v}>{v === 1 ? "Never pause" : `Pause at ${v * 100}%`}</option>)}
+            </select>
+          </FormRow>
+        </Card>
+      </Section>
+
       <Section title="MCP server" description="Agents tab starts are connected automatically. Point any other MCP client here to let it search your queue, file what it finds, and create tasks.">
         <Card>
           <FormRow label="URL">
@@ -142,10 +161,17 @@ export function SettingsTab() {
         </Card>
       </Section>
 
-      <Section title="AI layer" description={`Claude reads each item with your instructions and nudges the rules score by up to ±25, with a one-line reason. Verdicts are cached by their inputs, so re-ranking is repeatable.`}>
+      <Section title="AI layer" description={`Claude Haiku reads each item with your instructions and nudges the rules score by up to ±25, with a one-line reason. Verdicts are cached by their inputs, so re-ranking is repeatable.`}>
         <Card>
           <FormRow label="Enabled">
             <Toggle label="AI layer" checked={ai.enabled} onChange={(v) => set((c) => void (c.ranking.ai.enabled = v))} />
+          </FormRow>
+          <FormRow label="Runs on" help="Reading the queue uses Claude Haiku. On your Claude plan it goes through the Claude Code CLI, so there's no key to manage.">
+            <select className="select" value={ai.backend} onChange={(e) => set((c) => void (c.ranking.ai.backend = e.target.value as typeof c.ranking.ai.backend))}>
+              <option value="auto">Automatic (API key if set, otherwise your Claude plan)</option>
+              <option value="claude_code">Your Claude plan (Claude Code)</option>
+              <option value="api">Anthropic API key</option>
+            </select>
           </FormRow>
           <FormRow label="Anthropic API key" help="Or set ANTHROPIC_API_KEY before launching.">
             <TextInput type="password" autoComplete="off" value={ai.api_key ?? ""} onChange={(e) => set((c) => void (c.ranking.ai.api_key = e.target.value || null))} />
@@ -164,5 +190,20 @@ export function SettingsTab() {
         </Card>
       </Section>
     </div>
+  );
+}
+
+/** Dollars, or empty for no limit. */
+function DollarInput({ value, onChange }: { value: number | null; onChange: (v: number | null) => void }) {
+  return (
+    <TextInput
+      type="number"
+      min={0}
+      step={0.5}
+      placeholder="No limit"
+      value={value ?? ""}
+      onChange={(e) => onChange(e.target.value === "" ? null : Math.max(0, Number(e.target.value)))}
+      style={{ maxWidth: 160 }}
+    />
   );
 }

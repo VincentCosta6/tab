@@ -324,6 +324,13 @@ async fn mcp_info(state: State<'_, AppState>) -> CmdResult<McpInfo> {
     Ok(McpInfo { url, token })
 }
 
+// --- Agent spend ---------------------------------------------------------
+
+#[tauri::command]
+async fn usage_summary(state: State<'_, AppState>) -> CmdResult<tab_core::store::UsageSummary> {
+    state.store.usage_summary(chrono::Utc::now()).map_err(err)
+}
+
 // --- GitHub CLI ----------------------------------------------------------
 
 #[tauri::command]
@@ -629,6 +636,7 @@ pub fn run() {
             detect_agents,
             mcp_info,
             gh_status,
+            usage_summary,
             gh_login,
             gh_install,
             github_pull,

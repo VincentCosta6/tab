@@ -229,7 +229,7 @@ export interface TabConfig {
   profile: { name: string; role: string; handles: string[] };
   ranking: {
     rules: RankingRules;
-    ai: { enabled: boolean; api_key: string | null; model: string | null; instructions: string };
+    ai: { enabled: boolean; backend: "auto" | "api" | "claude_code"; api_key: string | null; model: string | null; instructions: string };
   };
   connectors: Record<string, { enabled: boolean; settings: Record<string, unknown> }>;
   agent: AgentConfig;
@@ -244,4 +244,32 @@ export interface AgentConfig {
   workdir: string | null;
   permission_mode: string;
   opencode_url: string | null;
+  budget: BudgetConfig;
+}
+
+export interface BudgetConfig {
+  daily_usd: number | null;
+  monthly_usd: number | null;
+  per_turn_usd: number | null;
+  /** 0..1: background queue reading pauses past this share of a Claude plan window. */
+  ranker_plan_cap: number;
+}
+
+export interface PlanWindow {
+  window: string;
+  utilization: number | null;
+  resets_at: string | null;
+  status: string;
+  updated_at: string;
+}
+
+export interface UsageSummary {
+  today_usd: number;
+  month_usd: number;
+  today_agent_usd: number;
+  today_ranker_usd: number;
+  today_turns: number;
+  today_tokens: number;
+  billing: "subscription" | "api" | "unknown" | null;
+  windows: PlanWindow[];
 }

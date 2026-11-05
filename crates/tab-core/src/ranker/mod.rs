@@ -39,20 +39,7 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn from_config(cfg: &TabConfig, gateway: Arc<Gateway>, store: Arc<Store>) -> Self {
-        let ai = &cfg.ranking.ai;
-        let ai = ai
-            .api_key
-            .as_deref()
-            .filter(|k| ai.enabled && !k.is_empty())
-            .map(|key| {
-                AiLayer::new(
-                    gateway,
-                    store,
-                    key,
-                    ai.model.clone().unwrap_or_else(|| DEFAULT_MODEL.into()),
-                    ai.instructions.clone(),
-                )
-            });
+        let ai = AiLayer::from_config(cfg, gateway, store);
         Self {
             rules: cfg.ranking.rules.clone(),
             profile: cfg.profile.clone(),

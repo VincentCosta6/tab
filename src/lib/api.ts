@@ -5,7 +5,7 @@
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   ItemContext, ItemDetail, ItemState, NewContext, NewTask, Pressure, Preview, PullReview, QueueItem,
-  RateLimitState, TabConfig, UsageRow,
+  RateLimitState, TabConfig, UsageRow, UsageSummary,
 } from "./types";
 import { mockApi } from "./mock";
 
@@ -45,6 +45,7 @@ export const api = {
   approvalResolve: (id: string, decision: "allow" | "always" | "deny", message?: string) =>
     call<boolean>("approval_resolve", { id, decision, message: message ?? null }),
   detectAgents: () => call<AgentProbe[]>("detect_agents"),
+  usageSummary: () => call<UsageSummary>("usage_summary"),
   ghStatus: () => call<GhStatus>("gh_status"),
   ghLogin: () => call<GhStatus>("gh_login"),
   ghInstall: () => call<GhStatus>("gh_install"),

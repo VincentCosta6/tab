@@ -121,10 +121,11 @@ let config: TabConfig = {
   profile: { name: "Vincent", role: "Engineer", handles: ["VincentCosta6"] },
   ranking: {
     rules: { kinds: [], default_score: 30, keywords: [{ contains: "outage", delta: 20 }, { contains: "urgent", delta: 15 }], vip_actors: [], vip_boost: 15, muted: [] },
-    ai: { enabled: true, api_key: "••••••••", model: null, instructions: "Anything from on-call or my manager is urgent. Dependabot can wait until Friday." },
+    ai: { enabled: true, backend: "auto", api_key: "••••••••", model: null, instructions: "Anything from on-call or my manager is urgent. Dependabot can wait until Friday." },
   },
   connectors: { demo: { enabled: true, settings: {} }, tab: { enabled: true, settings: {} } },
-  agent: { kind: "claude_code", command: null, model: null, workdir: "C:\\Users\\vince\\code", permission_mode: "default", opencode_url: null },
+  agent: {
+    budget: { daily_usd: 10, monthly_usd: null, per_turn_usd: null, ranker_plan_cap: 0.8 }, kind: "claude_code", command: null, model: null, workdir: "C:\\Users\\vince\\code", permission_mode: "default", opencode_url: null },
   mcp: { port: 47821, token: "mock-token" },
   onboarded: true,
 };
@@ -230,6 +231,19 @@ export const mockApi = {
         case "mcp_info": return { url: "http://127.0.0.1:47821/mcp", token: "mock-token" };
         case "github_pull": return samplePull(args.repo, args.number);
         case "gh_status": return gh;
+        case "usage_summary": {
+          const in3h = new Date(Date.now() + 3 * 3600_000).toISOString();
+          const in4d = new Date(Date.now() + 4 * 86400_000).toISOString();
+          const now = new Date().toISOString();
+          return {
+            today_usd: 3.42, month_usd: 41.8, today_agent_usd: 3.31, today_ranker_usd: 0.11, today_turns: 14, today_tokens: 912_000,
+            billing: "subscription",
+            windows: [
+              { window: "five_hour", utilization: 0.34, resets_at: in3h, status: "allowed", updated_at: now },
+              { window: "seven_day", utilization: 0.82, resets_at: in4d, status: "allowed_warning", updated_at: now },
+            ],
+          };
+        }
         case "gh_install":
           await new Promise((r) => setTimeout(r, 1500));
           gh = { ...gh, installed: true, path: "/opt/homebrew/bin/gh", version: "2.89.0" };

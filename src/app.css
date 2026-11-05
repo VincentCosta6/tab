@@ -269,3 +269,26 @@
 .gh-row code { font-size: 12px; }
 .gh-code-value { font-family: var(--font-mono); font-size: 20px; font-weight: 600; letter-spacing: 0.08em; padding: 4px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-sunken); }
 .link-button { background: none; border: 0; padding: 0; font: inherit; font-size: 12px; cursor: pointer; text-align: left; justify-self: start; text-decoration: underline; text-underline-offset: 2px; }
+
+/* Agent spend (bottom left) */
+.usage { position: relative; margin-bottom: var(--space-2); }
+.usage-chip { width: 100%; display: grid; justify-items: center; gap: 3px; padding: var(--space-2) 6px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); color: var(--fg); cursor: pointer; }
+.usage-chip:hover, .usage-chip.active { border-color: var(--border-strong, var(--border)); box-shadow: var(--shadow-sm); }
+.usage-chip.over .usage-amount { color: var(--tone-danger-fg); }
+.usage-amount { font-weight: 600; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.usage-caption { font-size: 10px; color: var(--fg-muted); margin-top: -3px; }
+.usage-mini { display: grid; grid-template-columns: 16px 1fr; align-items: center; gap: 4px; width: 100%; }
+.usage-mini-label { font-size: 9px; color: var(--fg-muted); text-align: right; }
+.usage-mini-bar { height: 4px; border-radius: var(--radius-pill); background: var(--bg-sunken); overflow: hidden; }
+.usage-mini-bar > span { display: block; height: 100%; background: var(--tone-fg); border-radius: inherit; }
+.usage-pop { position: absolute; left: calc(100% + 12px); bottom: 0; z-index: 40; width: 300px; display: grid; gap: var(--space-3); padding: var(--space-4); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg, var(--shadow-sm)); }
+.usage-pop-head { display: grid; gap: 2px; }
+.usage-pop-head .subtle { font-size: var(--text-xs); }
+.usage-stats { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+.usage-stats > div { display: grid; }
+.usage-big { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.usage-split { font-size: var(--text-xs); line-height: 1.5; }
+.usage-window { display: grid; gap: 4px; font-size: var(--text-sm); }
+.usage-window-head { display: flex; justify-content: space-between; }
+.usage-window .subtle { font-size: var(--text-xs); }
+.usage-pop > button { justify-self: start; }

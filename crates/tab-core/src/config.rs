@@ -50,6 +50,60 @@ pub struct AgentConfig {
     /// Use an OpenCode server that is already running instead of starting one.
     #[serde(default)]
     pub opencode_url: Option<String>,
+    #[serde(default)]
+    pub budget: BudgetConfig,
+}
+
+/// Spend limits for agents and the ranker. Costs are what the agent reports:
+/// real spend on an API key, the API-equivalent figure on a Claude plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BudgetConfig {
+    /// New agent turns are refused once today's spend reaches this.
+    #[serde(default)]
+    pub daily_usd: Option<f64>,
+    #[serde(default)]
+    pub monthly_usd: Option<f64>,
+    /// Claude Code stops a single turn past this (`--max-budget-usd`).
+    #[serde(default)]
+    pub per_turn_usd: Option<f64>,
+    /// On a Claude plan, background queue reading pauses once any usage
+    /// window passes this fraction, keeping the rest for your own work.
+    #[serde(default = "default_ranker_plan_cap")]
+    pub ranker_plan_cap: f64,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            daily_usd: None,
+            monthly_usd: None,
+            per_turn_usd: None,
+            ranker_plan_cap: default_ranker_plan_cap(),
+        }
+    }
+}
+
+fn default_ranker_plan_cap() -> f64 {
+    0.8
+}
+
+impl BudgetConfig {
+    /// Why a new turn can't start, if a limit is reached.
+    pub fn blocked(&self, s: &crate::store::UsageSummary) -> Option<String> {
+        if let Some(d) = self.daily_usd.filter(|d| *d > 0.0 && s.today_usd >= *d) {
+            return Some(format!(
+                "Today's agent budget of ${d:.2} is used up (${:.2} spent). Raise it in Settings → Agent.",
+                s.today_usd
+            ));
+        }
+        if let Some(m) = self.monthly_usd.filter(|m| *m > 0.0 && s.month_usd >= *m) {
+            return Some(format!(
+                "This month's agent budget of ${m:.2} is used up (${:.2} spent). Raise it in Settings → Agent.",
+                s.month_usd
+            ));
+        }
+        None
+    }
 }
 
 impl Default for AgentConfig {
@@ -61,6 +115,7 @@ impl Default for AgentConfig {
             workdir: None,
             permission_mode: default_permission_mode(),
             opencode_url: None,
+            budget: BudgetConfig::default(),
         }
     }
 }
@@ -117,6 +172,10 @@ pub struct RankingConfig {
 pub struct AiConfig {
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Where the ranker's Haiku calls go. `auto` uses the API key when there
+    /// is one, otherwise your Claude plan through the Claude Code CLI.
+    #[serde(default)]
+    pub backend: AiBackend,
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -127,10 +186,20 @@ pub struct AiConfig {
     pub instructions: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AiBackend {
+    #[default]
+    Auto,
+    Api,
+    ClaudeCode,
+}
+
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            backend: AiBackend::Auto,
             api_key: None,
             model: None,
             instructions: String::new(),

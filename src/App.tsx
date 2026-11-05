@@ -7,6 +7,7 @@ import { useConfig } from "./lib/hooks";
 import { QueryProvider } from "./lib/query";
 import { Onboarding } from "./modules/onboarding/Onboarding";
 import { tabs } from "./modules/registry";
+import { UsageMeter } from "./modules/usage/UsageMeter";
 
 export default function App() {
   return (
@@ -62,7 +63,10 @@ function Shell() {
       <nav className="nav">
         <div className="nav-brand" title="TAB Annihilates Backlogs"><TabMark size={26} /></div>
         <div className="nav-group">{visible.filter((t) => !t.footer).map(navButton)}</div>
-        <div className="nav-group nav-footer">{visible.filter((t) => t.footer).map(navButton)}</div>
+        <div className="nav-group nav-footer">
+          <UsageMeter onSettings={() => setActive("settings")} />
+          {visible.filter((t) => t.footer).map(navButton)}
+        </div>
       </nav>
       <main className="main">
         <Active />

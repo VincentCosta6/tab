@@ -24,6 +24,8 @@ struct Turn {
     /// Text parts not yet stored, in arrival order.
     pending: Vec<(String, String)>,
     tools_done: std::collections::HashSet<String>,
+    /// Assistant messages whose cost is already recorded.
+    costed: std::collections::HashSet<String>,
     error: Option<String>,
     done: Arc<Notify>,
 }
@@ -219,6 +221,29 @@ fn handle_event(hub: &Arc<AgentHub>, s: &Arc<Server>, v: &Value) {
                 (props["info"]["id"].as_str(), props["info"]["role"].as_str())
             {
                 turn.roles.insert(id.into(), role.into());
+                let info = &props["info"];
+                if role == "assistant"
+                    && !info["time"]["completed"].is_null()
+                    && turn.costed.insert(id.into())
+                {
+                    let t = &info["tokens"];
+                    let n = |v: &Value| v.as_i64().unwrap_or(0);
+                    let u = crate::store::NewUsage {
+                        purpose: "agent",
+                        session_id: Some(sid.clone()),
+                        agent: "opencode".into(),
+                        model: info["modelID"].as_str().map(str::to_string),
+                        billing: "api",
+                        cost_usd: info["cost"].as_f64().unwrap_or(0.0),
+                        input_tokens: n(&t["input"])
+                            + n(&t["cache"]["read"])
+                            + n(&t["cache"]["write"]),
+                        output_tokens: n(&t["output"]) + n(&t["reasoning"]),
+                    };
+                    if let Err(e) = hub.store.usage_add(&u, chrono::Utc::now()) {
+                        tracing::warn!(error = %e, "couldn't store usage");
+                    }
+                }
             }
         }
         "message.part.delta" => {

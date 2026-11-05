@@ -72,6 +72,9 @@ pub(super) async fn run_turn(
     if let Some(m) = cfg.model.as_deref().filter(|m| !m.trim().is_empty()) {
         cmd.args(["--model", m]);
     }
+    if let Some(cap) = cfg.budget.per_turn_usd.filter(|c| *c > 0.0) {
+        cmd.args(["--max-budget-usd", &format!("{cap:.2}")]);
+    }
     if let Some(id) = &session.agent_session_id {
         cmd.args(["--resume", id]);
     }
@@ -143,6 +146,7 @@ struct Parser {
     session_id: String,
     seen: HashSet<String>,
     finished: bool,
+    billing: &'static str,
 }
 
 impl Parser {
@@ -152,6 +156,7 @@ impl Parser {
             session_id,
             seen: HashSet::new(),
             finished: false,
+            billing: "unknown",
         }
     }
 
@@ -164,6 +169,7 @@ impl Parser {
         let hub = self.hub.clone();
         match v["type"].as_str().unwrap_or_default() {
             "system" if v["subtype"] == "init" => {
+                self.billing = crate::usage::billing_from_init(v);
                 if let Some(id) = v["session_id"].as_str() {
                     hub.update(&sid, None, Some(id));
                 }
@@ -237,6 +243,7 @@ impl Parser {
             }
             "rate_limit_event" => {
                 let info = &v["rate_limit_info"];
+                crate::usage::record_rate_limit(&hub.store, info);
                 if info["status"]
                     .as_str()
                     .is_some_and(|s| !s.starts_with("allowed"))
@@ -256,6 +263,13 @@ impl Parser {
             }
             "result" => {
                 self.finished = true;
+                crate::usage::record_claude_result(
+                    &hub.store,
+                    v,
+                    "agent",
+                    Some(&sid),
+                    self.billing,
+                );
                 if let Some(id) = v["session_id"].as_str() {
                     hub.update(&sid, None, Some(id));
                 }

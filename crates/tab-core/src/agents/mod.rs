@@ -208,6 +208,13 @@ impl AgentHub {
             .ok_or_else(|| anyhow::anyhow!("no such session"))?;
         let text = text.trim();
         anyhow::ensure!(!text.is_empty(), "message is empty");
+        if let Some(why) = self
+            .config()
+            .budget
+            .blocked(&self.store.usage_summary(Utc::now())?)
+        {
+            anyhow::bail!(why);
+        }
         let cancel = CancellationToken::new();
         {
             let mut running = self.running.lock().unwrap();
@@ -446,7 +453,7 @@ pub(crate) fn default_command(kind: AgentKind) -> &'static str {
 }
 
 /// Finds an executable on PATH (including `.cmd` shims on Windows).
-pub(crate) fn resolve(command: &str) -> anyhow::Result<PathBuf> {
+pub fn resolve(command: &str) -> anyhow::Result<PathBuf> {
     let p = PathBuf::from(command);
     if p.components().count() > 1 && p.exists() {
         return Ok(p);
@@ -457,7 +464,7 @@ pub(crate) fn resolve(command: &str) -> anyhow::Result<PathBuf> {
 }
 
 /// A command that never opens a console window on Windows.
-pub(crate) fn command(exe: &std::path::Path) -> tokio::process::Command {
+pub fn command(exe: &std::path::Path) -> tokio::process::Command {
     #[allow(unused_mut)]
     let mut cmd = tokio::process::Command::new(exe);
     #[cfg(windows)]

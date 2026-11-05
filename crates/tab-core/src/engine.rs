@@ -643,6 +643,8 @@ mod tests {
         let gateway = Arc::new(Gateway::new(store.clone()));
         let mut cfg = TabConfig::default();
         assert!(cfg.connector("demo").is_none(), "sample data is opt-in");
+        // Rules only: the AI layer would reach for a real Claude login.
+        cfg.ranking.ai.enabled = false;
         cfg.connectors
             .insert("demo".into(), crate::config::ConnectorConfig::on());
         let engine = Engine::from_config(&cfg, store.clone(), gateway, events);
