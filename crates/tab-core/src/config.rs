@@ -257,7 +257,11 @@ impl TabConfig {
             Err(e) => return Err(e.into()),
         };
         cfg.apply_env();
-        cfg.connectors.insert("tab".into(), ConnectorConfig::on());
+        // Always enabled, but keep its saved settings (search by meaning, etc.).
+        cfg.connectors
+            .entry("tab".into())
+            .or_insert_with(ConnectorConfig::on)
+            .enabled = true;
         if cfg.mcp.token.is_empty() {
             cfg.mcp.token = uuid::Uuid::new_v4().simple().to_string();
             // Persist it so agent configs written earlier stay valid.
@@ -300,5 +304,26 @@ impl TabConfig {
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_keeps_saved_tab_settings() {
+        let path = std::env::temp_dir().join(format!("tab-config-{}.json", uuid::Uuid::new_v4()));
+        let mut cfg = TabConfig::default();
+        let mut tab = ConnectorConfig::on();
+        tab.settings.insert("semantic_search".into(), true.into());
+        cfg.connectors.insert("tab".into(), tab);
+        cfg.save(&path).unwrap();
+
+        let loaded = TabConfig::load(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let tab = loaded.connectors.get("tab").unwrap();
+        assert!(tab.enabled);
+        assert_eq!(tab.settings.get("semantic_search"), Some(&true.into()));
     }
 }
