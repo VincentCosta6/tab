@@ -49,12 +49,17 @@ function ZoomMark({ size }: { size: number }) {
   );
 }
 
-/** tab's own mark: a folder-style tab over a stack. */
+/** tab's own mark, as the app icon: three lines merging into one. */
 export function TabMark({ size = 20 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-label="tab">
-      <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h4.2l2 2.5h6.8A2.5 2.5 0 0 1 21 10v7.5a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z" fill="var(--brand-tab, #4f46e5)" />
-      <path d="M7 12.5h10M7 15.5h6" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" />
+    <svg width={size} height={size} viewBox="0 0 1024 1024" aria-label="tab">
+      <rect width="1024" height="1024" rx="230" fill="#1c1c20" />
+      <g fill="none" strokeLinecap="round" strokeWidth="84">
+        <path d="M220 300 C 420 300, 440 512, 600 512" stroke="#7dd3fc" />
+        <path d="M220 724 C 420 724, 440 512, 600 512" stroke="#f9a8d4" />
+        <path d="M220 512 H 600" stroke="#fcd34d" />
+      </g>
+      <rect x="580" y="452" width="230" height="120" rx="60" fill="#fff" />
     </svg>
   );
 }
