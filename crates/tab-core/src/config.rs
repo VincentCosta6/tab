@@ -52,6 +52,9 @@ pub struct AgentConfig {
     pub opencode_url: Option<String>,
     #[serde(default)]
     pub budget: BudgetConfig,
+    /// Offer a likely next reply after each turn (Tab fills it, Enter sends).
+    #[serde(default = "default_true")]
+    pub suggest_replies: bool,
 }
 
 /// Spend limits for agents and the ranker. Costs are what the agent reports:
@@ -116,8 +119,13 @@ impl Default for AgentConfig {
             permission_mode: default_permission_mode(),
             opencode_url: None,
             budget: BudgetConfig::default(),
+            suggest_replies: true,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_permission_mode() -> String {

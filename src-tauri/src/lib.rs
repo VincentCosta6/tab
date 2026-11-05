@@ -461,6 +461,10 @@ async fn chat_send(
         }
     };
     let session = state.hub.session_for_item(&item.id).map_err(err)?;
+    // A turn in flight takes the message as steering; otherwise it starts one.
+    if attachments.is_empty() && state.hub.steer(&session.id, &text).map_err(err)? {
+        return Ok(ChatStarted { item, session });
+    }
     state
         .hub
         .send_with(&session.id, &text, &attachments)

@@ -427,12 +427,37 @@ pub(super) async fn run_turn(
         .await?
         .error_for_status()?;
 
+    // Steering: more prompts to the same session while it works. OpenCode
+    // reads the new message at its next step, and the turn ends when the
+    // session goes idle with nothing left queued.
+    let mut steer_rx = hub.steering_open(&session.id);
+    let steer = {
+        let (s, oc_id, mut body) = (s.clone(), oc_id.clone(), body.clone());
+        tokio::spawn(async move {
+            while let Some(text) = steer_rx.recv().await {
+                body["parts"] = json!([{ "type": "text", "text": text }]);
+                let sent = s
+                    .client
+                    .post(s.url(&format!("/session/{oc_id}/prompt_async")))
+                    .query(&s.q())
+                    .json(&body)
+                    .send()
+                    .await;
+                if let Err(e) = sent {
+                    tracing::warn!(error = %e, "steering an OpenCode session failed");
+                }
+            }
+        })
+    };
+
     tokio::select! {
         _ = done.notified() => {}
         _ = cancel.cancelled() => {
             let _ = s.client.post(s.url(&format!("/session/{oc_id}/abort"))).query(&s.q()).send().await;
         }
     }
+    hub.steering_close(&session.id);
+    steer.abort();
     let turn = s.turns.lock().unwrap().remove(&oc_id);
     if let Some(mut t) = turn {
         flush(hub, &mut t);
@@ -444,4 +469,60 @@ pub(super) async fn run_turn(
         hub.update(&session.id, Some(SessionStatus::Idle), None);
     }
     Ok(())
+}
+
+/// One-shot completion on a throwaway OpenCode session, for small jobs like
+/// suggesting a reply. Uses whichever model tab is configured with.
+pub(super) async fn complete(
+    hub: &Arc<AgentHub>,
+    system: &str,
+    prompt: &str,
+) -> anyhow::Result<String> {
+    let s = server(hub).await?;
+    let v: Value = s
+        .client
+        .post(s.url("/session"))
+        .query(&s.q())
+        .json(&json!({ "title": "tab: suggestion" }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let id = v["id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("OpenCode did not return a session id"))?
+        .to_string();
+    let mut body = json!({
+        "parts": [{ "type": "text", "text": prompt }],
+        "system": system,
+        "tools": {},
+    });
+    if let Some((provider, model)) = hub.config().model.as_deref().and_then(|m| m.split_once('/')) {
+        body["model"] = json!({ "providerID": provider, "modelID": model });
+    }
+    let out = tokio::time::timeout(Duration::from_secs(60), async {
+        s.client
+            .post(s.url(&format!("/session/{id}/message")))
+            .query(&s.q())
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await
+    })
+    .await;
+    let _ = s.client.delete(s.url(&format!("/session/{id}"))).query(&s.q()).send().await;
+    let v = out.map_err(|_| anyhow::anyhow!("OpenCode took too long to suggest"))??;
+    Ok(v["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["type"] == "text")
+        .filter_map(|p| p["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("")
+        .trim()
+        .to_string())
 }

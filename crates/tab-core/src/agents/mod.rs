@@ -14,6 +14,7 @@
 
 mod claude;
 mod opencode;
+mod suggest;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde::Serialize;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::AgentConfig;
@@ -67,6 +68,9 @@ pub struct AgentHub {
     /// Per-session files (MCP config, system prompt) live here.
     dir: PathBuf,
     running: Mutex<HashMap<String, CancellationToken>>,
+    /// Live turns that take more messages while they run: Claude Code's stdin,
+    /// or more prompts to the same OpenCode session.
+    steering: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
     approvals: Mutex<HashMap<String, (Approval, oneshot::Sender<Decision>)>>,
     opencode: tokio::sync::Mutex<Option<Arc<opencode::Server>>>,
 }
@@ -85,6 +89,7 @@ impl AgentHub {
             mcp: RwLock::new(None),
             dir,
             running: Mutex::new(HashMap::new()),
+            steering: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             opencode: tokio::sync::Mutex::new(None),
         })
@@ -252,6 +257,43 @@ impl AgentHub {
         self.running.lock().unwrap().contains_key(session_id)
     }
 
+    /// Whether the running turn can take a message mid-flight.
+    pub fn can_steer(&self, session_id: &str) -> bool {
+        self.steering.lock().unwrap().contains_key(session_id)
+    }
+
+    /// Hands the person's message to the turn already running, so the agent
+    /// picks it up at its next step instead of after it finishes. Returns
+    /// false when no live turn takes messages (it already finished).
+    pub fn steer(&self, session_id: &str, text: &str) -> anyhow::Result<bool> {
+        let text = text.trim();
+        anyhow::ensure!(!text.is_empty(), "message is empty");
+        let tx = self.steering.lock().unwrap().get(session_id).cloned();
+        let Some(tx) = tx else { return Ok(false) };
+        if tx.send(text.to_string()).is_err() {
+            return Ok(false);
+        }
+        self.post(
+            session_id,
+            "user",
+            "text",
+            text,
+            serde_json::json!({ "steer": true }),
+        );
+        Ok(true)
+    }
+
+    pub(crate) fn steering_open(&self, session_id: &str) -> mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.steering.lock().unwrap().insert(session_id.into(), tx);
+        rx
+    }
+
+    /// Stops taking messages; the turn's stdin closes once the queue drains.
+    pub(crate) fn steering_close(&self, session_id: &str) {
+        self.steering.lock().unwrap().remove(session_id);
+    }
+
     /// Sends the person's message and runs one agent turn in the background.
     pub fn send(self: &Arc<Self>, session_id: &str, text: &str) -> anyhow::Result<()> {
         self.start_turn(session_id, text, true, &[])
@@ -389,6 +431,7 @@ impl AgentHub {
                 }
             };
             hub.running.lock().unwrap().remove(&session.id);
+            hub.steering_close(&session.id);
             // Anything still waiting on the person is moot now.
             hub.drop_approvals(&session.id);
             match result {
@@ -402,7 +445,7 @@ impl AgentHub {
                     );
                     hub.update(&session.id, Some(SessionStatus::Idle), None);
                 }
-                Ok(()) => {}
+                Ok(()) => suggest::spawn(hub.clone(), session.id.clone()),
                 Err(e) => {
                     tracing::warn!(session = %session.id, error = %e, "agent turn failed");
                     hub.post(

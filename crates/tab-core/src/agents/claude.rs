@@ -37,6 +37,8 @@ pub(super) async fn run_turn(
     let mut cmd = super::command(&exe);
     cmd.args([
         "-p",
+        "--input-format",
+        "stream-json",
         "--output-format",
         "stream-json",
         "--verbose",
@@ -92,9 +94,20 @@ pub(super) async fn run_turn(
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("starting Claude Code ({}) failed: {e}", exe.display()))?;
+    // stdin stays open so the person can steer mid-turn; it closes when the
+    // turn's result arrives (see `steering_close`) and the queue drains.
     let mut stdin = child.stdin.take().expect("piped");
-    stdin.write_all(prompt.as_bytes()).await?;
-    drop(stdin);
+    let first = json!({ "type": "user", "message": { "role": "user", "content": prompt } });
+    stdin.write_all(format!("{first}\n").as_bytes()).await?;
+    let mut steer_rx = hub.steering_open(&session.id);
+    tokio::spawn(async move {
+        while let Some(text) = steer_rx.recv().await {
+            let line = json!({ "type": "user", "message": { "role": "user", "content": text } });
+            if stdin.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
 
     let stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
@@ -331,6 +344,7 @@ impl Parser {
             }
             "result" => {
                 self.finished = true;
+                hub.steering_close(&sid);
                 crate::usage::record_claude_result(
                     &hub.store,
                     v,
