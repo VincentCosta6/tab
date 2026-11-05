@@ -535,3 +535,14 @@ body.resizing iframe { pointer-events: none; }
 .rv-menu-note { display: flex; align-items: center; gap: 6px; padding: 6px 10px 4px; font-size: var(--text-xs); color: #cf222e; }
 .rv-menu-note.warn { color: var(--tone-warning-fg); }
 @media (prefers-color-scheme: dark) { .rv-menu-note:not(.warn) { color: #f85149; } }
+
+/* The composer fits narrow panels (review Ask AI, Ask): one footer row,
+   less said as it narrows, Send always inside. */
+.composer { container-type: inline-size; }
+.composer-foot { flex-wrap: nowrap; min-width: 0; }
+.composer-foot .btn { flex: none; }
+.composer-agent { min-width: 0; flex: 1; white-space: nowrap; overflow: hidden; }
+.composer-agent .model-picker { min-width: 0; max-width: 140px; text-overflow: ellipsis; }
+.composer-hint { overflow: hidden; text-overflow: ellipsis; }
+@container (max-width: 560px) { .composer-hint { display: none; } }
+@container (max-width: 400px) { .composer-agent-name { display: none; } }

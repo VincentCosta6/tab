@@ -349,3 +349,12 @@
 .md-code-link { color: var(--tone-accent-fg); text-decoration: none; border-bottom: 1px dotted currentColor; cursor: pointer; }
 .md-code-link:hover { border-bottom-style: solid; }
 .md-code-link code { color: inherit; }
+
+/* Ask AI is a sidebar: intro and starters at the top, left-aligned, as a
+   compact list; the composer fills the panel width. */
+.rv-ai-body { display: flex; flex-direction: column; }
+.rv-ai-body .empty-chat { justify-content: flex-start; align-items: stretch; }
+.rv-ai-body .suggestions { flex-direction: column; align-items: stretch; gap: 4px; }
+.rv-ai-body .suggestion { height: auto; min-height: 28px; padding: 4px var(--space-2); border-radius: var(--radius-md); font-size: var(--text-xs); text-align: left; }
+.rv-ai-body .composer { margin: var(--space-2); width: auto; max-width: none; align-self: stretch; }
+.rv-ai-body .msg { font-size: var(--text-sm); }

@@ -518,8 +518,8 @@ export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat 
       />
       <div className="composer-foot">
         <span className="subtle composer-agent">
-          {config?.agent.kind && <><Brand name={agentBrand[config.agent.kind]} size={11} /> {agentLabel[config.agent.kind]} <ModelPicker /><ModePicker /></>}
-          {chat?.session ? " · continues this task's session" : " · starts a session for this task"}
+          {config?.agent.kind && <><Brand name={agentBrand[config.agent.kind]} size={11} /> <span className="composer-agent-name">{agentLabel[config.agent.kind]}</span> <ModelPicker /><ModePicker /></>}
+          <span className="composer-hint">{chat?.session ? " · continues this task's session" : " · starts a session for this task"}</span>
         </span>
         {running && chat?.session ? (
           <Button size="sm" icon="stop" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
