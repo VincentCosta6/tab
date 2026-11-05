@@ -36,7 +36,7 @@ export const modules: TabModule[] = [
     // Sample data includes PRs, so the review tool can be tried without a token.
     tabs: [{ id: "reviews", label: "Reviews", icon: "git-pull-request", component: ReviewsTab, shortcut: "2", when: installed("github", "demo") }],
   },
-  { id: "core.connections", tabs: [{ id: "connections", label: "Connections", icon: "plug", component: ConnectionsTab, shortcut: "3" }] },
+  { id: "core.connections", tabs: [{ id: "connections", label: "Connections", icon: "plug", component: ConnectionsTab, shortcut: "3", footer: true }] },
   { id: "core.settings", tabs: [{ id: "settings", label: "Settings", icon: "settings", component: SettingsTab, footer: true }] },
 ];
 
