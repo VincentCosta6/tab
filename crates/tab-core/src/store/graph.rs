@@ -1,0 +1,183 @@
+//! Knowledge graph queries. Items link to entities; entities that appear on
+//! the same item get a weighted `co_occurs` edge. That's enough for "what's
+//! related to this" today, and the MCP server builds on the same tables.
+
+use chrono::{DateTime, Utc};
+use rusqlite::{Transaction, params};
+
+use super::items::get_item;
+use super::{Store, fts_phrase, ts};
+use crate::model::{Entity, EntityRef, QueueItem};
+
+pub(crate) fn link_item(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    refs: &[EntityRef],
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    tx.execute("DELETE FROM item_entities WHERE item_id = ?1", [item_id])?;
+    let mut ids = Vec::with_capacity(refs.len());
+    for r in refs {
+        let id: i64 = tx.query_row(
+            "INSERT INTO entities (kind, key, label, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT (kind, key) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at
+             RETURNING id",
+            params![r.kind, r.key, r.label, ts(now)],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO item_entities (item_id, entity_id, rel) VALUES (?1, ?2, ?3)",
+            params![item_id, id, r.rel],
+        )?;
+        ids.push(id);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    for (i, a) in ids.iter().enumerate() {
+        for b in &ids[i + 1..] {
+            tx.execute(
+                "INSERT INTO edges (src, dst, rel, weight, updated_at) VALUES (?1, ?2, 'co_occurs', 1, ?3)
+                 ON CONFLICT (src, dst, rel) DO UPDATE SET weight = weight + 1, updated_at = excluded.updated_at",
+                params![a, b, ts(now)],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+const ENTITY_COLS: &str = "e.id, e.kind, e.key, e.label, (SELECT COUNT(*) FROM item_entities ie WHERE ie.entity_id = e.id)";
+
+fn row_to_entity(r: &rusqlite::Row<'_>) -> rusqlite::Result<Entity> {
+    Ok(Entity {
+        id: r.get(0)?,
+        kind: r.get(1)?,
+        key: r.get(2)?,
+        label: r.get(3)?,
+        item_count: r.get(4)?,
+    })
+}
+
+impl Store {
+    /// Other items that share entities with this one, most shared first.
+    pub fn related_items(&self, item_id: &str, limit: usize) -> anyhow::Result<Vec<QueueItem>> {
+        let conn = self.conn();
+        let ids: Vec<String> = conn
+            .prepare(
+                "SELECT other.item_id, COUNT(DISTINCT other.entity_id) AS shared, MAX(i.occurred_at) AS latest
+                 FROM item_entities mine
+                 JOIN item_entities other ON other.entity_id = mine.entity_id AND other.item_id != mine.item_id
+                 JOIN items i ON i.id = other.item_id
+                 WHERE mine.item_id = ?1
+                 GROUP BY other.item_id
+                 ORDER BY shared DESC, latest DESC, other.item_id
+                 LIMIT ?2",
+            )?
+            .query_map(params![item_id, limit], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            out.extend(get_item(&conn, &id)?);
+        }
+        Ok(out)
+    }
+
+    pub fn search_entities(&self, query: &str, limit: usize) -> anyhow::Result<Vec<Entity>> {
+        let conn = self.conn();
+        let rows = match fts_phrase(query) {
+            Some(phrase) => conn
+                .prepare(&format!(
+                    "SELECT {ENTITY_COLS} FROM entities_fts JOIN entities e ON e.id = entities_fts.rowid
+                     WHERE entities_fts MATCH ?1 ORDER BY bm25(entities_fts), e.id LIMIT ?2"
+                ))?
+                .query_map(params![phrase, limit], row_to_entity)?
+                .collect::<Result<_, _>>()?,
+            None => conn
+                .prepare(&format!("SELECT {ENTITY_COLS} FROM entities e WHERE e.label LIKE ?1 ORDER BY e.label LIMIT ?2"))?
+                .query_map(params![format!("%{}%", query.trim()), limit], row_to_entity)?
+                .collect::<Result<_, _>>()?,
+        };
+        Ok(rows)
+    }
+
+    /// Entities most connected to the given one.
+    pub fn neighbors(&self, entity_id: i64, limit: usize) -> anyhow::Result<Vec<(Entity, f64)>> {
+        let conn = self.conn();
+        let rows = conn
+            .prepare(&format!(
+                "SELECT {ENTITY_COLS}, n.weight FROM (
+                     SELECT dst AS id, weight FROM edges WHERE src = ?1
+                     UNION ALL SELECT src AS id, weight FROM edges WHERE dst = ?1
+                 ) n JOIN entities e ON e.id = n.id
+                 ORDER BY n.weight DESC, e.id LIMIT ?2"
+            ))?
+            .query_map(params![entity_id, limit], |r| {
+                Ok((row_to_entity(r)?, r.get(5)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::IncomingEvent;
+
+    fn ev(id: &str, refs: Vec<EntityRef>) -> IncomingEvent {
+        IncomingEvent {
+            source: "t".into(),
+            external_id: id.into(),
+            kind: "t.k".into(),
+            title: format!("item {id}"),
+            occurred_at: Utc::now(),
+            entities: refs,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn related_items_and_neighbors() {
+        let s = Store::in_memory().unwrap();
+        let dana = || EntityRef::new("person", "github:dana", "Dana", "from");
+        let repo = || EntityRef::new("repo", "github:acme/payments", "acme/payments", "in");
+        let other = || EntityRef::new("repo", "github:acme/web", "acme/web", "in");
+        let id_of = |u| match u {
+            crate::store::Upsert::Inserted(i) => i.id,
+            _ => unreachable!(),
+        };
+        let a = id_of(
+            s.upsert(&ev("a", vec![dana(), repo()]), Utc::now())
+                .unwrap(),
+        );
+        let b = id_of(
+            s.upsert(&ev("b", vec![dana(), repo()]), Utc::now())
+                .unwrap(),
+        );
+        let c = id_of(
+            s.upsert(&ev("c", vec![dana(), other()]), Utc::now())
+                .unwrap(),
+        );
+        id_of(s.upsert(&ev("d", vec![]), Utc::now()).unwrap());
+
+        let related: Vec<_> = s
+            .related_items(&a, 10)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(
+            related,
+            [b, c],
+            "b shares two entities, c shares one, d none"
+        );
+
+        let found = s.search_entities("payme", 5).unwrap();
+        assert_eq!(found[0].key, "github:acme/payments");
+        assert_eq!(found[0].item_count, 2);
+
+        let dana_id = s.search_entities("Dana", 1).unwrap()[0].id;
+        let n = s.neighbors(dana_id, 5).unwrap();
+        assert_eq!(n[0].0.key, "github:acme/payments");
+        assert_eq!(n[0].1, 2.0);
+    }
+}
