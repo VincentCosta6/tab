@@ -76,6 +76,14 @@ export function useSaveConfig() {
   });
 }
 
+export function useProjects() {
+  return useQuery({ queryKey: keys.projects, queryFn: api.projectsList });
+}
+
+export function useProjectNotes(projectId: string | null | undefined) {
+  return useQuery({ queryKey: keys.notes(projectId ?? ""), queryFn: () => api.projectNotes(projectId!), enabled: !!projectId, staleTime: 0 });
+}
+
 export function usePressure() {
   return useQuery({ queryKey: keys.pressure, queryFn: api.ratePressure, refetchInterval: 4000, staleTime: 0 });
 }

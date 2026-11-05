@@ -397,6 +397,14 @@ impl AgentHub {
              discussion) goes under Found with tab_add_found, for the person to decide. Don't attach things \
              that are only loosely connected; a few direct links beat a big web.\n\
              - If the work splits into follow-ups, create them with tab_create_task.\n\
+             - When the person mentions something you don't recognise (a project, a codename, a person, a \
+             repo), call tab_graph_search before asking them: it searches everything tab knows and shows \
+             what's connected to it. tab_graph_expand follows one connection further. tab_project shows a \
+             whole project: its notes, what it's about and its recent work.\n\
+             - When you learn a durable fact about the project (how it deploys, who owns what, where things \
+             live, a decision and why), save it with tab_project_note under a short topic, citing the items \
+             it came from. Writing the same topic again replaces the note, so keep it current rather than \
+             adding new ones. Skip anything that's only true for this one task.\n\
              - When the person wants to connect a service (email, GitHub, ...), set it up for them: \
              tab_list_connections shows each connection's settings. For email, call tab_find_email_server \
              with their address to find the IMAP server instead of asking them for it. Save settings with \
@@ -429,6 +437,30 @@ impl AgentHub {
         }
         if let Some(u) = &e.url {
             out.push_str(&format!("Link: {u}\n"));
+        }
+        if let Some(p) = ctx
+            .item
+            .project_id
+            .as_deref()
+            .and_then(|p| self.store.project_find(p).ok().flatten())
+        {
+            out.push_str(&format!(
+                "Project: {} (call tab_project for its recent work)\n",
+                p.name
+            ));
+            let notes = self.store.project_notes(&p.id).unwrap_or_default();
+            if !notes.is_empty() {
+                out.push_str("Project notes, from earlier chats:\n");
+                for n in notes.iter().take(20) {
+                    out.push_str(&format!(
+                        "- {} ({}, {}): {}\n",
+                        n.topic,
+                        n.added_by,
+                        n.updated_at.format("%Y-%m-%d"),
+                        n.text.chars().take(500).collect::<String>()
+                    ));
+                }
+            }
         }
         if let Some(b) = &e.body {
             out.push_str(&format!(

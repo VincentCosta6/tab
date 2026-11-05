@@ -9,6 +9,7 @@ mod graph;
 mod http;
 mod items;
 mod previews;
+mod projects;
 mod sessions;
 mod usage;
 
@@ -33,6 +34,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/003_previews.sql"),
     include_str!("migrations/004_agent_usage.sql"),
     include_str!("migrations/005_email_previews.sql"),
+    include_str!("migrations/006_projects.sql"),
     include_str!("migrations/006_session_keys.sql"),
 ];
 

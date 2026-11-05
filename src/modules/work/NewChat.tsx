@@ -6,6 +6,8 @@ import { api } from "../../lib/api";
 import { keys } from "../../lib/query";
 import type { Chat } from "../../lib/types";
 import { Composer } from "./Chat";
+import { cx } from "../../design/components";
+import { ProjectPicker, useProjectTint, useRememberedProject } from "./Projects";
 
 const starters = [
   "Work on the checkout latency incident",
@@ -24,12 +26,15 @@ export function NewChat({ onStarted }: { onStarted: (itemId: string) => void }) 
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // The last project picked here is where the next chat goes too.
+  const [project, setProject] = useRememberedProject("tab.newChatProject");
+  const tint = useProjectTint(project);
 
   const send = async (text: string) => {
     setBusy(true);
     setError(null);
     try {
-      const { item, session } = await api.chatSend(null, text);
+      const { item, session } = await api.chatSend(null, text, project);
       qc.setQueryData(keys.item(item.id), item);
       qc.setQueryData<Chat>(keys.chat(item.id), { session, messages: [], approvals: [], running: true });
       qc.invalidateQueries({ queryKey: keys.allItems });
@@ -41,7 +46,10 @@ export function NewChat({ onStarted }: { onStarted: (itemId: string) => void }) 
   };
 
   return (
-    <div className="new-chat">
+    <div className={cx("new-chat", tint.className)} style={tint.style}>
+      <div className="new-chat-project">
+        <ProjectPicker value={project} onChange={setProject} />
+      </div>
       <div className="new-chat-hero">
         <TabMark size={36} />
         <h2>What should tab work on?</h2>

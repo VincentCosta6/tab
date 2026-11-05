@@ -13,6 +13,8 @@
 .btn-primary { background: var(--fg); color: var(--bg-raised); border-color: var(--fg); }
 .btn-primary:hover:not(:disabled) { background: var(--fg-muted); }
 .btn-ghost { border-color: transparent; background: transparent; }
+.btn-danger { background: var(--tone-danger-fg); color: #fff; border-color: var(--tone-danger-fg); }
+.btn-danger:hover:not(:disabled) { background: var(--tone-danger-fg); filter: brightness(1.1); }
 .btn .kbd { margin-left: var(--space-1); }
 
 .kbd {

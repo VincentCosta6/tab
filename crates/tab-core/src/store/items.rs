@@ -29,7 +29,7 @@ pub(crate) fn fingerprint(e: &IncomingEvent) -> String {
 const COLUMNS: &str = "items.id, items.source, items.external_id, items.kind, items.title, items.body, items.url, \
     items.actor, items.context, items.occurred_at, items.blocks, items.entities, items.metadata, items.state, \
     items.snoozed_until, items.score, items.base_score, items.ai_adjustment, items.urgency, items.reason, \
-    items.ranked_by, items.created_at, items.updated_at";
+    items.ranked_by, items.created_at, items.updated_at, items.project_id";
 
 /// Display order. Fully deterministic: ties fall back to recency, then id.
 const ORDER: &str = "ORDER BY COALESCE(items.score, 50) DESC, items.occurred_at DESC, items.id";
@@ -79,6 +79,7 @@ fn row_to_item(r: &Row<'_>) -> rusqlite::Result<QueueItem> {
         state: ItemState::parse(&r.get::<_, String>("state")?),
         ranking,
         snoozed_until: snoozed.as_deref().map(parse_ts).transpose()?,
+        project_id: r.get("project_id")?,
         created_at: parse_ts(&r.get::<_, String>("created_at")?)?,
         updated_at: parse_ts(&r.get::<_, String>("updated_at")?)?,
     })

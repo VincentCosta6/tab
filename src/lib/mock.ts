@@ -4,7 +4,7 @@
 import type {
   GhLoginCode, GhStatus, LspServer,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
-  PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
+  Project, ProjectNote, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
@@ -145,6 +145,35 @@ export const mockApi = {
   async invoke<T>(cmd: string, args: Record<string, any> = {}): Promise<T> {
     const r = await (async () => {
       switch (cmd) {
+        case "projects_list": return [...projects].sort((a, b) => a.name.localeCompare(b.name));
+        case "project_save": {
+          const p: Project = { id: args.id ?? `p-${Date.now()}`, name: String(args.name).trim(), color: args.color, icon: args.icon, created_at: new Date().toISOString() };
+          if (!p.name) throw new Error("a project needs a name");
+          projects = [...projects.filter((x) => x.id !== p.id), p];
+          return p;
+        }
+        case "project_delete": {
+          projects = projects.filter((x) => x.id !== args.id);
+          notes = notes.filter((n) => n.project_id !== args.id);
+          items = items.map((i) => (i.project_id === args.id ? { ...i, project_id: null } : i));
+          return null;
+        }
+        case "item_set_project": {
+          const i = items.find((x) => x.id === args.id);
+          if (!i) return null;
+          i.project_id = args.projectId;
+          emit({ type: "item_changed", change: "updated", item: i });
+          return i;
+        }
+        case "project_notes": return notes.filter((n) => n.project_id === args.projectId);
+        case "project_note_save": {
+          const now = new Date().toISOString();
+          const old = notes.find((n) => n.id === args.id);
+          if (old) Object.assign(old, { text: args.text, added_by: "user", updated_at: now });
+          else notes = [{ id: `n-${Date.now()}`, project_id: args.projectId, topic: args.topic, text: args.text, added_by: "user", session_id: null, sources: [], created_at: now, updated_at: now }, ...notes.filter((n) => !(n.project_id === args.projectId && n.topic.toLowerCase() === String(args.topic).toLowerCase()))];
+          return null;
+        }
+        case "project_note_delete": notes = notes.filter((n) => n.id !== args.id); return null;
         case "list_items": return sorted(items.filter((i) => args.states.includes(i.state)));
         case "search_items": {
           const q = String(args.query).toLowerCase();
@@ -219,7 +248,7 @@ export const mockApi = {
           return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: false } satisfies Chat;
         }
         case "chat_send": {
-          const item = args.itemId ? items.find((i) => i.id === args.itemId)! : createTask(String(args.text).split("\n")[0].slice(0, 80), null);
+          const item = args.itemId ? items.find((i) => i.id === args.itemId)! : createTask(String(args.text).split("\n")[0].slice(0, 80), null, args.projectId ?? null);
           let session = sessions.find((s) => s.item_id === item.id);
           if (!session) {
             session = { id: `sess-${Date.now()}`, item_id: item.id, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: item.title, status: "working", cwd: "~/code", created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
@@ -309,15 +338,25 @@ let gh: GhStatus = { installed: false, path: null, version: null, logged_in: fal
 const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
 
 let contexts: ContextEntry[] = [];
+let projects: Project[] = [
+  { id: "p-pay", name: "Payments", color: "#7c5cff", icon: "zap", created_at: ago(9000) },
+  { id: "p-sec", name: "SOC 2", color: "#e5484d", icon: "shield", created_at: ago(9000) },
+];
+let notes: ProjectNote[] = [
+  { id: "n1", project_id: "p-pay", topic: "deploys", text: "Payments deploys go through the staging branch; prod is cut on Tuesdays and Thursdays.", added_by: "agent", session_id: null, sources: [], created_at: ago(3000), updated_at: ago(3000) },
+  { id: "n2", project_id: "p-pay", topic: "owners", text: "Dana owns checkout; Priya owns the ledger service.", added_by: "user", session_id: null, sources: [], created_at: ago(900), updated_at: ago(900) },
+];
+// Put some of the sample work into projects.
+items = items.map((i) => ({ ...i, project_id: /checkout|payment|PAY-|ledger|refund/i.test(`${i.title} ${i.body}`) ? "p-pay" : /SOC 2|security|audit/i.test(`${i.title} ${i.body}`) ? "p-sec" : null }));
 const sessions: Session[] = [];
 const messages: SessionMessage[] = [];
 let msgId = 1;
 
-function createTask(title: string, body: string | null): QueueItem {
+function createTask(title: string, body: string | null, projectId: string | null = null): QueueItem {
   const now = new Date().toISOString();
   const item: QueueItem = {
     id: `task-${Date.now()}`, source: "tab", external_id: String(Date.now()), kind: "tab.task", title, body, url: null, actor: "you", context: "tab",
-    occurred_at: now, blocks: [], entities: [], metadata: {}, state: "open", snoozed_until: null, created_at: now, updated_at: now,
+    occurred_at: now, blocks: [], entities: [], metadata: {}, state: "open", snoozed_until: null, project_id: projectId, created_at: now, updated_at: now,
     ranking: { score: 62, base_score: 62, ai_adjustment: null, urgency: "today", reason: "A task you created", ranked_by: "rules" },
   };
   items = [item, ...items];

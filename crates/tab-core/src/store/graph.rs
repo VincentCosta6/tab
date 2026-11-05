@@ -15,7 +15,12 @@ pub(crate) fn link_item(
     refs: &[EntityRef],
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
-    tx.execute("DELETE FROM item_entities WHERE item_id = ?1", [item_id])?;
+    // Project membership is set by the person, not the source: keep it.
+    tx.execute(
+        "DELETE FROM item_entities WHERE item_id = ?1
+           AND entity_id NOT IN (SELECT id FROM entities WHERE kind = 'project')",
+        [item_id],
+    )?;
     let mut ids = Vec::with_capacity(refs.len());
     for r in refs {
         let id: i64 = tx.query_row(
@@ -96,6 +101,59 @@ impl Store {
                 .query_map(params![format!("%{}%", query.trim()), limit], row_to_entity)?
                 .collect::<Result<_, _>>()?,
         };
+        Ok(rows)
+    }
+
+    pub fn entity(&self, id: i64) -> anyhow::Result<Option<Entity>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn();
+        Ok(conn
+            .query_row(
+                &format!("SELECT {ENTITY_COLS} FROM entities e WHERE e.id = ?1"),
+                [id],
+                row_to_entity,
+            )
+            .optional()?)
+    }
+
+    /// Items linked to an entity, most recent first.
+    pub fn entity_items(&self, entity_id: i64, limit: usize) -> anyhow::Result<Vec<QueueItem>> {
+        let conn = self.conn();
+        let ids: Vec<String> = conn
+            .prepare(
+                "SELECT i.id FROM item_entities ie JOIN items i ON i.id = ie.item_id
+                 WHERE ie.entity_id = ?1 ORDER BY i.occurred_at DESC LIMIT ?2",
+            )?
+            .query_map(params![entity_id, limit], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            out.extend(get_item(&conn, &id)?);
+        }
+        Ok(out)
+    }
+
+    /// Entities that appear on the same items as this one, optionally of one
+    /// kind, with how many items they share. Projects count too, so a repo
+    /// leads to the project its work is filed under.
+    pub fn co_entities(
+        &self,
+        entity_id: i64,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(Entity, i64)>> {
+        let conn = self.conn();
+        let rows = conn
+            .prepare(&format!(
+                "SELECT {ENTITY_COLS}, COUNT(DISTINCT mine.item_id) AS shared
+                 FROM item_entities mine
+                 JOIN item_entities other ON other.item_id = mine.item_id AND other.entity_id != mine.entity_id
+                 JOIN entities e ON e.id = other.entity_id
+                 WHERE mine.entity_id = ?1 AND (?2 IS NULL OR e.kind = ?2)
+                 GROUP BY e.id ORDER BY shared DESC, e.label LIMIT ?3"
+            ))?
+            .query_map(params![entity_id, kind, limit], |r| Ok((row_to_entity(r)?, r.get(5)?)))?
+            .collect::<Result<_, _>>()?;
         Ok(rows)
     }
 

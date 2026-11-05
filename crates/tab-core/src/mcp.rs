@@ -9,6 +9,10 @@
 //! * `tab_add_found`: file something relevant under the item's Found section.
 //! * `tab_attach_context`: attach a queue item (or link) as Context.
 //! * `tab_create_task`: create a tab task, optionally scheduled.
+//! * `tab_graph_search`, `tab_graph_expand`: the knowledge graph (repos,
+//!   people, tickets, projects) and the items around each node.
+//! * `tab_project`, `tab_project_note`: a project's overview, and durable
+//!   notes agents leave for the next chat.
 //! * `tab_list_connections`, `tab_find_email_server`, `tab_configure_connection`,
 //!   `tab_ask_for_secret`, `tab_test_connection`: the setup assistant. Agents
 //!   fill in everything but secrets; secrets go through a card in the chat
@@ -30,7 +34,8 @@ use crate::agents::{AgentHub, Decision, summarize_tool};
 use crate::config::ConnectorConfig;
 use crate::engine::EngineEvent;
 use crate::model::{
-    ConnectorInfo, ContextSection, ItemState, NewContext, NewTask, Preview, QueueItem, SettingKind,
+    ConnectorInfo, ContextSection, Entity, ItemState, NewContext, NewTask, Preview, Project,
+    ProjectNote, QueueItem, SettingKind,
 };
 use crate::store::Store;
 
@@ -150,6 +155,17 @@ fn brief(i: &QueueItem) -> Value {
     })
 }
 
+fn entity_json(e: &Entity) -> Value {
+    json!({ "entity_id": e.id, "kind": e.kind, "label": e.label, "key": e.key, "items": e.item_count })
+}
+
+fn note_json(n: &ProjectNote) -> Value {
+    json!({
+        "topic": n.topic, "text": n.text, "by": n.added_by,
+        "updated": n.updated_at.format("%Y-%m-%d").to_string(), "sources": n.sources,
+    })
+}
+
 pub fn tools() -> Value {
     json!([
         {
@@ -199,6 +215,41 @@ pub fn tools() -> Value {
                 "due_in_minutes": { "type": "integer", "minimum": 1 },
                 "url": { "type": "string" }
             }, "required": ["title"] }
+        },
+        {
+            "name": "tab_graph_search",
+            "description": "Search tab's knowledge graph: the projects, repos, people, PRs, tickets, channels and email contacts that appear across the person's work. Use it when they mention something you don't recognise. Each match comes with what it's most connected to, its recent items, and for a project its notes.",
+            "inputSchema": { "type": "object", "properties": {
+                "query": { "type": "string", "description": "A name or part of one: \"billing\", \"dana\", \"acme/web\"." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 10 }
+            }, "required": ["query"] }
+        },
+        {
+            "name": "tab_graph_expand",
+            "description": "Follow the graph one step from an entity (entity_id from tab_graph_search): what it's connected to, optionally only one kind (person, repo, pull_request, issue, project, ...), and its recent items.",
+            "inputSchema": { "type": "object", "properties": {
+                "entity_id": { "type": "integer" },
+                "kind": { "type": "string" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 30 }
+            }, "required": ["entity_id"] }
+        },
+        {
+            "name": "tab_project",
+            "description": "A project's overview: its notes, the repos, people and tickets its work is about, and its recent items. Defaults to this chat's project; with no project, lists them all.",
+            "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string", "description": "Project name or id." }
+            } }
+        },
+        {
+            "name": "tab_project_note",
+            "description": "Save a durable fact about a project for future chats: how it deploys, who owns what, where something lives, a decision and why. One note per topic: writing a topic again replaces it. Cite the items it came from.",
+            "inputSchema": { "type": "object", "properties": {
+                "topic": { "type": "string", "description": "A short, stable topic, e.g. \"deploys\", \"owners\", \"staging env\"." },
+                "text": { "type": "string", "description": "The fact, in one to three sentences." },
+                "source_item_ids": { "type": "array", "items": { "type": "string" } },
+                "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." },
+                "delete": { "type": "boolean", "description": "Remove the note on this topic instead, e.g. when it's no longer true." }
+            }, "required": ["topic"] }
         },
         {
             "name": "tab_list_connections",
@@ -316,7 +367,7 @@ impl McpServer {
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "tab", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "tab is the person's work queue. Search it, read items, file what you find under Found, attach context and create tasks, and set up connections (email, GitHub, ...) for the person."
+                "instructions": "tab is the person's work queue. Search it, read items, file what you find under Found, attach context and create tasks, and set up connections (email, GitHub, ...) for the person. When the person mentions something you don't recognise, call tab_graph_search before asking them. Leave durable facts about a project with tab_project_note."
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools() })),
@@ -346,6 +397,26 @@ impl McpServer {
             .and_then(|s| self.store.session_get(s).ok().flatten())
             .and_then(|s| s.item_id)
             .ok_or_else(|| anyhow::anyhow!("pass item_id: this session is not tied to a task"))
+    }
+
+    /// The project named in `project`, else the session's task's project.
+    fn project_arg(&self, session: Option<&str>, args: &Value) -> anyhow::Result<Option<Project>> {
+        if let Some(name) = args["project"].as_str().filter(|v| !v.trim().is_empty()) {
+            return Ok(Some(
+                self.store
+                    .project_find(name)?
+                    .ok_or_else(|| anyhow::anyhow!("no project named {name}"))?,
+            ));
+        }
+        let pid = self
+            .session_item(session, &json!({}))
+            .ok()
+            .and_then(|id| self.store.get(&id).ok().flatten())
+            .and_then(|i| i.project_id);
+        Ok(match pid {
+            Some(p) => self.store.project_find(&p)?,
+            None => None,
+        })
     }
 
     pub async fn call(
@@ -383,6 +454,7 @@ impl McpServer {
                 let preview = self.engine.preview(&id).await.ok();
                 Ok(text(serde_json::to_string_pretty(&json!({
                     "item": brief(&ctx.item),
+                    "project": ctx.item.project_id.as_deref().and_then(|p| self.store.project_find(p).ok().flatten()).map(|p| p.name),
                     "body": ctx.item.event.body,
                     "preview": preview.map(|p| p.blocks),
                     "context": ctx.entries.iter().map(|c| json!({
@@ -439,6 +511,12 @@ impl McpServer {
                 let due_at = args["due_in_minutes"]
                     .as_i64()
                     .map(|m| Utc::now() + chrono::Duration::minutes(m.max(1)));
+                // Follow-ups land in the same project as the chat's task.
+                let project_id = self
+                    .session_item(session, &json!({}))
+                    .ok()
+                    .and_then(|id| self.store.get(&id).ok().flatten())
+                    .and_then(|i| i.project_id);
                 let item = self
                     .engine
                     .create_task(NewTask {
@@ -448,11 +526,144 @@ impl McpServer {
                         due_at,
                         url: s("url"),
                         created_by: "agent".into(),
+                        project_id,
                     })
                     .await?;
                 Ok(text(format!(
                     "Created task {} ({})",
                     item.id, item.event.kind
+                )))
+            }
+            "tab_graph_search" => {
+                let q = s("query").ok_or_else(|| anyhow::anyhow!("query is required"))?;
+                let limit = args["limit"].as_u64().unwrap_or(5).clamp(1, 10) as usize;
+                let found = self.store.search_entities(&q, limit)?;
+                if found.is_empty() {
+                    return Ok(text(format!(
+                        "Nothing in the graph matches \"{q}\". Try tab_search for words inside items, or ask the person."
+                    )));
+                }
+                let mut out = Vec::new();
+                for e in &found {
+                    let mut v = entity_json(e);
+                    v["connected"] = json!(self.store.co_entities(e.id, None, 8)?.iter()
+                        .map(|(n, shared)| json!({ "entity_id": n.id, "kind": n.kind, "label": n.label, "shared_items": shared }))
+                        .collect::<Vec<_>>());
+                    v["recent_items"] = json!(
+                        self.store
+                            .entity_items(e.id, 5)?
+                            .iter()
+                            .map(brief)
+                            .collect::<Vec<_>>()
+                    );
+                    if let Some(p) = e
+                        .key
+                        .strip_prefix("project:")
+                        .filter(|_| e.kind == "project")
+                    {
+                        v["notes"] = json!(
+                            self.store
+                                .project_notes(p)?
+                                .iter()
+                                .map(note_json)
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    out.push(v);
+                }
+                Ok(text(serde_json::to_string_pretty(&out)?))
+            }
+            "tab_graph_expand" => {
+                let id = args["entity_id"]
+                    .as_i64()
+                    .ok_or_else(|| anyhow::anyhow!("entity_id is required"))?;
+                let e = self
+                    .store
+                    .entity(id)?
+                    .ok_or_else(|| anyhow::anyhow!("no entity {id}"))?;
+                let limit = args["limit"].as_u64().unwrap_or(15).clamp(1, 30) as usize;
+                let kind = s("kind");
+                Ok(text(serde_json::to_string_pretty(&json!({
+                    "entity": entity_json(&e),
+                    "connected": self.store.co_entities(id, kind.as_deref(), limit)?.iter()
+                        .map(|(n, shared)| json!({ "entity_id": n.id, "kind": n.kind, "label": n.label, "shared_items": shared }))
+                        .collect::<Vec<_>>(),
+                    "recent_items": self.store.entity_items(id, 10)?.iter().map(brief).collect::<Vec<_>>(),
+                }))?))
+            }
+            "tab_project" => {
+                let Some(p) = self.project_arg(session, &args)? else {
+                    let all = self.store.projects()?;
+                    return Ok(text(if all.is_empty() {
+                        "The person has no projects yet.".to_string()
+                    } else {
+                        format!(
+                            "This chat isn't in a project. Projects: {}",
+                            all.iter()
+                                .map(|p| p.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }));
+                };
+                Ok(text(serde_json::to_string_pretty(&json!({
+                    "project": { "id": p.id, "name": p.name },
+                    "notes": self.store.project_notes(&p.id)?.iter().map(note_json).collect::<Vec<_>>(),
+                    "about": self.store.project_entities(&p.id, 15)?.iter()
+                        .map(|(e, n)| json!({ "entity_id": e.id, "kind": e.kind, "label": e.label, "items_in_project": n }))
+                        .collect::<Vec<_>>(),
+                    "recent_items": self.store.project_items(&p.id, 15)?.iter().map(brief).collect::<Vec<_>>(),
+                }))?))
+            }
+            "tab_project_note" => {
+                let topic = s("topic").ok_or_else(|| anyhow::anyhow!("topic is required"))?;
+                let p = self.project_arg(session, &args)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "this chat isn't in a project; pass project (a name from tab_project)"
+                    )
+                })?;
+                if args["delete"].as_bool().unwrap_or(false) {
+                    let gone = self
+                        .store
+                        .project_notes(&p.id)?
+                        .into_iter()
+                        .find(|n| n.topic.eq_ignore_ascii_case(&topic));
+                    let Some(n) = gone else {
+                        return Ok(text(format!("{} has no note on \"{topic}\".", p.name)));
+                    };
+                    self.store.note_delete(&n.id)?;
+                    let _ = self.events.send(EngineEvent::ProjectChanged {
+                        project_id: p.id.clone(),
+                    });
+                    return Ok(text(format!(
+                        "Removed the \"{topic}\" note from {}.",
+                        p.name
+                    )));
+                }
+                let body = s("text").ok_or_else(|| anyhow::anyhow!("text is required"))?;
+                let sources: Vec<String> = args["source_item_ids"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let n = self.store.note_save(
+                    &p.id,
+                    &topic,
+                    &body,
+                    "agent",
+                    session,
+                    &sources,
+                    Utc::now(),
+                )?;
+                let _ = self.events.send(EngineEvent::ProjectChanged {
+                    project_id: p.id.clone(),
+                });
+                Ok(text(format!(
+                    "Saved the \"{}\" note on {}.",
+                    n.topic, p.name
                 )))
             }
             "tab_list_connections" => {
@@ -696,7 +907,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 11);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 15);
 
         // Create a task, a ticket to find, then file it under Found on the task.
         let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}});
@@ -868,6 +1079,127 @@ mod tests {
             )
             .await);
         assert!(bad.is_err());
+    }
+
+    #[tokio::test]
+    async fn agents_search_the_graph_and_leave_project_notes() {
+        use crate::model::{EntityRef, IncomingEvent};
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let server = McpServer {
+            store: store.clone(),
+            hub,
+            engine: Arc::new(Connections(Default::default())),
+            events,
+            token: "t".into(),
+        };
+        let now = Utc::now();
+        let p = store
+            .project_save(None, "Sidequest", "#7c5cff", "zap", now)
+            .unwrap();
+        let ev = |id: &str, title: &str| IncomingEvent {
+            source: "github".into(),
+            external_id: id.into(),
+            kind: "github.pr".into(),
+            title: title.into(),
+            occurred_at: now,
+            entities: vec![
+                EntityRef::new("repo", "github:acme/sidequest", "acme/sidequest", "in"),
+                EntityRef::new("person", "github:dana", "Dana", "from"),
+            ],
+            ..Default::default()
+        };
+        let crate::store::Upsert::Inserted(a) =
+            store.upsert(&ev("1", "Add billing page"), now).unwrap()
+        else {
+            panic!()
+        };
+        store.upsert(&ev("2", "Fix login"), now).unwrap();
+        store.item_set_project(&a.id, Some(&p.id), now).unwrap();
+        let session = store
+            .session_create(Some(&a.id), AgentKind::ClaudeCode, "t", ".", now)
+            .unwrap();
+        let out = |v: anyhow::Result<Value>| {
+            v.map(|v| v["content"][0]["text"].as_str().unwrap().to_string())
+                .unwrap()
+        };
+
+        // "sidequest" finds the project and the repo, each with its neighbours.
+        let found = out(server
+            .call(
+                Some(&session.id),
+                "tab_graph_search",
+                json!({"query":"sidequest"}),
+            )
+            .await);
+        let found: Value = serde_json::from_str(&found).unwrap();
+        let kinds: Vec<_> = found
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["kind"].as_str().unwrap())
+            .collect();
+        assert!(
+            kinds.contains(&"project") && kinds.contains(&"repo"),
+            "{kinds:?}"
+        );
+        let repo = found
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["kind"] == "repo")
+            .unwrap();
+        assert_eq!(repo["recent_items"].as_array().unwrap().len(), 2);
+        let expanded = out(server
+            .call(
+                None,
+                "tab_graph_expand",
+                json!({"entity_id": repo["entity_id"], "kind":"person"}),
+            )
+            .await);
+        assert!(expanded.contains("Dana"));
+
+        // A note defaults to the chat's project and replaces by topic.
+        out(server
+            .call(
+                Some(&session.id),
+                "tab_project_note",
+                json!({"topic":"deploys","text":"Via staging.","source_item_ids":[a.id]}),
+            )
+            .await);
+        out(server
+            .call(
+                Some(&session.id),
+                "tab_project_note",
+                json!({"topic":"Deploys","text":"Via staging, Fridays to prod."}),
+            )
+            .await);
+        let notes = store.project_notes(&p.id).unwrap();
+        assert_eq!(notes.len(), 1, "same topic, any case, replaces");
+        let overview = out(server
+            .call(Some(&session.id), "tab_project", json!({}))
+            .await);
+        assert!(
+            overview.contains("Fridays")
+                && overview.contains("acme/sidequest")
+                && overview.contains("Add billing page")
+        );
+        // The next chat in the project starts with the notes.
+        assert!(server.hub.system_prompt(&session).contains("Fridays"));
+        out(server
+            .call(
+                Some(&session.id),
+                "tab_project_note",
+                json!({"topic":"deploys","delete":true}),
+            )
+            .await);
+        assert!(store.project_notes(&p.id).unwrap().is_empty());
     }
 
     async fn server_call(url: &str, session: &str, body: Value) -> Value {

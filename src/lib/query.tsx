@@ -57,6 +57,8 @@ export const keys = {
   stream: (sessionId: string) => ["stream", sessionId] as const,
   connectors: ["connectors"] as const,
   config: ["config"] as const,
+  projects: ["projects"] as const,
+  notes: (projectId: string) => ["notes", projectId] as const,
   pressure: ["pressure"] as const,
   pull: (repo: string, n: number) => ["pull", repo, n] as const,
   file: (repo: string, sha: string, path: string) => ["file", repo, sha, path] as const,
@@ -114,6 +116,9 @@ function LiveEvents() {
           break;
         case "context_changed":
           qc.invalidateQueries({ queryKey: keys.context(e.item_id) });
+          break;
+        case "project_changed":
+          qc.invalidateQueries({ queryKey: keys.notes(e.project_id) });
           break;
         case "session_changed": {
           const s = e.session;

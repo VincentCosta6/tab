@@ -79,6 +79,10 @@ pub enum EngineEvent {
     },
     /// Settings were saved, by the person or by an agent setting up a connection.
     ConfigChanged,
+    /// A project or its notes changed.
+    ProjectChanged {
+        project_id: String,
+    },
 }
 
 const MAX_CONCURRENT_RANKS: usize = 4;
@@ -576,6 +580,14 @@ impl EngineHandle {
             .core
             .ingest(&event)?
             .ok_or_else(|| anyhow::anyhow!("task was not stored"))?;
+        let item = match task.project_id.as_deref().filter(|p| !p.is_empty()) {
+            Some(p) => self
+                .core
+                .store
+                .item_set_project(&item.id, Some(p), now)?
+                .unwrap_or(item),
+            None => item,
+        };
         if scheduled && let Some(due) = task.due_at {
             return Ok(self.snooze(&item.id, due)?.unwrap_or(item));
         }

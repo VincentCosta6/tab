@@ -299,6 +299,7 @@ async fn chat_send(
     state: State<'_, AppState>,
     item_id: Option<String>,
     text: String,
+    project_id: Option<String>,
 ) -> CmdResult<ChatStarted> {
     let text = text.trim().to_string();
     if text.is_empty() {
@@ -324,6 +325,7 @@ async fn chat_send(
                 title,
                 body: (text.len() > first.len()).then(|| text.clone()),
                 created_by: "user".into(),
+                project_id,
                 ..Default::default()
             }).map_err(err))?
         }
@@ -440,6 +442,88 @@ fn review_brief(t: &ReviewChatTarget, checkout: Option<&str>) -> String {
          the person asks; they review your changes first.\n",
     );
     b
+}
+
+// --- Projects ------------------------------------------------------------
+
+#[tauri::command]
+async fn projects_list(state: State<'_, AppState>) -> CmdResult<Vec<tab_core::model::Project>> {
+    state.store.projects().map_err(err)
+}
+
+#[tauri::command]
+async fn project_save(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    name: String,
+    color: String,
+    icon: String,
+) -> CmdResult<tab_core::model::Project> {
+    state
+        .store
+        .project_save(id.as_deref(), &name, &color, &icon, Utc::now())
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn project_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.store.project_delete(&id).map_err(err)
+}
+
+#[tauri::command]
+async fn project_notes(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<tab_core::model::ProjectNote>> {
+    state.store.project_notes(&project_id).map_err(err)
+}
+
+/// The person adding a note (no id) or rewriting one.
+#[tauri::command]
+async fn project_note_save(
+    state: State<'_, AppState>,
+    project_id: String,
+    id: Option<String>,
+    topic: String,
+    text: String,
+) -> CmdResult<()> {
+    match id {
+        Some(id) => {
+            state.store.note_edit(&id, &text, Utc::now()).map_err(err)?;
+        }
+        None => {
+            state
+                .store
+                .note_save(&project_id, &topic, &text, "user", None, &[], Utc::now())
+                .map_err(err)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn project_note_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.store.note_delete(&id).map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn item_set_project(
+    state: State<'_, AppState>,
+    id: String,
+    project_id: Option<String>,
+) -> CmdResult<Option<QueueItem>> {
+    let item = state
+        .store
+        .item_set_project(&id, project_id.as_deref(), Utc::now())
+        .map_err(err)?;
+    if let Some(i) = &item {
+        let _ = state.events.send(EngineEvent::ItemChanged {
+            change: tab_core::engine::Change::Updated,
+            item: i.clone(),
+        });
+    }
+    Ok(item)
 }
 
 #[tauri::command]
@@ -1011,6 +1095,13 @@ pub fn run() {
             chat_open,
             chat_send,
             chat_stop,
+            projects_list,
+            project_save,
+            project_delete,
+            item_set_project,
+            project_notes,
+            project_note_save,
+            project_note_delete,
             review_chat_open,
             review_chat_send,
             approval_resolve,

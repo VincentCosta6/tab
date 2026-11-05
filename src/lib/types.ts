@@ -46,6 +46,23 @@ export interface QueueItem {
   state: ItemState;
   ranking: Ranking | null;
   snoozed_until: string | null;
+  project_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A group of work the person defines. Chats started in it belong to it. */
+export interface Project { id: string; name: string; color: string; icon: string; created_at: string }
+
+/** A durable fact about a project, from an agent or the person. One per topic. */
+export interface ProjectNote {
+  id: string;
+  project_id: string;
+  topic: string;
+  text: string;
+  added_by: string;
+  session_id: string | null;
+  sources: string[];
   created_at: string;
   updated_at: string;
 }
@@ -93,7 +110,8 @@ export type EngineEvent =
   | { type: "session_delta"; session_id: string; text: string }
   | { type: "approval_requested"; approval: Approval }
   | { type: "approval_resolved"; session_id: string; id: string }
-  | { type: "config_changed" };
+  | { type: "config_changed" }
+  | { type: "project_changed"; project_id: string };
 
 export interface Preview { item_id: string; blocks: Block[]; fetched_at: string | null; stale: boolean }
 

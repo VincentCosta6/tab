@@ -272,6 +272,39 @@ pub struct QueueItem {
     pub snoozed_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The project the person put this in, if any.
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
+
+/// A group of work the person defines: chats started in it belong to it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    /// CSS color, e.g. `#7c5cff`.
+    pub color: String,
+    /// Icon name from the design system.
+    pub icon: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A durable fact about a project, left by an agent or the person, so the
+/// next chat starts with it. One note per topic: writing a topic again
+/// replaces it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectNote {
+    pub id: String,
+    pub project_id: String,
+    pub topic: String,
+    pub text: String,
+    /// `agent` or `user`.
+    pub added_by: String,
+    pub session_id: Option<String>,
+    /// Item ids the note is based on.
+    pub sources: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Who the queue is for. Fed to the AI layer so "important" means important to *this* person.
@@ -565,4 +598,7 @@ pub struct NewTask {
     /// `user` or `agent`.
     #[serde(default)]
     pub created_by: String,
+    /// Project to put the task in.
+    #[serde(default)]
+    pub project_id: Option<String>,
 }

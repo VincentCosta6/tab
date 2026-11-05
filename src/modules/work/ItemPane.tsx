@@ -12,6 +12,7 @@ import { parsePullUrl } from "../github/pulls";
 import { ChatView } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
 import { ReadModeSwitch, Reader, useHasRich, useReadMode } from "./Reader";
+import { ProjectPicker, useProjectTint } from "./Projects";
 import { SnoozeMenu } from "./SnoozeMenu";
 
 const ReviewView = lazy(() => import("../github/review/Workspace"));
@@ -25,6 +26,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   const [reviewing, setReviewing] = useState(false);
   const { data: chat } = useChat(id);
   const [readMode, setReadMode] = useReadMode();
+  const tint = useProjectTint(item?.project_id);
   const chatCount = chat?.messages.filter((m) => m.role === "user" || (m.role === "assistant" && m.kind === "text")).length ?? 0;
   // Mail is for reading: open on the message. Everything else opens on the chat.
   const [tab, setTab] = useState<"content" | "chat">(() => (id && item?.kind.startsWith("email.") ? "content" : "chat"));
@@ -42,6 +44,11 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   };
   const done = async (i: QueueItem) => (settle(i.id), await api.markDone(i.id));
   const snooze = async (i: QueueItem, minutes: number) => (setSnoozeOpen(false), settle(i.id), await api.snooze(i.id, minutes));
+  const move = async (i: QueueItem, projectId: string | null) => {
+    const next = await api.itemSetProject(i.id, projectId);
+    if (next) qc.setQueryData(keys.item(i.id), next);
+    qc.invalidateQueries({ queryKey: keys.allItems });
+  };
   const reopen = async (i: QueueItem) => (await api.reopen(i.id), qc.invalidateQueries({ queryKey: keys.allItems }));
 
   useEffect(() => {
@@ -72,7 +79,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   const k = kind(item.kind);
   const r = item.ranking;
   return (
-    <div className="item-pane">
+    <div className={cx("item-pane", tint.className)} style={tint.style}>
       <header className="item-head">
         <div className="item-head-main">
           <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={34} />
@@ -90,6 +97,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
           </div>
         </div>
         <div className="item-actions">
+          <ProjectPicker value={item.project_id ?? null} onChange={(p) => move(item, p)} align="right" compact />
           {pull && <Button size="sm" icon="code" shortcut="R" onClick={() => setReviewing(true)}>Review</Button>}
           {item.url && <Button size="sm" icon="external" shortcut="O" onClick={() => openUrl(item.url!)}>Open</Button>}
           {item.state !== "done" && (

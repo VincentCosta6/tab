@@ -12,6 +12,7 @@ import type { ItemState, QueueItem, Urgency } from "../../lib/types";
 import { takePendingOpen } from "./Chat";
 import { ItemPane } from "./ItemPane";
 import { NewChat } from "./NewChat";
+import { ProjectChip, ProjectPicker, useRememberedProject } from "./Projects";
 import { SnoozeMenu } from "./SnoozeMenu";
 
 const urgencyOrder: Urgency[] = ["now", "today", "this_week", "whenever"];
@@ -27,7 +28,10 @@ export function WorkTab() {
   const [view, setView] = useState<ItemState>("open");
   const [app, setApp] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const { data: items = [] } = useItems(view, query);
+  const { data: all = [] } = useItems(view, query);
+  // "All projects" (null) or one project; remembered across launches.
+  const [project, setProject] = useRememberedProject("tab.queueProject");
+  const items = useMemo(() => (project ? all.filter((i) => i.project_id === project) : all), [all, project]);
   const [selected, setSelected] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const [listWidth, setListWidth] = useState(() => {
@@ -77,7 +81,7 @@ export function WorkTab() {
   // so typing doesn't rebuild the right pane; once the results leave it out,
   // the top result opens. Otherwise the selection sticks, so opening a
   // related (or done) item from the pane stays put.
-  const filterKey = `${view}|${app ?? ""}|${query}`;
+  const filterKey = `${view}|${app ?? ""}|${query}|${project ?? ""}`;
   const recheck = useRef<string | null>(null);
   useEffect(() => {
     recheck.current = filterKey;
@@ -187,6 +191,7 @@ export function WorkTab() {
                 { value: "done", label: "Done" },
               ]}
             />
+            <ProjectPicker value={project} onChange={setProject} none="All projects" align="right" compact />
           </div>
           <TextInput ref={searchRef} icon="search" placeholder="Search everything  /" value={query} onChange={(e) => setQuery(e.target.value)} />
           <div className="chips">
@@ -253,7 +258,7 @@ export function QueueRow({ item, selected, onSelect, onAct, compact }: {
       <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={compact ? 24 : 28} />
       <div className="row-main">
         <div className="row-title">{item.title}</div>
-        <div className="row-meta">{[item.actor, item.context].filter(Boolean).join(" · ")}</div>
+        <div className="row-meta"><ProjectChip id={item.project_id} />{[item.actor, item.context].filter(Boolean).join(" · ")}</div>
         {!compact && item.body && <div className="row-snippet">{item.body}</div>}
       </div>
       <div className="row-side">
