@@ -15,6 +15,7 @@ export type Block =
   | { type: "badges"; items: Field[] }
   | { type: "links"; items: Link[] }
   | { type: "code"; text: string; language?: string | null }
+  | { type: "html"; html: string }
   | { type: "choices"; prompt: string; options: string[] };
 
 export interface EntityRef { kind: string; key: string; label: string; rel: string }

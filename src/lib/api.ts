@@ -66,6 +66,8 @@ export const api = {
 };
 
 export async function openUrl(url: string) {
+  // A bare host ("mail.example.com/webmail") from a settings field.
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = `https://${url}`;
   if (!inTauri) {
     window.open(url, "_blank", "noopener");
     return;

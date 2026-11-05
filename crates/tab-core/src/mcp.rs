@@ -279,6 +279,18 @@ impl McpServer {
             return;
         };
         let d = &info.descriptor;
+        // One card per ask: if one for this connection is already waiting
+        // (nothing from the person since), don't stack a second.
+        if let Ok(msgs) = self.store.messages(session) {
+            let waiting = msgs
+                .iter()
+                .rev()
+                .take_while(|m| m.role != "user")
+                .any(|m| m.kind == "secret_request" && m.meta["connector_id"] == d.id.as_str());
+            if waiting {
+                return;
+            }
+        }
         let fields: Vec<_> = d
             .settings
             .iter()

@@ -79,7 +79,7 @@ impl ConnectorFactory for EmailFactory {
                 setting("folders", "Folders", SettingKind::Text, "Comma separated. Defaults to INBOX. Spam folders are never read.", false),
                 setting("bulk", "Newsletters and automated mail", SettingKind::Text, "\"rules\" (default): import, rank with rules only. \"skip\": don't import. \"ai\": let the AI layer read them too.", false),
                 setting("spam_score", "Spam score cutoff", SettingKind::Number, "Skip mail the server scored at or above this. Default 5.", false),
-                setting("webmail_url", "Webmail link", SettingKind::Text, "Optional. Where Open takes you, e.g. your MXroute webmail.", false),
+                setting("webmail_url", "Webmail link", SettingKind::Text, "Optional. Where Open takes you. MXroute, Gmail, Fastmail and iCloud are filled in for you; a Roundcube link opens the message itself.", false),
             ],
             available: true,
             rate_limits: Vec::new(),
@@ -674,7 +674,7 @@ pub fn sort_message(
         kind: format!("email.{kind}"),
         title: subject,
         body: (!short.is_empty()).then_some(short),
-        url: s.webmail_url.clone(),
+        url: open_url(s.webmail_url.as_deref(), &s.host, folder, uid, &message_id),
         actor,
         context: Some(if folder == "INBOX" {
             s.username.clone()
@@ -695,7 +695,170 @@ pub fn sort_message(
     }))
 }
 
+/// Largest formatted body rendered; bigger ones show as text.
+const MAX_HTML: usize = 1024 * 1024;
+
+fn base64(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The full message for the detail pane: who it's between, the formatted
+/// body (with inline images embedded), and attachment names.
+pub fn render_message(raw: &[u8]) -> Vec<Block> {
+    use mail_parser::MimeHeaders;
+    let Some(m) = MessageParser::new().parse(raw) else {
+        return vec![Block::Text {
+            text: "This email couldn't be read.".into(),
+            markdown: false,
+        }];
+    };
+    let people = |a: Option<&Address<'_>>| {
+        a.map(|a| {
+            a.iter()
+                .map(|p| match (p.name(), p.address()) {
+                    (Some(n), Some(e)) => format!("{n} <{e}>"),
+                    (Some(n), None) => n.to_string(),
+                    (None, Some(e)) => e.to_string(),
+                    _ => String::new(),
+                })
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|s| !s.is_empty())
+    };
+    let mut fields = Vec::new();
+    for (label, v) in [
+        ("From", people(m.from())),
+        ("To", people(m.to())),
+        ("Cc", people(m.cc())),
+    ] {
+        if let Some(v) = v {
+            fields.push(Field::new(label, v));
+        }
+    }
+    if let Some(d) = m.date() {
+        fields.push(Field::new("Date", d.to_rfc822()));
+    }
+    let mut blocks = vec![Block::Fields { items: fields }];
+
+    let has_html = m.html_bodies().any(|p| p.is_text_html());
+    match m.body_html(0).filter(|h| has_html && h.len() <= MAX_HTML) {
+        Some(html) => {
+            let mut html = html.into_owned();
+            // Inline images (cid:) become data URLs so they show without the network.
+            for a in m.attachments() {
+                let (Some(cid), Some(ct)) = (a.content_id(), a.content_type()) else {
+                    continue;
+                };
+                if ct.ctype() != "image" || a.contents().len() > 2 * 1024 * 1024 {
+                    continue;
+                }
+                let cid = cid.trim_matches(['<', '>']);
+                let data = format!(
+                    "data:image/{};base64,{}",
+                    ct.subtype().unwrap_or("png"),
+                    base64(a.contents())
+                );
+                html = html.replace(&format!("cid:{cid}"), &data);
+            }
+            blocks.push(Block::Html { html });
+        }
+        None => {
+            let text = m.body_text(0).map(|t| t.into_owned()).unwrap_or_default();
+            if !text.trim().is_empty() {
+                blocks.push(Block::Text {
+                    text: text.chars().take(100_000).collect(),
+                    markdown: false,
+                });
+            }
+        }
+    }
+    let files: Vec<_> = m
+        .attachments()
+        .filter(|a| a.content_id().is_none() || a.attachment_name().is_some())
+        .filter_map(|a| a.attachment_name().map(|n| Field::new("attachment", n)))
+        .collect();
+    if !files.is_empty() {
+        blocks.push(Block::Badges { items: files });
+    }
+    blocks
+}
+
+/// Where Open goes for one message. Roundcube (MXroute's webmail) and Gmail
+/// open the message itself; other webmail opens the inbox.
+pub fn open_url(
+    webmail: Option<&str>,
+    host: &str,
+    folder: &str,
+    uid: u32,
+    message_id: &str,
+) -> Option<String> {
+    let enc = |s: &str| -> String {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
+    };
+    let base = match webmail.map(str::trim).filter(|w| !w.is_empty()) {
+        Some(w) if w.contains("://") => w.to_string(),
+        Some(w) => format!("https://{w}"),
+        None if host.ends_with(".mxrouting.net") || host.ends_with(".mxlogin.com") => {
+            format!("https://{host}/roundcube/")
+        }
+        None if host == "imap.gmail.com" => "https://mail.google.com/".into(),
+        None if host == "imap.fastmail.com" => "https://app.fastmail.com/".into(),
+        None if host == "imap.mail.me.com" => "https://www.icloud.com/mail/".into(),
+        None => return None,
+    };
+    if base.contains("mail.google.com") {
+        return Some(format!(
+            "https://mail.google.com/mail/u/0/#search/rfc822msgid%3A{}",
+            enc(message_id)
+        ));
+    }
+    if base.contains("roundcube") {
+        let sep = if base.contains('?') { '&' } else { '?' };
+        return Some(format!(
+            "{base}{sep}_task=mail&_mbox={}&_uid={uid}&_action=show",
+            enc(folder)
+        ));
+    }
+    Some(base)
+}
+
 impl EmailConnector {
+    async fn fetch_raw(&self, folder: &str, uid: u64) -> anyhow::Result<Option<Vec<u8>>> {
+        let mut imap = connect(&self.settings).await?;
+        imap.examine(folder).await?;
+        let msgs: Vec<_> = imap
+            .uid_fetch(uid.to_string(), "BODY.PEEK[]")
+            .await?
+            .try_collect()
+            .await?;
+        let raw = msgs.iter().find_map(|f| f.body().map(<[u8]>::to_vec));
+        let _ = imap.logout().await;
+        Ok(raw)
+    }
+
     /// Fetches every message in `folder` with a UID after `after` (or the last
     /// week on the first pass) and emits what survives the filters. Returns the
     /// highest UID seen.
@@ -722,7 +885,9 @@ impl EmailConnector {
                 let since =
                     (Utc::now() - chrono::Duration::days(FIRST_SYNC_DAYS)).format("%d-%b-%Y");
                 let mut v: Vec<u32> = imap
-                    .uid_search(format!("SINCE {since}"))
+                    // Unread only: mail you finished (marked done here, or read
+                    // elsewhere) doesn't come back after a restart.
+                    .uid_search(format!("UNSEEN SINCE {since}"))
                     .await?
                     .into_iter()
                     .collect();
@@ -862,9 +1027,21 @@ impl Connector for EmailConnector {
         Ok(())
     }
 
-    /// Everything is captured at ingest; there's nothing to refetch.
+    /// The whole message, formatted, fetched once from the server and cached.
+    /// Falls back to what was captured at ingest.
     async fn preview(&self, item: &QueueItem) -> anyhow::Result<Vec<Block>> {
-        Ok(item.event.blocks.clone())
+        let m = &item.event.metadata;
+        let (Some(folder), Some(uid)) = (m["folder"].as_str(), m["uid"].as_u64()) else {
+            return Ok(item.event.blocks.clone());
+        };
+        match self.fetch_raw(folder, uid).await {
+            Ok(Some(raw)) => Ok(render_message(&raw)),
+            Ok(None) => Ok(item.event.blocks.clone()),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't fetch the full email");
+                Ok(item.event.blocks.clone())
+            }
+        }
     }
 
     fn preview_ttl(&self) -> Duration {
@@ -997,6 +1174,39 @@ mod tests {
         assert_eq!(e.body.as_deref(), Some("Can you look at this today?"));
         assert_eq!(e.external_id, "abc@x");
         assert!(is_spam_folder("Junk") && is_spam_folder("INBOX.spam") && !is_spam_folder("INBOX"));
+    }
+
+    #[test]
+    fn renders_email_and_links_to_webmail() {
+        let raw =
+            b"From: Ann <ann@acme.com>\r\nTo: v@x.dev\r\nSubject: Hi\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/related; boundary=b\r\n\r\n--b\r\nContent-Type: text/html\r\n\r\n\
+<p>Hello <img src=\"cid:logo\"></p>\r\n--b\r\nContent-Type: image/png\r\nContent-ID: <logo>\r\n\
+Content-Transfer-Encoding: base64\r\n\r\naGk=\r\n--b--\r\n";
+        let blocks = render_message(raw);
+        let html = blocks.iter().find_map(|b| match b {
+            Block::Html { html } => Some(html.clone()),
+            _ => None,
+        });
+        assert!(html.unwrap().contains("data:image/png;base64,aGk="));
+        assert_eq!(base64(b"hello"), "aGVsbG8=");
+
+        assert_eq!(
+            open_url(None, "heracles.mxrouting.net", "INBOX", 7, "a@b").as_deref(),
+            Some(
+                "https://heracles.mxrouting.net/roundcube/?_task=mail&_mbox=INBOX&_uid=7&_action=show"
+            )
+        );
+        assert!(
+            open_url(None, "imap.gmail.com", "INBOX", 1, "x@y")
+                .unwrap()
+                .contains("rfc822msgid%3Ax%40y")
+        );
+        assert_eq!(
+            open_url(Some("mail.me.dev"), "h", "INBOX", 1, "x").as_deref(),
+            Some("https://mail.me.dev")
+        );
+        assert_eq!(open_url(None, "mail.example.org", "INBOX", 1, "x"), None);
     }
 
     #[test]

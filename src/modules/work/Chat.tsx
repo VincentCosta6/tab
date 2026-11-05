@@ -114,6 +114,12 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
   messages.forEach((m, i) => {
     if (m.kind === "tool" && messages[i + 1]?.kind === "tool_result") results.set(m.id, messages[i + 1]);
   });
+  // Several password cards for one connection: show only the newest.
+  const newestCard = new Map<string, number>();
+  messages.forEach((m) => m.kind === "secret_request" && newestCard.set(m.meta?.connector_id, m.id));
+  messages.forEach((m) => {
+    if (m.kind === "secret_request" && newestCard.get(m.meta?.connector_id) !== m.id) m.meta = { ...m.meta, superseded: true };
+  });
 
   useLayoutEffect(() => {
     end.current?.scrollIntoView({ block: "end" });
@@ -155,7 +161,7 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
 
 function MessageView({ m, result, onSend }: { m: SessionMessage; result?: SessionMessage; onSend?: (text: string) => void }) {
   if (m.role === "user") return <div className="msg msg-user">{m.content}</div>;
-  if (m.kind === "secret_request") return <SecretCard m={m} onSend={onSend} />;
+  if (m.kind === "secret_request") return m.meta?.superseded ? null : <SecretCard m={m} onSend={onSend} />;
   if (m.kind === "text") return <div className="msg msg-assistant"><Markdown text={m.content} /></div>;
   if (m.kind === "tool")
     return (

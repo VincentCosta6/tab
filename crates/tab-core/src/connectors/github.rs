@@ -147,10 +147,15 @@ struct User {
 
 #[derive(Deserialize)]
 struct PullOrIssue {
+    // Some subjects (e.g. discussions, releases) have no title or state.
+    #[serde(default)]
     title: String,
+    #[serde(default)]
     body: Option<String>,
+    #[serde(default)]
     state: String,
     user: Option<User>,
+    #[serde(default)]
     html_url: String,
     #[serde(default)]
     draft: Option<bool>,

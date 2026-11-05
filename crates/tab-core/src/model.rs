@@ -121,6 +121,11 @@ pub enum Block {
         #[serde(default)]
         language: Option<String>,
     },
+    /// A formatted email (or similar) body. The UI renders it isolated, with
+    /// scripts off and remote images blocked until the person loads them.
+    Html {
+        html: String,
+    },
     /// A question with options, e.g. an agent asking which approach to take.
     Choices {
         prompt: String,
