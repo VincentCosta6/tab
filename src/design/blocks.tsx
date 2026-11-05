@@ -1,7 +1,7 @@
 // Renders connector-provided Blocks. One component per Block variant; a new
 // connector gets rich previews by emitting these, with no UI work.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { sanitizeEmail } from "./sanitize";
 import type { Block } from "../lib/types";
 import { openUrl } from "../lib/api";
@@ -86,10 +86,18 @@ export function BlockView({ block }: { block: Block }) {
  * images (often trackers) blocked until the person loads them. Links open in
  * the browser.
  */
-function HtmlFrame({ html }: { html: string }) {
+/** Measured heights by content, so a remounted frame doesn't jump or flash. */
+const frameHeights = new Map<string, number>();
+
+const HtmlFrame = memo(function HtmlFrame({ html }: { html: string }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const [images, setImages] = useState(false);
-  const [height, setHeight] = useState(200);
+  const [height, setHeightState] = useState(() => frameHeights.get(html) ?? 200);
+  const [ready, setReady] = useState(false);
+  const setHeight = (h: number) => {
+    frameHeights.set(html, h);
+    setHeightState(h);
+  };
   const clean = useMemo(() => sanitizeEmail(html), [html]);
   const remote = /<img[^>]+src=["']?https?:|url\(\s*["']?https?:/i.test(clean);
   const csp = `default-src 'none'; style-src 'unsafe-inline' ${images ? "https:" : ""}; img-src data: ${images ? "https: http:" : ""}; font-src data: ${images ? "https:" : ""}`;
@@ -103,6 +111,7 @@ function HtmlFrame({ html }: { html: string }) {
       if (!d) return;
       const fit = () => setHeight(Math.min(4000, d.documentElement.scrollHeight + 2));
       fit();
+      setReady(true);
       d.querySelectorAll("img").forEach((i) => i.addEventListener("load", fit));
       // Nothing in the email navigates on its own. A link opens in the
       // browser only when clicked, and only for web and mailto addresses.
@@ -129,10 +138,10 @@ function HtmlFrame({ html }: { html: string }) {
         </div>
       )}
       {/* allow-same-origin without allow-scripts: nothing in the email runs, but tab can size the frame and catch link clicks. */}
-      <iframe ref={ref} title="Email" sandbox="allow-same-origin" srcDoc={doc} style={{ height }} />
+      <iframe ref={ref} title="Email" sandbox="allow-same-origin" srcDoc={doc} style={{ height }} className={ready ? "ready" : undefined} />
     </div>
   );
-}
+});
 
 export function Blocks({ blocks }: { blocks: Block[] }) {
   return (

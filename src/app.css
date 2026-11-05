@@ -289,7 +289,8 @@
 
 /* Formatted email bodies */
 .block-html { display: grid; gap: 6px; }
-.block-html iframe { width: 100%; border: 1px solid var(--border); border-radius: var(--radius-md); background: #fff; display: block; }
+.block-html iframe { width: 100%; border: 1px solid var(--border); border-radius: var(--radius-md); background: transparent; display: block; opacity: 0; transition: opacity 0.12s; }
+.block-html iframe.ready { opacity: 1; background: #fff; }
 .block-html-bar { display: flex; align-items: center; gap: 6px; font-size: var(--text-xs); color: var(--fg-subtle); }
 
 /* Context meter in the chat header */
