@@ -20,6 +20,7 @@ use tab_core::model::{
 };
 use tab_core::ratelimit::Pressure;
 use tab_core::store::{AuditEntry, AuditQuery, UsageRow};
+use tab_core::workflow::{self, Issue, Run, SavedBy, Workflow};
 use tab_core::workspace::{self, SearchHit, SearchQuery, Target, Workspace, Workspaces};
 use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tauri::{Emitter, Manager, State};
@@ -91,6 +92,14 @@ impl EngineAccess for LiveEngine {
         let mut next = self.0.config.lock().await.clone();
         next.connectors.insert(id.to_string(), cfg);
         self.0.apply(next).await.map(|_| ())
+    }
+    async fn dry_run_workflow(&self, w: Workflow, item_id: Option<String>) -> anyhow::Result<Run> {
+        let guard = self.0.engine.read().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
+            .run_workflow(w, item_id.as_deref(), true)
+            .await
     }
 }
 
@@ -461,6 +470,10 @@ async fn chat_send(
         }
     };
     let session = state.hub.session_for_item(&item.id).map_err(err)?;
+    // A turn in flight takes the message as steering; otherwise it starts one.
+    if attachments.is_empty() && state.hub.steer(&session.id, &text).map_err(err)? {
+        return Ok(ChatStarted { item, session });
+    }
     state
         .hub
         .send_with(&session.id, &text, &attachments)
@@ -1165,6 +1178,230 @@ async fn lsp_stop(state: State<'_, AppState>, session: String) -> CmdResult<()> 
     Ok(())
 }
 
+// --- Workflows -------------------------------------------------------------
+
+#[tauri::command]
+async fn workflows_list(state: State<'_, AppState>) -> CmdResult<Vec<Workflow>> {
+    state.store.workflows().map_err(err)
+}
+
+#[tauri::command]
+async fn workflow_templates() -> CmdResult<Vec<Workflow>> {
+    Ok(workflow::templates())
+}
+
+#[tauri::command]
+async fn workflow_validate(
+    state: State<'_, AppState>,
+    workflow: Workflow,
+) -> CmdResult<Vec<Issue>> {
+    let catalog = with_engine!(state, e => e.connectors());
+    let saved = state.store.workflows().map_err(err)?;
+    Ok(workflow::validate(&workflow, &catalog, &saved))
+}
+
+#[derive(Serialize)]
+struct SavedWorkflow {
+    workflow: Workflow,
+    issues: Vec<Issue>,
+}
+
+/// Saves the person's edits. A workflow with errors is saved turned off.
+#[tauri::command]
+async fn workflow_save(state: State<'_, AppState>, workflow: Workflow) -> CmdResult<SavedWorkflow> {
+    let catalog = with_engine!(state, e => e.connectors());
+    let saved = state.store.workflows().map_err(err)?;
+    let (w, issues) = workflow::prepare_save(workflow, SavedBy::Person, &catalog, &saved);
+    let w = state
+        .store
+        .workflow_save(&w, "user", Utc::now())
+        .map_err(err)?;
+    let _ = state.events.send(EngineEvent::WorkflowsChanged {
+        id: w.id.clone(),
+        by: "user".into(),
+    });
+    Ok(SavedWorkflow {
+        workflow: w,
+        issues,
+    })
+}
+
+/// Turns a workflow on or off, or allows its destructive steps. Turning on
+/// refuses a workflow that has errors.
+#[tauri::command]
+async fn workflow_set_enabled(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+    allow_destructive: Option<bool>,
+) -> CmdResult<Workflow> {
+    let mut w = state
+        .store
+        .workflow_get(&id)
+        .map_err(err)?
+        .ok_or("no such workflow")?;
+    if enabled {
+        let catalog = with_engine!(state, e => e.connectors());
+        let saved = state.store.workflows().map_err(err)?;
+        let mut check = w.clone();
+        check.enabled = true;
+        if let Some(i) = workflow::validate(&check, &catalog, &saved)
+            .into_iter()
+            .find(|i| i.error)
+        {
+            return Err(i.message);
+        }
+    }
+    let changed_destructive = allow_destructive.is_some_and(|a| a != w.allow_destructive);
+    w.enabled = enabled;
+    if let Some(a) = allow_destructive {
+        w.allow_destructive = a;
+    }
+    let w = if changed_destructive {
+        state
+            .store
+            .workflow_save(&w, "user", Utc::now())
+            .map_err(err)?
+    } else {
+        state
+            .store
+            .workflow_set_enabled(&id, enabled)
+            .map_err(err)?
+            .ok_or("no such workflow")?
+    };
+    let _ = state.events.send(EngineEvent::WorkflowsChanged {
+        id: w.id.clone(),
+        by: "user".into(),
+    });
+    Ok(w)
+}
+
+#[tauri::command]
+async fn workflow_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.store.workflow_delete(&id).map_err(err)?;
+    let _ = state.events.send(EngineEvent::WorkflowsChanged {
+        id,
+        by: "user".into(),
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn workflow_runs(
+    state: State<'_, AppState>,
+    workflow_id: Option<String>,
+    limit: Option<usize>,
+) -> CmdResult<Vec<Run>> {
+    state
+        .store
+        .workflow_runs(workflow_id.as_deref(), limit.unwrap_or(50).min(500))
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn workflow_versions(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<serde_json::Value>> {
+    Ok(state
+        .store
+        .workflow_versions(&id)
+        .map_err(err)?
+        .into_iter()
+        .map(|(version, by, at, w)| serde_json::json!({ "version": version, "saved_by": by, "saved_at": at, "workflow": w }))
+        .collect())
+}
+
+/// Runs a workflow now: dry (nothing changes) or for real.
+#[tauri::command]
+async fn workflow_run(
+    state: State<'_, AppState>,
+    workflow: Workflow,
+    item_id: Option<String>,
+    dry_run: bool,
+) -> CmdResult<Run> {
+    let guard = state.engine.read().await;
+    let e = guard.as_ref().ok_or("engine is not running")?;
+    e.run_workflow(workflow, item_id.as_deref(), dry_run)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn item_activity(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<tab_core::model::Activity>> {
+    state.store.activity_for(&id, 200).map_err(err)
+}
+
+const WORKFLOW_CHAT_KEY: &str = "workflows";
+
+#[tauri::command]
+async fn workflow_chat_open(state: State<'_, AppState>) -> CmdResult<Chat> {
+    let session = state
+        .store
+        .session_for_key(WORKFLOW_CHAT_KEY)
+        .map_err(err)?;
+    let (messages, approvals, running) = match &session {
+        Some(s) => (
+            state.store.messages(&s.id).map_err(err)?,
+            state.hub.pending_approvals(&s.id),
+            state.hub.is_running(&s.id),
+        ),
+        None => (Vec::new(), Vec::new(), false),
+    };
+    Ok(Chat {
+        session,
+        messages,
+        approvals,
+        running,
+    })
+}
+
+/// A message to the builder's assistant, with the workflow that's open.
+#[tauri::command]
+async fn workflow_chat_send(
+    state: State<'_, AppState>,
+    text: String,
+    open: Option<Workflow>,
+) -> CmdResult<Session> {
+    let mut text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("message is empty".into());
+    }
+    if state.hub.config().kind.is_none() {
+        return Err("Set up an agent first (Settings → Agent).".into());
+    }
+    if let Some(w) = &open {
+        let saved = if w.id.is_empty() {
+            "a new draft, not saved yet"
+        } else {
+            "saved"
+        };
+        text = format!(
+            "(Open in the builder, {saved}:\n```json\n{}\n```)\n\n{text}",
+            serde_json::to_string_pretty(w).map_err(err)?
+        );
+    }
+    let brief = "This chat is the assistant in tab's workflow builder. The person describes what they want \
+        automated and you build it as a tab workflow: a trigger and ordered steps that call connection actions. \
+        Start with tab_list_actions to see what each connection can start on and do; never invent actions or \
+        inputs. Save with tab_save_workflow (pass the open workflow's id to change it, leave id out for a new one); \
+        the builder shows what you save right away. Then dry-run it with tab_test_workflow on a real item from \
+        tab_search when one fits, and say in a sentence or two what it does and what the dry run showed. \
+        Prefer deterministic steps: filters and conditions on fields over anything vague. Keep triggers narrow \
+        (a connection and kinds) so workflows can't feed each other. You can't turn workflows on or allow \
+        destructive steps (merge, close, move mail); the person does that in the builder, so tell them when it's needed.";
+    let cwd = state.hub.workdir();
+    let session = state
+        .hub
+        .session_for_key(WORKFLOW_CHAT_KEY, "Workflow builder", &cwd, brief)
+        .map_err(err)?;
+    state.hub.send_with(&session.id, &text, &[]).map_err(err)?;
+    Ok(session)
+}
+
 #[tauri::command]
 async fn mark_done(state: State<'_, AppState>, id: String) -> CmdResult<Option<QueueItem>> {
     with_engine!(state, e => e.mark_done(&id).await.map_err(err))
@@ -1514,6 +1751,18 @@ pub fn run() {
             lsp_request,
             lsp_notify,
             lsp_stop,
+            workflows_list,
+            workflow_templates,
+            workflow_validate,
+            workflow_save,
+            workflow_set_enabled,
+            workflow_delete,
+            workflow_runs,
+            workflow_versions,
+            workflow_run,
+            item_activity,
+            workflow_chat_open,
+            workflow_chat_send,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

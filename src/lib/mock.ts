@@ -1,6 +1,7 @@
 // Browser-only stand-in for the Rust backend. Mirrors the demo connector's
 // sample data closely enough to design against.
 
+import { NOT_HANDLED, withActions, workflowMock } from "./mock-workflows";
 import type {
   GhLoginCode, GhStatus, LspServer,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
@@ -51,7 +52,7 @@ let items: QueueItem[] = seeds.map(([kind, title, body, actor, context, url, min
 });
 
 const base = { rate_limits: [], category: "built_in", features: [] as string[], builtin: false };
-const connectors: ConnectorInfo[] = [
+const plainConnectors: ConnectorInfo[] = [
   { ...base, id: "tab", name: "tab", icon: "tab", builtin: true, description: "tab's own tasks and schedules. Anything you or an agent asks tab to do becomes a task here, with a priority, an optional due time, and its own agent session.", available: true, enabled: true, status: { state: "running", last_sync: ago(0) },
     features: ["Tasks with priority (low, normal, high, urgent) and due times", "Scheduled tasks wake up in the queue when they are due", "Every task can own an agent session", "Agents create and update tasks through tab's MCP server"],
     kinds: [
@@ -141,9 +142,13 @@ const setState = (id: string, state: ItemState, snoozed_until: string | null = n
   return item;
 };
 
+const connectors: ConnectorInfo[] = withActions(plainConnectors);
+
 export const mockApi = {
   async invoke<T>(cmd: string, args: Record<string, any> = {}): Promise<T> {
     const r = await (async () => {
+      const wf = workflowMock(cmd, args, { items: () => items, connectors: () => connectors, emit });
+      if (wf !== NOT_HANDLED) return wf;
       switch (cmd) {
         case "agent_slash_commands": return ["compact", "context", "cost", "init", "review", "pr-comments", "security-review", "release-notes", "frontend-design", "deploy"];
         case "agent_activity": return sessions.filter((s) => s.item_id && s.status !== "idle").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));

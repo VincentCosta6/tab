@@ -6,6 +6,7 @@ import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, GraphNode, GraphView, LinkSummary, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, Session, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
+  Activity, Issue, Workflow, WorkflowRun,
 } from "./types";
 import { mockApi } from "./mock";
 
@@ -99,6 +100,18 @@ export const api = {
   lspRequest: <T = unknown>(session: string, method: string, params: unknown) => call<T>("lsp_request", { session, method, params }),
   lspNotify: (session: string, method: string, params: unknown) => call<void>("lsp_notify", { session, method, params }),
   lspStop: (session: string) => call<void>("lsp_stop", { session }),
+  workflowsList: () => call<Workflow[]>("workflows_list"),
+  workflowTemplates: () => call<Workflow[]>("workflow_templates"),
+  workflowValidate: (workflow: Workflow) => call<Issue[]>("workflow_validate", { workflow }),
+  workflowSave: (workflow: Workflow) => call<{ workflow: Workflow; issues: Issue[] }>("workflow_save", { workflow }),
+  workflowSetEnabled: (id: string, enabled: boolean, allowDestructive?: boolean) =>
+    call<Workflow>("workflow_set_enabled", { id, enabled, allowDestructive: allowDestructive ?? null }),
+  workflowDelete: (id: string) => call<void>("workflow_delete", { id }),
+  workflowRuns: (workflowId: string | null, limit = 50) => call<WorkflowRun[]>("workflow_runs", { workflowId, limit }),
+  workflowRun: (workflow: Workflow, itemId: string | null, dryRun: boolean) => call<WorkflowRun>("workflow_run", { workflow, itemId, dryRun }),
+  workflowChatOpen: () => call<Chat>("workflow_chat_open"),
+  workflowChatSend: (text: string, open: Workflow | null) => call<Session>("workflow_chat_send", { text, open }),
+  itemActivity: (id: string) => call<Activity[]>("item_activity", { id }),
 };
 
 export async function openUrl(url: string) {

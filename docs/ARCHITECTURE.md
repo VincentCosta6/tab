@@ -144,24 +144,29 @@ The design system (`src/design/`) is the only source of styling:
 
 Rule of thumb: a new screen should be composable from these; if it isn't, add the missing component to the design system first.
 
-## Automations (designed)
+## Workflows (built)
 
-"When something happens in tab, do something." Configurable in a visual builder, over MCP, or as JSON.
+"When something happens in tab, do these steps." Built in the Workflows tab (a visual builder), by the builder's assistant, over MCP, or as JSON.
 
-```
-Trigger            →  Conditions               →  Actions
-item ingested         kind = github.ci_failed      deterministic: snooze, mark done, set score,
-item ranked           score ≥ 80                     webhook, run command, connector action
-item snoozed          actor in [...]                 (comment on PR, re-run CI, reply in Slack)
-item done             context matches /…/        agent: start an agent session with a prompt
-agent status changed  time window                    template and the item as context
-schedule (cron)
-```
+**Actions are connector metadata.** Next to `kinds` (what a connector emits), every `ConnectorDescriptor` lists `actions`: `ActionInfo { id, label, description, icon, effect, inputs, outputs, spends, for_kinds }`. `effect` is `read`, `write` or `destructive`; `inputs`/`outputs` are typed fields (`text`, `long_text`, `number`, `bool`, `select`, `list`) with defaults like `{{item.metadata.repo}}`. `Connector::act(action, input)` runs one, through the gateway like every other call. Built in: GitHub (`pr.get`, `issue.comment`, `issue.add_labels`, `pr.request_reviewers`, `issue.create`, `pr.merge`, `issue.close`), email (`message.mark_read`, `message.flag`, `message.move`) and tab (`task.create`, `item.snooze`, `item.done`, `item.reopen`, `item.set_project`, run by the engine itself). Adding an action needs no UI work: the builder's forms come from the descriptor.
 
-- Stored in `automations` (versioned JSON graph of nodes and edges) with runs in `automation_runs` (inputs, each step's output, duration, error). Runs are audited like API calls; actions that call APIs go through the gateway.
-- Triggers are `EngineEvent`s, so the runtime is just another subscriber.
-- The **visual builder** is a node canvas (trigger → condition → action) generated from action descriptors, the same metadata pattern connectors use. Connectors can contribute actions.
-- Safety: dry-run mode, per-automation rate limits, and confirmation for destructive actions until the automation is marked trusted.
+**A workflow is data** (`workflow/mod.rs`): one trigger (`item` change from chosen connections and kinds with conditions, `signal` from another workflow, `schedule`, or `manual`) and ordered steps: `action`, `filter` (stop unless conditions hold), `set` (compute values) and `emit` (signal other workflows). Each step can have `when` conditions. Templates (`{{item.title}}`, `{{steps.pr.additions}}`, `{{signal.repo}}`) let steps feed each other; a value that is exactly one template keeps its type. There's no model call anywhere in a run, so runs are deterministic.
+
+**Runtime** (`workflow/runtime.rs`) is one more subscriber to the engine's event stream. Stored in `workflows` (JSON definition) with every save kept in `workflow_versions`; runs in `workflow_runs` with each step's inputs, outputs, status and timing, for 30 days.
+
+**Guardrails.**
+- *Loops.* Each run carries the chain of workflows that caused it (tasks a run creates carry `workflow_chain` in metadata, and items a run changes remember the chain for 10 minutes). A workflow never runs inside its own chain, and chains stop at 3. Saving also refuses a set of enabled workflows that could start each other in a circle (a task-creating workflow on every new tab item, two workflows signalling each other).
+- *Dedup.* The same trigger (change, item, item version; or schedule slot) runs a workflow once, enforced by a unique index.
+- *Rate.* Per-workflow runs per hour (default 30) and per-item cool-down, 200 runs an hour across all workflows, at most 10 actions per run, a 60 s step timeout. Connector actions run at background priority, so the gateway defers them when a provider budget is tight; the run is marked *held back* rather than spending what interactive use needs. Refused runs are written down at most once an hour per workflow.
+- *Consent.* Agents can draft, save and dry-run workflows but every agent save is off and can't allow destructive steps. The person turns a workflow on (which re-validates it), and destructive actions stay blocked until the person allows them on that workflow.
+
+**Dry runs** execute reads for real and show what each write would do with its rendered inputs.
+
+**Building with AI.** The builder has an assistant chat (session key `workflows`) whose agent uses MCP tools `tab_list_actions`, `tab_list_workflows`, `tab_save_workflow` and `tab_test_workflow`; the open workflow is sent with each message, and what the agent saves appears on the canvas right away.
+
+## Item timelines (built)
+
+`item_activity` is an append-only log per item: arrived (and from where, or which workflow created it), updated, snoozed, woke, done (by you or a workflow), reopened, finished upstream (a PR merged or closed), moved to a project, agent session started / waiting on you / failed, and workflow runs. Reading a timeline also pulls in what happened to items linked into the item's context (a PR the agent raised shows its merge), so a task reads as: created, Claude Code session started, PR linked, PR merged, workflow ran. The Timeline tab on every item shows it, and `tab_get_item` gives it to agents.
 
 ## MCP server (built: core tools; designed: the rest)
 
@@ -226,6 +231,6 @@ Sync across devices, team-shared automations and graph, and a webhook receiver s
 | **0. Foundation** (this PR) | Core crate, connector framework, GitHub + sample connectors, deterministic ranking + Haiku layer, gateway with cache/limits/audit, SQLite with FTS5 trigram and graph tables, design system, Work / Connections / Settings. |
 | **1. Agents + MCP** | MCP server (read, act, configure). Agent session runner with PTY streaming, xterm.js, status adapters (generic, MCP, Claude Code hooks, OpenCode). Agent items in the queue. |
 | **2. Graph + review** | Graph view module. GitHub review module with Monaco diffs and comments. Secrets in keychain. |
-| **3. Automations** | Runtime on the event stream, deterministic and agent actions, visual builder, MCP configuration. |
+| **3. Workflows** (built) | Connector actions, deterministic runtime on the event stream with loop/dedup/rate guards, visual builder, AI assistant over MCP, item timelines. Next: agent steps, approval cards for destructive steps, webhook triggers. |
 | **4. More connectors** | Slack, Gmail, Zoom summaries, Jira/Linear; out-of-process connector protocol; gateway budgets and CLI provider. |
 | **5. Server** | Sync, webhooks, team features. |

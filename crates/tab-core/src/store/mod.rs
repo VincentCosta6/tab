@@ -4,6 +4,7 @@
 //! Search uses FTS5 with the trigram tokenizer, so substring search works
 //! ("checko" finds "#incident-checkout") across items and entities.
 
+mod activity;
 mod context;
 mod graph;
 mod http;
@@ -13,6 +14,7 @@ mod projects;
 mod sessions;
 mod usage;
 mod vectors;
+mod workflows;
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -30,6 +32,8 @@ pub struct Store {
     /// Set once the embedding model has loaded; search uses it for queries.
     embedder: std::sync::RwLock<Option<std::sync::Arc<dyn crate::embed::Embed>>>,
     index_status: Mutex<crate::embed::IndexStatus>,
+    /// Bumped on every workflow write, so the runtime knows to reload.
+    workflows_rev: std::sync::atomic::AtomicU64,
 }
 
 /// Ordered migrations; `PRAGMA user_version` records how many have run.
@@ -42,7 +46,9 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/006_session_keys.sql"),
     include_str!("migrations/007_projects.sql"),
     include_str!("migrations/008_embeddings.sql"),
-    include_str!("migrations/009_entity_blocks.sql"),
+    include_str!("migrations/009_workflows.sql"),
+    include_str!("migrations/010_item_activity.sql"),
+    include_str!("migrations/011_entity_blocks.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {
@@ -93,6 +99,7 @@ impl Store {
             conn: Mutex::new(conn),
             embedder: std::sync::RwLock::new(None),
             index_status: Mutex::new(Default::default()),
+            workflows_rev: std::sync::atomic::AtomicU64::new(0),
         })
     }
 

@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -26,9 +27,11 @@ use crate::model::{
 use crate::ranker::{Pipeline, Ranker};
 use crate::ratelimit;
 use crate::store::{Store, Upsert};
+use crate::workflow::runtime::{Host, Runtime};
+use crate::workflow::{Run, Workflow};
 
 /// What happened to an item. These are the triggers automations will hang off.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Change {
     Ingested,
@@ -82,6 +85,16 @@ pub enum EngineEvent {
     /// A project or its notes changed.
     ProjectChanged {
         project_id: String,
+    },
+    /// A workflow run started or finished.
+    WorkflowRun {
+        run: Run,
+    },
+    /// A workflow was saved, turned on or off, or deleted.
+    WorkflowsChanged {
+        id: String,
+        /// `user` or `agent`.
+        by: String,
     },
 }
 
@@ -150,8 +163,7 @@ impl Engine {
 /// A running engine. Dropping it does not stop it; call [`EngineHandle::shutdown`].
 pub struct EngineHandle {
     core: Arc<Core>,
-    connectors: Arc<HashMap<String, Arc<dyn Connector>>>,
-    infos: Arc<Mutex<Vec<ConnectorInfo>>>,
+    workflows: Arc<Runtime>,
     cancel: CancellationToken,
 }
 
@@ -161,9 +173,157 @@ struct Core {
     ranker: Arc<dyn Ranker>,
     events: broadcast::Sender<EngineEvent>,
     rank_slots: Semaphore,
+    connectors: HashMap<String, Arc<dyn Connector>>,
+    infos: Arc<Mutex<Vec<ConnectorInfo>>>,
+}
+
+fn changed(core: &Core, change: Change, item: Option<QueueItem>) -> Option<QueueItem> {
+    if let Some(i) = &item {
+        core.publish(change, i.clone());
+    }
+    item
 }
 
 impl Core {
+    /// Adds a line to an item's timeline. Never fails the caller.
+    fn note(
+        &self,
+        item_id: &str,
+        kind: &str,
+        title: &str,
+        by: Option<&str>,
+        detail: serde_json::Value,
+    ) {
+        if let Err(e) = self
+            .store
+            .activity_add(item_id, Utc::now(), kind, title, by, detail)
+        {
+            tracing::warn!(error = %e, "recording activity failed");
+        }
+    }
+
+    async fn mark_done(&self, id: &str, by: &str) -> anyhow::Result<Option<QueueItem>> {
+        let item = changed(
+            self,
+            Change::Done,
+            self.store
+                .set_state(id, ItemState::Done, None, Utc::now())?,
+        );
+        if let Some(i) = &item
+            && let Some(c) = self.connectors.get(&i.event.source)
+            && let Err(e) = c.on_done(i).await
+        {
+            tracing::warn!(connector = c.id(), error = %e, "on_done failed");
+        }
+        if item.is_some() {
+            self.note(id, "done", "Marked done", Some(by), serde_json::json!({}));
+        }
+        Ok(item)
+    }
+
+    fn snooze(
+        &self,
+        id: &str,
+        until: DateTime<Utc>,
+        by: &str,
+    ) -> anyhow::Result<Option<QueueItem>> {
+        let item = changed(
+            self,
+            Change::Snoozed,
+            self.store
+                .set_state(id, ItemState::Snoozed, Some(until), Utc::now())?,
+        );
+        if item.is_some() {
+            self.note(
+                id,
+                "snoozed",
+                "Snoozed",
+                Some(by),
+                serde_json::json!({ "until": until }),
+            );
+        }
+        Ok(item)
+    }
+
+    fn reopen(&self, id: &str, by: &str) -> anyhow::Result<Option<QueueItem>> {
+        let item = changed(
+            self,
+            Change::Reopened,
+            self.store
+                .set_state(id, ItemState::Open, None, Utc::now())?,
+        );
+        if item.is_some() {
+            self.note(id, "reopened", "Reopened", Some(by), serde_json::json!({}));
+        }
+        Ok(item)
+    }
+
+    /// `chain` is set when a workflow creates the task, so workflows it
+    /// starts know where it came from.
+    fn create_task(
+        self: &Arc<Self>,
+        task: NewTask,
+        chain: &[String],
+        workflow: Option<&str>,
+    ) -> anyhow::Result<QueueItem> {
+        let now = Utc::now();
+        let title = task.title.trim();
+        anyhow::ensure!(!title.is_empty(), "a task needs a title");
+        let scheduled = task.due_at.is_some_and(|d| d > now);
+        let mut metadata = serde_json::json!({ "created_by": task.created_by });
+        if let Some(p) = task.priority.as_deref().filter(|p| *p != "normal") {
+            metadata["priority"] = p.into();
+        }
+        if let Some(d) = task.due_at {
+            metadata["due_at"] = d.to_rfc3339().into();
+        }
+        if !chain.is_empty() {
+            metadata["workflow_chain"] = serde_json::json!(chain);
+        }
+        if let Some(w) = workflow {
+            metadata["workflow"] = w.into();
+        }
+        let event = IncomingEvent {
+            source: crate::connectors::tab::SOURCE.into(),
+            external_id: uuid::Uuid::new_v4().to_string(),
+            kind: if scheduled {
+                "tab.scheduled"
+            } else {
+                "tab.task"
+            }
+            .into(),
+            title: title.chars().take(200).collect(),
+            body: task.body.filter(|b| !b.trim().is_empty()),
+            url: task.url.filter(|u| !u.trim().is_empty()),
+            actor: Some(
+                match task.created_by.as_str() {
+                    "agent" => "agent",
+                    "workflow" => "workflow",
+                    _ => "you",
+                }
+                .into(),
+            ),
+            context: Some("tab".into()),
+            occurred_at: now,
+            metadata,
+            ..Default::default()
+        };
+        let item = self
+            .ingest(&event)?
+            .ok_or_else(|| anyhow::anyhow!("task was not stored"))?;
+        let item = match task.project_id.as_deref().filter(|p| !p.is_empty()) {
+            Some(p) => self
+                .store
+                .item_set_project(&item.id, Some(p), now)?
+                .unwrap_or(item),
+            None => item,
+        };
+        if scheduled && let Some(due) = task.due_at {
+            return Ok(self.snooze(&item.id, due, "schedule")?.unwrap_or(item));
+        }
+        Ok(item)
+    }
+
     /// Marks an item done because it finished at the source.
     fn finish_upstream(&self, item: &QueueItem) {
         match self
@@ -172,6 +332,18 @@ impl Core {
         {
             Ok(Some(i)) => {
                 tracing::info!(id = %i.id, title = %i.event.title, "finished upstream");
+                let title = match i.event.metadata["subject_type"].as_str() {
+                    Some("PullRequest") => "Pull request merged or closed",
+                    Some("Issue") => "Issue closed",
+                    _ => "Finished upstream",
+                };
+                self.note(
+                    &i.id,
+                    "finished_upstream",
+                    title,
+                    Some("upstream"),
+                    serde_json::json!({}),
+                );
                 self.publish(Change::Done, i);
             }
             Ok(None) => {}
@@ -203,11 +375,35 @@ impl Core {
     fn ingest(self: &Arc<Self>, e: &IncomingEvent) -> anyhow::Result<Option<QueueItem>> {
         Ok(match self.store.upsert(e, Utc::now())? {
             Upsert::Inserted(item) => {
+                let (title, by) = match e.metadata["workflow"].as_str() {
+                    Some(w) => (
+                        "Created by a workflow".to_string(),
+                        Some(format!("workflow:{w}")),
+                    ),
+                    None if e.source == crate::connectors::tab::SOURCE => {
+                        ("Created".to_string(), e.actor.clone())
+                    }
+                    None => (format!("Arrived from {}", e.source), e.actor.clone()),
+                };
+                self.note(
+                    &item.id,
+                    "arrived",
+                    &title,
+                    by.as_deref(),
+                    serde_json::json!({ "kind": e.kind }),
+                );
                 self.publish(Change::Ingested, item.clone());
                 tokio::spawn(self.clone().rank(item.clone()));
                 Some(item)
             }
             Upsert::Updated(item) => {
+                self.note(
+                    &item.id,
+                    "updated",
+                    &format!("Updated: {}", e.title),
+                    e.actor.as_deref(),
+                    serde_json::json!({ "kind": e.kind }),
+                );
                 // Keep showing the old preview; the refresher replaces it.
                 self.store.preview_mark_dirty(&item.id)?;
                 self.publish(Change::Updated, item.clone());
@@ -266,19 +462,261 @@ impl Core {
     }
 }
 
+/// Writes agent sessions and workflow runs into item timelines.
+struct Timeline {
+    core: Arc<Core>,
+    /// Session id → last status written, so each turn isn't a line.
+    sessions: HashMap<String, crate::model::SessionStatus>,
+}
+
+impl Timeline {
+    fn record(&mut self, e: &EngineEvent) {
+        use crate::model::SessionStatus;
+        match e {
+            EngineEvent::SessionChanged { session: s } => {
+                let Some(item) = &s.item_id else { return };
+                let agent = match s.agent {
+                    crate::model::AgentKind::ClaudeCode => "Claude Code",
+                    crate::model::AgentKind::OpenCode => "OpenCode",
+                };
+                let before = self.sessions.insert(s.id.clone(), s.status);
+                let first = before.is_none()
+                    && !self
+                        .core
+                        .store
+                        .activity_for(item, 500)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|a| {
+                            a.kind == "session_started" && a.detail["session_id"] == s.id.as_str()
+                        });
+                let detail = serde_json::json!({ "session_id": s.id, "agent": s.agent });
+                if first {
+                    self.core.note(
+                        item,
+                        "session_started",
+                        &format!("{agent} session started"),
+                        Some("agent"),
+                        detail.clone(),
+                    );
+                }
+                if before != Some(s.status) {
+                    match s.status {
+                        SessionStatus::NeedsInput => self.core.note(
+                            item,
+                            "session_needs_input",
+                            &format!("{agent} is waiting on you"),
+                            Some("agent"),
+                            detail,
+                        ),
+                        SessionStatus::Failed => self.core.note(
+                            item,
+                            "session_failed",
+                            &format!("{agent} session failed"),
+                            Some("agent"),
+                            detail,
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+            EngineEvent::WorkflowRun { run } if run.finished_at.is_some() && !run.dry_run => {
+                use crate::workflow::RunStatus;
+                let Some(item) = &run.item_id else { return };
+                let outcome = match run.status {
+                    RunStatus::Succeeded => "ran",
+                    RunStatus::Stopped => "stopped at a filter",
+                    RunStatus::Failed => "failed",
+                    RunStatus::Blocked => "is waiting for your OK",
+                    RunStatus::Throttled => "was held back by a rate limit",
+                    RunStatus::LoopStopped => "was stopped to prevent a loop",
+                    RunStatus::Running => return,
+                };
+                // A filter that didn't match on the first step is noise.
+                if run.status == RunStatus::Stopped && run.steps.len() <= 1 {
+                    return;
+                }
+                self.core.note(
+                    item,
+                    "workflow_run",
+                    &format!("Workflow \"{}\" {outcome}", run.workflow_name),
+                    Some(&format!("workflow:{}", run.workflow_name)),
+                    serde_json::json!({ "run_id": run.id, "workflow_id": run.workflow_id, "status": run.status, "error": run.error }),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What workflows reach through the engine.
+struct WorkflowHost(Arc<Core>);
+
+fn str_arg(v: &serde_json::Value, k: &str) -> Option<String> {
+    match &v[k] {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn num_arg(v: &serde_json::Value, k: &str) -> Option<i64> {
+    v[k].as_i64()
+        .or_else(|| v[k].as_f64().map(|f| f as i64))
+        .or_else(|| v[k].as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+#[async_trait]
+impl Host for WorkflowHost {
+    fn store(&self) -> &Store {
+        &self.0.store
+    }
+    fn catalog(&self) -> Vec<ConnectorInfo> {
+        self.0
+            .infos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    fn connector(&self, id: &str) -> Option<Arc<dyn Connector>> {
+        self.0.connectors.get(id).cloned()
+    }
+    fn publish(&self, e: EngineEvent) {
+        let _ = self.0.events.send(e);
+    }
+    async fn tab_action(
+        &self,
+        action: &str,
+        input: &serde_json::Value,
+        chain: &[String],
+        workflow: &str,
+    ) -> anyhow::Result<(serde_json::Value, Option<String>)> {
+        let core = &self.0;
+        let by = format!("workflow:{workflow}");
+        let item_id =
+            || str_arg(input, "item_id").ok_or_else(|| anyhow::anyhow!("item_id is required"));
+        let project = |name: Option<String>| -> anyhow::Result<Option<String>> {
+            match name {
+                None => Ok(None),
+                Some(n) => Ok(Some(
+                    core.store
+                        .project_find(&n)?
+                        .ok_or_else(|| anyhow::anyhow!("no project called {n}"))?
+                        .id,
+                )),
+            }
+        };
+        let gone = |id: &str| anyhow::anyhow!("no item {id}");
+        match action {
+            "task.create" => {
+                let due = num_arg(input, "due_in_minutes")
+                    .filter(|m| *m > 0)
+                    .map(|m| Utc::now() + chrono::Duration::minutes(m));
+                let task = NewTask {
+                    title: str_arg(input, "title").unwrap_or_default(),
+                    body: str_arg(input, "body"),
+                    priority: str_arg(input, "priority"),
+                    due_at: due,
+                    url: str_arg(input, "url"),
+                    created_by: "workflow".into(),
+                    project_id: project(str_arg(input, "project"))?,
+                };
+                let item = core.create_task(task, chain, Some(workflow))?;
+                Ok((serde_json::json!({ "item_id": item.id }), Some(item.id)))
+            }
+            "item.snooze" => {
+                let id = item_id()?;
+                let minutes = num_arg(input, "minutes").filter(|m| *m > 0).unwrap_or(240);
+                core.snooze(&id, Utc::now() + chrono::Duration::minutes(minutes), &by)?
+                    .ok_or_else(|| gone(&id))?;
+                Ok((serde_json::json!({}), Some(id)))
+            }
+            "item.done" => {
+                let id = item_id()?;
+                core.mark_done(&id, &by).await?.ok_or_else(|| gone(&id))?;
+                Ok((serde_json::json!({}), Some(id)))
+            }
+            "item.reopen" => {
+                let id = item_id()?;
+                core.reopen(&id, &by)?.ok_or_else(|| gone(&id))?;
+                Ok((serde_json::json!({}), Some(id)))
+            }
+            "item.set_project" => {
+                let id = item_id()?;
+                let p = project(str_arg(input, "project"))?;
+                core.store
+                    .item_set_project(&id, p.as_deref(), Utc::now())?
+                    .ok_or_else(|| gone(&id))?;
+                let name = str_arg(input, "project");
+                core.note(
+                    &id,
+                    "project",
+                    &match &name {
+                        Some(n) => format!("Put in {n}"),
+                        None => "Taken out of its project".into(),
+                    },
+                    Some(&by),
+                    serde_json::json!({ "project_id": p }),
+                );
+                Ok((serde_json::json!({ "project_id": p }), Some(id)))
+            }
+            other => anyhow::bail!("tab has no action {other}"),
+        }
+    }
+}
+
 impl Engine {
     /// Spawns connectors, the ingest loop and the timers on the current Tokio runtime.
     pub fn start(self) -> EngineHandle {
         let cancel = CancellationToken::new();
         let (tx, mut rx) = mpsc::channel::<EngineMsg>(256);
+        let infos = Arc::new(Mutex::new(self.infos));
+        let connector_map: HashMap<String, Arc<dyn Connector>> = self
+            .connectors
+            .iter()
+            .map(|c| (c.id().to_string(), c.clone()))
+            .collect();
         let core = Arc::new(Core {
             store: self.store,
             gateway: self.gateway,
             ranker: self.ranker,
             events: self.events,
             rank_slots: Semaphore::new(MAX_CONCURRENT_RANKS),
+            connectors: connector_map,
+            infos: infos.clone(),
         });
-        let infos = Arc::new(Mutex::new(self.infos));
+
+        // Workflows listen before anything can happen.
+        let workflows = Runtime::new(Arc::new(WorkflowHost(core.clone())));
+        if let Err(e) = core.store.workflow_runs_abandon(Utc::now()) {
+            tracing::warn!(error = %e, "couldn't close unfinished workflow runs");
+        }
+        {
+            let (wf, mut sub, wf_cancel) =
+                (workflows.clone(), core.events.subscribe(), cancel.clone());
+            let mut timeline = Timeline {
+                core: core.clone(),
+                sessions: HashMap::new(),
+            };
+            tokio::spawn(async move {
+                loop {
+                    let e = tokio::select! {
+                        e = sub.recv() => e,
+                        _ = wf_cancel.cancelled() => break,
+                    };
+                    match e {
+                        Ok(e) => {
+                            timeline.record(&e);
+                            wf.on_event(&e)
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(missed = n, "workflows fell behind the event stream")
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
 
         // Once per start: close items whose PR (or similar) finished while tab
         // wasn't looking. Runs in the background, one item at a time.
@@ -361,7 +799,7 @@ impl Engine {
             }
         });
 
-        let (timer, timer_cancel) = (core.clone(), cancel.clone());
+        let (timer, timer_cancel, timer_wf) = (core.clone(), cancel.clone(), workflows.clone());
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(30));
             let mut n = 0u64;
@@ -371,32 +809,39 @@ impl Engine {
                     _ = timer_cancel.cancelled() => break,
                 }
                 match timer.store.wake_due(Utc::now()) {
-                    Ok(items) => items
-                        .into_iter()
-                        .for_each(|i| timer.publish(Change::Woke, i)),
+                    Ok(items) => items.into_iter().for_each(|i| {
+                        timer.note(
+                            &i.id,
+                            "woke",
+                            "Back in the queue",
+                            None,
+                            serde_json::json!({}),
+                        );
+                        timer.publish(Change::Woke, i)
+                    }),
                     Err(e) => tracing::error!(error = %e, "waking snoozed items failed"),
                 }
-                if n.is_multiple_of(120)
-                    && let Err(e) = timer.store.prune(Utc::now(), chrono::Duration::days(30))
-                {
-                    tracing::error!(error = %e, "pruning failed");
+                timer_wf.tick(Utc::now());
+                if n.is_multiple_of(120) {
+                    if let Err(e) = timer.store.prune(Utc::now(), chrono::Duration::days(30)) {
+                        tracing::error!(error = %e, "pruning failed");
+                    }
+                    if let Err(e) = timer
+                        .store
+                        .workflow_runs_prune(Utc::now() - chrono::Duration::days(30))
+                        .and_then(|_| timer.store.activity_prune())
+                    {
+                        tracing::error!(error = %e, "pruning workflow runs failed");
+                    }
                 }
                 n += 1;
             }
         });
 
-        let connectors: Arc<HashMap<String, Arc<dyn Connector>>> = Arc::new(
-            self.connectors
-                .into_iter()
-                .map(|c| (c.id().to_string(), c))
-                .collect(),
-        );
-
         // Background preview refresher. Runs every call at background
         // priority, so the gateway defers it whenever a connector's budget
         // is tight or it has been bursting; interactive opens always win.
-        let (refresh, refresh_conns, refresh_cancel) =
-            (core.clone(), connectors.clone(), cancel.clone());
+        let (refresh, refresh_cancel) = (core.clone(), cancel.clone());
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(REFRESH_EVERY);
             loop {
@@ -418,7 +863,7 @@ impl Engine {
                     if done >= REFRESH_BATCH || refresh_cancel.is_cancelled() {
                         break;
                     }
-                    let Some(c) = refresh_conns.get(&item.event.source) else {
+                    let Some(c) = refresh.connectors.get(&item.event.source) else {
                         continue;
                     };
                     if backed_off.contains(&item.event.source) {
@@ -439,8 +884,7 @@ impl Engine {
 
         EngineHandle {
             core,
-            connectors,
-            infos,
+            workflows,
             cancel,
         }
     }
@@ -456,49 +900,48 @@ impl EngineHandle {
     }
 
     pub fn connectors(&self) -> Vec<ConnectorInfo> {
-        self.infos.lock().unwrap_or_else(|e| e.into_inner()).clone()
-    }
-
-    fn changed(&self, change: Change, item: Option<QueueItem>) -> Option<QueueItem> {
-        if let Some(i) = &item {
-            self.core.publish(change, i.clone());
-        }
-        item
+        self.core
+            .infos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Marks an item done and lets its connector react (e.g. mark the GitHub thread read).
     pub async fn mark_done(&self, id: &str) -> anyhow::Result<Option<QueueItem>> {
-        let item = self.changed(
-            Change::Done,
-            self.core
-                .store
-                .set_state(id, ItemState::Done, None, Utc::now())?,
-        );
-        if let Some(i) = &item
-            && let Some(c) = self.connectors.get(&i.event.source)
-            && let Err(e) = c.on_done(i).await
-        {
-            tracing::warn!(connector = c.id(), error = %e, "on_done failed");
-        }
-        Ok(item)
+        self.core.mark_done(id, "you").await
     }
 
     pub fn snooze(&self, id: &str, until: DateTime<Utc>) -> anyhow::Result<Option<QueueItem>> {
-        Ok(self.changed(
-            Change::Snoozed,
-            self.core
-                .store
-                .set_state(id, ItemState::Snoozed, Some(until), Utc::now())?,
-        ))
+        self.core.snooze(id, until, "you")
     }
 
     pub fn reopen(&self, id: &str) -> anyhow::Result<Option<QueueItem>> {
-        Ok(self.changed(
-            Change::Reopened,
-            self.core
-                .store
-                .set_state(id, ItemState::Open, None, Utc::now())?,
-        ))
+        self.core.reopen(id, "you")
+    }
+
+    /// Runs a workflow now and waits for it: dry (nothing changes) or for
+    /// real, on an item if given. A dry run doesn't need the workflow saved.
+    pub async fn run_workflow(
+        &self,
+        w: Workflow,
+        item_id: Option<&str>,
+        dry_run: bool,
+    ) -> anyhow::Result<Run> {
+        anyhow::ensure!(
+            dry_run || !w.id.is_empty(),
+            "save the workflow before running it for real"
+        );
+        let item = match item_id.filter(|i| !i.is_empty()) {
+            Some(id) => Some(
+                self.core
+                    .store
+                    .get(id)?
+                    .ok_or_else(|| anyhow::anyhow!("no item {id}"))?,
+            ),
+            None => None,
+        };
+        self.workflows.run_now(w, item, dry_run).await
     }
 
     /// Rich content for an item. Cached content is returned immediately,
@@ -515,7 +958,7 @@ impl EngineHandle {
         let Some(item) = self.core.store.get(id)? else {
             return Ok(empty);
         };
-        let Some(c) = self.connectors.get(&item.event.source).cloned() else {
+        let Some(c) = self.core.connectors.get(&item.event.source).cloned() else {
             return Ok(empty);
         };
         if let Some((blocks, fetched_at, dirty)) = self.core.store.preview_get(id)? {
@@ -540,58 +983,7 @@ impl EngineHandle {
     /// Creates a task in tab's own connector. A due time makes it a
     /// scheduled task that sleeps until then.
     pub fn create_task(&self, task: NewTask) -> anyhow::Result<QueueItem> {
-        let now = Utc::now();
-        let title = task.title.trim();
-        anyhow::ensure!(!title.is_empty(), "a task needs a title");
-        let scheduled = task.due_at.is_some_and(|d| d > now);
-        let mut metadata = serde_json::json!({ "created_by": task.created_by });
-        if let Some(p) = task.priority.as_deref().filter(|p| *p != "normal") {
-            metadata["priority"] = p.into();
-        }
-        if let Some(d) = task.due_at {
-            metadata["due_at"] = d.to_rfc3339().into();
-        }
-        let event = IncomingEvent {
-            source: crate::connectors::tab::SOURCE.into(),
-            external_id: uuid::Uuid::new_v4().to_string(),
-            kind: if scheduled {
-                "tab.scheduled"
-            } else {
-                "tab.task"
-            }
-            .into(),
-            title: title.chars().take(200).collect(),
-            body: task.body.filter(|b| !b.trim().is_empty()),
-            url: task.url,
-            actor: Some(
-                if task.created_by == "agent" {
-                    "agent"
-                } else {
-                    "you"
-                }
-                .into(),
-            ),
-            context: Some("tab".into()),
-            occurred_at: now,
-            metadata,
-            ..Default::default()
-        };
-        let item = self
-            .core
-            .ingest(&event)?
-            .ok_or_else(|| anyhow::anyhow!("task was not stored"))?;
-        let item = match task.project_id.as_deref().filter(|p| !p.is_empty()) {
-            Some(p) => self
-                .core
-                .store
-                .item_set_project(&item.id, Some(p), now)?
-                .unwrap_or(item),
-            None => item,
-        };
-        if scheduled && let Some(due) = task.due_at {
-            return Ok(self.snooze(&item.id, due)?.unwrap_or(item));
-        }
-        Ok(item)
+        self.core.create_task(task, &[], None)
     }
 
     /// Publishes an event on the engine's stream (used by the agent runner).
@@ -778,6 +1170,258 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        handle.shutdown();
+    }
+
+    /// GitHub stand-in that records the actions it's asked to run.
+    #[derive(Default)]
+    struct Acting(std::sync::Mutex<Vec<(String, serde_json::Value)>>);
+
+    #[async_trait]
+    impl Connector for Acting {
+        fn id(&self) -> &str {
+            "github"
+        }
+        async fn run(&self, ctx: ConnectorContext) -> anyhow::Result<()> {
+            ctx.emit(IncomingEvent {
+                source: "github".into(),
+                external_id: "7".into(),
+                kind: "github.ci_failed".into(),
+                title: "CI failed: outage in checkout".into(),
+                context: Some("acme/shop".into()),
+                occurred_at: Utc::now(),
+                metadata: serde_json::json!({ "repo": "acme/shop", "number": 7 }),
+                ..Default::default()
+            })
+            .await?;
+            ctx.cancelled().await;
+            Ok(())
+        }
+        async fn act(
+            &self,
+            action: &str,
+            input: &serde_json::Value,
+        ) -> anyhow::Result<serde_json::Value> {
+            self.0.lock().unwrap().push((action.into(), input.clone()));
+            Ok(serde_json::json!({ "url": "https://github.com/acme/shop/pull/7#c1" }))
+        }
+    }
+
+    #[tokio::test]
+    async fn workflows_chain_actions_and_stop_loops() {
+        use crate::workflow::{Condition, Op, RunStatus, Step, StepKind, Trigger};
+        let step = |id: &str, kind: StepKind| Step {
+            id: id.into(),
+            label: String::new(),
+            when: vec![],
+            continue_on_error: false,
+            kind,
+        };
+        let input = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+                .collect()
+        };
+        let store = Arc::new(Store::in_memory().unwrap());
+        let now = Utc::now();
+        // On CI failures: comment, then a task linking the comment.
+        let triage = store
+            .workflow_save(
+                &Workflow {
+                    name: "Triage CI".into(),
+                    enabled: true,
+                    trigger: Trigger::Item {
+                        changes: vec![Change::Ingested],
+                        sources: vec!["github".into()],
+                        kinds: vec!["github.ci_*".into()],
+                        when: vec![],
+                    },
+                    steps: vec![
+                        step(
+                            "outage",
+                            StepKind::Filter {
+                                conditions: vec![Condition {
+                                    field: "item.title".into(),
+                                    op: Op::Contains,
+                                    value: "outage".into(),
+                                }],
+                            },
+                        ),
+                        step(
+                            "comment",
+                            StepKind::Action {
+                                connector: "github".into(),
+                                action: "issue.comment".into(),
+                                input: input(&[
+                                    ("repo", "{{item.metadata.repo}}"),
+                                    ("number", "{{item.metadata.number}}"),
+                                    ("body", "Looking at {{item.title}}"),
+                                ]),
+                            },
+                        ),
+                        step(
+                            "task",
+                            StepKind::Action {
+                                connector: "tab".into(),
+                                action: "task.create".into(),
+                                input: input(&[
+                                    ("title", "Follow up"),
+                                    ("url", "{{steps.comment.url}}"),
+                                ]),
+                            },
+                        ),
+                    ],
+                    ..Default::default()
+                },
+                "user",
+                now,
+            )
+            .unwrap();
+        // Echoes every new tab task as another task: a loop on its own.
+        let echo = store
+            .workflow_save(
+                &Workflow {
+                    name: "Echo".into(),
+                    enabled: true,
+                    trigger: Trigger::Item {
+                        changes: vec![Change::Ingested],
+                        sources: vec!["tab".into()],
+                        kinds: vec![],
+                        when: vec![],
+                    },
+                    steps: vec![step(
+                        "again",
+                        StepKind::Action {
+                            connector: "tab".into(),
+                            action: "task.create".into(),
+                            input: input(&[("title", "echo {{item.title}}")]),
+                        },
+                    )],
+                    ..Default::default()
+                },
+                "user",
+                now,
+            )
+            .unwrap();
+
+        let (events, _) = broadcast::channel(256);
+        let acting = Arc::new(Acting::default());
+        let infos = connectors::registry()
+            .into_iter()
+            .map(|f| ConnectorInfo {
+                descriptor: f.descriptor(),
+                enabled: true,
+                status: ConnectorStatus::Starting,
+            })
+            .collect();
+        let handle = Engine {
+            gateway: Arc::new(Gateway::new(store.clone())),
+            store: store.clone(),
+            ranker: Arc::new(Pipeline {
+                rules: RankingRules::default(),
+                profile: Default::default(),
+                ai: None,
+            }),
+            connectors: vec![acting.clone(), Arc::new(crate::connectors::TabConnector)],
+            infos,
+            events,
+        }
+        .start();
+
+        let titles = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let echo_runs = store.workflow_runs(Some(&echo.id), 10).unwrap();
+                if echo_runs.iter().any(|r| r.status == RunStatus::LoopStopped) {
+                    let mut t: Vec<String> = store
+                        .list(&[ItemState::Open])
+                        .unwrap()
+                        .into_iter()
+                        .filter(|i| i.event.source == "tab")
+                        .map(|i| i.event.title)
+                        .collect();
+                    t.sort();
+                    return t;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the echo loop was stopped");
+        assert_eq!(titles, ["Follow up", "echo Follow up"]);
+
+        let calls = acting.0.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "issue.comment");
+        assert_eq!(calls[0].1["number"], 7, "a lone template keeps its type");
+        assert_eq!(
+            calls[0].1["body"],
+            "Looking at CI failed: outage in checkout"
+        );
+
+        let run = &store.workflow_runs(Some(&triage.id), 10).unwrap()[0];
+        assert_eq!(run.status, RunStatus::Succeeded);
+        let follow = store
+            .list(&[ItemState::Open])
+            .unwrap()
+            .into_iter()
+            .find(|i| i.event.title == "Follow up")
+            .unwrap();
+        assert_eq!(
+            follow.event.url.as_deref(),
+            Some("https://github.com/acme/shop/pull/7#c1")
+        );
+        assert_eq!(
+            follow.event.metadata["workflow_chain"],
+            serde_json::json!([triage.id])
+        );
+
+        // Both items' timelines say what happened and who did it.
+        let ci = store
+            .list(&[ItemState::Open])
+            .unwrap()
+            .into_iter()
+            .find(|i| i.event.source == "github")
+            .unwrap();
+        let timeline = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let t = store.activity_for(&ci.id, 50).unwrap();
+                if t.iter().any(|a| a.kind == "workflow_run") {
+                    return t;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the run is on the CI item's timeline");
+        let kinds: Vec<&str> = timeline.iter().map(|a| a.kind.as_str()).collect();
+        assert_eq!(kinds, ["arrived", "workflow_run"]);
+        assert_eq!(timeline[1].title, "Workflow \"Triage CI\" ran");
+        let created = &store.activity_for(&follow.id, 50).unwrap()[0];
+        assert_eq!(
+            (created.kind.as_str(), created.by.as_deref()),
+            ("arrived", Some("workflow:Triage CI"))
+        );
+
+        // A dry run on the same item touches nothing.
+        let dry = handle
+            .run_workflow(
+                store.workflow_get(&triage.id).unwrap().unwrap(),
+                Some(&ci.id),
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(dry.dry_run && dry.status == RunStatus::Succeeded);
+        assert_eq!(
+            dry.steps[1].status,
+            crate::workflow::runtime::StepStatus::Dry
+        );
+        assert_eq!(
+            dry.steps[1].input["body"],
+            "Looking at CI failed: outage in checkout"
+        );
+        assert_eq!(acting.0.lock().unwrap().len(), 1);
         handle.shutdown();
     }
 }

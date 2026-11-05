@@ -122,9 +122,54 @@ export interface ConnectorInfo {
   category: string;
   features: string[];
   builtin: boolean;
+  actions?: ActionInfo[];
   enabled: boolean;
   status: ConnectorStatus;
 }
+
+// --- Actions and workflows (mirror model.rs and workflow/) ---
+
+export type Effect = "read" | "write" | "destructive";
+export type FieldType = "text" | "long_text" | "number" | "bool" | "select" | "list";
+export interface ActionField { key: string; label: string; type: FieldType; required?: boolean; help?: string; options?: string[]; default?: string }
+export interface ActionInfo {
+  id: string; label: string; description: string; icon: string; effect: Effect;
+  inputs: ActionField[]; outputs: ActionField[]; spends?: string; for_kinds?: string[];
+}
+
+export type Op = "equals" | "not_equals" | "contains" | "not_contains" | "starts_with" | "matches" | "in" | "gt" | "lt" | "exists" | "missing";
+export interface Condition { field: string; op: Op; value: unknown }
+
+export type Trigger =
+  | { type: "item"; changes: Change[]; sources: string[]; kinds: string[]; when: Condition[] }
+  | { type: "signal"; name: string; when: Condition[] }
+  | { type: "schedule"; every_minutes: number }
+  | { type: "manual" };
+
+export type StepKind =
+  | { type: "action"; connector: string; action: string; input: Record<string, unknown> }
+  | { type: "filter"; conditions: Condition[] }
+  | { type: "set"; values: Record<string, unknown> }
+  | { type: "emit"; signal: string; payload: Record<string, unknown> };
+export type Step = { id: string; label: string; when: Condition[]; continue_on_error: boolean } & StepKind;
+
+export interface Workflow {
+  id: string; name: string; description: string; enabled: boolean; allow_destructive: boolean;
+  trigger: Trigger; steps: Step[]; limits: { max_runs_per_hour: number; cooldown_minutes: number };
+  created_by: string; version: number; updated_at: string | null;
+}
+export interface Issue { at: string | null; error: boolean; message: string }
+
+export type RunStatus = "running" | "succeeded" | "stopped" | "failed" | "blocked" | "throttled" | "loop_stopped";
+export type StepStatus = "ok" | "skipped" | "stopped" | "failed" | "blocked" | "throttled" | "dry";
+export interface StepRun { id: string; label: string; status: StepStatus; input: unknown; output: unknown; error: string | null; ms: number }
+export interface WorkflowRun {
+  id: string; workflow_id: string; workflow_name: string; version: number; status: RunStatus; dry_run: boolean;
+  trigger: string; trigger_key: string | null; item_id: string | null; chain: string[]; steps: StepRun[];
+  error: string | null; started_at: string; finished_at: string | null;
+}
+
+export interface Activity { id: number; item_id: string; at: string; kind: string; title: string; by: string | null; detail: Record<string, unknown>; via: string | null }
 
 export type Change = "ingested" | "updated" | "ranked" | "snoozed" | "woke" | "done" | "reopened";
 export type EngineEvent =
@@ -138,7 +183,9 @@ export type EngineEvent =
   | { type: "approval_requested"; approval: Approval }
   | { type: "approval_resolved"; session_id: string; id: string }
   | { type: "config_changed" }
-  | { type: "project_changed"; project_id: string };
+  | { type: "project_changed"; project_id: string }
+  | { type: "workflow_run"; run: WorkflowRun }
+  | { type: "workflows_changed"; id: string; by: string };
 
 export interface Preview { item_id: string; blocks: Block[]; fetched_at: string | null; stale: boolean }
 
@@ -175,7 +222,7 @@ export interface SessionMessage {
   id: number;
   session_id: string;
   role: "user" | "assistant" | "tool" | "system";
-  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request";
+  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request" | "suggestion";
   content: string;
   meta: any;
   created_at: string;
@@ -342,6 +389,7 @@ export interface AgentConfig {
   model: string | null;
   workdir: string | null;
   permission_mode: string;
+  suggest_replies?: boolean;
   opencode_url: string | null;
   budget: BudgetConfig;
 }

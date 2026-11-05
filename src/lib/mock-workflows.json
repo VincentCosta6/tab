@@ -1,0 +1,898 @@
+{
+  "connectors": [
+    {
+      "actions": [
+        {
+          "description": "Adds a task to your queue, optionally scheduled for later.",
+          "effect": "write",
+          "icon": "check-square",
+          "id": "task.create",
+          "inputs": [
+            {
+              "key": "title",
+              "label": "Title",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "key": "body",
+              "label": "Notes",
+              "required": false,
+              "type": "long_text"
+            },
+            {
+              "default": "normal",
+              "key": "priority",
+              "label": "Priority",
+              "options": [
+                "low",
+                "normal",
+                "high",
+                "urgent"
+              ],
+              "required": false,
+              "type": "select"
+            },
+            {
+              "help": "Leave empty for now. Scheduled tasks sleep until they're due.",
+              "key": "due_in_minutes",
+              "label": "Due in (minutes)",
+              "required": false,
+              "type": "number"
+            },
+            {
+              "default": "{{item.url}}",
+              "key": "url",
+              "label": "Link",
+              "required": false,
+              "type": "text"
+            },
+            {
+              "help": "Project name. Optional.",
+              "key": "project",
+              "label": "Project",
+              "required": false,
+              "type": "text"
+            }
+          ],
+          "label": "Create a task",
+          "outputs": [
+            {
+              "key": "item_id",
+              "label": "New task",
+              "required": false,
+              "type": "text"
+            }
+          ]
+        },
+        {
+          "description": "Hides an item until later. It comes back on its own.",
+          "effect": "write",
+          "icon": "clock",
+          "id": "item.snooze",
+          "inputs": [
+            {
+              "default": "{{item.id}}",
+              "help": "Defaults to the item that started the run.",
+              "key": "item_id",
+              "label": "Item",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "default": "240",
+              "key": "minutes",
+              "label": "For (minutes)",
+              "required": true,
+              "type": "number"
+            }
+          ],
+          "label": "Snooze",
+          "outputs": []
+        },
+        {
+          "description": "Marks an item done. Its connection reacts as it does when you click Done (GitHub marks the notification read, email marks the message read).",
+          "effect": "write",
+          "icon": "check",
+          "id": "item.done",
+          "inputs": [
+            {
+              "default": "{{item.id}}",
+              "help": "Defaults to the item that started the run.",
+              "key": "item_id",
+              "label": "Item",
+              "required": true,
+              "type": "text"
+            }
+          ],
+          "label": "Mark done",
+          "outputs": []
+        },
+        {
+          "description": "Puts a done or snoozed item back in the queue.",
+          "effect": "write",
+          "icon": "undo",
+          "id": "item.reopen",
+          "inputs": [
+            {
+              "default": "{{item.id}}",
+              "help": "Defaults to the item that started the run.",
+              "key": "item_id",
+              "label": "Item",
+              "required": true,
+              "type": "text"
+            }
+          ],
+          "label": "Reopen",
+          "outputs": []
+        },
+        {
+          "description": "Files an item under one of your projects.",
+          "effect": "write",
+          "icon": "folder",
+          "id": "item.set_project",
+          "inputs": [
+            {
+              "default": "{{item.id}}",
+              "help": "Defaults to the item that started the run.",
+              "key": "item_id",
+              "label": "Item",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "help": "Project name, or empty to take it out.",
+              "key": "project",
+              "label": "Project",
+              "required": true,
+              "type": "text"
+            }
+          ],
+          "label": "Put in project",
+          "outputs": []
+        }
+      ],
+      "icon": "tab",
+      "id": "tab",
+      "kinds": [
+        {
+          "icon": "check-square",
+          "kind": "tab.task",
+          "label": "Task",
+          "tone": "accent"
+        },
+        {
+          "icon": "clock",
+          "kind": "tab.scheduled",
+          "label": "Scheduled",
+          "tone": "warning"
+        },
+        {
+          "icon": "bot",
+          "kind": "agent.needs_input",
+          "label": "Agent needs input",
+          "tone": "warning"
+        },
+        {
+          "icon": "bot",
+          "kind": "agent.needs_review",
+          "label": "Agent ready for review",
+          "tone": "accent"
+        }
+      ],
+      "name": "tab"
+    },
+    {
+      "actions": [
+        {
+          "description": "Fetches a PR's state, branches, author and size, for conditions in later steps.",
+          "effect": "read",
+          "for_kinds": [
+            "github.*"
+          ],
+          "icon": "git-pull-request",
+          "id": "pr.get",
+          "inputs": [
+            {
+              "default": "{{item.metadata.repo}}",
+              "help": "owner/name",
+              "key": "repo",
+              "label": "Repository",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "default": "{{item.metadata.number}}",
+              "key": "number",
+              "label": "PR or issue number",
+              "required": true,
+              "type": "number"
+            }
+          ],
+          "label": "Read a pull request",
+          "outputs": [
+            {
+              "key": "state",
+              "label": "State (open, closed, merged)",
+              "required": false,
+              "type": "text"
+            },
+            {
+              "key": "draft",
+              "label": "Draft",
+              "required": false,
+              "type": "bool"
+            },
+            {
+              "key": "author",
+              "label": "Author",
+              "required": false,
+              "type": "text"
+            },
+            {
+              "key": "base",
+              "label": "Base branch",
+              "required": false,
+              "type": "text"
+            },
+            {
+              "key": "head",
+              "label": "Head branch",
+              "required": false,
+              "type": "text"
+            },
+            {
+              "key": "additions",
+              "label": "Lines added",
+              "required": false,
+              "type": "number"
+            },
+            {
+              "key": "deletions",
+              "label": "Lines removed",
+              "required": false,
+              "type": "number"
+            },
+            {
+              "key": "labels",
+              "label": "Labels",
+              "required": false,
+              "type": "list"
+            },
+            {
+              "key": "url",
+              "label": "Link",
+              "required": false,
+              "type": "text"
+            }
+          ],
+          "spends": "github/core"
+        },
+        {
+          "description": "Posts a comment on a pull request or issue, as you.",
+          "effect": "write",
+          "for_kinds": [
+            "github.*"
+          ],
+          "icon": "message",
+          "id": "issue.comment",
+          "inputs": [
+            {
+              "default": "{{item.metadata.repo}}",
+              "help": "owner/name",
+              "key": "repo",
+              "label": "Repository",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "default": "{{item.metadata.number}}",
+              "key": "number",
+              "label": "PR or issue number",
+              "required": true,
+              "type": "number"
+            },
+            {
+              "help": "Markdown.",
+              "key": "body",
+              "label": "Comment",
+              "required": true,
+              "type": "long_text"
+            }
+          ],
+          "label": "Comment",
+          "outputs": [
+            {
+              "key": "url",
+              "label": "Link",
+              "required": false,
+              "type": "text"
+            }
+          ],
+          "spends": "github/core"
+        },
+        {
+          "description": "Adds labels to a pull request or issue. Labels that don't exist yet are created.",
+          "effect": "write",
+          "for_kinds": [
+            "github.*"
+          ],
+          "icon": "pin",
+          "id": "issue.add_labels",
+          "inputs": [
+            {
+              "default": "{{item.metadata.repo}}",
+              "help": "owner/name",
+              "key": "repo",
+              "label": "Repository",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "default": "{{item.metadata.number}}",
+              "key": "number",
+              "label": "PR or issue number",
+              "required": true,
+              "type": "number"
+            },
+            {
+              "help": "Comma separated.",
+              "key": "labels",
+              "label": "Labels",
+              "required": true,
+              "type": "list"
+            }
+          ],
+          "label": "Add labels",
+          "outputs": [],
+          "spends": "github/core"
+        },
+        {
+          "description": "Asks people to review a pull request.",
+          "effect": "write",
+          "for_kinds": [
+            "github.review_requested",
+            "github.ci_failed",
+            "github.activity"
+          ],
+          "icon": "user",
+          "id": "pr.request_reviewers",
+          "inputs": [
+            {
+              "default": "{{item.metadata.repo}}",
+              "help": "owner/name",
+              "key": "repo",
+              "label": "Repository",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "default": "{{item.metadata.number}}",
+              "key": "number",
+              "label": "PR or issue number",
+              "required": true,
+              "type": "number"
+            },
+            {
+              "help": "GitHub logins, comma separated.",
+              "key": "reviewers",
+              "label": "Reviewers",
+              "required": true,
+              "type": "list"
+            }
+          ],
+          "label": "Request reviewers",
+          "outputs": [],
+          "spends": "github/core"
+        },
+        {
+          "description": "Opens a new issue in a repository.",
+          "effect": "write",
+          "icon": "circle-dot",
+          "id": "issue.create",
+          "inputs": [
+            {
+              "help": "owner/name",
+              "key": "repo",
+              "label": "Repository",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "key": "title",
+              "label": "Title",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "key": "body",
+              "label": "Description",
+              "required": false,
+              "type": "long_text"
+            },
+            {
+              "key": "labels",
+              "label": "Labels",
+              "required": false,
+              "type": "list"
+            }
+          ],
+          "label": "Open an issue",
+          "outputs": [
+            {
+              "key": "number",
+              "label": "Issue number",
+              "required": false,
+              "type": "number"
+            },
+            {
+              "key": "url",
+              "label": "Link",
+              "required": false,
+              "type": "text"
+            }
+          ],
+          "spends": "github/core"
+        },
+        {
+          "description": "Merges a pull request. GitHub refuses if checks or reviews block it.",
+          "effect": "destructive",
+          "for_kinds": [
+            "github.review_requested",
+            "github.activity"
+          ],
+          "icon": "git-merge",
+          "id": "pr.merge",
+          "inputs": [
+            {
+              "default": "{{item.metadata.repo}}",
+              "help": "owner/name",
+              "key": "repo",
+              "label": "Repository",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "default": "{{item.metadata.number}}",
+              "key": "number",
+              "label": "PR or issue number",
+              "required": true,
+              "type": "number"
+            },
+            {
+              "default": "squash",
+              "key": "method",
+              "label": "Merge method",
+              "options": [
+                "squash",
+                "merge",
+                "rebase"
+              ],
+              "required": false,
+              "type": "select"
+            }
+          ],
+          "label": "Merge a pull request",
+          "outputs": [
+            {
+              "key": "sha",
+              "label": "Merge commit",
+              "required": false,
+              "type": "text"
+            }
+          ],
+          "spends": "github/core"
+        },
+        {
+          "description": "Closes a pull request or issue without merging.",
+          "effect": "destructive",
+          "for_kinds": [
+            "github.*"
+          ],
+          "icon": "x-circle",
+          "id": "issue.close",
+          "inputs": [
+            {
+              "default": "{{item.metadata.repo}}",
+              "help": "owner/name",
+              "key": "repo",
+              "label": "Repository",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "default": "{{item.metadata.number}}",
+              "key": "number",
+              "label": "PR or issue number",
+              "required": true,
+              "type": "number"
+            }
+          ],
+          "label": "Close",
+          "outputs": [],
+          "spends": "github/core"
+        }
+      ],
+      "icon": "github",
+      "id": "github",
+      "kinds": [
+        {
+          "icon": "git-pull-request",
+          "kind": "github.review_requested",
+          "label": "Review requested",
+          "tone": "accent"
+        },
+        {
+          "icon": "x-circle",
+          "kind": "github.ci_failed",
+          "label": "CI failed",
+          "tone": "danger"
+        },
+        {
+          "icon": "at-sign",
+          "kind": "github.mention",
+          "label": "Mention",
+          "tone": "info"
+        },
+        {
+          "icon": "message",
+          "kind": "github.comment",
+          "label": "Comment",
+          "tone": "neutral"
+        },
+        {
+          "icon": "user",
+          "kind": "github.assign",
+          "label": "Assigned",
+          "tone": "info"
+        },
+        {
+          "icon": "shield",
+          "kind": "github.security",
+          "label": "Security alert",
+          "tone": "danger"
+        },
+        {
+          "icon": "github",
+          "kind": "github.activity",
+          "label": "Activity",
+          "tone": "neutral"
+        }
+      ],
+      "name": "GitHub"
+    },
+    {
+      "actions": [
+        {
+          "description": "Marks the email read on the server.",
+          "effect": "write",
+          "for_kinds": [
+            "email.*"
+          ],
+          "icon": "check",
+          "id": "message.mark_read",
+          "inputs": [
+            {
+              "default": "{{item.metadata.folder}}",
+              "key": "folder",
+              "label": "Folder",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "default": "{{item.metadata.uid}}",
+              "help": "The message's IMAP UID. Filled in from the item.",
+              "key": "uid",
+              "label": "Message",
+              "required": true,
+              "type": "number"
+            }
+          ],
+          "label": "Mark read",
+          "outputs": []
+        },
+        {
+          "description": "Flags (stars) the email so it stands out in your mail app.",
+          "effect": "write",
+          "for_kinds": [
+            "email.*"
+          ],
+          "icon": "pin",
+          "id": "message.flag",
+          "inputs": [
+            {
+              "default": "{{item.metadata.folder}}",
+              "key": "folder",
+              "label": "Folder",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "default": "{{item.metadata.uid}}",
+              "help": "The message's IMAP UID. Filled in from the item.",
+              "key": "uid",
+              "label": "Message",
+              "required": true,
+              "type": "number"
+            }
+          ],
+          "label": "Flag",
+          "outputs": []
+        },
+        {
+          "description": "Moves the email to another folder, such as Archive.",
+          "effect": "destructive",
+          "for_kinds": [
+            "email.*"
+          ],
+          "icon": "folder",
+          "id": "message.move",
+          "inputs": [
+            {
+              "default": "{{item.metadata.folder}}",
+              "key": "folder",
+              "label": "Folder",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "default": "{{item.metadata.uid}}",
+              "help": "The message's IMAP UID. Filled in from the item.",
+              "key": "uid",
+              "label": "Message",
+              "required": true,
+              "type": "number"
+            },
+            {
+              "default": "Archive",
+              "key": "to",
+              "label": "Move to",
+              "required": true,
+              "type": "text"
+            }
+          ],
+          "label": "Move to folder",
+          "outputs": []
+        }
+      ],
+      "icon": "mail",
+      "id": "email",
+      "kinds": [
+        {
+          "icon": "mail",
+          "kind": "email.direct",
+          "label": "Email",
+          "tone": "info"
+        },
+        {
+          "icon": "mail",
+          "kind": "email.cc",
+          "label": "CC'd",
+          "tone": "neutral"
+        },
+        {
+          "icon": "mail",
+          "kind": "email.newsletter",
+          "label": "Newsletter",
+          "tone": "neutral"
+        },
+        {
+          "icon": "mail",
+          "kind": "email.automated",
+          "label": "Automated",
+          "tone": "neutral"
+        }
+      ],
+      "name": "Email (IMAP)"
+    }
+  ],
+  "templates": [
+    {
+      "allow_destructive": false,
+      "created_by": "template",
+      "description": "Newsletters and automated mail wait until you've done real work.",
+      "enabled": false,
+      "id": "",
+      "limits": {
+        "cooldown_minutes": 0,
+        "max_runs_per_hour": 30
+      },
+      "name": "Snooze newsletters until the morning",
+      "steps": [
+        {
+          "action": "item.snooze",
+          "connector": "tab",
+          "continue_on_error": false,
+          "id": "snooze",
+          "input": {
+            "item_id": "{{item.id}}",
+            "minutes": "720"
+          },
+          "label": "",
+          "type": "action",
+          "when": []
+        }
+      ],
+      "trigger": {
+        "changes": [
+          "ingested"
+        ],
+        "kinds": [
+          "email.newsletter",
+          "email.automated"
+        ],
+        "sources": [
+          "email"
+        ],
+        "type": "item",
+        "when": []
+      },
+      "updated_at": null,
+      "version": 0
+    },
+    {
+      "allow_destructive": false,
+      "created_by": "template",
+      "description": "When your review is requested on a small PR, add an urgent task so it's done today.",
+      "enabled": false,
+      "id": "",
+      "limits": {
+        "cooldown_minutes": 0,
+        "max_runs_per_hour": 30
+      },
+      "name": "Small PRs get a review task",
+      "steps": [
+        {
+          "action": "pr.get",
+          "connector": "github",
+          "continue_on_error": false,
+          "id": "pr",
+          "input": {
+            "number": "{{item.metadata.number}}",
+            "repo": "{{item.metadata.repo}}"
+          },
+          "label": "",
+          "type": "action",
+          "when": []
+        },
+        {
+          "conditions": [
+            {
+              "field": "steps.pr.additions",
+              "op": "lt",
+              "value": 200
+            },
+            {
+              "field": "steps.pr.draft",
+              "op": "equals",
+              "value": false
+            }
+          ],
+          "continue_on_error": false,
+          "id": "small",
+          "label": "",
+          "type": "filter",
+          "when": []
+        },
+        {
+          "action": "task.create",
+          "connector": "tab",
+          "continue_on_error": false,
+          "id": "task",
+          "input": {
+            "priority": "urgent",
+            "title": "Review {{item.metadata.repo}}#{{item.metadata.number}} (+{{steps.pr.additions}})",
+            "url": "{{steps.pr.url}}"
+          },
+          "label": "",
+          "type": "action",
+          "when": []
+        }
+      ],
+      "trigger": {
+        "changes": [
+          "ingested"
+        ],
+        "kinds": [
+          "github.review_requested"
+        ],
+        "sources": [
+          "github"
+        ],
+        "type": "item",
+        "when": []
+      },
+      "updated_at": null,
+      "version": 0
+    },
+    {
+      "allow_destructive": false,
+      "created_by": "template",
+      "description": "Adds a ci-failed label so the team sees it, and tells other workflows.",
+      "enabled": false,
+      "id": "",
+      "limits": {
+        "cooldown_minutes": 0,
+        "max_runs_per_hour": 30
+      },
+      "name": "Label PRs that fail CI",
+      "steps": [
+        {
+          "action": "issue.add_labels",
+          "connector": "github",
+          "continue_on_error": false,
+          "id": "label",
+          "input": {
+            "labels": "ci-failed",
+            "number": "{{item.metadata.number}}",
+            "repo": "{{item.metadata.repo}}"
+          },
+          "label": "",
+          "type": "action",
+          "when": []
+        },
+        {
+          "continue_on_error": false,
+          "id": "tell",
+          "label": "",
+          "payload": {
+            "number": "{{item.metadata.number}}",
+            "repo": "{{item.metadata.repo}}",
+            "title": "{{item.title}}"
+          },
+          "signal": "ci_failed",
+          "type": "emit",
+          "when": []
+        }
+      ],
+      "trigger": {
+        "changes": [
+          "ingested"
+        ],
+        "kinds": [
+          "github.ci_failed"
+        ],
+        "sources": [
+          "github"
+        ],
+        "type": "item",
+        "when": []
+      },
+      "updated_at": null,
+      "version": 0
+    },
+    {
+      "allow_destructive": false,
+      "created_by": "template",
+      "description": "Every morning-ish, a task to go through what came in overnight.",
+      "enabled": false,
+      "id": "",
+      "limits": {
+        "cooldown_minutes": 0,
+        "max_runs_per_hour": 30
+      },
+      "name": "Morning sweep",
+      "steps": [
+        {
+          "action": "task.create",
+          "connector": "tab",
+          "continue_on_error": false,
+          "id": "task",
+          "input": {
+            "priority": "high",
+            "title": "Sweep the queue"
+          },
+          "label": "",
+          "type": "action",
+          "when": []
+        }
+      ],
+      "trigger": {
+        "every_minutes": 1440,
+        "type": "schedule"
+      },
+      "updated_at": null,
+      "version": 0
+    }
+  ]
+}
