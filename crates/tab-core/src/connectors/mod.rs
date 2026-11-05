@@ -2,6 +2,7 @@
 
 mod demo;
 mod github;
+pub mod github_review;
 mod planned;
 pub mod tab;
 

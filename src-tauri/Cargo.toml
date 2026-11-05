@@ -25,6 +25,7 @@ tab-core = { path = "../crates/tab-core" }
 tokio.workspace = true
 chrono.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

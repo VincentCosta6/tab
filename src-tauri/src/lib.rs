@@ -6,9 +6,17 @@ use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use serde::Serialize;
+use async_trait::async_trait;
+use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint};
+use tab_core::connectors::github_review::{self, NewComment, PullReview};
 use tab_core::connectors::registry;
 use tab_core::gateway::RateLimitState;
-use tab_core::model::{Block, ConnectorInfo, ItemState, QueueItem, SettingKind};
+use tab_core::mcp::{EngineAccess, McpServer};
+use tab_core::model::{
+    Approval, ConnectorInfo, ContextEntry, ContextSection, ItemContext, ItemState, NewContext,
+    NewTask, Preview, QueueItem, Session, SessionMessage, SettingKind,
+};
+use tab_core::ratelimit::Pressure;
 use tab_core::store::{AuditEntry, AuditQuery, UsageRow};
 use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tauri::{Emitter, Manager, State};
@@ -17,13 +25,39 @@ use tokio::sync::{Mutex, RwLock, broadcast};
 /// Shown in place of stored secrets; sending it back means "keep the old value".
 const SECRET_MASK: &str = "••••••••";
 
+type SharedEngine = Arc<RwLock<Option<EngineHandle>>>;
+
 struct AppState {
     store: Arc<Store>,
     gateway: Arc<Gateway>,
     events: broadcast::Sender<EngineEvent>,
-    engine: RwLock<Option<EngineHandle>>,
+    engine: SharedEngine,
+    hub: Arc<AgentHub>,
+    mcp_url: std::sync::Mutex<Option<String>>,
     config: Mutex<TabConfig>,
     config_path: PathBuf,
+}
+
+/// Lets the MCP server reach whichever engine is running now.
+struct LiveEngine(SharedEngine);
+
+#[async_trait]
+impl EngineAccess for LiveEngine {
+    async fn create_task(&self, task: NewTask) -> anyhow::Result<QueueItem> {
+        let guard = self.0.read().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
+            .create_task(task)
+    }
+    async fn preview(&self, item_id: &str) -> anyhow::Result<Preview> {
+        let guard = self.0.read().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
+            .preview(item_id)
+            .await
+    }
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -91,8 +125,239 @@ async fn item_detail(state: State<'_, AppState>, id: String) -> CmdResult<Option
 }
 
 #[tauri::command]
-async fn item_preview(state: State<'_, AppState>, id: String) -> CmdResult<Vec<Block>> {
+async fn item_preview(state: State<'_, AppState>, id: String) -> CmdResult<Preview> {
     with_engine!(state, e => e.preview(&id).await.map_err(err))
+}
+
+#[tauri::command]
+async fn rate_pressure(state: State<'_, AppState>) -> CmdResult<Vec<Pressure>> {
+    Ok(state.gateway.pressure())
+}
+
+// --- Context -------------------------------------------------------------
+
+#[tauri::command]
+async fn item_context(state: State<'_, AppState>, id: String) -> CmdResult<Option<ItemContext>> {
+    state.store.item_context(&id).map_err(err)
+}
+
+#[tauri::command]
+async fn context_add(
+    state: State<'_, AppState>,
+    item_id: String,
+    entry: NewContext,
+) -> CmdResult<ContextEntry> {
+    let e = state
+        .store
+        .context_add(&item_id, &entry, Utc::now())
+        .map_err(err)?;
+    let _ = state.events.send(EngineEvent::ContextChanged { item_id });
+    Ok(e)
+}
+
+#[tauri::command]
+async fn context_update(
+    state: State<'_, AppState>,
+    id: String,
+    section: Option<ContextSection>,
+    pinned: Option<bool>,
+) -> CmdResult<Option<ContextEntry>> {
+    let e = state
+        .store
+        .context_update(&id, section, pinned)
+        .map_err(err)?;
+    if let Some(e) = &e {
+        let _ = state.events.send(EngineEvent::ContextChanged {
+            item_id: e.item_id.clone(),
+        });
+    }
+    Ok(e)
+}
+
+#[tauri::command]
+async fn context_remove(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let entry = state.store.context_get(&id).map_err(err)?;
+    state.store.context_remove(&id).map_err(err)?;
+    if let Some(e) = entry {
+        let _ = state
+            .events
+            .send(EngineEvent::ContextChanged { item_id: e.item_id });
+    }
+    Ok(())
+}
+
+// --- Tasks and chat ------------------------------------------------------
+
+#[tauri::command]
+async fn create_task(state: State<'_, AppState>, task: NewTask) -> CmdResult<QueueItem> {
+    with_engine!(state, e => e.create_task(task).map_err(err))
+}
+
+#[derive(Serialize)]
+struct Chat {
+    session: Option<Session>,
+    messages: Vec<SessionMessage>,
+    approvals: Vec<Approval>,
+    running: bool,
+}
+
+#[tauri::command]
+async fn chat_open(state: State<'_, AppState>, item_id: String) -> CmdResult<Chat> {
+    let session = state.store.session_for_item(&item_id).map_err(err)?;
+    let (messages, approvals, running) = match &session {
+        Some(s) => (
+            state.store.messages(&s.id).map_err(err)?,
+            state.hub.pending_approvals(&s.id),
+            state.hub.is_running(&s.id),
+        ),
+        None => (Vec::new(), Vec::new(), false),
+    };
+    Ok(Chat {
+        session,
+        messages,
+        approvals,
+        running,
+    })
+}
+
+#[derive(Serialize)]
+struct ChatStarted {
+    item: QueueItem,
+    session: Session,
+}
+
+/// Sends a chat message. Without an item (the "New" chat), the message
+/// first becomes a tab task, and the session hangs off that task.
+#[tauri::command]
+async fn chat_send(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    text: String,
+) -> CmdResult<ChatStarted> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("message is empty".into());
+    }
+    if state.hub.config().kind.is_none() {
+        return Err("Set up an agent first (Settings → Agent).".into());
+    }
+    let item = match item_id {
+        Some(id) => state
+            .store
+            .get(&id)
+            .map_err(err)?
+            .ok_or("that item no longer exists")?,
+        None => {
+            let first = text.lines().next().unwrap_or_default();
+            let title: String = if first.chars().count() > 80 {
+                first.chars().take(77).collect::<String>() + "…"
+            } else {
+                first.to_string()
+            };
+            with_engine!(state, e => e.create_task(NewTask {
+                title,
+                body: (text.len() > first.len()).then(|| text.clone()),
+                created_by: "user".into(),
+                ..Default::default()
+            }).map_err(err))?
+        }
+    };
+    let session = state.hub.session_for_item(&item.id).map_err(err)?;
+    state.hub.send(&session.id, &text).map_err(err)?;
+    Ok(ChatStarted { item, session })
+}
+
+#[tauri::command]
+async fn chat_stop(state: State<'_, AppState>, session_id: String) -> CmdResult<()> {
+    state.hub.stop(&session_id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn approval_resolve(
+    state: State<'_, AppState>,
+    id: String,
+    decision: String,
+    message: Option<String>,
+) -> CmdResult<bool> {
+    let d = match decision.as_str() {
+        "allow" => Decision::Allow,
+        "always" => Decision::AllowAlways,
+        _ => Decision::Deny(message.unwrap_or_else(|| "The person declined.".into())),
+    };
+    Ok(state.hub.resolve_approval(&id, d))
+}
+
+#[tauri::command]
+async fn detect_agents(state: State<'_, AppState>) -> CmdResult<Vec<AgentProbe>> {
+    Ok(state.hub.detect().await)
+}
+
+#[derive(Serialize)]
+struct McpInfo {
+    url: Option<String>,
+    token: String,
+}
+
+#[tauri::command]
+async fn mcp_info(state: State<'_, AppState>) -> CmdResult<McpInfo> {
+    let url = state.mcp_url.lock().unwrap().clone();
+    let token = state.config.lock().await.mcp.token.clone();
+    Ok(McpInfo { url, token })
+}
+
+// --- GitHub review -------------------------------------------------------
+
+#[tauri::command]
+async fn github_pull(
+    state: State<'_, AppState>,
+    repo: String,
+    number: u64,
+    sample: bool,
+) -> CmdResult<PullReview> {
+    github_review::pull(&state.gateway, &repo, number, sample)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn github_file(
+    state: State<'_, AppState>,
+    repo: String,
+    sha: String,
+    path: String,
+) -> CmdResult<String> {
+    github_review::file_at(&state.gateway, &repo, &sha, &path)
+        .await
+        .map_err(err)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn github_comment(
+    state: State<'_, AppState>,
+    repo: String,
+    number: u64,
+    commit_id: String,
+    path: String,
+    line: u32,
+    side: String,
+    body: String,
+) -> CmdResult<()> {
+    github_review::comment(
+        &state.gateway,
+        NewComment {
+            repo: &repo,
+            number,
+            commit_id: &commit_id,
+            path: &path,
+            line,
+            side: &side,
+            body: &body,
+        },
+    )
+    .await
+    .map_err(err)
 }
 
 #[tauri::command]
@@ -210,6 +475,7 @@ async fn save_config(state: State<'_, AppState>, config: TabConfig) -> CmdResult
     let ranking_changed = next.ranking != current.ranking || next.profile != current.profile;
     *current = next.clone();
     drop(current);
+    state.hub.set_config(next.agent.clone()).await;
     state.restart(&next).await;
     if ranking_changed {
         with_engine!(state, e => e.rerank_all().map_err(err))?;
@@ -253,15 +519,45 @@ pub fn run() {
                 }
             });
 
+            let hub = AgentHub::new(
+                store.clone(),
+                events.clone(),
+                config.agent.clone(),
+                data_dir.clone(),
+            );
+            let engine: SharedEngine = Arc::new(RwLock::new(None));
             let state = AppState {
-                store,
+                store: store.clone(),
                 gateway,
-                events,
-                engine: RwLock::new(None),
+                events: events.clone(),
+                engine: engine.clone(),
+                hub: hub.clone(),
+                mcp_url: std::sync::Mutex::new(None),
                 config: Mutex::new(config.clone()),
                 config_path,
             };
-            tauri::async_runtime::block_on(state.restart(&config));
+            tauri::async_runtime::block_on(async {
+                state.restart(&config).await;
+                // Local MCP server for agents.
+                let server = Arc::new(McpServer {
+                    store,
+                    hub: hub.clone(),
+                    engine: Arc::new(LiveEngine(engine)),
+                    events,
+                    token: config.mcp.token.clone(),
+                });
+                match tab_core::mcp::serve(server, config.mcp.port).await {
+                    Ok(url) => {
+                        tracing::info!(%url, "MCP server listening");
+                        hub.set_mcp(McpEndpoint {
+                            url: url.clone(),
+                            token: config.mcp.token.clone(),
+                        });
+                        *state.mcp_url.lock().unwrap() = Some(url);
+                    }
+                    Err(e) => tracing::error!(error = %e, "MCP server failed to start"),
+                }
+            });
             app.manage(state);
             Ok(())
         })
@@ -279,7 +575,30 @@ pub fn run() {
             api_usage,
             get_config,
             save_config,
+            rate_pressure,
+            item_context,
+            context_add,
+            context_update,
+            context_remove,
+            create_task,
+            chat_open,
+            chat_send,
+            chat_stop,
+            approval_resolve,
+            detect_agents,
+            mcp_info,
+            github_pull,
+            github_file,
+            github_comment,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event
+                && let Some(state) = app.try_state::<AppState>()
+            {
+                // Stops agent processes and the OpenCode server tab started.
+                state.hub.shutdown();
+            }
+        });
 }

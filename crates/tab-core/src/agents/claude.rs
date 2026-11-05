@@ -232,7 +232,7 @@ impl Parser {
             }
             "rate_limit_event" => {
                 let info = &v["rate_limit_info"];
-                if info["status"].as_str().is_some_and(|s| s != "allowed") {
+                if info["status"].as_str().is_some_and(|s| !s.starts_with("allowed")) {
                     hub.post(
                         &sid,
                         "system",
