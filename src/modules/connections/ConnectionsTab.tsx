@@ -119,7 +119,7 @@ function MarketCard({ c, onOpen }: { c: ConnectorInfo; onOpen: () => void }) {
         <ConnectorMark c={c} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="connector-name">{c.name}</div>
-          <div className="subtle">{c.available ? (c.id === "github" ? "Sign in with GitHub" : c.settings.some((s) => s.required) ? "Needs a token" : "One click") : "Coming soon"}</div>
+          <div className="subtle">{c.available ? (c.id === "github" ? "Sign in with GitHub" : c.id === "email" ? "Sign in with IMAP" : c.settings.some((s) => s.required) ? "Needs a token" : "One click") : "Coming soon"}</div>
         </div>
         {c.available && <Button size="sm" variant="primary" onClick={onOpen}>Install</Button>}
       </div>

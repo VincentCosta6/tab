@@ -64,6 +64,10 @@ impl Ranker for Pipeline {
         if base.muted {
             return Ok(ranking);
         }
+        // Connectors mark mail like newsletters rules-only, so it never spends AI.
+        if item.event.metadata["ai"] == serde_json::Value::Bool(false) {
+            return Ok(ranking);
+        }
         if let Some(ai) = &self.ai {
             match ai.adjust(item, &self.profile, &base).await {
                 Ok(v) => {

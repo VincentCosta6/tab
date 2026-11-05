@@ -114,3 +114,35 @@ impl ConnectorContext {
         }
     }
 }
+
+/// A context outside the engine, for examples and smoke tests: every event and
+/// status change arrives on the receiver as one line of text.
+pub fn test_context(id: &str) -> (ConnectorContext, mpsc::Receiver<String>, CancellationToken) {
+    let (tx, mut rx) = mpsc::channel::<EngineMsg>(64);
+    let (out_tx, out_rx) = mpsc::channel(64);
+    let cancel = CancellationToken::new();
+    tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            let line = match m {
+                EngineMsg::Event(e) => format!(
+                    "event {} | {} | {} | from {} | ai={} | {}",
+                    e.kind,
+                    e.external_id,
+                    e.title,
+                    e.actor.unwrap_or_default(),
+                    e.metadata["ai"],
+                    e.body.unwrap_or_default().replace('\n', " ")
+                ),
+                EngineMsg::Status(id, s) => format!("status {id}: {s:?}"),
+            };
+            if out_tx.send(line).await.is_err() {
+                break;
+            }
+        }
+    });
+    (
+        ConnectorContext::new(id.into(), tx, cancel.clone()),
+        out_rx,
+        cancel,
+    )
+}
