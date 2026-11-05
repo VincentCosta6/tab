@@ -74,32 +74,90 @@ export function ensureModel(uri: monaco.Uri, text: string, path: string) {
   return monaco.editor.createModel(text, languageFor(path), uri);
 }
 
-const PROJECT_EXT = /\.(tsx?|mts|cts|jsx?|mjs|cjs|json)$/i;
-const SKIP = /(^|\/)(node_modules|dist|build|out|target|vendor|\.next|coverage)\//;
+const PROJECT_EXT = /\.(tsx?|mts|cts|jsx?|mjs|cjs)$/i;
+const PROJECT_JSON = /(^|\/)(package\.json|tsconfig[^/]*\.json|jsconfig\.json)$/i;
+const SKIP = /(^|\/)(node_modules|dist|build|out|target|vendor|\.next|coverage|gen)\//;
 
 /** Files worth loading so TypeScript can resolve imports across the repo. */
-export function projectFiles(files: string[], limit = 4000) {
-  return files.filter((f) => PROJECT_EXT.test(f) && !SKIP.test(f) && !/\.min\.js$/.test(f) && !/(^|\/)package-lock\.json$/.test(f)).slice(0, limit);
+export function projectFiles(files: string[], limit = 3000) {
+  return files.filter((f) => (PROJECT_EXT.test(f) || PROJECT_JSON.test(f)) && !SKIP.test(f) && !/\.min\.js$/.test(f)).slice(0, limit);
 }
 
-let projectKey = "";
-/** Loads a repository's source files as models, in batches. Returns how many loaded. */
-export async function loadProject(key: string, files: string[], read: (paths: string[]) => Promise<[string, string][]>, onProgress?: (done: number, total: number) => void) {
-  if (projectKey === key) return 0;
-  projectKey = key;
-  // Drop the previous project's head models; base models are cheap to recreate.
-  for (const m of monaco.editor.getModels()) if (m.uri.scheme === "file" || m.uri.scheme === "base") m.dispose();
+export interface ProjectState { key: string; done: number; total: number; state: "loading" | "ready" | "error"; error?: string }
+
+// One loader for the whole app, so remounting the workspace (switching tabs,
+// reopening the PR) picks up the load already running instead of waiting on it.
+let project: ProjectState | null = null;
+let running: Promise<void> | null = null;
+const listeners = new Set<() => void>();
+const loaded = new Set<string>();
+const set = (p: ProjectState | null) => {
+  project = p;
+  listeners.forEach((l) => l());
+};
+export const projectStore = {
+  get: () => project,
+  subscribe: (l: () => void) => {
+    listeners.add(l);
+    return () => listeners.delete(l);
+  },
+};
+
+const BATCH = 80;
+const MAX_BYTES = 40 * 1024 * 1024;
+
+/** Loads a repository's source files as models, in small batches, yielding to the UI between them. */
+export function loadProject(key: string, files: string[], read: (paths: string[]) => Promise<[string, string][]>): Promise<void> {
+  if (project?.key === key && running) return running;
+  if (project?.key === key && project.state === "ready") return Promise.resolve();
   const want = projectFiles(files);
-  let done = 0;
-  for (let i = 0; i < want.length; i += 250) {
-    if (projectKey !== key) return done;
-    const batch = await read(want.slice(i, i + 250));
-    if (projectKey !== key) return done;
-    for (const [path, text] of batch) ensureModel(headUri(path), text, path);
-    done += batch.length;
-    onProgress?.(done, want.length);
+  if (!want.length) {
+    set(null);
+    return Promise.resolve();
   }
-  return done;
+  // Drop the previous project's models, except ones an editor still shows.
+  const shown = new Set(monaco.editor.getEditors().map((e) => e.getModel()?.uri.toString()));
+  for (const uri of loaded) {
+    const m = monaco.editor.getModel(monaco.Uri.parse(uri));
+    if (m && !shown.has(uri)) m.dispose();
+  }
+  loaded.clear();
+  set({ key, done: 0, total: want.length, state: "loading" });
+  const job = (async () => {
+    let done = 0;
+    let bytes = 0;
+    let failures = 0;
+    for (let i = 0; i < want.length && bytes < MAX_BYTES; i += BATCH) {
+      if (project?.key !== key) return;
+      let batch: [string, string][] = [];
+      try {
+        batch = await read(want.slice(i, i + BATCH));
+      } catch (e) {
+        // A bad batch shouldn't stop the rest; give up only if most fail.
+        if (++failures > 3) throw e;
+      }
+      if (project?.key !== key) return;
+      for (const [path, text] of batch) {
+        const uri = headUri(path);
+        // Leave models an editor already created (they may hold newer text).
+        if (!monaco.editor.getModel(uri)) monaco.editor.createModel(text, languageFor(path), uri);
+        loaded.add(uri.toString());
+        bytes += text.length;
+      }
+      done = Math.min(want.length, i + BATCH);
+      set({ key, done, total: want.length, state: "loading" });
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    set({ key, done: want.length, total: want.length, state: "ready" });
+  })()
+    .catch((e) => {
+      if (project?.key === key) set({ key, done: project.done, total: project.total, state: "error", error: String(e) });
+    })
+    .finally(() => {
+      if (project?.key === key) running = null;
+    });
+  running = job;
+  return job;
 }
 
 type Opener = (path: string, line?: number, column?: number) => void;

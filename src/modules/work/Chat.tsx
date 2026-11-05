@@ -232,7 +232,7 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
 }
 
 function MessageView({ m, result, onSend }: { m: SessionMessage; result?: SessionMessage; onSend?: (text: string) => void }) {
-  if (m.role === "user") return <div className="msg msg-user">{m.content}</div>;
+  if (m.role === "user") return <div className="msg msg-user">{/```|\]\(/.test(m.content) ? <Markdown text={m.content} /> : m.content}</div>;
   if (m.kind === "secret_request") return m.meta?.superseded ? null : <SecretCard m={m} onSend={onSend} />;
   if (m.kind === "text") return <div className="msg msg-assistant"><Markdown text={m.content} /></div>;
   if (m.kind === "tool")

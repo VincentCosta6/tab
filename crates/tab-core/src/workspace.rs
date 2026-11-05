@@ -81,7 +81,9 @@ pub struct SearchQuery {
 
 const MAX_HITS: usize = 2000;
 /// Files larger than this aren't returned in bulk reads.
-const MAX_BULK_FILE: usize = 512 * 1024;
+const MAX_BULK_FILE: usize = 256 * 1024;
+/// One bulk read returns at most this much, so a single IPC reply stays small.
+const MAX_BULK_TOTAL: usize = 8 * 1024 * 1024;
 
 pub struct Workspaces {
     root: PathBuf,
@@ -498,7 +500,11 @@ impl Workspaces {
     ) -> anyhow::Result<Vec<(String, String)>> {
         let wt = self.worktree(repo, number)?;
         let mut out = Vec::with_capacity(paths.len());
+        let mut total = 0usize;
         for p in paths {
+            if total >= MAX_BULK_TOTAL {
+                break;
+            }
             let Ok(p) = valid_path(p) else { continue };
             let full = wt.join(p);
             let Ok(meta) = tokio::fs::metadata(&full).await else {
@@ -510,6 +516,7 @@ impl Workspaces {
             if let Ok(bytes) = tokio::fs::read(&full).await
                 && !bytes.contains(&0)
             {
+                total += bytes.len();
                 out.push((p.to_string(), String::from_utf8_lossy(&bytes).into_owned()));
             }
         }

@@ -196,9 +196,21 @@ export interface PullReview {
 export interface ReviewWorkspace { path: string; head_sha: string; merge_base: string; files: string[]; reused: boolean }
 export interface WorkspaceProgress { repo: string; number: number; step: "clone" | "fetch" | "checkout" | "index"; state: "running" | "done" | "error"; message: string; percent: number | null }
 export interface SearchHit { path: string; line: number; column: number; text: string }
+/** A language server tab can run for a checkout, and whether it's installed. */
+export interface LspServer {
+  id: string; name: string; languages: string[]; command: string; note: string;
+  installed: boolean; path: string | null;
+  /** What Install runs, when a tool for it is present. */
+  install_command: string | null;
+  /** When nothing here can install it: what to get first. */
+  needs: string | null; needs_url: string | null;
+}
+export interface LspStarted { session: string; root_uri: string; capabilities: Record<string, unknown> }
+export interface LspEvent { session: string; method: string; params: any }
 export interface SearchQuery { query: string; regex: boolean; case_sensitive: boolean; whole_word: boolean; include: string | null }
 export type ReviewAction =
   | { type: "mark_viewed"; path: string; viewed: boolean }
+  | { type: "mark_viewed_many"; paths: string[]; viewed: boolean }
   | { type: "add_thread"; path: string; line: number; start_line: number | null; side: "LEFT" | "RIGHT"; body: string; pending: boolean }
   | { type: "reply"; thread_id: string; comment_id: number | null; body: string; pending: boolean }
   | { type: "edit_comment"; comment_id: string; body: string }

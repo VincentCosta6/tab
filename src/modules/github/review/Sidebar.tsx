@@ -7,7 +7,7 @@ import { Icon } from "../../../design/icons";
 import type { PrFile, SearchQuery } from "../../../lib/types";
 import { useReview } from "./context";
 import { useSearch } from "./data";
-import { buildTree, isViewed, splitPath, statusLetter, statusTone, type TreeNode } from "./model";
+import { buildTree, compactTree, filesUnder, isViewed, splitPath, statusLetter, statusTone, type TreeNode } from "./model";
 
 export type Panel = "explorer" | "search" | "changes" | "threads";
 
@@ -208,23 +208,103 @@ export function SearchPanel({ seed, local }: { seed: { text: string; nonce: numb
 
 // --- Changes ---------------------------------------------------------------
 
-export function ChangesPanel({ autoRead, setAutoRead, active }: { autoRead: boolean; setAutoRead: (v: boolean) => void; active: string | null }) {
+function Tri({ checked, mixed, onChange, title }: { checked: boolean; mixed: boolean; onChange: (v: boolean) => void; title: string }) {
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = mixed;
+  }, [mixed]);
+  return <input ref={ref} type="checkbox" title={title} checked={checked} onChange={(e) => onChange(e.target.checked)} onClick={(e) => e.stopPropagation()} />;
+}
+
+function ChangeRow({ f, depth, active }: { f: PrFile; depth: number; active: string | null }) {
   const { pr, act, showChange, notify } = useReview();
+  const { name } = splitPath(f.filename);
+  const threads = pr.threads.filter((t) => t.path === f.filename && !t.resolved).length;
+  return (
+    <div className={cx("rv-change", isViewed(f) && "viewed", active === f.filename && "active")} style={{ paddingLeft: 12 + depth * 14 }}>
+      <input
+        type="checkbox"
+        title={isViewed(f) ? "Viewed" : "Mark as viewed"}
+        checked={isViewed(f)}
+        onChange={(e) => act({ type: "mark_viewed", path: f.filename, viewed: e.target.checked }).catch((err) => notify(String(err), "danger"))}
+      />
+      <button className="rv-change-main" onClick={() => showChange(f.filename)} title={f.filename}>
+        <span className="rv-change-name">{name}</span>
+        {f.previous_filename && f.previous_filename !== f.filename && <span className="rv-change-dir subtle">← {splitPath(f.previous_filename).name}</span>}
+      </button>
+      {threads > 0 && <span className="rv-file-threads open" title={`${threads} open threads`}><Icon name="message" size={11} />{threads}</span>}
+      <span className="rv-file-stat subtle"><span className="text-success">+{f.additions}</span> <span className="text-danger">−{f.deletions}</span></span>
+      <span className={cx("rv-status", `text-${statusTone[f.status] ?? "neutral"}`)}>{statusLetter[f.status] ?? "M"}</span>
+    </div>
+  );
+}
+
+function ChangeFolder({ node, depth, byPath, closed, toggle, active }: {
+  node: TreeNode; depth: number; byPath: Map<string, PrFile>; closed: Set<string>; toggle: (p: string) => void; active: string | null;
+}) {
+  const { act, notify } = useReview();
+  const paths = filesUnder(node);
+  const viewed = paths.filter((p) => byPath.get(p) && isViewed(byPath.get(p)!)).length;
+  const isOpen = !closed.has(node.path);
+  const all = viewed === paths.length;
+  return (
+    <>
+      <div className={cx("rv-change rv-change-folder", all && "viewed")} style={{ paddingLeft: 12 + depth * 14 }} onClick={() => toggle(node.path)}>
+        <Tri
+          checked={all}
+          mixed={viewed > 0 && !all}
+          title={all ? "Mark folder as not viewed" : "Mark every file in this folder as viewed"}
+          onChange={(v) => act({ type: "mark_viewed_many", paths, viewed: v }).catch((err) => notify(String(err), "danger"))}
+        />
+        <Icon name={isOpen ? "chevron-down" : "chevron-right"} size={13} />
+        <Icon name={isOpen ? "folder-open" : "folder"} size={14} className="rv-folder-icon" />
+        <span className="rv-change-name rv-ellipsis" title={node.path}>{node.name}</span>
+        <span className="rv-flex" />
+        <span className="subtle rv-tabular rv-folder-count">{viewed}/{paths.length}</span>
+      </div>
+      {isOpen && node.children.map((c) =>
+        c.dir ? (
+          <ChangeFolder key={c.path} node={c} depth={depth + 1} byPath={byPath} closed={closed} toggle={toggle} active={active} />
+        ) : (
+          byPath.get(c.path) && <ChangeRow key={c.path} f={byPath.get(c.path)!} depth={depth + 1} active={active} />
+        ),
+      )}
+    </>
+  );
+}
+
+export function ChangesPanel({ autoRead, setAutoRead, active }: { autoRead: boolean; setAutoRead: (v: boolean) => void; active: string | null }) {
+  const { pr, act, notify } = useReview();
   const [filter, setFilter] = useState("");
   const [hideViewed, setHideViewed] = useState(false);
+  const [closed, setClosed] = useState<Set<string>>(new Set());
   const viewed = pr.files.filter(isViewed).length;
-  const shown = pr.files.filter((f) => (!filter || f.filename.toLowerCase().includes(filter.toLowerCase())) && (!hideViewed || !isViewed(f)));
+  const byPath = useMemo(() => new Map(pr.files.map((f) => [f.filename, f])), [pr.files]);
+  const tree = useMemo(() => {
+    const q = filter.toLowerCase();
+    const shown = pr.files.filter((f) => (!q || f.filename.toLowerCase().includes(q)) && (!hideViewed || !isViewed(f)));
+    return compactTree(buildTree(shown.map((f) => f.filename)));
+  }, [pr.files, filter, hideViewed]);
+  const toggle = (p: string) => setClosed((s) => {
+    const n = new Set(s);
+    if (n.has(p)) n.delete(p);
+    else n.add(p);
+    return n;
+  });
+  const allViewed = viewed === pr.files.length;
   return (
     <div className="rv-panel">
       <PanelHead title="Files changed">
-        <span className="subtle rv-tabular">{pr.files.length}</span>
+        <button className="rv-icon-btn" title={closed.size ? "Expand folders" : "Collapse folders"} onClick={() => setClosed(closed.size ? new Set() : new Set(tree.filter((n) => n.dir).map((n) => n.path)))}>
+          <Icon name="chevrons-up" size={14} />
+        </button>
       </PanelHead>
       <div className="rv-changes-progress">
         <div className="rv-changes-progress-row">
           <span><strong>{viewed}</strong> of {pr.files.length} viewed</span>
           <span className="subtle rv-tabular"><span className="text-success">+{pr.additions}</span> <span className="text-danger">−{pr.deletions}</span></span>
         </div>
-        <Meter value={viewed} max={Math.max(1, pr.files.length)} tone={viewed === pr.files.length ? "success" : "accent"} />
+        <Meter value={viewed} max={Math.max(1, pr.files.length)} tone={allViewed ? "success" : "accent"} />
         <label className="rv-check">
           <input type="checkbox" checked={autoRead} onChange={(e) => setAutoRead(e.target.checked)} />
           Mark files viewed as I scroll past them
@@ -234,31 +314,24 @@ export function ChangesPanel({ autoRead, setAutoRead, active }: { autoRead: bool
           Hide viewed files
         </label>
       </div>
-      <div className="rv-panel-filter">
+      <div className="rv-panel-filter rv-changes-tools">
         <input className="rv-input" placeholder="Filter changed files" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <button
+          className="rv-link"
+          onClick={() => act({ type: "mark_viewed_many", paths: pr.files.map((f) => f.filename), viewed: !allViewed }).catch((err) => notify(String(err), "danger"))}
+        >
+          {allViewed ? "Unmark all" : "Mark all viewed"}
+        </button>
       </div>
       <div className="rv-changes">
-        {shown.map((f) => {
-          const { dir, name } = splitPath(f.filename);
-          const threads = pr.threads.filter((t) => t.path === f.filename && !t.resolved).length;
-          return (
-            <div key={f.filename} className={cx("rv-change", isViewed(f) && "viewed", active === f.filename && "active")}>
-              <input
-                type="checkbox"
-                title={isViewed(f) ? "Viewed" : "Mark as viewed"}
-                checked={isViewed(f)}
-                onChange={(e) => act({ type: "mark_viewed", path: f.filename, viewed: e.target.checked }).catch((err) => notify(String(err), "danger"))}
-              />
-              <button className="rv-change-main" onClick={() => showChange(f.filename)} title={f.filename}>
-                <span className="rv-change-name">{name}</span>
-                <span className="rv-change-dir subtle">{dir}</span>
-              </button>
-              {threads > 0 && <span className="rv-file-threads open" title={`${threads} open threads`}><Icon name="message" size={11} />{threads}</span>}
-              <span className={cx("rv-status", `text-${statusTone[f.status] ?? "neutral"}`)}>{statusLetter[f.status] ?? "M"}</span>
-            </div>
-          );
-        })}
-        {!shown.length && <p className="subtle rv-pad">{hideViewed ? "Every file is viewed." : "No files match."}</p>}
+        {tree.map((n) =>
+          n.dir ? (
+            <ChangeFolder key={n.path} node={n} depth={0} byPath={byPath} closed={closed} toggle={toggle} active={active} />
+          ) : (
+            byPath.get(n.path) && <ChangeRow key={n.path} f={byPath.get(n.path)!} depth={0} active={active} />
+          ),
+        )}
+        {!tree.length && <p className="subtle rv-pad">{hideViewed ? "Every file is viewed." : "No files match."}</p>}
       </div>
     </div>
   );

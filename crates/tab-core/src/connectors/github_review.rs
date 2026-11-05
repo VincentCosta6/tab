@@ -520,6 +520,11 @@ pub enum ReviewAction {
         path: String,
         viewed: bool,
     },
+    /// Marks several files at once, like a whole folder.
+    MarkViewedMany {
+        paths: Vec<String>,
+        viewed: bool,
+    },
     /// A new comment thread on a line or range. `pending` adds it to the
     /// viewer's review instead of posting it now.
     AddThread {
@@ -622,6 +627,37 @@ pub async fn act(gw: &Gateway, pr: &PrRef, action: ReviewAction) -> anyhow::Resu
                 json!({ "pr": pr.node_id, "path": path }),
             )
             .await?;
+        }
+        ReviewAction::MarkViewedMany { paths, viewed } => {
+            let m = if viewed {
+                "markFileAsViewed"
+            } else {
+                "unmarkFileAsViewed"
+            };
+            // Aliased mutations: one request per 25 files.
+            for chunk in paths.chunks(25) {
+                let vars: Vec<String> = (0..chunk.len())
+                    .map(|i| format!("$p{i}: String!"))
+                    .collect();
+                let body: Vec<String> = (0..chunk.len())
+                    .map(|i| format!("f{i}: {m}(input: {{ pullRequestId: $pr, path: $p{i} }}) {{ clientMutationId }}"))
+                    .collect();
+                let mut v = json!({ "pr": pr.node_id });
+                for (i, p) in chunk.iter().enumerate() {
+                    v[format!("p{i}")] = json!(p);
+                }
+                graphql(
+                    gw,
+                    "review: mark folder viewed",
+                    &format!(
+                        "mutation($pr: ID!, {}) {{ {} }}",
+                        vars.join(", "),
+                        body.join(" ")
+                    ),
+                    v,
+                )
+                .await?;
+            }
         }
         ReviewAction::AddThread {
             path,
@@ -977,6 +1013,7 @@ test("retries timeouts with the same idempotency key", async () => {
         }],
         pending_review: None,
         sample_tree: vec![
+            tree("db/migrations/0007_refund_reason.sql", "-- Refunds keep the reason the customer gave.\nALTER TABLE refunds ADD COLUMN reason text;\n\nCREATE INDEX refunds_charge_id_idx ON refunds (charge_id);\n"),
             tree("README.md", "# payments\n\nCharges, captures and refunds for acme.\n"),
             tree("package.json", "{\n  \"name\": \"@acme/payments\",\n  \"private\": true,\n  \"scripts\": { \"test\": \"vitest\" }\n}\n"),
             tree("src/types.ts", "export interface Charge {\n  id: string;\n  amount: number;\n  currency: string;\n}\n"),

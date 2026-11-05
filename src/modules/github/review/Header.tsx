@@ -157,7 +157,7 @@ function copy(text: string) {
 }
 
 export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () => void; local: boolean; onRefresh: () => void; refreshing: boolean }) {
-  const { pr, act, notify } = useReview();
+  const { pr, act, notify, ai } = useReview();
   const [menu, setMenu] = useState(false);
   const [submit, setSubmit] = useState(false);
   const [checks, setChecks] = useState(false);
@@ -204,6 +204,9 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
         </div>
         {pr.sample && <Badge tone="warning">Sample data</Badge>}
         <span className="rv-flex" />
+        <Button size="sm" variant={ai.open ? "secondary" : "ghost"} icon="sparkles" className={cx("rv-ai-btn", ai.open && "on")} onClick={() => ai.setOpen(!ai.open)} title="Chat with your agent about this PR">
+          Ask AI{ai.chat?.running ? "…" : ""}
+        </Button>
         <div className="rv-menu-wrap" ref={menuRef}>
           <Button size="sm" icon="more" onClick={() => setMenu((m) => !m)}>Actions</Button>
           {menu && (

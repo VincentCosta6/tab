@@ -69,6 +69,10 @@ export function applyLocal(pr: PullReview, a: ReviewAction): PullReview {
   switch (a.type) {
     case "mark_viewed":
       return { ...pr, files: pr.files.map((f) => (f.filename === a.path ? { ...f, viewed: a.viewed ? "viewed" : "unviewed" } : f)) };
+    case "mark_viewed_many": {
+      const set = new Set(a.paths);
+      return { ...pr, files: pr.files.map((f) => (set.has(f.filename) ? { ...f, viewed: a.viewed ? "viewed" : "unviewed" } : f)) };
+    }
     case "add_thread":
       return {
         ...pr,
@@ -179,4 +183,25 @@ export function isViewed(f: PrFile) {
 export function threadRange(t: ReviewThread): [number, number] | null {
   if (!t.line) return null;
   return [t.start_line && t.start_line < t.line ? t.start_line : t.line, t.line];
+}
+
+/** A tree of changed files with single-child folders merged ("src/lib"), like VS Code. */
+export function compactTree(nodes: TreeNode[]): TreeNode[] {
+  return nodes.map((n) => {
+    let cur = n;
+    while (cur.dir && cur.children.length === 1 && cur.children[0].dir) {
+      const c = cur.children[0];
+      cur = { ...c, name: `${cur.name}/${c.name}` };
+    }
+    return cur.dir ? { ...cur, children: compactTree(cur.children) } : cur;
+  });
+}
+
+/** Paths in the order the tree shows them, folders first. */
+export function treeOrder(nodes: TreeNode[]): string[] {
+  return nodes.flatMap((n) => (n.dir ? treeOrder(n.children) : [n.path]));
+}
+
+export function filesUnder(n: TreeNode): string[] {
+  return n.dir ? n.children.flatMap(filesUnder) : [n.path];
 }

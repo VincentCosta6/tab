@@ -61,7 +61,17 @@ export function RichBody({ body, path, side, range }: { body: string; path?: str
   return <div className="rv-richbody">{parts}</div>;
 }
 
-export interface ComposerButton { label: string; kind: string; primary?: boolean }
+export interface ComposerButton {
+  label: string;
+  kind: string;
+  primary?: boolean;
+  icon?: string;
+  /** Shown at the start of the row, as a quiet button. */
+  aside?: boolean;
+  /** Works with an empty comment (e.g. Ask AI has a default question). */
+  allowEmpty?: boolean;
+  title?: string;
+}
 
 const TOOLS: { icon: string; title: string; kind: "wrap" | "line"; a: string; b?: string; key?: string }[] = [
   { icon: "bold", title: "Bold (Ctrl B)", kind: "wrap", a: "**", b: "**", key: "b" },
@@ -135,7 +145,8 @@ export function Composer({
   };
 
   const submit = async (kind: string) => {
-    if (!onSubmit || !text.trim() || busy) return;
+    const b = buttons.find((x) => x.kind === kind);
+    if (!onSubmit || (!text.trim() && !b?.allowEmpty) || busy) return;
     setBusy(kind);
     setError(null);
     try {
@@ -204,10 +215,20 @@ export function Composer({
       {error && <p className="rv-error">{error}</p>}
       {!hideButtons && (
         <div className="rv-composer-actions">
-          <span className="subtle rv-hint">Markdown supported · Ctrl Enter to send</span>
+          {buttons.some((b) => b.aside) ? (
+            <span className="rv-composer-aside">
+              {buttons.filter((b) => b.aside).map((b) => (
+                <Button key={b.kind} size="sm" variant="ghost" icon={b.icon} title={b.title} disabled={(!text.trim() && !b.allowEmpty) || !!busy} onClick={() => submit(b.kind)}>
+                  {busy === b.kind ? "Sending…" : b.label}
+                </Button>
+              ))}
+            </span>
+          ) : (
+            <span className="subtle rv-hint">Markdown supported · Ctrl Enter to send</span>
+          )}
           {onCancel && <Button size="sm" variant="ghost" onClick={onCancel}>Cancel</Button>}
-          {buttons.map((b) => (
-            <Button key={b.kind} size="sm" variant={b.primary ? "primary" : "secondary"} disabled={!text.trim() || !!busy} onClick={() => submit(b.kind)}>
+          {buttons.filter((b) => !b.aside).map((b) => (
+            <Button key={b.kind} size="sm" variant={b.primary ? "primary" : "secondary"} icon={b.icon} title={b.title} disabled={(!text.trim() && !b.allowEmpty) || !!busy} onClick={() => submit(b.kind)}>
               {busy === b.kind ? "Sending…" : b.label}
             </Button>
           ))}
@@ -259,7 +280,7 @@ function CommentView({ thread, c, range }: { thread: ReviewThread; c: ThreadComm
 }
 
 export function ThreadCard({ thread }: { thread: ReviewThread }) {
-  const { pr, act, notify } = useReview();
+  const { pr, act, notify, ai } = useReview();
   const [open, setOpen] = useState(!thread.resolved);
   const [replying, setReplying] = useState(false);
   const range = threadRange(thread);
@@ -301,6 +322,15 @@ export function ThreadCard({ thread }: { thread: ReviewThread }) {
             ) : (
               <div className="rv-thread-actions">
                 {thread.can_reply && <button className="rv-reply-fake" onClick={() => setReplying(true)}>Reply…</button>}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon="zap"
+                  title="Queue this thread for your agent to fix"
+                  onClick={() => ai.addFix(thread.comments.map((c) => `${c.author}: ${c.body}`).join("\n\n"), range ? { path: thread.path, side: thread.side, start: range[0], end: range[1] } : null, "thread")}
+                >
+                  Fix list
+                </Button>
                 {thread.can_resolve && !onlyPending && (
                   <Button size="sm" icon={thread.resolved ? "undo" : "check"} onClick={() => { resolve(!thread.resolved); if (!thread.resolved) setOpen(false); }}>
                     {thread.resolved ? "Unresolve" : "Resolve"}
@@ -317,7 +347,7 @@ export function ThreadCard({ thread }: { thread: ReviewThread }) {
 
 /** The composer for a new thread on a line range. */
 export function NewThread({ path, side, start, end, onDone }: { path: string; side: Side; start: number; end: number; onDone: () => void }) {
-  const { pr, act } = useReview();
+  const { pr, act, ai } = useReview();
   const hasPending = !!pr.pending_review;
   return (
     <div className="rv-thread rv-thread-new">
@@ -328,12 +358,24 @@ export function NewThread({ path, side, start, end, onDone }: { path: string; si
       <div className="rv-thread-foot">
         <Composer
           target={{ path, side, start, end }}
+          placeholder="Leave a comment, ask AI about these lines, or note a fix for your agent"
           buttons={[
+            { label: "Ask AI", kind: "ask", icon: "sparkles", aside: true, allowEmpty: true, title: "Ask your agent about these lines (empty asks what they do)" },
+            { label: "Add to fix list", kind: "fix", icon: "zap", aside: true, title: "Queue this for your agent to fix; nothing is posted" },
             { label: "Add single comment", kind: "single" },
             { label: hasPending ? "Add review comment" : "Start a review", kind: "review", primary: true },
           ]}
           onCancel={onDone}
           onSubmit={async (body, kind) => {
+            const at = { path, side, start, end };
+            if (kind === "ask") {
+              await ai.ask(body, at);
+              return onDone();
+            }
+            if (kind === "fix") {
+              ai.addFix(body, at);
+              return onDone();
+            }
             await act({ type: "add_thread", path, line: end, start_line: start < end ? start : null, side, body, pending: kind === "review" });
             onDone();
           }}

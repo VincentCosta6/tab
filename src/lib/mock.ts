@@ -2,7 +2,7 @@
 // sample data closely enough to design against.
 
 import type {
-  GhLoginCode, GhStatus,
+  GhLoginCode, GhStatus, LspServer,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
@@ -228,6 +228,20 @@ export const mockApi = {
           simulateTurn(session, item, String(args.text));
           return { item, session };
         }
+        case "review_chat_open": {
+          const session = sessions.find((s) => s.cwd === `review:${args.repo}#${args.number}`) ?? null;
+          return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: false } satisfies Chat;
+        }
+        case "review_chat_send": {
+          const key = `review:${args.target.repo}#${args.target.number}`;
+          let session = sessions.find((s) => s.cwd === key);
+          if (!session) {
+            session = { id: `sess-${Date.now()}`, item_id: null, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: args.target.title, status: "working", cwd: key, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+            sessions.push(session);
+          }
+          simulateReviewTurn(session, String(args.text));
+          return session;
+        }
         case "chat_stop": return null;
         case "approval_resolve": return true;
         case "detect_agents": return [
@@ -236,6 +250,13 @@ export const mockApi = {
         ];
         case "mcp_info": return { url: "http://127.0.0.1:47821/mcp", token: "mock-token" };
         case "github_pull": return samplePull(args.repo, args.number);
+        case "lsp_servers": return lspServers;
+        case "lsp_install": {
+          await new Promise((r) => setTimeout(r, 1800));
+          lspServers = lspServers.map((s) => (s.id === args.id ? { ...s, installed: true, path: `/Users/you/go/bin/${s.command}` } : s));
+          return lspServers.find((s) => s.id === args.id);
+        }
+        case "lsp_start": throw new Error("Language servers run in the desktop app.");
         case "gh_status": return gh;
         case "usage_summary": {
           const in3h = new Date(Date.now() + 3 * 3600_000).toISOString();
@@ -276,6 +297,13 @@ export const mockApi = {
     return () => void ghCodeListeners.delete(cb);
   },
 };
+
+let lspServers: LspServer[] = [
+  { id: "gopls", name: "Go (gopls)", languages: ["go"], command: "gopls", note: "Hover, go to definition, references and errors across the module.", installed: false, path: null, install_command: "go install golang.org/x/tools/gopls@latest", needs: null, needs_url: null },
+  { id: "sqls", name: "SQL (sqls)", languages: ["sql"], command: "sqls", note: "Syntax errors and outline. Table and column info needs a database connection in sqls's own config.", installed: false, path: null, install_command: "go install github.com/sqls-server/sqls@latest", needs: null, needs_url: null },
+  { id: "rust-analyzer", name: "Rust (rust-analyzer)", languages: ["rust"], command: "rust-analyzer", note: "Hover, go to definition and references. Indexing a large workspace takes a minute.", installed: true, path: "/Users/you/.cargo/bin/rust-analyzer", install_command: "rustup component add rust-analyzer", needs: null, needs_url: null },
+  { id: "pyright", name: "Python (pyright)", languages: ["python"], command: "pyright-langserver", note: "Hover, go to definition, references and type errors.", installed: false, path: null, install_command: null, needs: "npm", needs_url: "https://nodejs.org" },
+];
 
 let gh: GhStatus = { installed: false, path: null, version: null, logged_in: false, user: null, install_command: "brew install gh", error: null };
 const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
@@ -336,6 +364,35 @@ function simulateTurn(session: Session, item: QueueItem, text: string) {
   })();
 }
 
+/** A canned review answer: explains the sample's capture loop, with code links. */
+function simulateReviewTurn(session: Session, text: string) {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    post(session, "user", "text", text);
+    status(session, "working");
+    await sleep(400);
+    const fixes = /fix list/i.test(text);
+    if (fixes) {
+      post(session, "assistant", "tool", "Edit src/capture.ts", { tool: "Edit" });
+      post(session, "tool", "tool_result", "Applied 1 edit");
+      await sleep(300);
+    } else {
+      post(session, "assistant", "tool", "Read src/backoff.ts", { tool: "Read" });
+      post(session, "tool", "tool_result", "5 lines");
+    }
+    const reply = fixes
+      ? "Done, one change per item:\n\n- Stopped retrying `card_declined`: [isRetryable](src/capture.ts#L23) now only matches timeouts, resets and rate limits.\n\nNothing is committed; review the change in the checkout."
+      : "It retries the capture up to [MAX_ATTEMPTS](src/capture.ts#L5) times. Each attempt reuses the same idempotency key, so Stripe never captures twice, and failures that [isRetryable](src/capture.ts#L23) rejects are thrown at once.\n\nBetween attempts it waits with [backoff](src/backoff.ts#L2), which sleeps a random time up to 250ms × 2^attempt, capped at 8s.";
+    for (let i = 0; i < reply.length; i += 14) {
+      emit({ type: "session_delta", session_id: session.id, text: reply.slice(i, i + 14) });
+      await sleep(25);
+    }
+    post(session, "assistant", "text", reply);
+    post(session, "system", "result", "", { cost_usd: 0.012, duration_ms: 5200 });
+    status(session, "idle");
+  })();
+}
+
 function pressure(): Pressure[] {
   return [
     { provider: "anthropic", resource: "requests", used: 11, budget: 50, window_seconds: 60, remote_remaining: 3988, remote_limit: 4000, headroom: 0.78, recent: 2, burst_threshold: 10, cooling_until: null, deferred: 0 },
@@ -377,6 +434,7 @@ function samplePull(repo: string, number: number): PullReview {
     }],
     pending_review: null,
     sample_tree: [
+      { path: "db/migrations/0007_refund_reason.sql", content: "-- Refunds keep the reason the customer gave.\nALTER TABLE refunds ADD COLUMN reason text;\n\nCREATE INDEX refunds_charge_id_idx ON refunds (charge_id);\n" },
       { path: "README.md", content: "# payments\n\nCharges, captures and refunds for acme.\n" },
       { path: "package.json", content: "{\n  \"name\": \"@acme/payments\",\n  \"private\": true,\n  \"scripts\": { \"test\": \"vitest\" }\n}\n" },
       { path: "src/types.ts", content: "export interface Charge {\n  id: string;\n  amount: number;\n  currency: string;\n}\n" },

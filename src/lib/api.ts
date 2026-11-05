@@ -4,8 +4,8 @@
 
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  ItemContext, ItemDetail, ItemState, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
-  RateLimitState, ReviewAction, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
+  ItemContext, ItemDetail, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
+  RateLimitState, ReviewAction, Session, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
 } from "./types";
 import { mockApi } from "./mock";
 
@@ -41,6 +41,9 @@ export const api = {
   createTask: (task: NewTask) => call<QueueItem>("create_task", { task }),
   chatOpen: (itemId: string) => call<Chat>("chat_open", { itemId }),
   chatSend: (itemId: string | null, text: string) => call<ChatStarted>("chat_send", { itemId, text }),
+  reviewChatOpen: (repo: string, number: number) => call<Chat>("review_chat_open", { repo, number }),
+  reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string) =>
+    call<Session>("review_chat_send", { target, text }),
   setAgentModel: (model: string | null) => call<TabConfig>("set_agent_model", { model }),
   connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),
   chatStop: (sessionId: string) => call<void>("chat_stop", { sessionId }),
@@ -63,6 +66,12 @@ export const api = {
   workspaceOpen: (repo: string, number: number, target: "vscode" | "folder", path?: string, line?: number) =>
     call<void>("review_workspace_open", { repo, number, target, path: path ?? null, line: line ?? null }),
   vscodeAvailable: () => call<boolean>("review_vscode_available"),
+  lspServers: () => call<LspServer[]>("lsp_servers"),
+  lspInstall: (id: string) => call<LspServer>("lsp_install", { id }),
+  lspStart: (server: string, repo: string, number: number) => call<LspStarted>("lsp_start", { server, repo, number }),
+  lspRequest: <T = unknown>(session: string, method: string, params: unknown) => call<T>("lsp_request", { session, method, params }),
+  lspNotify: (session: string, method: string, params: unknown) => call<void>("lsp_notify", { session, method, params }),
+  lspStop: (session: string) => call<void>("lsp_stop", { session }),
 };
 
 export async function openUrl(url: string) {
@@ -94,4 +103,11 @@ export async function onWorkspaceProgress(cb: (p: WorkspaceProgress) => void): P
   if (!inTauri) return mockApi.onWorkspace(cb);
   const { listen } = await import("@tauri-apps/api/event");
   return listen<WorkspaceProgress>("tab://workspace", (e) => cb(e.payload));
+}
+
+/** Notifications from running language servers (diagnostics, mostly). */
+export async function onLsp(cb: (e: LspEvent) => void): Promise<() => void> {
+  if (!inTauri) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<LspEvent>("tab://lsp", (e) => cb(e.payload));
 }

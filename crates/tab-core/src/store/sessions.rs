@@ -64,6 +64,55 @@ impl Store {
             .optional()?)
     }
 
+    /// The newest session with this key (e.g. `review:owner/name#12`).
+    pub fn session_for_key(&self, key: &str) -> anyhow::Result<Option<Session>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!(
+                    "SELECT {COLS} FROM sessions WHERE key = ?1 ORDER BY updated_at DESC LIMIT 1"
+                ),
+                [key],
+                row_to_session,
+            )
+            .optional()?)
+    }
+
+    pub fn session_create_keyed(
+        &self,
+        key: &str,
+        agent: AgentKind,
+        title: &str,
+        cwd: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Session> {
+        let s = self.session_create(None, agent, title, cwd, now)?;
+        self.conn().execute(
+            "UPDATE sessions SET key = ?2 WHERE id = ?1",
+            params![s.id, key],
+        )?;
+        Ok(s)
+    }
+
+    /// What the agent should know about the session's subject, refreshed each turn.
+    pub fn session_set_brief(&self, id: &str, brief: &str) -> anyhow::Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET brief = ?2 WHERE id = ?1",
+            params![id, brief],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_brief(&self, id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row("SELECT brief FROM sessions WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten())
+    }
+
     pub fn sessions_recent(&self, limit: usize) -> anyhow::Result<Vec<Session>> {
         let conn = self.conn();
         let rows = conn

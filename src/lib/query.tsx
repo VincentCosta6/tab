@@ -117,7 +117,11 @@ function LiveEvents() {
           break;
         case "session_changed": {
           const s = e.session;
-          if (s.item_id)
+          if (!s.item_id) {
+            // Keyed sessions (a PR's review chat) are found by id.
+            const key = chatKeyForSession(qc, s.id);
+            if (key) qc.setQueryData<Chat>(key, (c) => (c ? { ...c, session: s, running: s.status === "working" || s.status === "needs_input" } : c));
+          } else
             qc.setQueryData<Chat>(keys.chat(s.item_id), (c) => ({
               session: s,
               messages: c?.session?.id === s.id ? c.messages : [],

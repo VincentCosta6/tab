@@ -6,12 +6,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint};
 use tab_core::config::ConnectorConfig;
 use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
 use tab_core::connectors::registry;
 use tab_core::gateway::RateLimitState;
+use tab_core::lsp::{self, LspHub, ServerStatus};
 use tab_core::mcp::{EngineAccess, McpServer};
 use tab_core::model::{
     Approval, ConnectorInfo, ContextEntry, ContextSection, ItemContext, ItemState, NewContext,
@@ -44,6 +45,7 @@ struct AppState {
     core: Arc<Core>,
     mcp_url: std::sync::Mutex<Option<String>>,
     workspaces: Arc<Workspaces>,
+    lsp: Arc<LspHub>,
 }
 
 impl std::ops::Deref for AppState {
@@ -331,6 +333,115 @@ async fn chat_send(
     Ok(ChatStarted { item, session })
 }
 
+/// The PR a review chat is about.
+#[derive(Deserialize)]
+struct ReviewChatTarget {
+    repo: String,
+    number: u64,
+    title: String,
+    url: String,
+    head_ref: String,
+    base_ref: String,
+}
+
+fn review_chat_key(repo: &str, number: u64) -> String {
+    format!("review:{repo}#{number}")
+}
+
+/// The agent chat for a pull request under review.
+#[tauri::command]
+async fn review_chat_open(
+    state: State<'_, AppState>,
+    repo: String,
+    number: u64,
+) -> CmdResult<Chat> {
+    let session = state
+        .store
+        .session_for_key(&review_chat_key(&repo, number))
+        .map_err(err)?;
+    let (messages, approvals, running) = match &session {
+        Some(s) => (
+            state.store.messages(&s.id).map_err(err)?,
+            state.hub.pending_approvals(&s.id),
+            state.hub.is_running(&s.id),
+        ),
+        None => (Vec::new(), Vec::new(), false),
+    };
+    Ok(Chat {
+        session,
+        messages,
+        approvals,
+        running,
+    })
+}
+
+/// Sends a message to the PR's agent chat. The agent runs in the PR's local
+/// checkout when there is one.
+#[tauri::command]
+async fn review_chat_send(
+    state: State<'_, AppState>,
+    target: ReviewChatTarget,
+    text: String,
+) -> CmdResult<Session> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("message is empty".into());
+    }
+    if state.hub.config().kind.is_none() {
+        return Err("Set up an agent first (Settings → Agent).".into());
+    }
+    let dir = state
+        .workspaces
+        .worktree(&target.repo, target.number)
+        .map_err(err)?;
+    let local = dir.exists();
+    let cwd = if local {
+        dir.display().to_string()
+    } else {
+        state.hub.workdir()
+    };
+    let brief = review_brief(&target, local.then_some(cwd.as_str()));
+    let session = state
+        .hub
+        .session_for_key(
+            &review_chat_key(&target.repo, target.number),
+            &format!("{}#{}: {}", target.repo, target.number, target.title),
+            &cwd,
+            &brief,
+        )
+        .map_err(err)?;
+    state.hub.send(&session.id, &text).map_err(err)?;
+    Ok(session)
+}
+
+fn review_brief(t: &ReviewChatTarget, checkout: Option<&str>) -> String {
+    let mut b = format!(
+        "This session is about pull request {}#{} \"{}\" ({}), merging {} into {}. \
+         The person is reviewing it in tab's review workspace and talks to you from a side panel.\n",
+        t.repo, t.number, t.title, t.url, t.head_ref, t.base_ref
+    );
+    match checkout {
+        Some(dir) => b.push_str(&format!(
+            "The PR's head is checked out at {dir} (your working directory), with the base branch \
+             fetched, so `git diff origin/{}...HEAD` shows the PR's changes. Read code there instead of guessing.\n",
+            t.base_ref
+        )),
+        None => b.push_str(
+            "There is no local checkout of this PR; use `gh pr view` / `gh pr diff` or the GitHub API to read it.\n",
+        ),
+    }
+    b.push_str(
+        "- Link every piece of code you mention as a markdown link to its path from the repository root \
+         with a line anchor, like [refund()](src/refund.ts#L12) or [the retry loop](src/capture.ts#L8-L20). \
+         tab opens these in its editor, so prefer linking definitions over pasting them.\n\
+         - When asked what code does, explain briefly and link the definitions and call sites that matter.\n\
+         - When given a fix list, make each fix in the checkout, keeping changes minimal, then reply with \
+         one line per fix saying what you changed (linked) or why you didn't. Don't commit or push unless \
+         the person asks; they review your changes first.\n",
+    );
+    b
+}
+
 #[tauri::command]
 async fn chat_stop(state: State<'_, AppState>, session_id: String) -> CmdResult<()> {
     state.hub.stop(&session_id);
@@ -540,6 +651,89 @@ async fn review_workspace_open(
 #[tauri::command]
 async fn review_vscode_available() -> CmdResult<bool> {
     Ok(workspace::vscode().is_some())
+}
+
+/// Which language servers tab knows, and whether each is installed here.
+#[tauri::command]
+async fn lsp_servers() -> CmdResult<Vec<ServerStatus>> {
+    tauri::async_runtime::spawn_blocking(lsp::status)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn lsp_install(id: String) -> CmdResult<ServerStatus> {
+    lsp::install(&id).await.map_err(err)
+}
+
+#[derive(Serialize)]
+struct LspStarted {
+    session: String,
+    root_uri: String,
+    capabilities: serde_json::Value,
+}
+
+/// Starts a language server in the PR's checkout. Notifications arrive as `tab://lsp`.
+#[tauri::command]
+async fn lsp_start(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    server: String,
+    repo: String,
+    number: u64,
+) -> CmdResult<LspStarted> {
+    let dir = state.workspaces.worktree(&repo, number).map_err(err)?;
+    if !dir.exists() {
+        return Err("This pull request hasn't been checked out on this computer yet.".into());
+    }
+    let s = state
+        .lsp
+        .start(&server, &dir, move |e| {
+            let _ = app.emit("tab://lsp", &e);
+        })
+        .await
+        .map_err(err)?;
+    Ok(LspStarted {
+        session: s.id.clone(),
+        root_uri: s.root_uri.clone(),
+        capabilities: s.capabilities(),
+    })
+}
+
+#[tauri::command]
+async fn lsp_request(
+    state: State<'_, AppState>,
+    session: String,
+    method: String,
+    params: serde_json::Value,
+) -> CmdResult<serde_json::Value> {
+    let s = state
+        .lsp
+        .get(&session)
+        .await
+        .ok_or("That language server has stopped.")?;
+    s.request(&method, params).await.map_err(err)
+}
+
+#[tauri::command]
+async fn lsp_notify(
+    state: State<'_, AppState>,
+    session: String,
+    method: String,
+    params: serde_json::Value,
+) -> CmdResult<()> {
+    let s = state
+        .lsp
+        .get(&session)
+        .await
+        .ok_or("That language server has stopped.")?;
+    s.notify(&method, params).await.map_err(err)
+}
+
+#[tauri::command]
+async fn lsp_stop(state: State<'_, AppState>, session: String) -> CmdResult<()> {
+    state.lsp.stop(&session).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -765,6 +959,7 @@ pub fn run() {
                 core: core.clone(),
                 mcp_url: std::sync::Mutex::new(None),
                 workspaces: Arc::new(Workspaces::new(data_dir.join("workspaces"))),
+                lsp: Arc::new(LspHub::new()),
             };
             tauri::async_runtime::block_on(async {
                 state.restart(&config).await;
@@ -816,6 +1011,8 @@ pub fn run() {
             chat_open,
             chat_send,
             chat_stop,
+            review_chat_open,
+            review_chat_send,
             approval_resolve,
             detect_agents,
             mcp_info,
@@ -832,6 +1029,12 @@ pub fn run() {
             review_workspace_search,
             review_workspace_open,
             review_vscode_available,
+            lsp_servers,
+            lsp_install,
+            lsp_start,
+            lsp_request,
+            lsp_notify,
+            lsp_stop,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -841,6 +1044,8 @@ pub fn run() {
             {
                 // Stops agent processes and the OpenCode server tab started.
                 state.hub.shutdown();
+                let lsp = state.lsp.clone();
+                tauri::async_runtime::block_on(lsp.stop_all());
             }
         });
 }

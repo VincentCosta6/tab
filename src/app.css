@@ -148,6 +148,11 @@
 .transcript-head { display: flex; justify-content: center; }
 .empty-chat { justify-content: center; align-items: center; }
 .msg { line-height: 1.55; }
+.msg-user .markdown { white-space: normal; }
+.msg-user .markdown pre { white-space: pre-wrap; margin: var(--space-1) 0; padding: var(--space-2); border-radius: var(--radius-sm); background: rgb(127 127 127 / 0.2); font-size: var(--text-xs); }
+.msg-user .markdown code { background: rgb(127 127 127 / 0.25); color: inherit; }
+.msg-user .markdown pre code { background: none; padding: 0; }
+.msg-user .markdown a, .msg-user .md-code-link { color: inherit; }
 .msg-user { align-self: flex-end; max-width: 80% !important; margin-right: 0 !important; padding: var(--space-2) var(--space-3); border-radius: var(--radius-lg) var(--radius-lg) 4px var(--radius-lg); background: var(--fg); color: var(--bg-raised); white-space: pre-wrap; }
 .msg-assistant { color: var(--fg); }
 .msg-assistant.streaming::after { content: "▍"; color: var(--fg-subtle); animation: blink 1s steps(2) infinite; }
