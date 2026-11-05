@@ -11,14 +11,16 @@ import { cx } from "../../../design/components";
 import { Icon } from "../../../design/icons";
 import { api } from "../../../lib/api";
 import { keys } from "../../../lib/query";
+import { useLanguageServers } from "../lsp";
 import { loadProject, projectStore, setOpener } from "../monaco";
 import { Boot } from "./Boot";
 import { Ctx, type ComposerTarget, type DiffMode, type ReviewCtx } from "./context";
-import { useActions, usePull, useSource, useWorkspace } from "./data";
+import { readFile, useActions, usePull, useSource, useWorkspace } from "./data";
 import { DiffStack, FileHeader } from "./DiffStack";
 import { FileDiff } from "./FileDiff";
 import { FileView } from "./FileView";
 import { Header } from "./Header";
+import { LanguageStatus } from "./LanguageServers";
 import { buildTree, compactTree, isViewed, openThreads, splitPath, treeOrder } from "./model";
 import { Overview } from "./Overview";
 import "./review.css";
@@ -139,6 +141,15 @@ export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo
     loadProject(`${pr.repo}#${pr.number}@${ws.head_sha}`, ws.files, read);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws, pr?.repo, pr?.number, pr?.sample]);
+
+  // Go, SQL, Rust and Python get a language server in the checkout.
+  const srcRef = useRef(src);
+  srcRef.current = src;
+  const readHead = useCallback((path: string) => (srcRef.current ? readFile(srcRef.current, "head", path) : Promise.reject(new Error("not ready"))), []);
+  useLanguageServers(
+    pr && ws ? { repo: pr.repo, number: pr.number, key: `${pr.repo}#${pr.number}@${ws.head_sha}`, files: ws.files, local: !pr.sample && boot.phase === "ready" } : null,
+    readHead,
+  );
 
   // Ctrl+Shift+E/F/G switch panels, like VS Code.
   useEffect(() => {
@@ -263,6 +274,7 @@ export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo
           {project && ws && project.key === `${pr.repo}#${pr.number}@${ws.head_sha}` && (
             <span title={project.error}>{project.state === "loading" ? `Loading sources ${project.done}/${project.total}` : project.state === "error" ? "Some sources didn't load" : `TypeScript: ${project.total} files`}</span>
           )}
+          <LanguageStatus local={local} sample={!!pr.sample} />
           <span className="rv-flex" />
           {pr.pending_review && <span className="text-warning">Review in progress</span>}
           <button className="rv-status-btn" onClick={() => setAutoRead(!autoRead)} title="Mark files viewed as you scroll past them">

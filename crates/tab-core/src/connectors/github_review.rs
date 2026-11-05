@@ -1013,6 +1013,7 @@ test("retries timeouts with the same idempotency key", async () => {
         }],
         pending_review: None,
         sample_tree: vec![
+            tree("db/migrations/0007_refund_reason.sql", "-- Refunds keep the reason the customer gave.\nALTER TABLE refunds ADD COLUMN reason text;\n\nCREATE INDEX refunds_charge_id_idx ON refunds (charge_id);\n"),
             tree("README.md", "# payments\n\nCharges, captures and refunds for acme.\n"),
             tree("package.json", "{\n  \"name\": \"@acme/payments\",\n  \"private\": true,\n  \"scripts\": { \"test\": \"vitest\" }\n}\n"),
             tree("src/types.ts", "export interface Charge {\n  id: string;\n  amount: number;\n  currency: string;\n}\n"),

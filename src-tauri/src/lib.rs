@@ -12,6 +12,7 @@ use tab_core::config::ConnectorConfig;
 use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
 use tab_core::connectors::registry;
 use tab_core::gateway::RateLimitState;
+use tab_core::lsp::{self, LspHub, ServerStatus};
 use tab_core::mcp::{EngineAccess, McpServer};
 use tab_core::model::{
     Approval, ConnectorInfo, ContextEntry, ContextSection, ItemContext, ItemState, NewContext,
@@ -44,6 +45,7 @@ struct AppState {
     core: Arc<Core>,
     mcp_url: std::sync::Mutex<Option<String>>,
     workspaces: Arc<Workspaces>,
+    lsp: Arc<LspHub>,
 }
 
 impl std::ops::Deref for AppState {
@@ -542,6 +544,89 @@ async fn review_vscode_available() -> CmdResult<bool> {
     Ok(workspace::vscode().is_some())
 }
 
+/// Which language servers tab knows, and whether each is installed here.
+#[tauri::command]
+async fn lsp_servers() -> CmdResult<Vec<ServerStatus>> {
+    tauri::async_runtime::spawn_blocking(lsp::status)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn lsp_install(id: String) -> CmdResult<ServerStatus> {
+    lsp::install(&id).await.map_err(err)
+}
+
+#[derive(Serialize)]
+struct LspStarted {
+    session: String,
+    root_uri: String,
+    capabilities: serde_json::Value,
+}
+
+/// Starts a language server in the PR's checkout. Notifications arrive as `tab://lsp`.
+#[tauri::command]
+async fn lsp_start(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    server: String,
+    repo: String,
+    number: u64,
+) -> CmdResult<LspStarted> {
+    let dir = state.workspaces.worktree(&repo, number).map_err(err)?;
+    if !dir.exists() {
+        return Err("This pull request hasn't been checked out on this computer yet.".into());
+    }
+    let s = state
+        .lsp
+        .start(&server, &dir, move |e| {
+            let _ = app.emit("tab://lsp", &e);
+        })
+        .await
+        .map_err(err)?;
+    Ok(LspStarted {
+        session: s.id.clone(),
+        root_uri: s.root_uri.clone(),
+        capabilities: s.capabilities(),
+    })
+}
+
+#[tauri::command]
+async fn lsp_request(
+    state: State<'_, AppState>,
+    session: String,
+    method: String,
+    params: serde_json::Value,
+) -> CmdResult<serde_json::Value> {
+    let s = state
+        .lsp
+        .get(&session)
+        .await
+        .ok_or("That language server has stopped.")?;
+    s.request(&method, params).await.map_err(err)
+}
+
+#[tauri::command]
+async fn lsp_notify(
+    state: State<'_, AppState>,
+    session: String,
+    method: String,
+    params: serde_json::Value,
+) -> CmdResult<()> {
+    let s = state
+        .lsp
+        .get(&session)
+        .await
+        .ok_or("That language server has stopped.")?;
+    s.notify(&method, params).await.map_err(err)
+}
+
+#[tauri::command]
+async fn lsp_stop(state: State<'_, AppState>, session: String) -> CmdResult<()> {
+    state.lsp.stop(&session).await;
+    Ok(())
+}
+
 #[tauri::command]
 async fn mark_done(state: State<'_, AppState>, id: String) -> CmdResult<Option<QueueItem>> {
     with_engine!(state, e => e.mark_done(&id).await.map_err(err))
@@ -765,6 +850,7 @@ pub fn run() {
                 core: core.clone(),
                 mcp_url: std::sync::Mutex::new(None),
                 workspaces: Arc::new(Workspaces::new(data_dir.join("workspaces"))),
+                lsp: Arc::new(LspHub::new()),
             };
             tauri::async_runtime::block_on(async {
                 state.restart(&config).await;
@@ -832,6 +918,12 @@ pub fn run() {
             review_workspace_search,
             review_workspace_open,
             review_vscode_available,
+            lsp_servers,
+            lsp_install,
+            lsp_start,
+            lsp_request,
+            lsp_notify,
+            lsp_stop,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -841,6 +933,8 @@ pub fn run() {
             {
                 // Stops agent processes and the OpenCode server tab started.
                 state.hub.shutdown();
+                let lsp = state.lsp.clone();
+                tauri::async_runtime::block_on(lsp.stop_all());
             }
         });
 }

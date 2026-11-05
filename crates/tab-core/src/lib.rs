@@ -21,6 +21,7 @@ pub mod connectors;
 pub mod engine;
 pub mod gateway;
 pub mod gh;
+pub mod lsp;
 pub mod mcp;
 pub mod model;
 pub mod ranker;

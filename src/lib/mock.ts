@@ -2,7 +2,7 @@
 // sample data closely enough to design against.
 
 import type {
-  GhLoginCode, GhStatus,
+  GhLoginCode, GhStatus, LspServer,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
@@ -236,6 +236,13 @@ export const mockApi = {
         ];
         case "mcp_info": return { url: "http://127.0.0.1:47821/mcp", token: "mock-token" };
         case "github_pull": return samplePull(args.repo, args.number);
+        case "lsp_servers": return lspServers;
+        case "lsp_install": {
+          await new Promise((r) => setTimeout(r, 1800));
+          lspServers = lspServers.map((s) => (s.id === args.id ? { ...s, installed: true, path: `/Users/you/go/bin/${s.command}` } : s));
+          return lspServers.find((s) => s.id === args.id);
+        }
+        case "lsp_start": throw new Error("Language servers run in the desktop app.");
         case "gh_status": return gh;
         case "usage_summary": {
           const in3h = new Date(Date.now() + 3 * 3600_000).toISOString();
@@ -276,6 +283,13 @@ export const mockApi = {
     return () => void ghCodeListeners.delete(cb);
   },
 };
+
+let lspServers: LspServer[] = [
+  { id: "gopls", name: "Go (gopls)", languages: ["go"], command: "gopls", note: "Hover, go to definition, references and errors across the module.", installed: false, path: null, install_command: "go install golang.org/x/tools/gopls@latest", needs: null, needs_url: null },
+  { id: "sqls", name: "SQL (sqls)", languages: ["sql"], command: "sqls", note: "Syntax errors and outline. Table and column info needs a database connection in sqls's own config.", installed: false, path: null, install_command: "go install github.com/sqls-server/sqls@latest", needs: null, needs_url: null },
+  { id: "rust-analyzer", name: "Rust (rust-analyzer)", languages: ["rust"], command: "rust-analyzer", note: "Hover, go to definition and references. Indexing a large workspace takes a minute.", installed: true, path: "/Users/you/.cargo/bin/rust-analyzer", install_command: "rustup component add rust-analyzer", needs: null, needs_url: null },
+  { id: "pyright", name: "Python (pyright)", languages: ["python"], command: "pyright-langserver", note: "Hover, go to definition, references and type errors.", installed: false, path: null, install_command: null, needs: "npm", needs_url: "https://nodejs.org" },
+];
 
 let gh: GhStatus = { installed: false, path: null, version: null, logged_in: false, user: null, install_command: "brew install gh", error: null };
 const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
@@ -377,6 +391,7 @@ function samplePull(repo: string, number: number): PullReview {
     }],
     pending_review: null,
     sample_tree: [
+      { path: "db/migrations/0007_refund_reason.sql", content: "-- Refunds keep the reason the customer gave.\nALTER TABLE refunds ADD COLUMN reason text;\n\nCREATE INDEX refunds_charge_id_idx ON refunds (charge_id);\n" },
       { path: "README.md", content: "# payments\n\nCharges, captures and refunds for acme.\n" },
       { path: "package.json", content: "{\n  \"name\": \"@acme/payments\",\n  \"private\": true,\n  \"scripts\": { \"test\": \"vitest\" }\n}\n" },
       { path: "src/types.ts", content: "export interface Charge {\n  id: string;\n  amount: number;\n  currency: string;\n}\n" },
