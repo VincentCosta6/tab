@@ -620,6 +620,17 @@ async fn ensure_pending(gw: &Gateway, pr: &PrRef) -> anyhow::Result<String> {
 }
 
 pub async fn act(gw: &Gateway, pr: &PrRef, action: ReviewAction) -> anyhow::Result<()> {
+    let result = act_inner(gw, pr, action).await;
+    // Merging, closing or approving changes what a link to this PR should
+    // show; drop the cached summary even if the action half-failed.
+    LINK_CACHE
+        .lock()
+        .unwrap()
+        .remove(&format!("{}#{}", pr.repo, pr.number));
+    result
+}
+
+async fn act_inner(gw: &Gateway, pr: &PrRef, action: ReviewAction) -> anyhow::Result<()> {
     let base = format!("/repos/{}/pulls/{}", pr.repo, pr.number);
     match action {
         ReviewAction::MarkViewed { path, viewed } => {
