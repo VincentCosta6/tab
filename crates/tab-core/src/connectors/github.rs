@@ -185,6 +185,12 @@ struct Label {
     name: String,
 }
 
+/// Pull requests count only when you wrote them or your review is
+/// requested. Other subjects (issues, CI runs, ...) always pass.
+fn pr_is_yours(subject_type: &str, reason: &str) -> bool {
+    subject_type != "PullRequest" || matches!(reason, "review_requested" | "author")
+}
+
 /// Maps GitHub's notification `reason` to a tab kind.
 pub fn kind_for(reason: &str, subject_type: &str) -> &'static str {
     match (reason, subject_type) {
@@ -385,6 +391,10 @@ impl GithubConnector {
             }
             // Only open and draft pull requests belong in the queue. A PR
             // that closed or merged takes its item with it.
+            if !pr_is_yours(&n.subject.kind, &n.reason) {
+                ctx.resolve(&n.id).await;
+                continue;
+            }
             let mut pr_state = None;
             if n.subject.kind == "PullRequest"
                 && let Some(url) = n.subject.url.as_deref()
@@ -468,6 +478,9 @@ impl Connector for GithubConnector {
         if m["subject_type"].as_str() != Some("PullRequest") {
             return Ok(false);
         }
+        if !pr_is_yours("PullRequest", m["reason"].as_str().unwrap_or_default()) {
+            return Ok(true);
+        }
         let Some(url) = m["api_url"].as_str() else {
             return Ok(false);
         };
@@ -532,6 +545,15 @@ impl Connector for GithubConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_only_your_prs() {
+        assert!(pr_is_yours("PullRequest", "review_requested"));
+        assert!(pr_is_yours("PullRequest", "author"));
+        assert!(!pr_is_yours("PullRequest", "subscribed"));
+        assert!(!pr_is_yours("PullRequest", "comment"));
+        assert!(pr_is_yours("Issue", "subscribed"));
+    }
 
     #[test]
     fn maps_reasons_and_urls() {
