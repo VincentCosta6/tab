@@ -19,12 +19,12 @@ use tokio::sync::Mutex;
 
 use crate::config::ConnectorConfig;
 use crate::connector::{Connector, ConnectorContext, ConnectorFactory};
-use crate::ratelimit::RateLimitSpec;
 use crate::gateway::{Call, Gateway, GatewayError};
 use crate::model::{
     Block, ConnectorDescriptor, ConnectorStatus, EntityRef, Field, IncomingEvent, KindInfo, Link,
     QueueItem, SettingField, SettingKind, Tone,
 };
+use crate::ratelimit::RateLimitSpec;
 
 const API: &str = "https://api.github.com";
 const MAX_BODY: usize = 4000;

@@ -127,7 +127,11 @@ pub(super) async fn run_turn(
             .join("\n");
         anyhow::bail!(
             "Claude Code exited ({status}) before finishing.{}",
-            if tail.is_empty() { String::new() } else { format!("\n{tail}") }
+            if tail.is_empty() {
+                String::new()
+            } else {
+                format!("\n{tail}")
+            }
         );
     }
     Ok(())
@@ -184,7 +188,8 @@ impl Parser {
                     match block["type"].as_str() {
                         Some("text") => {
                             let text = block["text"].as_str().unwrap_or_default();
-                            if !text.trim().is_empty() && self.once(format!("{msg_id}:{i}:{text}")) {
+                            if !text.trim().is_empty() && self.once(format!("{msg_id}:{i}:{text}"))
+                            {
                                 hub.post(&sid, "assistant", "text", text, Value::Null);
                             }
                         }
@@ -232,7 +237,10 @@ impl Parser {
             }
             "rate_limit_event" => {
                 let info = &v["rate_limit_info"];
-                if info["status"].as_str().is_some_and(|s| !s.starts_with("allowed")) {
+                if info["status"]
+                    .as_str()
+                    .is_some_and(|s| !s.starts_with("allowed"))
+                {
                     hub.post(
                         &sid,
                         "system",
@@ -298,7 +306,12 @@ mod tests {
     async fn parses_a_stream_json_turn() {
         let store = Arc::new(Store::in_memory().unwrap());
         let (tx, mut rx) = tokio::sync::broadcast::channel(64);
-        let hub = AgentHub::new(store.clone(), tx, AgentConfig::default(), std::env::temp_dir());
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
         let s = store
             .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
             .unwrap();
@@ -320,7 +333,10 @@ mod tests {
         assert_eq!(kinds, ["text", "tool", "tool_result", "result"]);
         assert_eq!(msgs[1].content, "Bash: ls");
         let s = store.session_get(&s.id).unwrap().unwrap();
-        assert_eq!((s.agent_session_id.as_deref(), s.status), (Some("abc"), SessionStatus::Idle));
+        assert_eq!(
+            (s.agent_session_id.as_deref(), s.status),
+            (Some("abc"), SessionStatus::Idle)
+        );
         let mut deltas = 0;
         while let Ok(e) = rx.try_recv() {
             if matches!(e, EngineEvent::SessionDelta { .. }) {

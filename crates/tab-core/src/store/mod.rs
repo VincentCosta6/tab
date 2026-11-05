@@ -4,9 +4,9 @@
 //! Search uses FTS5 with the trigram tokenizer, so substring search works
 //! ("checko" finds "#incident-checkout") across items and entities.
 
+mod context;
 mod graph;
 mod http;
-mod context;
 mod items;
 mod previews;
 mod sessions;

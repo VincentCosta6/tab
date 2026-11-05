@@ -54,7 +54,10 @@ pub async fn serve(server: Arc<McpServer>, port: u16) -> anyhow::Result<String> 
     let listener = listener.ok_or_else(|| anyhow::anyhow!("no free port for the MCP server"))?;
     let url = format!("http://{}/mcp", listener.local_addr()?);
     let app = Router::new()
-        .route("/mcp", post(handle).get(|| async { StatusCode::METHOD_NOT_ALLOWED }))
+        .route(
+            "/mcp",
+            post(handle).get(|| async { StatusCode::METHOD_NOT_ALLOWED }),
+        )
         .with_state(server);
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -209,7 +212,9 @@ impl McpServer {
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
                 Ok(match self.call(session, name, args).await {
                     Ok(v) => v,
-                    Err(e) => json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true }),
+                    Err(e) => {
+                        json!({ "content": [{ "type": "text", "text": e.to_string() }], "isError": true })
+                    }
                 })
             }
             _ => Err((-32601, format!("unknown method {method}"))),
@@ -230,8 +235,18 @@ impl McpServer {
             .ok_or_else(|| anyhow::anyhow!("pass item_id: this session is not tied to a task"))
     }
 
-    pub async fn call(&self, session: Option<&str>, name: &str, args: Value) -> anyhow::Result<Value> {
-        let s = |k: &str| args[k].as_str().filter(|v| !v.trim().is_empty()).map(str::to_string);
+    pub async fn call(
+        &self,
+        session: Option<&str>,
+        name: &str,
+        args: Value,
+    ) -> anyhow::Result<Value> {
+        let s = |k: &str| {
+            args[k]
+                .as_str()
+                .filter(|v| !v.trim().is_empty())
+                .map(str::to_string)
+        };
         match name {
             "tab_search" => {
                 let q = s("query").unwrap_or_default();
@@ -279,7 +294,10 @@ impl McpServer {
                     .or(ref_item.as_ref().map(|i| i.event.title.clone()))
                     .or(s("url"))
                     .ok_or_else(|| anyhow::anyhow!("pass a title, url or ref_item_id"))?;
-                anyhow::ensure!(ref_item_id.as_deref() != Some(item_id.as_str()), "an item can't be its own context");
+                anyhow::ensure!(
+                    ref_item_id.as_deref() != Some(item_id.as_str()),
+                    "an item can't be its own context"
+                );
                 let section = if name == "tab_add_found" {
                     ContextSection::Found
                 } else {
@@ -319,12 +337,16 @@ impl McpServer {
                         created_by: "agent".into(),
                     })
                     .await?;
-                Ok(text(format!("Created task {} ({})", item.id, item.event.kind)))
+                Ok(text(format!(
+                    "Created task {} ({})",
+                    item.id, item.event.kind
+                )))
             }
             "approve" => {
                 let tool = s("tool_name").unwrap_or_else(|| "tool".into());
                 let input = args["input"].clone();
-                let session = session.ok_or_else(|| anyhow::anyhow!("approvals need a tab session"))?;
+                let session =
+                    session.ok_or_else(|| anyhow::anyhow!("approvals need a tab session"))?;
                 let decision = self
                     .hub
                     .request_approval(session, &tool, summarize_tool(&tool, &input), input.clone())
@@ -367,7 +389,12 @@ mod tests {
             }
         }
         async fn preview(&self, id: &str) -> anyhow::Result<Preview> {
-            Ok(Preview { item_id: id.into(), blocks: vec![], fetched_at: None, stale: false })
+            Ok(Preview {
+                item_id: id.into(),
+                blocks: vec![],
+                fetched_at: None,
+                stale: false,
+            })
         }
     }
 
@@ -375,7 +402,12 @@ mod tests {
     async fn speaks_mcp_over_http_and_files_context() {
         let store = Arc::new(Store::in_memory().unwrap());
         let (events, _) = tokio::sync::broadcast::channel(64);
-        let hub = AgentHub::new(store.clone(), events.clone(), AgentConfig::default(), std::env::temp_dir());
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
         let server = Arc::new(McpServer {
             store: store.clone(),
             hub: hub.clone(),
@@ -398,28 +430,81 @@ mod tests {
         let init: Value = rpc(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}), "secret")
             .await.unwrap().json().await.unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "tab");
-        let note = rpc(json!({"jsonrpc":"2.0","method":"notifications/initialized"}), "secret").await.unwrap();
+        let note = rpc(
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            "secret",
+        )
+        .await
+        .unwrap();
         assert_eq!(note.status(), 202);
-        let list: Value = rpc(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}), "secret")
-            .await.unwrap().json().await.unwrap();
+        let list: Value = rpc(
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            "secret",
+        )
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
         assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 6);
 
         // Create a task, a ticket to find, then file it under Found on the task.
         let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}});
-        let created: Value = rpc(call("tab_create_task", json!({"title":"Fix checkout"})), "secret")
-            .await.unwrap().json().await.unwrap();
-        let task_text = created["result"]["content"][0]["text"].as_str().unwrap().to_string();
+        let created: Value = rpc(
+            call("tab_create_task", json!({"title":"Fix checkout"})),
+            "secret",
+        )
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        let task_text = created["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let task_id = task_text.split_whitespace().nth(2).unwrap().to_string();
-        let ticket = NoEngine(store.clone()).create_task(NewTask { title: "PAY-12 checkout 500s".into(), ..Default::default() }).await.unwrap();
-        let session = store.session_create(Some(&task_id), AgentKind::ClaudeCode, "t", ".", Utc::now()).unwrap();
-        let found = server_call(&url, &session.id, call("tab_add_found", json!({"ref_item_id": ticket.id, "summary": "Same stack trace"}))).await;
-        assert!(found["result"]["content"][0]["text"].as_str().unwrap().contains("under found"));
+        let ticket = NoEngine(store.clone())
+            .create_task(NewTask {
+                title: "PAY-12 checkout 500s".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let session = store
+            .session_create(Some(&task_id), AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let found = server_call(
+            &url,
+            &session.id,
+            call(
+                "tab_add_found",
+                json!({"ref_item_id": ticket.id, "summary": "Same stack trace"}),
+            ),
+        )
+        .await;
+        assert!(
+            found["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("under found")
+        );
         let ctx = store.item_context(&task_id).unwrap().unwrap();
         assert_eq!(ctx.entries.len(), 1);
         assert_eq!(ctx.entries[0].section, ContextSection::Found);
 
-        let search = server_call(&url, &session.id, call("tab_search", json!({"query":"checkout"}))).await;
-        assert!(search["result"]["content"][0]["text"].as_str().unwrap().contains("PAY-12"));
+        let search = server_call(
+            &url,
+            &session.id,
+            call("tab_search", json!({"query":"checkout"})),
+        )
+        .await;
+        assert!(
+            search["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("PAY-12")
+        );
     }
 
     async fn server_call(url: &str, session: &str, body: Value) -> Value {

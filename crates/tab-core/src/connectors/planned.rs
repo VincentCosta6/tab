@@ -46,7 +46,11 @@ fn d(
     }
 }
 
-fn with(mut d: ConnectorDescriptor, category: &str, limits: Vec<RateLimitSpec>) -> ConnectorDescriptor {
+fn with(
+    mut d: ConnectorDescriptor,
+    category: &str,
+    limits: Vec<RateLimitSpec>,
+) -> ConnectorDescriptor {
     d.category = category.into();
     d.rate_limits = limits;
     d

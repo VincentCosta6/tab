@@ -23,8 +23,8 @@ use crate::model::{
     Approval, ConnectorInfo, ConnectorStatus, IncomingEvent, ItemState, NewTask, Preview,
     QueueItem, Session, SessionMessage,
 };
-use crate::ratelimit;
 use crate::ranker::{Pipeline, Ranker};
+use crate::ratelimit;
 use crate::store::{Store, Upsert};
 
 /// What happened to an item. These are the triggers automations will hang off.
@@ -44,18 +44,39 @@ pub enum Change {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)] // items dominate the stream; boxing buys nothing
 pub enum EngineEvent {
-    ItemChanged { change: Change, item: QueueItem },
-    ConnectorChanged { connector: ConnectorInfo },
+    ItemChanged {
+        change: Change,
+        item: QueueItem,
+    },
+    ConnectorChanged {
+        connector: ConnectorInfo,
+    },
     /// A cached preview was filled or refreshed.
-    PreviewChanged { preview: Preview },
+    PreviewChanged {
+        preview: Preview,
+    },
     /// Context entries on an item were added, promoted, pinned or removed.
-    ContextChanged { item_id: String },
-    SessionChanged { session: Session },
-    SessionMessage { message: SessionMessage },
+    ContextChanged {
+        item_id: String,
+    },
+    SessionChanged {
+        session: Session,
+    },
+    SessionMessage {
+        message: SessionMessage,
+    },
     /// Streaming text from the agent, before the full message is stored.
-    SessionDelta { session_id: String, text: String },
-    ApprovalRequested { approval: Approval },
-    ApprovalResolved { session_id: String, id: String },
+    SessionDelta {
+        session_id: String,
+        text: String,
+    },
+    ApprovalRequested {
+        approval: Approval,
+    },
+    ApprovalResolved {
+        session_id: String,
+        id: String,
+    },
 }
 
 const MAX_CONCURRENT_RANKS: usize = 4;
@@ -480,11 +501,23 @@ impl EngineHandle {
         let event = IncomingEvent {
             source: crate::connectors::tab::SOURCE.into(),
             external_id: uuid::Uuid::new_v4().to_string(),
-            kind: if scheduled { "tab.scheduled" } else { "tab.task" }.into(),
+            kind: if scheduled {
+                "tab.scheduled"
+            } else {
+                "tab.task"
+            }
+            .into(),
             title: title.chars().take(200).collect(),
             body: task.body.filter(|b| !b.trim().is_empty()),
             url: task.url,
-            actor: Some(if task.created_by == "agent" { "agent" } else { "you" }.into()),
+            actor: Some(
+                if task.created_by == "agent" {
+                    "agent"
+                } else {
+                    "you"
+                }
+                .into(),
+            ),
             context: Some("tab".into()),
             occurred_at: now,
             metadata,
@@ -665,7 +698,10 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert_eq!((task.event.source.as_str(), task.event.kind.as_str()), ("tab", "tab.task"));
+        assert_eq!(
+            (task.event.source.as_str(), task.event.kind.as_str()),
+            ("tab", "tab.task")
+        );
         let later = handle
             .create_task(NewTask {
                 title: "Check the deploy".into(),

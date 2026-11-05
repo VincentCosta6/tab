@@ -180,13 +180,16 @@ impl AgentHub {
             .store
             .get(item_id)?
             .ok_or_else(|| anyhow::anyhow!("no such item"))?;
-        let kind = self
-            .config()
-            .kind
-            .ok_or_else(|| anyhow::anyhow!("no agent is set up yet; finish onboarding in Settings"))?;
-        let session =
-            self.store
-                .session_create(Some(item_id), kind, &item.event.title, &self.workdir(), Utc::now())?;
+        let kind = self.config().kind.ok_or_else(|| {
+            anyhow::anyhow!("no agent is set up yet; finish onboarding in Settings")
+        })?;
+        let session = self.store.session_create(
+            Some(item_id),
+            kind,
+            &item.event.title,
+            &self.workdir(),
+            Utc::now(),
+        )?;
         self.emit(EngineEvent::SessionChanged {
             session: session.clone(),
         });
@@ -234,13 +237,25 @@ impl AgentHub {
             hub.drop_approvals(&session.id);
             match result {
                 Ok(()) if cancel.is_cancelled() => {
-                    hub.post(&session.id, "system", "status", "Stopped", serde_json::Value::Null);
+                    hub.post(
+                        &session.id,
+                        "system",
+                        "status",
+                        "Stopped",
+                        serde_json::Value::Null,
+                    );
                     hub.update(&session.id, Some(SessionStatus::Idle), None);
                 }
                 Ok(()) => {}
                 Err(e) => {
                     tracing::warn!(session = %session.id, error = %e, "agent turn failed");
-                    hub.post(&session.id, "system", "error", &format!("{e:#}"), serde_json::Value::Null);
+                    hub.post(
+                        &session.id,
+                        "system",
+                        "error",
+                        &format!("{e:#}"),
+                        serde_json::Value::Null,
+                    );
                     hub.update(&session.id, Some(SessionStatus::Failed), None);
                 }
             }
@@ -367,7 +382,10 @@ impl AgentHub {
             out.push_str(&format!("Link: {u}\n"));
         }
         if let Some(b) = &e.body {
-            out.push_str(&format!("Details:\n{}\n", b.chars().take(4000).collect::<String>()));
+            out.push_str(&format!(
+                "Details:\n{}\n",
+                b.chars().take(4000).collect::<String>()
+            ));
         }
         let context: Vec<_> = ctx
             .entries
@@ -411,7 +429,9 @@ impl AgentHub {
         let cfg = self.config();
         let mut out = Vec::new();
         for kind in [AgentKind::OpenCode, AgentKind::ClaudeCode] {
-            let custom = (cfg.kind == Some(kind)).then(|| cfg.command.clone()).flatten();
+            let custom = (cfg.kind == Some(kind))
+                .then(|| cfg.command.clone())
+                .flatten();
             out.push(probe(kind, custom.as_deref()).await);
         }
         out

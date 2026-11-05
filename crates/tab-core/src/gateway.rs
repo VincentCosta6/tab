@@ -340,7 +340,12 @@ impl Gateway {
     pub fn has_headroom(&self, provider: &str, resource: &str) -> bool {
         // Admission with no record: a dry run.
         self.limiter
-            .admit(provider, resource, Priority::Background, self.remote(provider, resource))
+            .admit(
+                provider,
+                resource,
+                Priority::Background,
+                self.remote(provider, resource),
+            )
             .is_ok()
     }
 

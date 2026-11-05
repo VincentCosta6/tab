@@ -191,7 +191,10 @@ impl RankingRules {
         };
         if delta != 0 {
             score += delta;
-            fired.push(format!("priority {} {delta:+}", explicit.unwrap_or_default()));
+            fired.push(format!(
+                "priority {} {delta:+}",
+                explicit.unwrap_or_default()
+            ));
         }
 
         RuleResult {

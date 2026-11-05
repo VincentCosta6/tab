@@ -18,8 +18,11 @@ use crate::gateway::Gateway;
 
 /// Every connector type the app knows about, in display order.
 pub fn registry() -> Vec<Box<dyn ConnectorFactory>> {
-    let mut v: Vec<Box<dyn ConnectorFactory>> =
-        vec![Box::new(TabFactory), Box::new(GithubFactory), Box::new(DemoFactory)];
+    let mut v: Vec<Box<dyn ConnectorFactory>> = vec![
+        Box::new(TabFactory),
+        Box::new(GithubFactory),
+        Box::new(DemoFactory),
+    ];
     v.extend(planned::factories());
     v
 }

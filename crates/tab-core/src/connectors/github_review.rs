@@ -60,7 +60,12 @@ fn get(purpose: &str, url: String, ttl: Duration) -> Call {
     Call::get("github", "github", purpose, url).cache(ttl)
 }
 
-pub async fn pull(gw: &Gateway, repo: &str, number: u64, sample: bool) -> anyhow::Result<PullReview> {
+pub async fn pull(
+    gw: &Gateway,
+    repo: &str,
+    number: u64,
+    sample: bool,
+) -> anyhow::Result<PullReview> {
     if sample {
         return Ok(sample_review(repo, number));
     }
@@ -91,20 +96,32 @@ pub async fn pull(gw: &Gateway, repo: &str, number: u64, sample: bool) -> anyhow
         created_at: String,
     }
     let pr: Pr = gw
-        .send(get("review: pull request", format!("{API}/repos/{repo}/pulls/{number}"), Duration::from_secs(60)))
+        .send(get(
+            "review: pull request",
+            format!("{API}/repos/{repo}/pulls/{number}"),
+            Duration::from_secs(60),
+        ))
         .await?
         .json()?;
     let files: Vec<PrFile> = gw
         .send(
-            get("review: changed files", format!("{API}/repos/{repo}/pulls/{number}/files"), Duration::from_secs(60))
-                .query("per_page", "100"),
+            get(
+                "review: changed files",
+                format!("{API}/repos/{repo}/pulls/{number}/files"),
+                Duration::from_secs(60),
+            )
+            .query("per_page", "100"),
         )
         .await?
         .json()?;
     let comments: Vec<Comment> = gw
         .send(
-            get("review: comments", format!("{API}/repos/{repo}/pulls/{number}/comments"), Duration::from_secs(30))
-                .query("per_page", "100"),
+            get(
+                "review: comments",
+                format!("{API}/repos/{repo}/pulls/{number}/comments"),
+                Duration::from_secs(30),
+            )
+            .query("per_page", "100"),
         )
         .await?
         .json()?;
@@ -142,7 +159,10 @@ pub async fn file_at(gw: &Gateway, repo: &str, sha: &str, path: &str) -> anyhow:
         Duration::from_secs(30 * 24 * 3600),
     )
     .query("ref", sha)
-    .header(ACCEPT, HeaderValue::from_static("application/vnd.github.raw+json"));
+    .header(
+        ACCEPT,
+        HeaderValue::from_static("application/vnd.github.raw+json"),
+    );
     match gw.send(call).await {
         Ok(r) => Ok(r.body),
         // Added or deleted files have no content on one side.
@@ -163,7 +183,13 @@ pub struct NewComment<'a> {
 
 pub async fn comment(gw: &Gateway, c: NewComment<'_>) -> anyhow::Result<()> {
     gw.send(
-        Call::post("github", "github", "review: comment", format!("{API}/repos/{}/pulls/{}/comments", c.repo, c.number)).json(json!({
+        Call::post(
+            "github",
+            "github",
+            "review: comment",
+            format!("{API}/repos/{}/pulls/{}/comments", c.repo, c.number),
+        )
+        .json(json!({
             "body": c.body,
             "commit_id": c.commit_id,
             "path": c.path,

@@ -6,7 +6,8 @@ use rusqlite::{OptionalExtension, Row, params};
 use super::{Store, parse_ts, ts};
 use crate::model::{AgentKind, Session, SessionMessage, SessionStatus};
 
-const COLS: &str = "id, item_id, agent, agent_session_id, title, status, cwd, created_at, updated_at";
+const COLS: &str =
+    "id, item_id, agent, agent_session_id, title, status, cwd, created_at, updated_at";
 
 fn row_to_session(r: &Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
@@ -23,7 +24,14 @@ fn row_to_session(r: &Row<'_>) -> rusqlite::Result<Session> {
 }
 
 impl Store {
-    pub fn session_create(&self, item_id: Option<&str>, agent: AgentKind, title: &str, cwd: &str, now: DateTime<Utc>) -> anyhow::Result<Session> {
+    pub fn session_create(
+        &self,
+        item_id: Option<&str>,
+        agent: AgentKind,
+        title: &str,
+        cwd: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Session> {
         let id = uuid::Uuid::new_v4().to_string();
         self.conn().execute(
             "INSERT INTO sessions (id, item_id, agent, title, status, cwd, created_at, updated_at)
@@ -36,7 +44,11 @@ impl Store {
     pub fn session_get(&self, id: &str) -> anyhow::Result<Option<Session>> {
         Ok(self
             .conn()
-            .query_row(&format!("SELECT {COLS} FROM sessions WHERE id = ?1"), [id], row_to_session)
+            .query_row(
+                &format!("SELECT {COLS} FROM sessions WHERE id = ?1"),
+                [id],
+                row_to_session,
+            )
             .optional()?)
     }
 
@@ -55,7 +67,9 @@ impl Store {
     pub fn sessions_recent(&self, limit: usize) -> anyhow::Result<Vec<Session>> {
         let conn = self.conn();
         let rows = conn
-            .prepare(&format!("SELECT {COLS} FROM sessions ORDER BY updated_at DESC LIMIT ?1"))?
+            .prepare(&format!(
+                "SELECT {COLS} FROM sessions ORDER BY updated_at DESC LIMIT ?1"
+            ))?
             .query_map([limit], row_to_session)?
             .collect::<Result<_, _>>()?;
         Ok(rows)
@@ -80,7 +94,15 @@ impl Store {
         self.session_get(id)
     }
 
-    pub fn message_add(&self, session_id: &str, role: &str, kind: &str, content: &str, meta: &serde_json::Value, now: DateTime<Utc>) -> anyhow::Result<SessionMessage> {
+    pub fn message_add(
+        &self,
+        session_id: &str,
+        role: &str,
+        kind: &str,
+        content: &str,
+        meta: &serde_json::Value,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<SessionMessage> {
         let conn = self.conn();
         conn.execute(
             "INSERT INTO session_messages (session_id, role, kind, content, meta, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

@@ -396,7 +396,11 @@ impl ContextSection {
         }
     }
     pub fn parse(s: &str) -> Self {
-        if s == "found" { ContextSection::Found } else { ContextSection::Context }
+        if s == "found" {
+            ContextSection::Found
+        } else {
+            ContextSection::Context
+        }
     }
 }
 
@@ -454,7 +458,11 @@ impl AgentKind {
         }
     }
     pub fn parse(s: &str) -> Self {
-        if s == "opencode" { AgentKind::OpenCode } else { AgentKind::ClaudeCode }
+        if s == "opencode" {
+            AgentKind::OpenCode
+        } else {
+            AgentKind::ClaudeCode
+        }
     }
 }
 

@@ -39,7 +39,13 @@ pub struct RateLimitSpec {
 }
 
 impl RateLimitSpec {
-    pub fn new(provider: &str, resource: &str, requests: u32, per_seconds: u32, burst: u32) -> Self {
+    pub fn new(
+        provider: &str,
+        resource: &str,
+        requests: u32,
+        per_seconds: u32,
+        burst: u32,
+    ) -> Self {
         Self {
             provider: provider.into(),
             resource: resource.into(),
@@ -114,7 +120,10 @@ pub enum Refusal {
     /// The declared budget is spent; nothing goes out until `until`.
     Exhausted { until: DateTime<Utc> },
     /// Background call held back to leave room for interactive ones.
-    Deferred { reason: String, until: DateTime<Utc> },
+    Deferred {
+        reason: String,
+        until: DateTime<Utc>,
+    },
 }
 
 #[derive(Default)]
@@ -134,13 +143,20 @@ impl Bucket {
     }
     fn trim(&mut self, now: Instant) {
         let keep = self.window().max(BURST_WINDOW);
-        while self.sent.front().is_some_and(|t| now.duration_since(*t) > keep) {
+        while self
+            .sent
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > keep)
+        {
             self.sent.pop_front();
         }
     }
     fn used(&self, now: Instant) -> u32 {
         let w = self.window();
-        self.sent.iter().filter(|t| now.duration_since(**t) <= w).count() as u32
+        self.sent
+            .iter()
+            .filter(|t| now.duration_since(**t) <= w)
+            .count() as u32
     }
     fn recent(&self, now: Instant) -> u32 {
         self.sent
@@ -192,7 +208,13 @@ impl Limiter {
         if let Some(spec) = &b.spec
             && used >= spec.requests
         {
-            let oldest = b.sent.iter().rev().nth(spec.requests as usize - 1).copied().unwrap_or(now);
+            let oldest = b
+                .sent
+                .iter()
+                .rev()
+                .nth(spec.requests as usize - 1)
+                .copied()
+                .unwrap_or(now);
             return Err(Refusal::Exhausted {
                 until: at(now, oldest + b.window()),
             });
@@ -231,7 +253,10 @@ impl Limiter {
         b.trim(now);
     }
 
-    pub fn pressure(&self, remote: impl Fn(&str, &str) -> Option<(u64, Option<u64>)>) -> Vec<Pressure> {
+    pub fn pressure(
+        &self,
+        remote: impl Fn(&str, &str) -> Option<(u64, Option<u64>)>,
+    ) -> Vec<Pressure> {
         let now = Instant::now();
         let mut all = self.buckets.lock().unwrap();
         let mut v: Vec<Pressure> = all
@@ -283,7 +308,8 @@ mod tests {
         let l = Limiter::default();
         l.declare(&[RateLimitSpec::new("slack", "default", 10, 60, 3)]);
         for _ in 0..4 {
-            l.admit("slack", "default", Priority::Interactive, None).unwrap();
+            l.admit("slack", "default", Priority::Interactive, None)
+                .unwrap();
             l.record("slack", "default");
         }
         // Four calls in ten seconds is a burst: background waits, interactive goes.
@@ -291,7 +317,8 @@ mod tests {
             l.admit("slack", "default", Priority::Background, None),
             Err(Refusal::Deferred { .. })
         ));
-        l.admit("slack", "default", Priority::Interactive, None).unwrap();
+        l.admit("slack", "default", Priority::Interactive, None)
+            .unwrap();
         for _ in 0..6 {
             l.record("slack", "default");
         }
@@ -308,9 +335,22 @@ mod tests {
     #[test]
     fn remote_headroom_counts_too() {
         let l = Limiter::default();
-        assert!(l.admit("github", "core", Priority::Background, Some((4000, Some(5000)))).is_ok());
+        assert!(
+            l.admit(
+                "github",
+                "core",
+                Priority::Background,
+                Some((4000, Some(5000)))
+            )
+            .is_ok()
+        );
         assert!(matches!(
-            l.admit("github", "core", Priority::Background, Some((100, Some(5000)))),
+            l.admit(
+                "github",
+                "core",
+                Priority::Background,
+                Some((100, Some(5000)))
+            ),
             Err(Refusal::Deferred { .. })
         ));
     }
@@ -318,6 +358,9 @@ mod tests {
     #[tokio::test]
     async fn background_scope_sets_priority() {
         assert_eq!(current_priority(), Priority::Interactive);
-        assert_eq!(background(async { current_priority() }).await, Priority::Background);
+        assert_eq!(
+            background(async { current_priority() }).await,
+            Priority::Background
+        );
     }
 }

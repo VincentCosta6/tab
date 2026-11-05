@@ -84,11 +84,17 @@ async fn server(hub: &Arc<AgentHub>) -> anyhow::Result<Arc<Server>> {
             )?;
             let port = free_port();
             let mut cmd = super::command(&exe);
-            cmd.args(["serve", "--hostname", "127.0.0.1", "--port", &port.to_string()])
-                .current_dir(&directory)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+            cmd.args([
+                "serve",
+                "--hostname",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+            ])
+            .current_dir(&directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
             if let Some(mcp) = hub.mcp() {
                 // Inline config: adds tab's MCP server without touching the
                 // person's own opencode.json.
@@ -104,9 +110,9 @@ async fn server(hub: &Arc<AgentHub>) -> anyhow::Result<Arc<Server>> {
                 });
                 cmd.env("OPENCODE_CONFIG_CONTENT", config.to_string());
             }
-            let child = cmd
-                .spawn()
-                .map_err(|e| anyhow::anyhow!("starting OpenCode ({}) failed: {e}", exe.display()))?;
+            let child = cmd.spawn().map_err(|e| {
+                anyhow::anyhow!("starting OpenCode ({}) failed: {e}", exe.display())
+            })?;
             (format!("http://127.0.0.1:{port}"), Some(child))
         }
     };
@@ -209,7 +215,9 @@ fn handle_event(hub: &Arc<AgentHub>, s: &Arc<Server>, v: &Value) {
     let sid = turn.tab_session.clone();
     match v["type"].as_str().unwrap_or_default() {
         "message.updated" => {
-            if let (Some(id), Some(role)) = (props["info"]["id"].as_str(), props["info"]["role"].as_str()) {
+            if let (Some(id), Some(role)) =
+                (props["info"]["id"].as_str(), props["info"]["role"].as_str())
+            {
                 turn.roles.insert(id.into(), role.into());
             }
         }
@@ -277,14 +285,26 @@ fn handle_event(hub: &Arc<AgentHub>, s: &Arc<Server>, v: &Value) {
                 .to_string();
             let patterns = props["patterns"].clone();
             let metadata = props["metadata"].clone();
-            let summary = match patterns.as_array().and_then(|p| p.first()).and_then(|p| p.as_str()) {
+            let summary = match patterns
+                .as_array()
+                .and_then(|p| p.first())
+                .and_then(|p| p.as_str())
+            {
                 Some(p) => format!("{permission}: {p}"),
-                None => props["title"].as_str().map(str::to_string).unwrap_or(permission.clone()),
+                None => props["title"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or(permission.clone()),
             };
             let (hub, s) = (hub.clone(), s.clone());
             tokio::spawn(async move {
                 let d = hub
-                    .request_approval(&sid, &permission, summary, json!({ "patterns": patterns, "metadata": metadata }))
+                    .request_approval(
+                        &sid,
+                        &permission,
+                        summary,
+                        json!({ "patterns": patterns, "metadata": metadata }),
+                    )
                     .await;
                 let (reply, message) = match d {
                     Decision::Allow => ("once", None),
@@ -316,11 +336,9 @@ fn handle_event(hub: &Arc<AgentHub>, s: &Arc<Server>, v: &Value) {
             flush(hub, turn);
             turn.done.notify_one();
         }
-        "session.status" => {
-            if props["status"]["type"] == "idle" {
-                flush(hub, turn);
-                turn.done.notify_one();
-            }
+        "session.status" if props["status"]["type"] == "idle" => {
+            flush(hub, turn);
+            turn.done.notify_one();
         }
         _ => {}
     }
@@ -368,7 +386,12 @@ pub(super) async fn run_turn(
         "parts": [{ "type": "text", "text": prompt }],
         "system": system,
     });
-    if let Some((provider, model)) = hub.config().model.as_deref().and_then(|m| m.split_once('/')) {
+    if let Some((provider, model)) = hub
+        .config()
+        .model
+        .as_deref()
+        .and_then(|m| m.split_once('/'))
+    {
         body["model"] = json!({ "providerID": provider, "modelID": model });
     }
     s.client

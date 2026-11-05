@@ -6,8 +6,13 @@ use rusqlite::{OptionalExtension, params};
 use super::{Store, parse_ts, ts};
 use crate::model::{Block, QueueItem};
 
+/// Cached blocks, when they were fetched, and whether the item changed since.
+pub type CachedPreview = (Vec<Block>, DateTime<Utc>, bool);
+/// An item due for a refresh, its last fetch time, and whether it is dirty.
+pub type DuePreview = (QueueItem, Option<DateTime<Utc>>, bool);
+
 impl Store {
-    pub fn preview_get(&self, item_id: &str) -> anyhow::Result<Option<(Vec<Block>, DateTime<Utc>, bool)>> {
+    pub fn preview_get(&self, item_id: &str) -> anyhow::Result<Option<CachedPreview>> {
         let row: Option<(String, String, bool)> = self
             .conn()
             .query_row(
@@ -22,7 +27,12 @@ impl Store {
         })
     }
 
-    pub fn preview_put(&self, item_id: &str, blocks: &[Block], now: DateTime<Utc>) -> anyhow::Result<()> {
+    pub fn preview_put(
+        &self,
+        item_id: &str,
+        blocks: &[Block],
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
         self.conn().execute(
             "INSERT INTO previews (item_id, blocks, fetched_at, dirty) VALUES (?1, ?2, ?3, 0)
              ON CONFLICT(item_id) DO UPDATE SET blocks = excluded.blocks, fetched_at = excluded.fetched_at, dirty = 0",
@@ -34,14 +44,20 @@ impl Store {
     /// Marks a preview as out of date without dropping it, so the old
     /// content keeps rendering until the refresher replaces it.
     pub fn preview_mark_dirty(&self, item_id: &str) -> anyhow::Result<()> {
-        self.conn()
-            .execute("UPDATE previews SET dirty = 1 WHERE item_id = ?1", [item_id])?;
+        self.conn().execute(
+            "UPDATE previews SET dirty = 1 WHERE item_id = ?1",
+            [item_id],
+        )?;
         Ok(())
     }
 
     /// Open items whose preview is missing, dirty, or older than `before`,
     /// most important first. The refresher filters by connector TTL.
-    pub fn previews_due(&self, before: DateTime<Utc>, limit: usize) -> anyhow::Result<Vec<(QueueItem, Option<DateTime<Utc>>, bool)>> {
+    pub fn previews_due(
+        &self,
+        before: DateTime<Utc>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<DuePreview>> {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT items.id, previews.fetched_at, COALESCE(previews.dirty, 0) FROM items
@@ -52,7 +68,9 @@ impl Store {
              LIMIT ?2",
         )?;
         let ids: Vec<(String, Option<String>, bool)> = stmt
-            .query_map(params![ts(before), limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .query_map(params![ts(before), limit], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
             .collect::<Result<_, _>>()?;
         drop(stmt);
         drop(conn);
