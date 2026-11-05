@@ -1,5 +1,7 @@
 # tab
 
+**TAB Accelerates Backlogs.**
+
 A modular work queue for engineers, designers and PMs. Connectors bring in everything that needs you (GitHub reviews and CI failures, Slack mentions, email, meeting action items, AI agents waiting on input). tab ranks it deterministically, refines it with your own instructions through Claude Haiku, and gives you one keyboard-driven place to work through it.
 
 Built with [Tauri 2](https://tauri.app) (Rust core) and React.
