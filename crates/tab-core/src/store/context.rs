@@ -88,6 +88,19 @@ impl Store {
                 }
             }
         };
+        // Attached work joins the graph: a PR or issue link ties the task to
+        // that PR and its repo, so it shows up in the project's graph.
+        if c.section == ContextSection::Context
+            && let Some(url) = &c.url
+        {
+            let refs = super::graph::github_refs(url);
+            if !refs.is_empty() {
+                let mut conn = self.conn();
+                let tx = conn.transaction()?;
+                super::graph::add_refs(&tx, item_id, &refs, now)?;
+                tx.commit()?;
+            }
+        }
         Ok(self.context_get(&id)?.expect("just written"))
     }
 
@@ -246,5 +259,47 @@ mod tests {
             (again.id, again.section),
             (found.id, ContextSection::Context)
         );
+    }
+
+    #[test]
+    fn attaching_a_pr_link_puts_it_in_the_graph_once() {
+        let s = Store::in_memory().unwrap();
+        let task = add(&s, "task");
+        let ctx = |url: &str, section| NewContext {
+            section,
+            ref_item_id: None,
+            url: Some(url.into()),
+            title: url.into(),
+            summary: None,
+            added_by: "agent".into(),
+        };
+        for url in [
+            "https://github.com/acme/tab/pull/6",
+            "https://github.com/acme/tab/pull/6/files",
+        ] {
+            s.context_add(&task, &ctx(url, ContextSection::Context), Utc::now())
+                .unwrap();
+        }
+        // Found, and links that aren't a PR or issue, add nothing.
+        s.context_add(
+            &task,
+            &ctx("https://github.com/acme/tab/pull/7", ContextSection::Found),
+            Utc::now(),
+        )
+        .unwrap();
+        s.context_add(
+            &task,
+            &ctx("https://github.com/acme/tab", ContextSection::Context),
+            Utc::now(),
+        )
+        .unwrap();
+        let pr = s.search_entities("acme/tab#6", 5).unwrap();
+        assert_eq!(pr.len(), 1);
+        assert_eq!((pr[0].kind.as_str(), pr[0].item_count), ("pull_request", 1));
+        assert!(s.search_entities("acme/tab#7", 5).unwrap().is_empty());
+        let (nodes, edges) = s.graph_view(None, None, 20).unwrap();
+        assert!(nodes.iter().any(|e| e.key == "github:acme/tab#6"));
+        // The new repo and PR also join the task's existing entities, once each.
+        assert!(edges.iter().all(|(_, _, n)| *n == 1));
     }
 }
