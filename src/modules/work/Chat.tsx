@@ -456,6 +456,32 @@ function ModelPicker() {
   );
 }
 
+const modes = [
+  { value: "default", label: "Ask first", help: "Asks before edits and commands" },
+  { value: "acceptEdits", label: "Accept edits", help: "Edits files freely, asks before commands" },
+  { value: "auto", label: "Auto", help: "Claude decides what's safe and asks about the rest" },
+  { value: "plan", label: "Plan only", help: "Reads and plans, changes nothing" },
+];
+
+/** Claude Code's permission mode, saved at once. Applies from the next message. */
+function ModePicker() {
+  const { data: config } = useConfig();
+  const qc = useQueryClient();
+  if (config?.agent.kind !== "claude_code") return null;
+  const current = config.agent.permission_mode || "default";
+  return (
+    <select
+      className={cx("model-picker", current === "auto" && "mode-auto")}
+      value={current}
+      title={modes.find((m) => m.value === current)?.help ?? "Permission mode"}
+      onChange={async (e) => qc.setQueryData(keys.config, await api.setAgentMode(e.target.value))}
+    >
+      {modes.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+      {!modes.some((m) => m.value === current) && <option value={current}>{current}</option>}
+    </select>
+  );
+}
+
 export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat | undefined; onSend: (text: string) => void; placeholder: string; autoFocus?: boolean }) {
   const { data: config } = useConfig();
   const [text, setText] = useState("");
@@ -503,7 +529,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat 
       />
       <div className="composer-foot">
         <span className="subtle composer-agent">
-          {config?.agent.kind && <><Brand name={agentBrand[config.agent.kind]} size={11} /> {agentLabel[config.agent.kind]} <ModelPicker /></>}
+          {config?.agent.kind && <><Brand name={agentBrand[config.agent.kind]} size={11} /> {agentLabel[config.agent.kind]} <ModelPicker /><ModePicker /></>}
           {chat?.session ? " · continues this task's session" : " · starts a session for this task"}
         </span>
         {running && chat?.session ? (

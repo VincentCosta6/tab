@@ -1129,6 +1129,24 @@ async fn set_agent_model(
     Ok(masked(&next))
 }
 
+/// Sets the Claude Code permission mode from the chat composer; applies
+/// from the next message.
+#[tauri::command]
+async fn set_agent_mode(state: State<'_, AppState>, mode: String) -> CmdResult<TabConfig> {
+    if !["default", "acceptEdits", "plan", "auto"].contains(&mode.as_str()) {
+        return Err(format!("unknown permission mode {mode}"));
+    }
+    let mut current = state.config.lock().await;
+    let mut next = current.clone();
+    next.agent.permission_mode = mode;
+    next.save(&state.config_path).map_err(err)?;
+    *current = next.clone();
+    drop(current);
+    state.hub.set_config(next.agent.clone()).await;
+    let _ = state.events.send(EngineEvent::ConfigChanged);
+    Ok(masked(&next))
+}
+
 /// Saves secrets the person typed into a setup card in the chat, and turns
 /// the connection on once everything it needs is set. Only secret fields are
 /// accepted here; agents fill in the rest.
@@ -1248,6 +1266,8 @@ pub fn run() {
                             token: config.mcp.token.clone(),
                         });
                         *state.mcp_url.lock().unwrap() = Some(url);
+                        // Turns cut off by the last quit carry on now.
+                        hub.resume_interrupted();
                     }
                     Err(e) => tracing::error!(error = %e, "MCP server failed to start"),
                 }
@@ -1271,6 +1291,7 @@ pub fn run() {
             save_config,
             connection_set_secrets,
             set_agent_model,
+            set_agent_mode,
             rate_pressure,
             item_context,
             context_add,

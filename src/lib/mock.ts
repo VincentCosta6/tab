@@ -304,6 +304,7 @@ export const mockApi = {
           simulateReviewTurn(session, String(args.text));
           return session;
         }
+        case "set_agent_mode": config = { ...config, agent: { ...config.agent, permission_mode: args.mode } }; return config;
         case "chat_stop": return null;
         case "approval_resolve": return true;
         case "detect_agents": return [

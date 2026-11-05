@@ -60,6 +60,7 @@ export const api = {
   reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string) =>
     call<Session>("review_chat_send", { target, text }),
   setAgentModel: (model: string | null) => call<TabConfig>("set_agent_model", { model }),
+  setAgentMode: (mode: string) => call<TabConfig>("set_agent_mode", { mode }),
   connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),
   chatStop: (sessionId: string) => call<void>("chat_stop", { sessionId }),
   approvalResolve: (id: string, decision: "allow" | "always" | "deny" | "answer", message?: string, answers?: Record<string, string>) =>

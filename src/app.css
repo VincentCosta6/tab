@@ -519,3 +519,4 @@ body.resizing iframe { pointer-events: none; }
 .ask-focus { align-self: center; max-width: 780px; width: calc(100% - 2 * var(--space-6)); font-size: var(--text-xs); color: var(--fg-subtle); padding: 0 0 6px; display: flex; align-items: center; gap: 4px; }
 .ask-suggestions { padding: 0 var(--space-6) var(--space-2); }
 .ask .composer { margin-top: 0; }
+.model-picker.mode-auto { color: var(--tone-success-fg); }

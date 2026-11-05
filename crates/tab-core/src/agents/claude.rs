@@ -83,6 +83,7 @@ pub(super) async fn run_turn(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    tracing::debug!(session = %session.id, mode, resume = ?session.agent_session_id, "starting Claude Code turn");
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow::anyhow!("starting Claude Code ({}) failed: {e}", exe.display()))?;

@@ -231,6 +231,59 @@ impl AgentHub {
 
     /// Sends the person's message and runs one agent turn in the background.
     pub fn send(self: &Arc<Self>, session_id: &str, text: &str) -> anyhow::Result<()> {
+        self.start_turn(session_id, text, true)
+    }
+
+    /// Picks up turns that were cut off when tab last quit: each session
+    /// still marked working resumes its agent conversation (`--resume`) with
+    /// a note to carry on. One that never got as far as starting is marked
+    /// failed instead. Call once at startup, after the MCP server is up.
+    pub fn resume_interrupted(self: &Arc<Self>) {
+        let Ok(sessions) = self.store.sessions_recent(500) else {
+            return;
+        };
+        for s in sessions
+            .into_iter()
+            .filter(|s| s.status == SessionStatus::Working)
+        {
+            if s.agent_session_id.is_none() {
+                self.post(
+                    &s.id,
+                    "system",
+                    "note",
+                    "tab quit before the agent started. Send your message again.",
+                    serde_json::Value::Null,
+                );
+                self.update(&s.id, Some(SessionStatus::Failed), None);
+                continue;
+            }
+            self.post(
+                &s.id,
+                "system",
+                "note",
+                "tab restarted while the agent was working, so it's picking up where it left off.",
+                serde_json::Value::Null,
+            );
+            self.update(&s.id, Some(SessionStatus::Idle), None);
+            let prompt = "tab (the app running you) restarted in the middle of your last turn, so it was cut off. \
+                          Continue where you left off; redo any tool call that didn't finish.";
+            match self.start_turn(&s.id, prompt, false) {
+                Ok(()) => tracing::info!(session = %s.id, "resumed an interrupted agent turn"),
+                Err(e) => {
+                    tracing::warn!(session = %s.id, error = %e, "couldn't resume an interrupted turn")
+                }
+            }
+        }
+    }
+
+    /// Runs one agent turn. `visible` turns show the prompt as the person's
+    /// message; tab's own prompts (resuming) don't.
+    fn start_turn(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+        visible: bool,
+    ) -> anyhow::Result<()> {
         let session = self
             .store
             .session_get(session_id)?
@@ -253,7 +306,9 @@ impl AgentHub {
             );
             running.insert(session_id.into(), cancel.clone());
         }
-        self.post(session_id, "user", "text", text, serde_json::Value::Null);
+        if visible {
+            self.post(session_id, "user", "text", text, serde_json::Value::Null);
+        }
         self.update(session_id, Some(SessionStatus::Working), None);
 
         let hub = self.clone();
@@ -642,6 +697,36 @@ mod keyed_tests {
                 .unwrap()
                 .id,
             c.id
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_cut_off_before_it_started_is_marked_failed() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = broadcast::channel(16);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        store
+            .session_update(&s.id, Some(SessionStatus::Working), None, Utc::now())
+            .unwrap();
+        hub.resume_interrupted();
+        assert_eq!(
+            store.session_get(&s.id).unwrap().unwrap().status,
+            SessionStatus::Failed
+        );
+        assert!(
+            store
+                .messages(&s.id)
+                .unwrap()
+                .iter()
+                .any(|m| m.content.contains("tab quit"))
         );
     }
 }
