@@ -39,6 +39,8 @@ struct Core {
     hub: Arc<AgentHub>,
     config: Mutex<TabConfig>,
     config_path: PathBuf,
+    /// Which embedding model search by meaning wants (None when it's off).
+    embed: tokio::sync::watch::Sender<Option<&'static str>>,
 }
 
 struct AppState {
@@ -100,6 +102,10 @@ fn err(e: impl std::fmt::Display) -> String {
 
 impl Core {
     async fn restart(&self, cfg: &TabConfig) {
+        self.embed.send_if_modified(|m| {
+            let want = tab_core::embed::choice(cfg);
+            std::mem::replace(m, want) != want
+        });
         let mut engine = self.engine.write().await;
         if let Some(old) = engine.take() {
             old.shutdown();
@@ -1010,11 +1016,12 @@ pub fn run() {
             let config = TabConfig::load(&config_path)?;
             let store = Arc::new(Store::open(&data_dir.join("tab.db"))?);
             let gateway = Arc::new(Gateway::new(store.clone()));
-            // Embeddings for search, built in the background.
+            // Search by meaning: follows the setting on the tab connection.
+            let (embed, embed_rx) = tokio::sync::watch::channel(tab_core::embed::choice(&config));
             {
                 let (store, dir) = (store.clone(), data_dir.clone());
                 tauri::async_runtime::spawn(async move {
-                    tab_core::embed::spawn_indexer(store, dir);
+                    tab_core::embed::spawn_indexer(store, dir, embed_rx);
                 });
             }
             let (events, _) = broadcast::channel(1024);
@@ -1051,6 +1058,7 @@ pub fn run() {
                 hub: hub.clone(),
                 config: Mutex::new(config.clone()),
                 config_path,
+                embed,
             });
             let state = AppState {
                 core: core.clone(),

@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use crate::config::ConnectorConfig;
 use crate::connector::{Connector, ConnectorContext, ConnectorFactory};
 use crate::gateway::Gateway;
-use crate::model::{ConnectorDescriptor, KindInfo, Tone};
+use crate::model::{ConnectorDescriptor, KindInfo, SettingField, SettingKind, Tone};
 
 pub struct TabFactory;
 
@@ -36,7 +36,22 @@ impl ConnectorFactory for TabFactory {
                 KindInfo::new("agent.needs_input", "Agent needs input", "bot", Tone::Warning),
                 KindInfo::new("agent.needs_review", "Agent ready for review", "bot", Tone::Accent),
             ],
-            settings: vec![],
+            settings: vec![
+                SettingField {
+                    key: "semantic_search".into(),
+                    label: "Search by meaning".into(),
+                    kind: SettingKind::Toggle,
+                    help: Some("Finds things by what they're about, not just exact words, in the search box and for agents. Downloads a small model once and indexes your items on this computer; nothing leaves it. Turning it off deletes the model and index.".into()),
+                    required: false,
+                },
+                SettingField {
+                    key: "semantic_model_large".into(),
+                    label: "Use the larger model".into(),
+                    kind: SettingKind::Toggle,
+                    help: Some("Better matches. A 130 MB download instead of 30 MB, about 35 MB of memory instead of 8 MB, and about 2 KB per item instead of 1 KB.".into()),
+                    required: false,
+                },
+            ],
             available: true,
             rate_limits: vec![],
             category: "built_in".into(),
@@ -45,6 +60,7 @@ impl ConnectorFactory for TabFactory {
                 "Scheduled tasks wake up in the queue when they are due".into(),
                 "Every task can own an agent session".into(),
                 "Agents create and update tasks through tab's MCP server".into(),
+                "Optional search by meaning, with a local model".into(),
             ],
             builtin: true,
         }

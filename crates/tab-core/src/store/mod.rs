@@ -28,7 +28,7 @@ pub use vectors::Doc;
 pub struct Store {
     conn: Mutex<Connection>,
     /// Set once the embedding model has loaded; search uses it for queries.
-    embedder: std::sync::OnceLock<std::sync::Arc<dyn crate::embed::Embed>>,
+    embedder: std::sync::RwLock<Option<std::sync::Arc<dyn crate::embed::Embed>>>,
 }
 
 /// Ordered migrations; `PRAGMA user_version` records how many have run.
@@ -89,17 +89,25 @@ impl Store {
         }
         Ok(Self {
             conn: Mutex::new(conn),
-            embedder: std::sync::OnceLock::new(),
+            embedder: std::sync::RwLock::new(None),
         })
     }
 
     pub fn set_embedder(&self, e: std::sync::Arc<dyn crate::embed::Embed>) {
-        let _ = self.embedder.set(e);
+        *self.embedder.write().unwrap_or_else(|e| e.into_inner()) = Some(e);
+    }
+
+    pub fn clear_embedder(&self) {
+        *self.embedder.write().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// The query's vector, once the model is ready.
     pub fn embed_query(&self, q: &str) -> Option<Vec<f32>> {
-        let e = self.embedder.get()?;
+        let e = self
+            .embedder
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
         e.encode(&[q.to_string()]).pop()
     }
 

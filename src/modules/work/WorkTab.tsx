@@ -176,7 +176,7 @@ export function WorkTab() {
         <div className="queue-resize" onMouseDown={startResize} onDoubleClick={() => saveWidth(DEFAULT_LIST_WIDTH)} title="Drag to resize. Double-click to reset." />
         <div className="queue-top">
           <div className="queue-title">
-            <h1>Work</h1>
+            <ProjectPicker value={project} onChange={setProject} none="All projects" />
             <Button variant={selected === NEW ? "primary" : "secondary"} size="sm" icon="plus" shortcut="N" onClick={() => setSelected(NEW)}>
               New
             </Button>
@@ -191,7 +191,6 @@ export function WorkTab() {
                 { value: "done", label: "Done" },
               ]}
             />
-            <ProjectPicker value={project} onChange={setProject} none="All projects" align="right" compact />
           </div>
           <TextInput ref={searchRef} icon="search" placeholder="Search everything  /" value={query} onChange={(e) => setQuery(e.target.value)} />
           <div className="chips">

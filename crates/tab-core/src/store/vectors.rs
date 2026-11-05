@@ -84,6 +84,14 @@ impl Store {
         Ok(())
     }
 
+    /// Drops the index (search by meaning was turned off).
+    pub fn vectors_clear(&self) -> anyhow::Result<()> {
+        self.conn().execute_batch(
+            "DROP TABLE IF EXISTS doc_vec; DELETE FROM doc_embeddings; DELETE FROM embed_model;",
+        )?;
+        Ok(())
+    }
+
     /// Up to `limit` items and notes that are new or changed since they
     /// were last embedded, most recent first.
     pub fn vectors_pending(&self, limit: usize) -> anyhow::Result<Vec<Doc>> {
