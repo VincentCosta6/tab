@@ -199,6 +199,7 @@ export interface SearchHit { path: string; line: number; column: number; text: s
 export interface SearchQuery { query: string; regex: boolean; case_sensitive: boolean; whole_word: boolean; include: string | null }
 export type ReviewAction =
   | { type: "mark_viewed"; path: string; viewed: boolean }
+  | { type: "mark_viewed_many"; paths: string[]; viewed: boolean }
   | { type: "add_thread"; path: string; line: number; start_line: number | null; side: "LEFT" | "RIGHT"; body: string; pending: boolean }
   | { type: "reply"; thread_id: string; comment_id: number | null; body: string; pending: boolean }
   | { type: "edit_comment"; comment_id: string; body: string }

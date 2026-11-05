@@ -6,12 +6,12 @@
 //   status bar  checkout, language service, view options
 
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { cx } from "../../../design/components";
 import { Icon } from "../../../design/icons";
 import { api } from "../../../lib/api";
 import { keys } from "../../../lib/query";
-import { loadProject, projectFiles, setOpener } from "../monaco";
+import { loadProject, projectStore, setOpener } from "../monaco";
 import { Boot } from "./Boot";
 import { Ctx, type ComposerTarget, type DiffMode, type ReviewCtx } from "./context";
 import { useActions, usePull, useSource, useWorkspace } from "./data";
@@ -19,7 +19,7 @@ import { DiffStack, FileHeader } from "./DiffStack";
 import { FileDiff } from "./FileDiff";
 import { FileView } from "./FileView";
 import { Header } from "./Header";
-import { isViewed, openThreads, splitPath } from "./model";
+import { buildTree, compactTree, isViewed, openThreads, splitPath, treeOrder } from "./model";
 import { Overview } from "./Overview";
 import "./review.css";
 import { ActivityBar, ChangesPanel, Explorer, SearchPanel, ThreadsPanel, type Panel } from "./Sidebar";
@@ -82,7 +82,7 @@ export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo
   const [scrollTo, setScrollTo] = useState<{ path: string; nonce: number } | null>(null);
   const [seed, setSeed] = useState<{ text: string; nonce: number } | null>(null);
   const [toast, setToast] = useState<{ text: string; tone?: "danger" | "success"; id: number } | null>(null);
-  const [project, setProject] = useState<{ done: number; total: number } | null>(null);
+  const project = useSyncExternalStore(projectStore.subscribe, projectStore.get);
 
   const notify = useCallback((text: string, tone?: "danger" | "success") => setToast({ text, tone, id: ++nonce }), []);
   useEffect(() => {
@@ -92,6 +92,12 @@ export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo
   }, [toast]);
 
   const changed = useMemo(() => new Set(pr?.files.map((f) => f.filename) ?? []), [pr?.files]);
+  // The combined view follows the Files changed tree: grouped by folder.
+  const ordered = useMemo(() => {
+    if (!pr) return [];
+    const by = new Map(pr.files.map((f) => [f.filename, f]));
+    return treeOrder(compactTree(buildTree(pr.files.map((f) => f.filename)))).map((p) => by.get(p)!).filter(Boolean);
+  }, [pr]);
 
   const openFile = useCallback((path: string, line?: number, column?: number) => {
     const kind = changed.has(path) ? "diff" : "file";
@@ -127,13 +133,10 @@ export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo
   const ws = boot.ws;
   useEffect(() => {
     if (!pr || !ws) return;
-    const want = projectFiles(ws.files);
-    if (!want.length) return;
     const read = pr.sample
       ? async (paths: string[]) => paths.map((p) => [p, pr.sample_tree.find((t) => t.path === p)?.content ?? pr.files.find((f) => f.filename === p)?.modified ?? ""] as [string, string])
       : (paths: string[]) => api.workspaceFiles(pr.repo, pr.number, paths);
-    setProject({ done: 0, total: want.length });
-    loadProject(`${pr.repo}#${pr.number}@${ws.head_sha}`, ws.files, read, (done, total) => setProject({ done, total })).catch(() => setProject(null));
+    loadProject(`${pr.repo}#${pr.number}@${ws.head_sha}`, ws.files, read);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws, pr?.repo, pr?.number, pr?.sample]);
 
@@ -238,7 +241,7 @@ export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo
               </div>}
             </div>
             <div className="rv-editor">
-              {tab.kind === "changes" && <DiffStack files={pr.files} autoRead={autoRead} scrollTo={scrollTo} />}
+              {tab.kind === "changes" && <DiffStack files={ordered} autoRead={autoRead} scrollTo={scrollTo} />}
               {tab.kind === "overview" && <Overview />}
               {tab.kind === "diff" && (() => {
                 const f = pr.files.find((x) => x.filename === tab.path);
@@ -257,7 +260,9 @@ export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo
           <span><Icon name="git-branch" size={12} /> {pr.head_ref}</span>
           <span className="rv-mono">{pr.head_sha.slice(0, 7)}</span>
           <span title={ws?.path}>{local ? <><Icon name="folder" size={12} /> {pr.sample ? "Sample checkout" : ws?.reused ? "Local copy" : "Cloned"}</> : <><Icon name="cloud" size={12} /> GitHub API (no local copy)</>}</span>
-          {project && project.total > 0 && <span>{project.done < project.total ? `Loading sources ${project.done}/${project.total}` : `TypeScript: ${project.total} files`}</span>}
+          {project && ws && project.key === `${pr.repo}#${pr.number}@${ws.head_sha}` && (
+            <span title={project.error}>{project.state === "loading" ? `Loading sources ${project.done}/${project.total}` : project.state === "error" ? "Some sources didn't load" : `TypeScript: ${project.total} files`}</span>
+          )}
           <span className="rv-flex" />
           {pr.pending_review && <span className="text-warning">Review in progress</span>}
           <button className="rv-status-btn" onClick={() => setAutoRead(!autoRead)} title="Mark files viewed as you scroll past them">
