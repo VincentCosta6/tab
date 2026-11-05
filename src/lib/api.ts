@@ -55,6 +55,7 @@ export const api = {
   slashCommands: () => call<string[]>("agent_slash_commands"),
   graphView: (projectId: string | null, days: number | null, limit?: number) => call<GraphView>("graph_view", { projectId, days, limit: limit ?? null }),
   graphNode: (id: number) => call<GraphNode>("graph_node", { id }),
+  graphDelete: (id: number, withExclusive: boolean) => call<number>("graph_delete", { id, withExclusive }),
   askChatOpen: (projectId: string | null) => call<Chat>("ask_chat_open", { projectId }),
   askChatSend: (projectId: string | null, text: string, focus: string[], attachments: string[] = []) => call<Session>("ask_chat_send", { projectId, text, focus, attachments }),
   searchIndexStatus: () => call<IndexStatus>("search_index_status"),

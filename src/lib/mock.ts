@@ -153,13 +153,22 @@ export const mockApi = {
         case "agent_slash_commands": return ["compact", "context", "cost", "init", "review", "pr-comments", "security-review", "release-notes", "frontend-design", "deploy"];
         case "agent_activity": return sessions.filter((s) => s.item_id && s.status !== "idle").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));
         case "graph_view": return mockGraph(args.projectId ?? null, args.days ?? null);
+        case "graph_delete": {
+          const g = mockGraph(null, null);
+          const hit = g.nodes.find((n) => n.id === args.id);
+          if (!hit || hit.kind === "project") return 0;
+          const mine = new Set(items.filter((i) => i.entities.some((x) => x.key === hit.key)).map((i) => i.id));
+          const gone = [hit, ...(args.withExclusive ? exclusiveOf(hit, mine) : [])];
+          gone.forEach((n) => removedNodes.add(n.key));
+          return gone.length;
+        }
         case "graph_node": {
           const g = mockGraph(null, null);
           const entity = g.nodes.find((n) => n.id === args.id)!;
           const near = g.edges.filter((e) => e.src === args.id || e.dst === args.id).sort((a, b) => b.weight - a.weight);
           const connected = near.map((e) => ({ entity: g.nodes.find((n) => n.id === (e.src === args.id ? e.dst : e.src))!, shared: e.weight }));
           const hits = items.filter((i) => (entity.kind === "project" ? `project:${i.project_id}` === entity.key : i.entities.some((x) => x.key === entity.key)));
-          return { entity, connected: connected.slice(0, 12), items: hits.slice(0, 12), notes: notes.filter((n) => `project:${n.project_id}` === entity.key) };
+          return { entity, exclusive: entity.kind === "project" ? [] : exclusiveOf(entity, new Set(hits.map((i) => i.id))), connected: connected.slice(0, 12), items: hits.slice(0, 12), notes: notes.filter((n) => `project:${n.project_id}` === entity.key) };
         }
         case "ask_chat_open": {
           const session = sessions.find((s) => s.cwd === `ask:${args.projectId ?? "all"}`) ?? null;
@@ -458,6 +467,18 @@ function simulateTurn(session: Session, item: QueueItem, text: string, attachmen
 }
 
 /** The demo items' entities as a graph, with projects as nodes. */
+/** Keys of graph nodes the person deleted, so the mock graph forgets them. */
+const removedNodes = new Set<string>();
+
+/** Nodes whose items are all among `mine`, so they'd be left floating without this one. */
+function exclusiveOf(node: Entity, mine: Set<string>): Entity[] {
+  return mockGraph(null, null).nodes.filter((n) => {
+    if (n.id === node.id || n.kind === "project") return false;
+    const theirs = items.filter((i) => i.entities.some((x) => x.key === n.key));
+    return theirs.length > 0 && theirs.every((i) => mine.has(i.id));
+  });
+}
+
 function mockGraph(projectId: string | null, days: number | null): GraphView {
   const since = days ? Date.now() - days * 86_400_000 : 0;
   const scoped = items.filter((i) => (!projectId || i.project_id === projectId) && Date.parse(i.occurred_at) >= since);
@@ -470,7 +491,7 @@ function mockGraph(projectId: string | null, days: number | null): GraphView {
   };
   const weights = new Map<string, number>();
   for (const i of scoped) {
-    const here = i.entities.map((e) => node(e.kind, e.key, e.label));
+    const here = i.entities.filter((e) => !removedNodes.has(e.key)).map((e) => node(e.kind, e.key, e.label));
     const p = projects.find((x) => x.id === i.project_id);
     if (p) here.push(node("project", `project:${p.id}`, p.name));
     const uniq = [...new Set(here)].sort((a, b) => a - b);

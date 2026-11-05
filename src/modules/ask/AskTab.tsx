@@ -55,6 +55,12 @@ export function AskTab() {
   });
   const { data: node } = useQuery({ queryKey: ["graph-node", selected], queryFn: () => api.graphNode(selected!), enabled: selected != null, staleTime: 0 });
 
+  const remove = async (id: number, withExclusive: boolean) => {
+    await api.graphDelete(id, withExclusive);
+    setSelected(null);
+    qc.invalidateQueries({ queryKey: ["graph"] });
+  };
+
   const projectColor = useMemo(() => new Map(projects.map((p) => [`project:${p.id}`, p.color])), [projects]);
   const colorOf = useCallback((e: Entity) => (e.kind === "project" ? projectColor.get(e.key) ?? "#8b8d98" : kindColor[e.kind] ?? "#8b8d98"), [projectColor]);
 
@@ -134,7 +140,7 @@ export function AskTab() {
             <GraphCanvas graph={shown} selected={selected} highlight={highlight} colorOf={colorOf} onSelect={setSelected} />
           )}
         </div>
-        {selected != null && node && <NodePanel node={node} color={colorOf(node.entity)} onSelect={setSelected} onClose={() => setSelected(null)} inGraph={(id) => shown.nodes.some((n) => n.id === id)} />}
+        {selected != null && node && <NodePanel node={node} color={colorOf(node.entity)} onSelect={setSelected} onClose={() => setSelected(null)} onDelete={remove} inGraph={(id) => shown.nodes.some((n) => n.id === id)} />}
       </div>
       <section className={cx("ask-chat", chatOpen && "open")}>
         <button className="ask-chat-toggle" onClick={() => setChatOpen((v) => !v)} aria-expanded={chatOpen}>
@@ -160,7 +166,7 @@ export function AskTab() {
 /** Nodes that stand for one piece of work, so the panel shows its content rather than only its links. */
 const contentKinds = new Set(["pull_request", "issue", "task"]);
 
-function NodePanel({ node, color, onSelect, onClose, inGraph }: { node: GraphNode; color: string; onSelect: (id: number) => void; onClose: () => void; inGraph: (id: number) => boolean }) {
+function NodePanel({ node, color, onSelect, onClose, onDelete, inGraph }: { node: GraphNode; color: string; onSelect: (id: number) => void; onClose: () => void; onDelete: (id: number, withExclusive: boolean) => void; inGraph: (id: number) => boolean }) {
   const e = node.entity;
   const lead = contentKinds.has(e.kind) ? node.items[0] : undefined;
   return (
@@ -173,6 +179,18 @@ function NodePanel({ node, color, onSelect, onClose, inGraph }: { node: GraphNod
         </div>
         <button className="icon-btn" onClick={onClose} aria-label="Close"><Icon name="x" size={14} /></button>
       </header>
+      {e.kind !== "project" && (
+        <section className="ask-remove">
+          <button className="seg-btn" onClick={() => onDelete(e.id, false)} title="Removes it from the graph and keeps it from coming back on sync. Your items stay.">
+            <Icon name="trash" size={12} /> Remove from graph
+          </button>
+          {node.exclusive.length > 0 && (
+            <button className="seg-btn" onClick={() => onDelete(e.id, true)} title={node.exclusive.map((x) => x.label).join("\n")}>
+              <Icon name="trash" size={12} /> Remove with {node.exclusive.length} only connected here
+            </button>
+          )}
+        </section>
+      )}
       {lead && (
         <section>
           <h4 className="label-sm">Details</h4>
