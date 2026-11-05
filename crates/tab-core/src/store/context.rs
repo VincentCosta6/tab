@@ -179,7 +179,10 @@ mod tests {
             kind: "t.k".into(),
             title: id.into(),
             occurred_at: Utc::now(),
-            entities: vec![EntityRef::new("repo", "github:acme/x", "acme/x", "in")],
+            entities: vec![
+                EntityRef::new("repo", "github:acme/x", "acme/x", "in"),
+                EntityRef::new("person", "github:dana", "Dana", "from"),
+            ],
             ..Default::default()
         };
         match s.upsert(&e, Utc::now()).unwrap() {

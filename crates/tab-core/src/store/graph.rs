@@ -66,17 +66,28 @@ fn row_to_entity(r: &rusqlite::Row<'_>) -> rusqlite::Result<Entity> {
 }
 
 impl Store {
-    /// Other items that share entities with this one, most shared first.
+    /// Other items that really overlap with this one, most shared first.
+    ///
+    /// Being in the same project isn't overlap (the project view covers
+    /// that), and neither is an entity on a large share of everything, like
+    /// you or a busy repo. What's left counts when it's specific (the same
+    /// PR, ticket or thread) or when two or more broad ones line up.
     pub fn related_items(&self, item_id: &str, limit: usize) -> anyhow::Result<Vec<QueueItem>> {
         let conn = self.conn();
         let ids: Vec<String> = conn
             .prepare(
-                "SELECT other.item_id, COUNT(DISTINCT other.entity_id) AS shared, MAX(i.occurred_at) AS latest
+                "SELECT other.item_id, COUNT(DISTINCT other.entity_id) AS shared,
+                        SUM(e.kind NOT IN ('person', 'repo', 'channel', 'org', 'team', 'mailbox', 'domain')) AS specific,
+                        MAX(i.occurred_at) AS latest
                  FROM item_entities mine
+                 JOIN entities e ON e.id = mine.entity_id
                  JOIN item_entities other ON other.entity_id = mine.entity_id AND other.item_id != mine.item_id
                  JOIN items i ON i.id = other.item_id
                  WHERE mine.item_id = ?1
+                   AND e.kind != 'project'
+                   AND (SELECT COUNT(*) FROM item_entities x WHERE x.entity_id = e.id) <= 40
                  GROUP BY other.item_id
+                 HAVING shared >= 2 OR specific >= 1
                  ORDER BY shared DESC, latest DESC, other.item_id
                  LIMIT ?2",
             )?
@@ -300,7 +311,7 @@ mod tests {
             s.upsert(&ev("b", vec![dana(), repo()]), Utc::now())
                 .unwrap(),
         );
-        let c = id_of(
+        id_of(
             s.upsert(&ev("c", vec![dana(), other()]), Utc::now())
                 .unwrap(),
         );
@@ -314,8 +325,8 @@ mod tests {
             .collect();
         assert_eq!(
             related,
-            [b, c],
-            "b shares two entities, c shares one, d none"
+            [b],
+            "b shares two entities; c shares only a person, d nothing"
         );
 
         let found = s.search_entities("payme", 5).unwrap();

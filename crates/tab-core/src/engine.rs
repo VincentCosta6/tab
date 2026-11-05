@@ -742,14 +742,6 @@ mod tests {
             .iter()
             .find(|i| i.event.kind == "github.review_requested")
             .unwrap();
-        assert!(
-            !handle
-                .store()
-                .related_items(&review.id, 5)
-                .unwrap()
-                .is_empty(),
-            "shares acme/payments"
-        );
         let first = handle.preview(&review.id).await.unwrap();
         assert!(first.blocks.len() >= 2 && !first.stale);
         // Second open is served from the preview cache, not the connector.
