@@ -25,6 +25,8 @@ export interface Entity { id: number; kind: string; key: string; label: string; 
 export interface GraphView { nodes: Entity[]; edges: { src: number; dst: number; weight: number }[] }
 export interface GraphNode {
   entity: Entity;
+  /** Nodes that only appear alongside this one. */
+  exclusive: Entity[];
   connected: { entity: Entity; shared: number }[];
   items: QueueItem[];
   notes: ProjectNote[];

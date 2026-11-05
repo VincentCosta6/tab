@@ -23,6 +23,14 @@ pub(crate) fn link_item(
     )?;
     let mut ids = Vec::with_capacity(refs.len());
     for r in refs {
+        let blocked: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM entity_blocks WHERE kind = ?1 AND key = ?2)",
+            params![r.kind, r.key],
+            |row| row.get(0),
+        )?;
+        if blocked {
+            continue;
+        }
         let id: i64 = tx.query_row(
             "INSERT INTO entities (kind, key, label, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)
              ON CONFLICT (kind, key) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at
@@ -224,6 +232,54 @@ impl Store {
         Ok((nodes, edges))
     }
 
+    /// Entities that only show up on this entity's items, so they'd be left
+    /// floating if it went away (a repo's PRs and tickets, say). Projects are
+    /// the person's own structure and never count.
+    pub fn exclusive_entities(&self, entity_id: i64) -> anyhow::Result<Vec<Entity>> {
+        let conn = self.conn();
+        let rows = conn
+            .prepare(&format!(
+                "SELECT {ENTITY_COLS} FROM entities e
+                 WHERE e.id != ?1 AND e.kind != 'project'
+                   AND EXISTS (SELECT 1 FROM item_entities x WHERE x.entity_id = e.id)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM item_entities x WHERE x.entity_id = e.id
+                         AND x.item_id NOT IN (SELECT item_id FROM item_entities WHERE entity_id = ?1))
+                 ORDER BY e.kind, e.label"
+            ))?
+            .query_map([entity_id], row_to_entity)?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Remove nodes from the graph for good: their links go, and they're
+    /// remembered so a later sync doesn't bring them back. The items stay.
+    /// Projects can't be removed here. Returns how many nodes went.
+    pub fn entities_delete(&self, ids: &[i64], now: DateTime<Utc>) -> anyhow::Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let mut n = 0;
+        for id in ids {
+            let found: Option<(String, String)> = {
+                use rusqlite::OptionalExtension;
+                tx.query_row(
+                    "SELECT kind, key FROM entities WHERE id = ?1 AND kind != 'project'",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+            };
+            let Some((kind, key)) = found else { continue };
+            tx.execute(
+                "INSERT OR IGNORE INTO entity_blocks (kind, key, created_at) VALUES (?1, ?2, ?3)",
+                params![kind, key, ts(now)],
+            )?;
+            n += tx.execute("DELETE FROM entities WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
     /// Entities most connected to the given one.
     pub fn neighbors(&self, entity_id: i64, limit: usize) -> anyhow::Result<Vec<(Entity, f64)>> {
         let conn = self.conn();
@@ -291,6 +347,34 @@ mod tests {
         let labels: Vec<_> = nodes.iter().map(|n| n.label.as_str()).collect();
         assert!(!labels.contains(&"acme/web"), "{labels:?}");
         assert_eq!(nodes.len(), 3);
+    }
+
+    #[test]
+    fn deleted_entities_stay_deleted() {
+        let s = Store::in_memory().unwrap();
+        let now = Utc::now();
+        let dana = || EntityRef::new("person", "github:dana", "Dana", "from");
+        let one = || EntityRef::new("repo", "github:acme/onejs", "acme/onejs", "in");
+        let pr = || EntityRef::new("pull_request", "github:acme/onejs#1", "onejs #1", "about");
+        let web = || EntityRef::new("repo", "github:acme/web", "acme/web", "in");
+        s.upsert(&ev("a", vec![dana(), one(), pr()]), now).unwrap();
+        s.upsert(&ev("b", vec![dana(), web()]), now).unwrap();
+
+        let one_id = s.search_entities("onejs", 5).unwrap().iter().find(|e| e.kind == "repo").unwrap().id;
+        let only: Vec<_> = s.exclusive_entities(one_id).unwrap().into_iter().map(|e| e.label).collect();
+        assert_eq!(only, ["onejs #1"], "Dana is also on b");
+
+        let mut ids = vec![one_id];
+        ids.extend(s.exclusive_entities(one_id).unwrap().into_iter().map(|e| e.id));
+        assert_eq!(s.entities_delete(&ids, now).unwrap(), 2);
+        assert!(s.entity(one_id).unwrap().is_none());
+
+        // The next sync reports the same entities; the deleted ones stay gone.
+        s.upsert(&ev("c", vec![dana(), one(), pr()]), now).unwrap();
+        let (nodes, _) = s.graph_view(None, None, 50).unwrap();
+        let labels: Vec<_> = nodes.iter().map(|n| n.label.as_str()).collect();
+        assert!(!labels.iter().any(|l| l.contains("onejs")), "{labels:?}");
+        assert!(labels.contains(&"Dana"));
     }
 
     #[test]

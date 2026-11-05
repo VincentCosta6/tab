@@ -748,12 +748,25 @@ async fn graph_node(state: State<'_, AppState>, id: i64) -> CmdResult<serde_json
         Some(p) => state.store.project_notes(p).map_err(err)?,
         None => Vec::new(),
     };
+    let exclusive = state.store.exclusive_entities(id).map_err(err)?;
     Ok(serde_json::json!({
         "entity": entity,
+        "exclusive": exclusive,
         "connected": connected.iter().map(|(e, n)| serde_json::json!({ "entity": e, "shared": n })).collect::<Vec<_>>(),
         "items": items,
         "notes": notes,
     }))
+}
+
+/// Remove nodes from the graph (and keep them out), optionally with the
+/// nodes that only exist because of them.
+#[tauri::command]
+async fn graph_delete(state: State<'_, AppState>, id: i64, with_exclusive: bool) -> CmdResult<usize> {
+    let mut ids = vec![id];
+    if with_exclusive {
+        ids.extend(state.store.exclusive_entities(id).map_err(err)?.into_iter().map(|e| e.id));
+    }
+    state.store.entities_delete(&ids, Utc::now()).map_err(err)
 }
 
 fn ask_chat_key(project_id: Option<&str>) -> String {
@@ -1471,6 +1484,7 @@ pub fn run() {
             agent_slash_commands,
             graph_view,
             graph_node,
+            graph_delete,
             ask_chat_open,
             ask_chat_send,
             project_notes,
