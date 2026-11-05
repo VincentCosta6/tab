@@ -141,6 +141,17 @@ export function WorkflowsTab() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testItem, setTestItem] = useState<string>("");
+  const [view, setView] = useState<"builder" | "runs">(() => (localStorage.getItem("tab.workflows.view") === "runs" ? "runs" : "builder"));
+  const { data: allRuns = [] } = useQuery({ queryKey: ["workflow-runs", "all"], queryFn: () => api.workflowRuns(null, 200), staleTime: 0 });
+  const lastRun = useMemo(() => {
+    const m = new Map<string, WorkflowRun>();
+    for (const r of allRuns) if (!r.dry_run && !m.has(r.workflow_id)) m.set(r.workflow_id, r);
+    return m;
+  }, [allRuns]);
+
+  useEffect(() => {
+    try { localStorage.setItem("tab.workflows.view", view); } catch { /* private window */ }
+  }, [view]);
 
   // Open the remembered (or first) workflow once the list loads.
   useEffect(() => {
@@ -193,6 +204,7 @@ export function WorkflowsTab() {
 
   const open = (w: Workflow) => {
     if (dirty && !confirm("Discard your unsaved changes?")) return;
+    setView("builder");
     setDraft(clone(w));
     setOpenId(w.id || null);
     setDirty(!w.id);
@@ -252,6 +264,18 @@ export function WorkflowsTab() {
     await qc.invalidateQueries({ queryKey: ["workflows"] });
   });
 
+  const askAi = () => {
+    if (dirty && !confirm("Discard your unsaved changes?")) return;
+    setView("builder");
+    setDraft(blank());
+    setOpenId(null);
+    setDirty(false);
+    setSelected("trigger");
+    setDry(null);
+    setError(null);
+    setPanel("assistant");
+  };
+
   const dryById = useMemo(() => new Map((dry?.steps ?? []).map((s) => [s.id, s])), [dry]);
   const issuesAt = (at: string | null) => issues.filter((i) => i.at === at);
   const errors = issues.filter((i) => i.error).length;
@@ -261,19 +285,34 @@ export function WorkflowsTab() {
       <aside className="wf-list">
         <header className="wf-list-head">
           <h2>Workflows</h2>
-          <Button size="sm" icon="plus" onClick={() => open(blank())}>New</Button>
+          <span className="wf-list-actions">
+            <Button size="sm" icon="sparkles" onClick={askAi} title="Describe a workflow and the assistant builds it">Ask AI</Button>
+            <Button size="sm" icon="plus" onClick={() => open(blank())}>New</Button>
+          </span>
         </header>
         <div className="wf-list-items">
-          {list.map((w) => (
-            <button key={w.id} className={cx("wf-list-item", draft?.id === w.id && "active")} onClick={() => open(w)}>
-              <span className={cx("wf-dot", w.enabled && "on")} />
-              <span className="wf-list-text">
-                <span className="wf-list-name">{w.name}</span>
-                <span className="subtle">{describeTrigger(w.trigger, connectors)}</span>
-              </span>
-              {w.created_by === "agent" && <Icon name="sparkles" size={12} className="subtle" />}
-            </button>
-          ))}
+          <button className={cx("wf-list-item", view === "runs" && "active")} onClick={() => setView("runs")}>
+            <Icon name="list" size={14} className="subtle" />
+            <span className="wf-list-text">
+              <span className="wf-list-name">All runs</span>
+              <span className="subtle">{runsSummary(allRuns)}</span>
+            </span>
+          </button>
+          <div className="wf-list-sep" />
+          {list.map((w) => {
+            const last = lastRun.get(w.id);
+            return (
+              <button key={w.id} className={cx("wf-list-item", view === "builder" && draft?.id === w.id && "active")} onClick={() => (draft?.id === w.id ? setView("builder") : open(w))}>
+                <span className={cx("wf-dot", w.enabled && "on")} title={w.enabled ? "On" : "Off"} />
+                <span className="wf-list-text">
+                  <span className="wf-list-name">{w.name}</span>
+                  <span className="subtle">{describeTrigger(w.trigger, connectors)}</span>
+                  {last && <span className={cx("subtle", "wf-list-last", `tone-${runTone[last.status]}`)}>{runLabel[last.status]} {timeAgo(last.started_at)}</span>}
+                </span>
+                {w.created_by === "agent" && <Icon name="sparkles" size={12} className="subtle" />}
+              </button>
+            );
+          })}
           {!list.length && <p className="subtle wf-empty-note">No workflows yet. Start from a template, describe one to the assistant, or build one.</p>}
         </div>
         <h4 className="label-sm wf-templates-head">Start from a template</h4>
@@ -287,7 +326,9 @@ export function WorkflowsTab() {
         </div>
       </aside>
 
-      {draft ? (
+      {view === "runs" ? (
+        <AllRuns runs={allRuns} workflows={list} onOpenWorkflow={(id) => { const w = list.find((x) => x.id === id); if (w) { if (draft?.id === id) setView("builder"); else open(w); setPanel("runs"); } }} />
+      ) : draft ? (
         <>
           <section className="wf-main">
             <header className="wf-bar">
@@ -326,6 +367,12 @@ export function WorkflowsTab() {
                   </div>
                 ))}
                 <Link end onAdd={(kind) => edit((w) => insertStep(w, w.steps.length, kind, connectors, setSelected))} connectors={connectors} workflow={draft} />
+                {!draft.steps.length && (
+                  <div className="wf-canvas-hint">
+                    <p className="subtle">Add steps with the + above, or describe what you want and the assistant builds it here.</p>
+                    {panel !== "assistant" && <Button size="sm" icon="sparkles" onClick={() => setPanel("assistant")}>Ask the assistant</Button>}
+                  </div>
+                )}
               </div>
               {issuesAt(null).length > 0 && (
                 <div className="wf-issues">
@@ -369,7 +416,7 @@ export function WorkflowsTab() {
           <p className="subtle">A workflow starts when something happens (a review request, a CI failure, a newsletter, a time of day) and runs steps your connections offer: comment, label, snooze, create a task, signal other workflows.</p>
           <div className="wf-blank-actions">
             <Button variant="primary" icon="plus" onClick={() => open(blank())}>New workflow</Button>
-            <Button icon="sparkles" onClick={() => { open(blank()); setPanel("assistant"); }}>Describe it to the assistant</Button>
+            <Button icon="sparkles" onClick={askAi}>Describe it to the assistant</Button>
           </div>
         </section>
       )}
@@ -904,7 +951,15 @@ function RunsPanel({ workflow }: { workflow: Workflow }) {
             <span className="wf-run-trigger" title={r.trigger}>{r.trigger}</span>
             <span className="subtle">{timeAgo(r.started_at)}</span>
           </button>
-          {open === r.id && (
+          {open === r.id && <RunDetail run={r} />}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RunDetail({ run: r }: { run: WorkflowRun }) {
+  return (
             <div className="wf-run-body">
               {r.error && <IssueLine issue={{ at: null, error: r.status === "failed", message: r.error }} />}
               {r.chain.length > 0 && <p className="subtle">Started by changes from {r.chain.length} earlier workflow{r.chain.length === 1 ? "" : "s"}.</p>}
@@ -922,10 +977,70 @@ function RunsPanel({ workflow }: { workflow: Workflow }) {
               ))}
               {r.item_id && <Button size="sm" icon="external" onClick={() => openItem(r.item_id!)}>Open the item and its timeline</Button>}
             </div>
-          )}
+  );
+}
+
+function runsSummary(runs: WorkflowRun[]): string {
+  const since = Date.now() - 24 * 3600_000;
+  const day = runs.filter((r) => !r.dry_run && new Date(r.started_at).getTime() >= since);
+  if (!day.length) return runs.length ? `Last ${timeAgo(runs[0].started_at)}` : "None yet";
+  const bad = day.filter((r) => r.status === "failed" || r.status === "blocked").length;
+  return `${day.length} today${bad ? ` · ${bad} need a look` : ""}`;
+}
+
+type RunFilter = "all" | "problems" | "succeeded" | "dry";
+
+function AllRuns({ runs, workflows, onOpenWorkflow }: { runs: WorkflowRun[]; workflows: Workflow[]; onOpenWorkflow: (id: string) => void }) {
+  const [filter, setFilter] = useState<RunFilter>("all");
+  const [wf, setWf] = useState<string>("");
+  const [open, setOpen] = useState<string | null>(null);
+  const shown = runs.filter((r) => {
+    if (wf && r.workflow_id !== wf) return false;
+    if (filter === "dry") return r.dry_run;
+    if (r.dry_run) return false;
+    if (filter === "problems") return !["succeeded", "stopped", "running"].includes(r.status);
+    if (filter === "succeeded") return r.status === "succeeded";
+    return true;
+  });
+  const exists = new Set(workflows.map((w) => w.id));
+  return (
+    <section className="wf-main wf-allruns">
+      <header className="wf-bar">
+        <h2 className="wf-allruns-title">All runs</h2>
+        <span className="wf-bar-spacer" />
+        <div className="wf-seg" role="tablist">
+          {(["all", "problems", "succeeded", "dry"] as const).map((f) => (
+            <button key={f} role="tab" aria-selected={filter === f} className={cx(filter === f && "active")} onClick={() => setFilter(f)}>
+              {f === "all" ? "All" : f === "problems" ? "Problems" : f === "succeeded" ? "Succeeded" : "Dry runs"}
+            </button>
+          ))}
         </div>
-      ))}
-    </div>
+        <select className="wf-select" value={wf} onChange={(e) => setWf(e.target.value)} aria-label="Workflow">
+          <option value="">Every workflow</option>
+          {workflows.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+        </select>
+      </header>
+      <div className="wf-allruns-body">
+        {!shown.length && <p className="subtle wf-pad">{runs.length ? "No runs match." : "No runs yet. When a workflow runs, each run shows here with every step's inputs and outputs, kept for 30 days."}</p>}
+        {shown.map((r) => (
+          <div key={r.id} className={cx("wf-run", open === r.id && "open")}>
+            <button className="wf-run-head wf-allruns-row" onClick={() => setOpen(open === r.id ? null : r.id)}>
+              <Badge tone={runTone[r.status]}>{r.dry_run ? "Dry run" : runLabel[r.status]}</Badge>
+              <span className="wf-allruns-name">{r.workflow_name}</span>
+              <span className="wf-run-trigger subtle" title={r.trigger}>{r.trigger}</span>
+              <span className="subtle wf-allruns-steps">{r.steps.length} step{r.steps.length === 1 ? "" : "s"}</span>
+              <span className="subtle" title={new Date(r.started_at).toLocaleString()}>{timeAgo(r.started_at)}</span>
+            </button>
+            {open === r.id && (
+              <>
+                <RunDetail run={r} />
+                {exists.has(r.workflow_id) && <div className="wf-allruns-open"><Button size="sm" icon="workflow" onClick={() => onOpenWorkflow(r.workflow_id)}>Open the workflow</Button></div>}
+              </>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }
 

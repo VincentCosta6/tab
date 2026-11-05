@@ -214,3 +214,30 @@
 .wf-assistant .composer-agent { min-width: 0; flex-wrap: wrap; }
 .wf-node.unreached { opacity: 0.5; }
 .wf-name { min-width: 200px; }
+
+/* Sidebar: Ask AI, all runs, last run per workflow */
+.wf-list-actions { display: flex; gap: var(--space-1); }
+.wf-list-sep { height: 1px; background: var(--border); margin: var(--space-1) var(--space-2); }
+.wf-list-last { font-size: var(--text-xs); }
+.wf-list-last.tone-success { color: var(--tone-success-fg); }
+.wf-list-last.tone-danger { color: var(--tone-danger-fg); }
+.wf-list-last.tone-warning { color: var(--tone-warning-fg); }
+
+/* Empty canvas hint */
+.wf-canvas-hint { display: grid; justify-items: center; gap: var(--space-2); max-width: 320px; margin: var(--space-3) auto 0; text-align: center; }
+.wf-canvas-hint p { margin: 0; font-size: var(--text-sm); }
+
+/* All runs */
+.wf-allruns { grid-column: 2 / -1; display: flex; flex-direction: column; min-height: 0; }
+.wf-allruns-title { margin: 0; font-size: var(--text-lg); font-weight: 600; }
+.wf-allruns-body { overflow: auto; min-height: 0; padding: var(--space-2) var(--space-3) var(--space-4); display: grid; gap: 2px; align-content: start; grid-template-columns: minmax(0, 1fr); }
+.wf-run-head.wf-allruns-row { display: grid; grid-template-columns: auto minmax(120px, 220px) minmax(0, 1fr) auto auto; gap: var(--space-3); align-items: center; }
+.wf-allruns-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-allruns-steps { font-size: var(--text-xs); }
+.wf-allruns-open { padding: 0 var(--space-3) var(--space-3); }
+.wf-seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+.wf-seg button { border: 0; background: transparent; padding: 4px 10px; font: inherit; font-size: var(--text-sm); color: var(--fg-muted); cursor: pointer; }
+.wf-seg button + button { border-left: 1px solid var(--border); }
+.wf-seg button.active { background: var(--bg-selected); color: var(--fg); font-weight: 500; }
+.wf-list-head { gap: var(--space-2); padding-left: var(--space-3); }
+.wf-list-head h2 { font-size: var(--text-md); white-space: nowrap; }
