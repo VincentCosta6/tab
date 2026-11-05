@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(ctx.entries.len(), 1);
         assert_eq!(
             ctx.related.iter().map(|i| i.id.clone()).collect::<Vec<_>>(),
-            [b.clone()]
+            [b]
         );
 
         let promoted = s

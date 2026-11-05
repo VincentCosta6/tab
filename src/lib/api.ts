@@ -3,7 +3,7 @@
 // and screenshotted without the desktop shell.
 
 import type {
-  AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent,
+  AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   ItemContext, ItemDetail, ItemState, NewContext, NewTask, Pressure, Preview, PullReview, QueueItem,
   RateLimitState, TabConfig, UsageRow,
 } from "./types";
@@ -45,6 +45,9 @@ export const api = {
   approvalResolve: (id: string, decision: "allow" | "always" | "deny", message?: string) =>
     call<boolean>("approval_resolve", { id, decision, message: message ?? null }),
   detectAgents: () => call<AgentProbe[]>("detect_agents"),
+  ghStatus: () => call<GhStatus>("gh_status"),
+  ghLogin: () => call<GhStatus>("gh_login"),
+  ghInstall: () => call<GhStatus>("gh_install"),
   mcpInfo: () => call<{ url: string | null; token: string }>("mcp_info"),
   githubPull: (repo: string, number: number, sample: boolean) => call<PullReview>("github_pull", { repo, number, sample }),
   githubFile: (repo: string, sha: string, path: string) => call<string>("github_file", { repo, sha, path }),
@@ -59,6 +62,13 @@ export async function openUrl(url: string) {
   }
   const { openUrl } = await import("@tauri-apps/plugin-opener");
   await openUrl(url);
+}
+
+/** The one-time code `gh auth login` wants typed at github.com/login/device. */
+export async function onGhCode(cb: (c: GhLoginCode) => void): Promise<() => void> {
+  if (!inTauri) return mockApi.onGhCode(cb);
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<GhLoginCode>("tab://gh-code", (e) => cb(e.payload));
 }
 
 export async function onEngineEvent(cb: (e: EngineEvent) => void): Promise<() => void> {

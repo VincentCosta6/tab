@@ -7,6 +7,7 @@ import { timeAgo, timeUntil } from "../../lib/format";
 import { useConfig, useSaveConfig } from "../../lib/hooks";
 import type { ConnectorInfo, ConnectorStatus, Tone } from "../../lib/types";
 import { ApiUsage } from "./ApiUsage";
+import { GhConnect } from "./GhConnect";
 
 type View = "installed" | "marketplace" | "usage";
 
@@ -118,7 +119,7 @@ function MarketCard({ c, onOpen }: { c: ConnectorInfo; onOpen: () => void }) {
         <ConnectorMark c={c} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="connector-name">{c.name}</div>
-          <div className="subtle">{c.available ? (c.settings.some((s) => s.required) ? "Needs a token" : "One click") : "Coming soon"}</div>
+          <div className="subtle">{c.available ? (c.id === "github" ? "Sign in with GitHub" : c.settings.some((s) => s.required) ? "Needs a token" : "One click") : "Coming soon"}</div>
         </div>
         {c.available && <Button size="sm" variant="primary" onClick={onOpen}>Install</Button>}
       </div>
@@ -145,6 +146,8 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
 
   useEffect(() => setDraft(saved?.settings ?? {}), [saved]);
 
+  // GitHub's token lives in the sign-in card, next to the GitHub CLI login.
+  const settings = c.id === "github" ? c.settings.filter((f) => f.key !== "token") : c.settings;
   const missingRequired = c.settings.some((f) => f.required && !String(draft[f.key] ?? "").trim());
   const write = async (enabled: boolean) => {
     if (!config) return;
@@ -184,11 +187,23 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
         </Section>
       )}
 
-      {c.settings.length > 0 && (
+      {c.id === "github" && (
+        <Section title="Sign in">
+          <Card>
+            <GhConnect
+              token={String(draft.token ?? "")}
+              onToken={(t) => setDraft({ ...draft, token: t })}
+              onSignedIn={(_, fresh) => { if (fresh && !c.enabled) void write(true); }}
+            />
+          </Card>
+        </Section>
+      )}
+
+      {settings.length > 0 && (
         <Section title="Settings">
           <Card>
             <form className="connector-settings" onSubmit={(e) => (e.preventDefault(), write(true))}>
-              {c.settings.map((f) => (
+              {settings.map((f) => (
                 <label key={f.key} className="setting">
                   {f.label}
                   {f.kind === "toggle" ? (

@@ -1,7 +1,7 @@
 //! GitHub notifications → queue items, plus cached PR / issue previews.
 //!
-//! Uses a personal access token (classic with `notifications` + `repo`, or a
-//! fine-grained token with notifications access). All calls go through the
+//! Signs in through the GitHub CLI (`gh auth token`) by default; a personal
+//! access token in settings (classic with `notifications` + `repo`) overrides it. All calls go through the
 //! gateway: the notifications poll is revalidated with ETags (a `304` does not
 //! count against GitHub's limit), and previews are cached for five minutes.
 
@@ -53,8 +53,8 @@ impl ConnectorFactory for GithubFactory {
                     key: "token".into(),
                     label: "Personal access token".into(),
                     kind: SettingKind::Secret,
-                    help: Some("Needs notifications and repo read access.".into()),
-                    required: true,
+                    help: Some("Optional. Leave empty to use your GitHub CLI login (gh auth login).".into()),
+                    required: false,
                 },
                 SettingField {
                     key: "poll_seconds".into(),
@@ -86,14 +86,18 @@ impl ConnectorFactory for GithubFactory {
         cfg: &ConnectorConfig,
         gateway: Arc<Gateway>,
     ) -> Option<anyhow::Result<Arc<dyn Connector>>> {
-        Some(match cfg.str("token") {
+        let token = cfg
+            .str("token")
+            .map(str::to_string)
+            .or_else(crate::gh::token);
+        Some(match token {
             Some(token) => Ok(Arc::new(GithubConnector::new(
                 gateway,
-                token,
+                &token,
                 cfg.u64("poll_seconds"),
             ))),
             None => Err(anyhow::anyhow!(
-                "Add a personal access token to connect GitHub."
+                "Sign in with the GitHub CLI (gh auth login) or add a personal access token."
             )),
         })
     }

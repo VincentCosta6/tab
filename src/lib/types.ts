@@ -137,6 +137,18 @@ export interface Approval { id: string; session_id: string; tool: string; summar
 export interface Chat { session: Session | null; messages: SessionMessage[]; approvals: Approval[]; running: boolean }
 export interface ChatStarted { item: QueueItem; session: Session }
 export interface NewTask { title: string; body?: string | null; priority?: string | null; due_at?: string | null; url?: string | null; created_by: string }
+export interface GhStatus {
+  installed: boolean;
+  path: string | null;
+  version: string | null;
+  logged_in: boolean;
+  user: string | null;
+  install_command: string | null;
+  error: string | null;
+}
+
+export interface GhLoginCode { code: string; url: string }
+
 export interface AgentProbe { kind: AgentKind; found: boolean; path: string | null; version: string | null; error: string | null }
 
 export interface Pressure {

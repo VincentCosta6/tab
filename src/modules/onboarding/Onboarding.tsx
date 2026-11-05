@@ -4,6 +4,7 @@ import { Button, Kbd, TextInput, Toggle, cx } from "../../design/components";
 import { Brand, TabMark } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
+import { GhConnect } from "../connections/GhConnect";
 import { useConfig, useSaveConfig } from "../../lib/hooks";
 import type { AgentKind, AgentProbe, TabConfig } from "../../lib/types";
 
@@ -118,11 +119,10 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
               <div style={{ flex: 1 }}>
                 <strong>GitHub</strong>
                 <p className="subtle">Review requests, CI failures and mentions, plus the built-in VS Code review tool.</p>
-                <TextInput
-                  type="password"
-                  placeholder="Personal access token (notifications, repo read)"
-                  value={String(github.settings.token ?? "")}
-                  onChange={(e) => set((c) => void (c.connectors.github = { enabled: !!e.target.value, settings: { ...github.settings, token: e.target.value } }))}
+                <GhConnect
+                  token={String(github.settings.token ?? "")}
+                  onToken={(t) => set((c) => void (c.connectors.github = { enabled: !!t, settings: { ...github.settings, token: t } }))}
+                  onSignedIn={() => set((c) => void (c.connectors.github = { enabled: true, settings: { ...(c.connectors.github?.settings ?? {}) } }))}
                 />
               </div>
             </div>

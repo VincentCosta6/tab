@@ -2,6 +2,7 @@
 // sample data closely enough to design against.
 
 import type {
+  GhLoginCode, GhStatus,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Session, SessionMessage, TabConfig, Urgency, UsageRow,
 } from "./types";
@@ -141,7 +142,7 @@ const setState = (id: string, state: ItemState, snoozed_until: string | null = n
 
 export const mockApi = {
   async invoke<T>(cmd: string, args: Record<string, any> = {}): Promise<T> {
-    const r = (() => {
+    const r = await (async () => {
       switch (cmd) {
         case "list_items": return sorted(items.filter((i) => args.states.includes(i.state)));
         case "search_items": {
@@ -228,6 +229,16 @@ export const mockApi = {
         ];
         case "mcp_info": return { url: "http://127.0.0.1:47821/mcp", token: "mock-token" };
         case "github_pull": return samplePull(args.repo, args.number);
+        case "gh_status": return gh;
+        case "gh_install":
+          await new Promise((r) => setTimeout(r, 1500));
+          gh = { ...gh, installed: true, path: "/opt/homebrew/bin/gh", version: "2.89.0" };
+          return gh;
+        case "gh_login":
+          setTimeout(() => ghCodeListeners.forEach((l) => l({ code: "8F2C-41DA", url: "https://github.com/login/device" })), 400);
+          await new Promise((r) => setTimeout(r, 6000));
+          gh = { ...gh, logged_in: true, user: "vincentcosta6" };
+          return gh;
         default: throw new Error(`mock: unknown command ${cmd}`);
       }
     })();
@@ -237,7 +248,14 @@ export const mockApi = {
     listeners.add(cb);
     return () => listeners.delete(cb);
   },
+  onGhCode(cb: (c: GhLoginCode) => void) {
+    ghCodeListeners.add(cb);
+    return () => void ghCodeListeners.delete(cb);
+  },
 };
+
+let gh: GhStatus = { installed: false, path: null, version: null, logged_in: false, user: null, install_command: "brew install gh", error: null };
+const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
 
 let contexts: ContextEntry[] = [];
 const sessions: Session[] = [];

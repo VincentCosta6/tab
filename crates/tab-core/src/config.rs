@@ -167,12 +167,9 @@ fn yes() -> bool {
 }
 
 fn default_connectors() -> BTreeMap<String, ConnectorConfig> {
-    // Sample data is on for a fresh install so the queue isn't empty.
     // tab's own task connector is always on.
-    BTreeMap::from([
-        ("demo".to_string(), ConnectorConfig::on()),
-        ("tab".to_string(), ConnectorConfig::on()),
-    ])
+    // Sample data is opt-in from onboarding, never on behind its back.
+    BTreeMap::from([("tab".to_string(), ConnectorConfig::on())])
 }
 
 impl TabConfig {

@@ -163,6 +163,31 @@ impl Store {
         get_item(&self.conn(), id)
     }
 
+    /// Every source that has items stored.
+    pub fn sources(&self) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn();
+        let rows = conn
+            .prepare("SELECT DISTINCT source FROM items")?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Deletes every item a source brought in (its context, previews and links
+    /// go with it), then any graph entities nothing points at any more.
+    /// Returns how many items were removed.
+    pub fn remove_source(&self, source: &str) -> anyhow::Result<usize> {
+        let conn = self.conn();
+        let n = conn.execute("DELETE FROM items WHERE source = ?1", [source])?;
+        if n > 0 {
+            conn.execute(
+                "DELETE FROM entities WHERE id NOT IN (SELECT entity_id FROM item_entities)",
+                [],
+            )?;
+        }
+        Ok(n)
+    }
+
     pub fn set_ranking(&self, id: &str, r: &Ranking) -> anyhow::Result<Option<QueueItem>> {
         let conn = self.conn();
         conn.execute(

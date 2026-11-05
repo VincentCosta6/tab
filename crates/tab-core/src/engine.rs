@@ -637,11 +637,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_config_runs_sample_data_end_to_end() {
+    async fn sample_data_runs_end_to_end() {
         let (events, _) = broadcast::channel(256);
         let store = Arc::new(Store::in_memory().unwrap());
         let gateway = Arc::new(Gateway::new(store.clone()));
-        let engine = Engine::from_config(&TabConfig::default(), store.clone(), gateway, events);
+        let mut cfg = TabConfig::default();
+        assert!(cfg.connector("demo").is_none(), "sample data is opt-in");
+        cfg.connectors
+            .insert("demo".into(), crate::config::ConnectorConfig::on());
+        let engine = Engine::from_config(&cfg, store.clone(), gateway, events);
         assert!(
             engine
                 .infos

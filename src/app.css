@@ -261,3 +261,11 @@
 .review-commented-line { background: color-mix(in srgb, var(--tone-warning-fg) 10%, transparent); }
 .review-comment-glyph { background: var(--tone-warning-fg); border-radius: 50%; width: 8px !important; height: 8px !important; margin: 6px 0 0 6px; }
 .ctx-this-toggle { justify-self: start; }
+
+/* GitHub CLI sign-in */
+.gh-connect { display: grid; gap: var(--space-2); }
+.gh-connect p { margin: 0; }
+.gh-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.gh-row code { font-size: 12px; }
+.gh-code-value { font-family: var(--font-mono); font-size: 20px; font-weight: 600; letter-spacing: 0.08em; padding: 4px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-sunken); }
+.link-button { background: none; border: 0; padding: 0; font: inherit; font-size: 12px; cursor: pointer; text-align: left; justify-self: start; text-decoration: underline; text-underline-offset: 2px; }

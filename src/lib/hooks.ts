@@ -70,6 +70,8 @@ export function useSaveConfig() {
     onSuccess: async (saved) => {
       qc.setQueryData(keys.config, saved);
       await qc.invalidateQueries({ queryKey: keys.connectors });
+      // Turning a connection off removes its items.
+      await qc.invalidateQueries({ queryKey: keys.allItems });
     },
   });
 }

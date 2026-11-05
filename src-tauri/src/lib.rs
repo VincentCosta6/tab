@@ -72,6 +72,24 @@ impl AppState {
         if let Some(old) = engine.take() {
             old.shutdown();
         }
+        // A connection that's off has nothing in the queue.
+        match self.store.sources() {
+            Ok(sources) => {
+                for source in sources {
+                    if source != "tab" && cfg.connector(&source).is_none() {
+                        match self.store.remove_source(&source) {
+                            Ok(n) => tracing::info!(
+                                source,
+                                removed = n,
+                                "cleared items from a connection that's off"
+                            ),
+                            Err(e) => tracing::warn!(source, error = %e, "couldn't clear items"),
+                        }
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "couldn't list sources"),
+        }
         *engine = Some(
             Engine::from_config(
                 cfg,
@@ -304,6 +322,29 @@ async fn mcp_info(state: State<'_, AppState>) -> CmdResult<McpInfo> {
     let url = state.mcp_url.lock().unwrap().clone();
     let token = state.config.lock().await.mcp.token.clone();
     Ok(McpInfo { url, token })
+}
+
+// --- GitHub CLI ----------------------------------------------------------
+
+#[tauri::command]
+async fn gh_status() -> CmdResult<tab_core::gh::GhStatus> {
+    Ok(tab_core::gh::status().await)
+}
+
+/// Runs `gh auth login --web`. The one-time code arrives as a `tab://gh-code` event.
+#[tauri::command]
+async fn gh_login(app: tauri::AppHandle) -> CmdResult<tab_core::gh::GhStatus> {
+    tab_core::gh::login(move |code| {
+        let _ = app.emit("tab://gh-code", &code);
+        let _ = tauri_plugin_opener::open_url(&code.url, None::<&str>);
+    })
+    .await
+    .map_err(err)
+}
+
+#[tauri::command]
+async fn gh_install() -> CmdResult<tab_core::gh::GhStatus> {
+    tab_core::gh::install().await.map_err(err)
 }
 
 // --- GitHub review -------------------------------------------------------
@@ -587,6 +628,9 @@ pub fn run() {
             approval_resolve,
             detect_agents,
             mcp_info,
+            gh_status,
+            gh_login,
+            gh_install,
             github_pull,
             github_file,
             github_comment,
