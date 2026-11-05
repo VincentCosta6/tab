@@ -34,8 +34,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/003_previews.sql"),
     include_str!("migrations/004_agent_usage.sql"),
     include_str!("migrations/005_email_previews.sql"),
-    include_str!("migrations/006_projects.sql"),
     include_str!("migrations/006_session_keys.sql"),
+    include_str!("migrations/007_projects.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {
@@ -88,5 +88,26 @@ impl Store {
     pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
         // A panic while holding the lock can't leave SQLite half-written, so recover.
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod migration_order {
+    /// Migrations run by position, so numbers must be unique and listed in
+    /// order: a new one always goes at the end with the next number.
+    #[test]
+    fn numbered_once_and_in_order() {
+        let src = include_str!("mod.rs");
+        let nums: Vec<u32> = src
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("include_str!(\"migrations/"))
+            .map(|l| l[..3].parse().unwrap())
+            .collect();
+        assert!(!nums.is_empty());
+        assert_eq!(
+            nums,
+            (1..=nums.len() as u32).collect::<Vec<_>>(),
+            "{nums:?}"
+        );
     }
 }
