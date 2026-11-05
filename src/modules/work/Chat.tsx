@@ -92,6 +92,71 @@ export function ChatView({ item }: { item: QueueItem }) {
   );
 }
 
+const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+
+/**
+ * How full the agent's context window is, from the last turn's usage, with
+ * a breakdown: the agent's own setup (system prompt, tools, MCP), what tab
+ * adds (this item and its attached context), and the conversation so far.
+ */
+function ContextMeter({ messages }: { messages: SessionMessage[] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const turns = messages.filter((m) => m.kind === "result" && m.meta?.context?.used);
+  const last = turns[turns.length - 1]?.meta.context;
+  if (!last) return null;
+  const size = Number(last.window) || 200_000;
+  const used = Number(last.used);
+  // The session's very first model call: setup plus the first message.
+  const base = Number(turns[0].meta.context.first_call ?? used);
+  const tab = Math.min(Number(last.tab_context) || 0, base);
+  const parts = [
+    { label: "Agent setup", hint: "System prompt, tools and MCP servers", n: Math.max(0, base - tab), cls: "ctx-setup" },
+    { label: "tab context", hint: "This item and the context attached to it", n: tab, cls: "ctx-tab" },
+    { label: "Conversation", hint: "Your messages, replies and tool output", n: Math.max(0, used - base), cls: "ctx-chat" },
+  ];
+  const pct = Math.min(100, (used / size) * 100);
+  const tone = pct >= 90 ? "danger" : pct >= 75 ? "warning" : "accent";
+
+  return (
+    <div className="ctx" ref={ref}>
+      <button className="ctx-chip" onClick={() => setOpen(!open)} title="Context window">
+        <span className="ctx-ring" style={{ ["--p" as string]: `${pct}%` }} data-tone={tone} />
+        {k(used)} / {k(size)}
+      </button>
+      {open && (
+        <div className="ctx-pop">
+          <div className="ctx-pop-head">
+            <strong>Context window</strong>
+            <span className={`text-${tone}`}>{Math.round(pct)}% used</span>
+          </div>
+          <div className="ctx-bar">
+            {parts.map((p) => <span key={p.label} className={p.cls} style={{ width: `${(p.n / size) * 100}%` }} title={`${p.label}: ${k(p.n)}`} />)}
+          </div>
+          <ul className="ctx-list">
+            {parts.map((p) => (
+              <li key={p.label}><i className={p.cls} /><span><strong>{p.label}</strong><small>{p.hint}</small></span><span>{k(p.n)}</span></li>
+            ))}
+            <li><i className="ctx-free" /><span><strong>Free</strong></span><span>{k(Math.max(0, size - used))}</span></li>
+          </ul>
+          <p className="subtle">
+            Last call: {k(Number(last.cache_read) || 0)} from cache, {k((Number(last.cache_write) || 0) + (Number(last.fresh_input) || 0))} new, {k(Number(last.output) || 0)} written
+            {last.model ? ` · ${String(last.model).replace(/^claude-/, "")}` : ""}.
+            {pct >= 75 && " The agent compacts older history when it gets close to full."}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AgentStatus({ chat }: { chat: Chat | undefined }) {
   const s = chat?.session;
   if (!s) return null;
@@ -143,7 +208,7 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
 
   return (
     <div className="transcript">
-      <div className="transcript-head"><AgentStatus chat={chat} /></div>
+      <div className="transcript-head"><AgentStatus chat={chat} /><ContextMeter messages={messages} /></div>
       {messages.map((m) => (m.kind === "tool_result" && [...results.values()].includes(m) ? null : <MessageView key={m.id} m={m} result={results.get(m.id)} onSend={onSend} />))}
       {stream && (
         <div className="msg msg-assistant streaming">

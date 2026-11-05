@@ -100,6 +100,8 @@ pub(super) async fn run_turn(
 
     let mut lines = BufReader::new(stdout).lines();
     let mut parser = Parser::new(hub.clone(), session.id.clone());
+    // Rough size of what tab adds to the system prompt (the item and its context).
+    parser.tab_context_tokens = (system.len() / 4) as i64;
     loop {
         tokio::select! {
             line = lines.next_line() => match line? {
@@ -147,6 +149,22 @@ struct Parser {
     seen: HashSet<String>,
     finished: bool,
     billing: &'static str,
+    /// Usage of the first and latest model call this turn, for the context meter.
+    first_call: Option<Value>,
+    last_call: Option<Value>,
+    tab_context_tokens: i64,
+}
+
+/// Everything a model call read: new input plus cache writes and reads.
+fn prompt_tokens(u: &Value) -> i64 {
+    [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    ]
+    .iter()
+    .map(|k| u[*k].as_i64().unwrap_or(0))
+    .sum()
 }
 
 impl Parser {
@@ -157,7 +175,37 @@ impl Parser {
             seen: HashSet::new(),
             finished: false,
             billing: "unknown",
+            first_call: None,
+            last_call: None,
+            tab_context_tokens: 0,
         }
+    }
+
+    /// How full the context window is after this turn, and what fills it.
+    fn context(&self, result: &Value) -> Value {
+        let Some(last) = &self.last_call else {
+            return Value::Null;
+        };
+        let (model, window) = result["modelUsage"]
+            .as_object()
+            .and_then(|m| {
+                m.iter()
+                    .max_by_key(|(_, u)| u["outputTokens"].as_i64().unwrap_or(0))
+                    .map(|(k, u)| (k.clone(), u["contextWindow"].as_i64()))
+            })
+            .unwrap_or_default();
+        json!({
+            "model": model,
+            "window": window.unwrap_or(200_000),
+            // The next turn starts from everything the last call read plus what it wrote.
+            "used": prompt_tokens(last) + last["output_tokens"].as_i64().unwrap_or(0),
+            "first_call": self.first_call.as_ref().map(prompt_tokens),
+            "cache_read": last["cache_read_input_tokens"],
+            "cache_write": last["cache_creation_input_tokens"],
+            "fresh_input": last["input_tokens"],
+            "output": last["output_tokens"],
+            "tab_context": self.tab_context_tokens,
+        })
     }
 
     fn once(&mut self, key: String) -> bool {
@@ -185,6 +233,13 @@ impl Parser {
             }
             "assistant" => {
                 let msg_id = v["message"]["id"].as_str().unwrap_or_default().to_string();
+                let usage = &v["message"]["usage"];
+                if usage.is_object() && prompt_tokens(usage) > 0 {
+                    if self.first_call.is_none() {
+                        self.first_call = Some(usage.clone());
+                    }
+                    self.last_call = Some(usage.clone());
+                }
                 for (i, block) in v["message"]["content"]
                     .as_array()
                     .into_iter()
@@ -291,6 +346,7 @@ impl Parser {
                         "duration_ms": v["duration_ms"],
                         "turns": v["num_turns"],
                         "stop_reason": v["stop_reason"],
+                        "context": self.context(v),
                     }),
                 );
                 hub.update(
