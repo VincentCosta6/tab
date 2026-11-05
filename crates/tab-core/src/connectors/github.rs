@@ -256,6 +256,27 @@ impl GithubConnector {
         self.gateway.send(call).await.ok()?.json().ok()
     }
 
+    /// `open`, `draft`, `closed` or `merged` for a pull request API URL.
+    async fn pr_state(&self, api_url: &str) -> anyhow::Result<&'static str> {
+        #[derive(Deserialize)]
+        struct Pr {
+            state: String,
+            #[serde(default)]
+            draft: bool,
+            #[serde(default)]
+            merged: bool,
+        }
+        let call = Call::get("github", "github", "pull request state", api_url)
+            .cache(Duration::from_secs(5 * 60));
+        let pr: Pr = self.gateway.send(call).await?.json()?;
+        Ok(match (pr.merged, pr.state.as_str(), pr.draft) {
+            (true, _, _) => "merged",
+            (_, "open", true) => "draft",
+            (_, "open", _) => "open",
+            _ => "closed",
+        })
+    }
+
     async fn to_event(&self, n: &Notification) -> IncomingEvent {
         let comment = self.latest_comment(n).await;
         let actor = comment
@@ -359,9 +380,29 @@ impl GithubConnector {
                 seen.insert(n.id.clone(), n.updated_at);
                 changed
             };
-            if is_new {
-                ctx.emit(self.to_event(n).await).await?;
+            if !is_new {
+                continue;
             }
+            // Only open and draft pull requests belong in the queue. A PR
+            // that closed or merged takes its item with it.
+            let mut pr_state = None;
+            if n.subject.kind == "PullRequest"
+                && let Some(url) = n.subject.url.as_deref()
+            {
+                match self.pr_state(url).await {
+                    Ok("closed" | "merged") => {
+                        ctx.resolve(&n.id).await;
+                        continue;
+                    }
+                    Ok(s) => pr_state = Some(s),
+                    Err(e) => tracing::debug!(error = %e, "couldn't read PR state"),
+                }
+            }
+            let mut e = self.to_event(n).await;
+            if let Some(s) = pr_state {
+                e.metadata["pr_state"] = s.into();
+            }
+            ctx.emit(e).await?;
         }
         Ok(wait)
     }
@@ -420,6 +461,17 @@ impl Connector for GithubConnector {
             ))
             .await?;
         Ok(())
+    }
+
+    async fn is_resolved(&self, item: &QueueItem) -> anyhow::Result<bool> {
+        let m = &item.event.metadata;
+        if m["subject_type"].as_str() != Some("PullRequest") {
+            return Ok(false);
+        }
+        let Some(url) = m["api_url"].as_str() else {
+            return Ok(false);
+        };
+        Ok(matches!(self.pr_state(url).await?, "closed" | "merged"))
     }
 
     async fn preview(&self, item: &QueueItem) -> anyhow::Result<Vec<Block>> {

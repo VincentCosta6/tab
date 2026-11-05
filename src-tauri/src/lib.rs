@@ -658,10 +658,15 @@ async fn save_config(state: State<'_, AppState>, config: TabConfig) -> CmdResult
 /// Switches the model chats use. Only the agent hub picks it up, so
 /// connectors keep running; the next turn of any chat uses it.
 #[tauri::command]
-async fn set_agent_model(state: State<'_, AppState>, model: Option<String>) -> CmdResult<TabConfig> {
+async fn set_agent_model(
+    state: State<'_, AppState>,
+    model: Option<String>,
+) -> CmdResult<TabConfig> {
     let mut current = state.config.lock().await;
     let mut next = current.clone();
-    next.agent.model = model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    next.agent.model = model
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty());
     next.save(&state.config_path).map_err(err)?;
     *current = next.clone();
     drop(current);

@@ -160,6 +160,21 @@ struct Core {
 }
 
 impl Core {
+    /// Marks an item done because it finished at the source.
+    fn finish_upstream(&self, item: &QueueItem) {
+        match self
+            .store
+            .set_state(&item.id, ItemState::Done, None, Utc::now())
+        {
+            Ok(Some(i)) => {
+                tracing::info!(id = %i.id, title = %i.event.title, "finished upstream");
+                self.publish(Change::Done, i);
+            }
+            Ok(None) => {}
+            Err(e) => tracing::error!(error = %e, "marking a finished item done failed"),
+        }
+    }
+
     fn publish(&self, change: Change, item: QueueItem) {
         let _ = self.events.send(EngineEvent::ItemChanged { change, item });
     }
@@ -261,6 +276,29 @@ impl Engine {
         });
         let infos = Arc::new(Mutex::new(self.infos));
 
+        // Once per start: close items whose PR (or similar) finished while tab
+        // wasn't looking. Runs in the background, one item at a time.
+        for c in &self.connectors {
+            let (c, core, cancel) = (c.clone(), core.clone(), cancel.clone());
+            tokio::spawn(async move {
+                let Ok(items) = core.store.list(&[ItemState::Open, ItemState::Snoozed]) else {
+                    return;
+                };
+                for item in items.into_iter().filter(|i| i.event.source == c.id()) {
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    match c.is_resolved(&item).await {
+                        Ok(true) => core.finish_upstream(&item),
+                        Ok(false) => {}
+                        Err(e) => {
+                            tracing::debug!(connector = c.id(), error = %e, "resolve check failed")
+                        }
+                    }
+                }
+            });
+        }
+
         for c in &self.connectors {
             let c = c.clone();
             let ctx = ConnectorContext::new(c.id().to_string(), tx.clone(), cancel.child_token());
@@ -293,6 +331,15 @@ impl Engine {
                     EngineMsg::Event(e) => {
                         if let Err(e) = ingest.ingest(&e) {
                             tracing::error!(error = %e, "storing event failed");
+                        }
+                    }
+                    EngineMsg::Resolved(source, external_id) => {
+                        match ingest.store.find_active(&source, &external_id) {
+                            Ok(Some(item)) => ingest.finish_upstream(&item),
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::error!(error = %e, "looking up a resolved item failed")
+                            }
                         }
                     }
                     EngineMsg::Status(id, status) => {

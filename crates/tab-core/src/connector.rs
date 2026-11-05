@@ -45,6 +45,13 @@ pub trait Connector: Send + Sync + 'static {
         Ok(())
     }
 
+    /// True when the thing behind an item is finished upstream, e.g. its pull
+    /// request closed or merged. The engine asks once per start for every
+    /// open item, and marks finished ones done.
+    async fn is_resolved(&self, _item: &QueueItem) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
     /// Richer content for the detail pane, fetched on demand. Implementations
     /// should go through the gateway with a cache TTL so previews are cheap.
     async fn preview(&self, _item: &QueueItem) -> anyhow::Result<Vec<Block>> {
@@ -61,6 +68,8 @@ pub trait Connector: Send + Sync + 'static {
 
 pub(crate) enum EngineMsg {
     Event(Box<IncomingEvent>),
+    /// The item with this external id is finished upstream; mark it done.
+    Resolved(String, String),
     Status(String, ConnectorStatus),
 }
 
@@ -82,6 +91,18 @@ impl ConnectorContext {
             .send(EngineMsg::Event(Box::new(event)))
             .await
             .map_err(|_| anyhow::anyhow!("engine stopped"))
+    }
+
+    /// Says the thing behind an item finished upstream (a PR closed or
+    /// merged). If it's in the queue, it's marked done; if not, nothing happens.
+    pub async fn resolve(&self, external_id: &str) {
+        let _ = self
+            .tx
+            .send(EngineMsg::Resolved(
+                self.id.clone(),
+                external_id.to_string(),
+            ))
+            .await;
     }
 
     pub async fn synced(&self) {
@@ -134,6 +155,7 @@ pub fn test_context(id: &str) -> (ConnectorContext, mpsc::Receiver<String>, Canc
                     e.body.unwrap_or_default().replace('\n', " ")
                 ),
                 EngineMsg::Status(id, s) => format!("status {id}: {s:?}"),
+                EngineMsg::Resolved(_, ext) => format!("resolved {ext}"),
             };
             if out_tx.send(line).await.is_err() {
                 break;

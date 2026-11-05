@@ -209,6 +209,26 @@ impl Store {
         )?)
     }
 
+    /// The open or snoozed item for a source's external id, if any.
+    pub fn find_active(
+        &self,
+        source: &str,
+        external_id: &str,
+    ) -> anyhow::Result<Option<QueueItem>> {
+        let conn = self.conn();
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM items WHERE source = ?1 AND external_id = ?2 AND state IN ('open', 'snoozed')",
+                params![source, external_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match id {
+            Some(id) => get_item(&conn, &id),
+            None => Ok(None),
+        }
+    }
+
     pub fn set_state(
         &self,
         id: &str,
