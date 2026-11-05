@@ -67,7 +67,7 @@ function Shell() {
   const navButton = (t: (typeof tabs)[number]) => (
     <button key={t.id} className={cx("nav-item", t.id === tab.id && "active")} onClick={() => setActive(t.id)} title={t.shortcut ? `${t.label} (Ctrl ${t.shortcut})` : t.label}>
       <span className="nav-icon">
-        <Icon name={t.icon} size={18} />
+        {t.id === "work" ? <TabMark size={22} /> : <Icon name={t.icon} size={18} />}
         {t.id === "work" && <AgentBadge />}
       </span>
       <span>{t.label}</span>
@@ -78,7 +78,6 @@ function Shell() {
   return (
     <div className="shell">
       <nav className="nav">
-        <div className="nav-brand" title="TAB Annihilates Backlogs"><TabMark size={36} /></div>
         <div className="nav-group">{visible.filter((t) => !t.footer).map(navButton)}</div>
         <div className="nav-group nav-footer">
           <UsageMeter onSettings={() => setActive("settings")} />
