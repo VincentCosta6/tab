@@ -1,7 +1,8 @@
 // Renders connector-provided Blocks. One component per Block variant; a new
 // connector gets rich previews by emitting these, with no UI work.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { sanitizeEmail } from "./sanitize";
 import type { Block } from "../lib/types";
 import { openUrl } from "../lib/api";
 import { Badge, Button, cx } from "./components";
@@ -89,9 +90,10 @@ function HtmlFrame({ html }: { html: string }) {
   const ref = useRef<HTMLIFrameElement>(null);
   const [images, setImages] = useState(false);
   const [height, setHeight] = useState(200);
-  const remote = /<img[^>]+src=["']?https?:|url\(\s*["']?https?:/i.test(html);
+  const clean = useMemo(() => sanitizeEmail(html), [html]);
+  const remote = /<img[^>]+src=["']?https?:|url\(\s*["']?https?:/i.test(clean);
   const csp = `default-src 'none'; style-src 'unsafe-inline' ${images ? "https:" : ""}; img-src data: ${images ? "https: http:" : ""}; font-src data: ${images ? "https:" : ""}`;
-  const doc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><base target="_blank"><style>html,body{margin:0;padding:0;background:#fff;color:#1a1a1a;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-wrap:anywhere}body{padding:16px}img{max-width:100%;height:auto}table{max-width:100%}pre{white-space:pre-wrap}</style></head><body>${html}</body></html>`;
+  const doc = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>html,body{margin:0;padding:0;background:#fff;color:#1a1a1a;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-wrap:anywhere}body{padding:16px}img{max-width:100%;height:auto}table{max-width:100%}pre{white-space:pre-wrap}</style></head><body>${clean}</body></html>`;
 
   useEffect(() => {
     const frame = ref.current;
@@ -102,12 +104,17 @@ function HtmlFrame({ html }: { html: string }) {
       const fit = () => setHeight(Math.min(4000, d.documentElement.scrollHeight + 2));
       fit();
       d.querySelectorAll("img").forEach((i) => i.addEventListener("load", fit));
-      d.addEventListener("click", (e) => {
-        const a = (e.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+      // Nothing in the email navigates on its own. A link opens in the
+      // browser only when clicked, and only for web and mailto addresses.
+      const onLink = (e: MouseEvent) => {
+        const a = (e.target as Element | null)?.closest?.("a") as HTMLAnchorElement | null;
         if (!a) return;
         e.preventDefault();
-        if (/^(https?|mailto):/i.test(a.href)) void openUrl(a.href);
-      });
+        if (e.type === "click" && /^(https?|mailto):/i.test(a.href)) void openUrl(a.href);
+      };
+      d.addEventListener("click", onLink);
+      d.addEventListener("auxclick", onLink);
+      d.addEventListener("submit", (e) => e.preventDefault());
     };
     frame.addEventListener("load", onLoad);
     return () => frame.removeEventListener("load", onLoad);
