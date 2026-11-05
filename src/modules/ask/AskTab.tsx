@@ -2,12 +2,13 @@ import { useCallback, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { cx } from "../../design/components";
 import { Icon } from "../../design/icons";
-import { api } from "../../lib/api";
+import { api, openUrl } from "../../lib/api";
 import { timeAgo } from "../../lib/format";
 import { useProjects } from "../../lib/hooks";
 import type { Chat, Entity, GraphNode } from "../../lib/types";
 import { AgentStatus, Composer, Transcript, openItem } from "../work/Chat";
 import { ProjectPicker, useProjectTint, useRememberedProject } from "../work/Projects";
+import { Reader } from "../work/Reader";
 import { GraphCanvas } from "./GraphCanvas";
 
 const kindColor: Record<string, string> = {
@@ -156,8 +157,12 @@ export function AskTab() {
   );
 }
 
+/** Nodes that stand for one piece of work, so the panel shows its content rather than only its links. */
+const contentKinds = new Set(["pull_request", "issue", "task"]);
+
 function NodePanel({ node, color, onSelect, onClose, inGraph }: { node: GraphNode; color: string; onSelect: (id: number) => void; onClose: () => void; inGraph: (id: number) => boolean }) {
   const e = node.entity;
+  const lead = contentKinds.has(e.kind) ? node.items[0] : undefined;
   return (
     <aside className="ask-node">
       <header>
@@ -168,6 +173,23 @@ function NodePanel({ node, color, onSelect, onClose, inGraph }: { node: GraphNod
         </div>
         <button className="icon-btn" onClick={onClose} aria-label="Close"><Icon name="x" size={14} /></button>
       </header>
+      {lead && (
+        <section>
+          <h4 className="label-sm">Details</h4>
+          <div className="ask-lead">
+            <button className="ask-item" onClick={() => openItem(lead.id)}>
+              <span className="ask-item-title">{lead.title}</span>
+              <span className="subtle">{[lead.actor, timeAgo(lead.occurred_at)].filter(Boolean).join(" · ")}</span>
+            </button>
+            <Reader item={lead} mode="rich" />
+            {lead.url && (
+              <button className="seg-btn" onClick={() => openUrl(lead.url!)}>
+                <Icon name="external" size={12} /> Open on GitHub
+              </button>
+            )}
+          </div>
+        </section>
+      )}
       {node.notes.length > 0 && (
         <section>
           <h4 className="label-sm">Notes</h4>
