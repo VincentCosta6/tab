@@ -281,3 +281,8 @@
 .secret-card .setting { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .secret-card .toolbar { align-items: center; }
 .secret-card p { margin: 0; font-size: 12px; }
+
+/* Model picker in the composer */
+.composer-agent { display: inline-flex; align-items: center; gap: 4px; }
+.model-picker { font: inherit; font-size: 12px; color: var(--fg-subtle); background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 1px 4px; cursor: pointer; }
+.model-picker:hover, .model-picker:focus { border-color: var(--border); outline: none; }

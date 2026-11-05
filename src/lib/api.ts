@@ -41,6 +41,7 @@ export const api = {
   createTask: (task: NewTask) => call<QueueItem>("create_task", { task }),
   chatOpen: (itemId: string) => call<Chat>("chat_open", { itemId }),
   chatSend: (itemId: string | null, text: string) => call<ChatStarted>("chat_send", { itemId, text }),
+  setAgentModel: (model: string | null) => call<TabConfig>("set_agent_model", { model }),
   connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),
   chatStop: (sessionId: string) => call<void>("chat_stop", { sessionId }),
   approvalResolve: (id: string, decision: "allow" | "always" | "deny", message?: string) =>

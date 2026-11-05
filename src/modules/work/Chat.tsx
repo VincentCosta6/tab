@@ -256,6 +256,43 @@ function ApprovalCard({ approval }: { approval: Approval }) {
   );
 }
 
+const modelChoices: Record<AgentKind, { value: string; label: string }[]> = {
+  claude_code: [
+    { value: "claude-opus-5-5", label: "Opus 5.5" },
+    { value: "claude-sonnet-5-5", label: "Sonnet 5.5" },
+    { value: "claude-haiku-5-5", label: "Haiku 5.5" },
+    { value: "claude-fable-5-1", label: "Fable 5.1" },
+  ],
+  opencode: [
+    { value: "anthropic/claude-opus-5-5", label: "Opus 5.5" },
+    { value: "anthropic/claude-sonnet-5-5", label: "Sonnet 5.5" },
+    { value: "anthropic/claude-haiku-5-5", label: "Haiku 5.5" },
+  ],
+};
+
+/** Which model chats run on. Applies from the next message, in every chat. */
+function ModelPicker() {
+  const { data: config } = useConfig();
+  const qc = useQueryClient();
+  const kind = config?.agent.kind;
+  if (!kind) return null;
+  const current = config.agent.model ?? "";
+  const choices = modelChoices[kind];
+  const known = !current || choices.some((c) => c.value === current);
+  return (
+    <select
+      className="model-picker"
+      value={current}
+      title="Model for chats. Applies from the next message."
+      onChange={async (e) => qc.setQueryData(keys.config, await api.setAgentModel(e.target.value || null))}
+    >
+      <option value="">Default model</option>
+      {choices.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+      {!known && <option value={current}>{current}</option>}
+    </select>
+  );
+}
+
 export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat | undefined; onSend: (text: string) => void; placeholder: string; autoFocus?: boolean }) {
   const { data: config } = useConfig();
   const [text, setText] = useState("");
@@ -302,8 +339,8 @@ export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat 
         }}
       />
       <div className="composer-foot">
-        <span className="subtle">
-          {config?.agent.kind && <><Brand name={agentBrand[config.agent.kind]} size={11} /> {agentLabel[config.agent.kind]}</>}
+        <span className="subtle composer-agent">
+          {config?.agent.kind && <><Brand name={agentBrand[config.agent.kind]} size={11} /> {agentLabel[config.agent.kind]} <ModelPicker /></>}
           {chat?.session ? " · continues this task's session" : " · starts a session for this task"}
         </span>
         {running && chat?.session ? (

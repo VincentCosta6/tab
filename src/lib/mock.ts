@@ -176,6 +176,7 @@ export const mockApi = {
         case "api_usage": return usage;
         case "get_config": return config;
         case "save_config": config = args.config; return config;
+        case "set_agent_model": config = { ...config, agent: { ...config.agent, model: args.model } }; return config;
         case "connection_set_secrets": {
           const c = config.connectors[args.id] ?? { enabled: false, settings: {} };
           config = { ...config, connectors: { ...config.connectors, [args.id]: { enabled: true, settings: { ...c.settings, ...Object.fromEntries(Object.keys(args.values).map((k) => [k, "••••••••"])) } } } };
