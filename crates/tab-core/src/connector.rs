@@ -58,6 +58,21 @@ pub trait Connector: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// Runs one of the actions in this connector's descriptor for a
+    /// workflow. `input` holds the step's inputs, templates already filled
+    /// in. Returns the step's output, which later steps can read.
+    ///
+    /// API calls go through the gateway like everything else; the workflow
+    /// runtime runs actions at background priority, so a tight budget defers
+    /// them instead of spending what interactive use needs.
+    async fn act(
+        &self,
+        action: &str,
+        _input: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        anyhow::bail!("{} has no action {action}", self.id())
+    }
+
     /// How long a cached preview counts as fresh. Older previews still
     /// render instantly; the engine's refresher replaces them in the
     /// background when this connector's rate budget has room.

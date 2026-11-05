@@ -402,6 +402,140 @@ pub struct ConnectorDescriptor {
     /// Built-in connectors can't be uninstalled.
     #[serde(default)]
     pub builtin: bool,
+    /// What workflows can ask this connector to do.
+    #[serde(default)]
+    pub actions: Vec<ActionInfo>,
+}
+
+// ---------------------------------------------------------------------------
+// Actions: what a connector can do, as data
+// ---------------------------------------------------------------------------
+
+/// How much an action changes the world. Workflows gate on this.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Effect {
+    /// Reads only. Runs in dry runs too.
+    #[default]
+    Read,
+    /// Changes something, in tab or upstream (a comment, a label, a snooze).
+    Write,
+    /// Hard to undo or seen by other people (merge, close, move mail).
+    /// Only runs once the person allows destructive steps on that workflow.
+    Destructive,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldType {
+    #[default]
+    Text,
+    /// Multi-line text, usually markdown.
+    LongText,
+    Number,
+    Bool,
+    /// One of `options`.
+    Select,
+    /// Comma separated, sent as a list.
+    List,
+}
+
+/// One input or output of an action. The builder renders inputs as a form.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ActionField {
+    pub key: String,
+    pub label: String,
+    #[serde(rename = "type", default)]
+    pub ty: FieldType,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// Template filled in when the step is added, e.g. `{{item.metadata.repo}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+impl ActionField {
+    pub fn new(key: &str, label: &str, ty: FieldType) -> Self {
+        Self {
+            key: key.into(),
+            label: label.into(),
+            ty,
+            ..Default::default()
+        }
+    }
+    pub fn required(mut self) -> Self {
+        self.required = true;
+        self
+    }
+    pub fn help(mut self, h: &str) -> Self {
+        self.help = Some(h.into());
+        self
+    }
+    pub fn default(mut self, d: &str) -> Self {
+        self.default = Some(d.into());
+        self
+    }
+    pub fn options(mut self, o: &[&str]) -> Self {
+        self.options = o.iter().map(|s| s.to_string()).collect();
+        self
+    }
+}
+
+/// Something a connector can do when a workflow asks. Described as data so
+/// the builder, agents and validation all read the same thing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ActionInfo {
+    /// Unique within the connector, dotted: `pr.comment`, `item.snooze`.
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub icon: String,
+    pub effect: Effect,
+    #[serde(default)]
+    pub inputs: Vec<ActionField>,
+    /// What the step's result holds, for `{{steps.<id>.<key>}}`.
+    #[serde(default)]
+    pub outputs: Vec<ActionField>,
+    /// Rate bucket it spends from, `provider/resource`, if it calls an API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spends: Option<String>,
+    /// Item kinds (exact or `prefix.*`) the action makes sense for, so the
+    /// builder can suggest it. Empty means any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub for_kinds: Vec<String>,
+}
+
+impl ActionInfo {
+    pub fn new(id: &str, label: &str, icon: &str, effect: Effect, description: &str) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            icon: icon.into(),
+            effect,
+            description: description.into(),
+            ..Default::default()
+        }
+    }
+    pub fn inputs(mut self, f: Vec<ActionField>) -> Self {
+        self.inputs = f;
+        self
+    }
+    pub fn outputs(mut self, f: Vec<ActionField>) -> Self {
+        self.outputs = f;
+        self
+    }
+    pub fn spends(mut self, bucket: &str) -> Self {
+        self.spends = Some(bucket.into());
+        self
+    }
+    pub fn for_kinds(mut self, k: &[&str]) -> Self {
+        self.for_kinds = k.iter().map(|s| s.to_string()).collect();
+        self
+    }
 }
 
 /// A connector type plus its live state, for the Connections tab.

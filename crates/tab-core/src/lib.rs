@@ -29,6 +29,7 @@ pub mod ranker;
 pub mod ratelimit;
 pub mod store;
 pub mod usage;
+pub mod workflow;
 pub mod workspace;
 
 pub use config::TabConfig;
