@@ -101,7 +101,7 @@ const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ?
 function ContextMeter({ messages }: { messages: SessionMessage[] }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const now = useNow(open ? 1000 : 5000);
+  const now = useNow(30_000);
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
@@ -113,8 +113,13 @@ function ContextMeter({ messages }: { messages: SessionMessage[] }) {
   const lastTurn = turns[turns.length - 1];
   const last = lastTurn?.meta.context;
   if (!last) return null;
-  const size = Number(last.window) || 200_000;
   const used = Number(last.used);
+  // Claude Code reports the model's largest window, which can be 1M even
+  // when the plan only gets 200k. Trust 1M only for a "[1m]" model or once
+  // the chat is actually past 200k.
+  const reported = Number(last.window) || 200_000;
+  const long = /\[1m\]/i.test(String(last.model ?? "")) || used > 200_000;
+  const size = reported > 200_000 && !long ? 200_000 : reported;
   // The session's very first model call: setup plus the first message.
   const base = Number(turns[0].meta.context.first_call ?? used);
   const tab = Math.min(Number(last.tab_context) || 0, base);
@@ -192,7 +197,7 @@ function ContextMeter({ messages }: { messages: SessionMessage[] }) {
 
 /** Claude's default prompt-cache lifetime, refreshed on every call. */
 const CACHE_TTL = 5 * 60_000;
-const clock = (ms: number) => `${Math.floor(ms / 60_000)}:${String(Math.floor((ms % 60_000) / 1000)).padStart(2, "0")}`;
+const clock = (ms: number) => (ms < 60_000 ? "<1m" : `${Math.ceil(ms / 60_000)}m`);
 const cacheText = (c: string, left: number) => (c === "none" ? "not used" : c === "cold" ? "expired" : `warm for ${clock(left)}`);
 
 function useNow(every: number) {
