@@ -352,6 +352,18 @@ pub struct ConnectorDescriptor {
     pub settings: Vec<SettingField>,
     /// False for connectors that are designed but not built yet.
     pub available: bool,
+    /// Limits the provider enforces. The gateway budgets against these.
+    #[serde(default)]
+    pub rate_limits: Vec<crate::ratelimit::RateLimitSpec>,
+    /// Marketplace shelf: `built_in`, `work`, `code`, `communication`, `agents`.
+    #[serde(default)]
+    pub category: String,
+    /// Extra capabilities shown in the marketplace (e.g. a review tool).
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Built-in connectors can't be uninstalled.
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 /// A connector type plus its live state, for the Connections tab.
@@ -361,4 +373,183 @@ pub struct ConnectorInfo {
     pub descriptor: ConnectorDescriptor,
     pub enabled: bool,
     pub status: ConnectorStatus,
+}
+
+// ---------------------------------------------------------------------------
+// Context, sessions, approvals
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSection {
+    /// Given to the agent with every message.
+    Context,
+    /// Suggested by an agent or the graph; the person can promote it.
+    Found,
+}
+
+impl ContextSection {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ContextSection::Context => "context",
+            ContextSection::Found => "found",
+        }
+    }
+    pub fn parse(s: &str) -> Self {
+        if s == "found" { ContextSection::Found } else { ContextSection::Context }
+    }
+}
+
+/// One piece of context attached to an item: another item, or a link.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextEntry {
+    pub id: String,
+    pub item_id: String,
+    pub section: ContextSection,
+    pub pinned: bool,
+    /// Set when the context is another queue item; the UI shows its rich preview.
+    pub ref_item: Option<Box<QueueItem>>,
+    pub url: Option<String>,
+    pub title: String,
+    pub summary: Option<String>,
+    /// `user`, `agent` or `graph`.
+    pub added_by: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NewContext {
+    pub section: ContextSection,
+    #[serde(default)]
+    pub ref_item_id: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    pub added_by: String,
+}
+
+/// Everything known around an item, rolled up for the chat view.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ItemContext {
+    pub item: QueueItem,
+    pub entries: Vec<ContextEntry>,
+    /// Graph neighbors not yet in `entries`; shown under Found.
+    pub related: Vec<QueueItem>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentKind {
+    ClaudeCode,
+    OpenCode,
+}
+
+impl AgentKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentKind::ClaudeCode => "claude_code",
+            AgentKind::OpenCode => "opencode",
+        }
+    }
+    pub fn parse(s: &str) -> Self {
+        if s == "opencode" { AgentKind::OpenCode } else { AgentKind::ClaudeCode }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    Idle,
+    Working,
+    /// Waiting on the person (an approval or a question).
+    NeedsInput,
+    Failed,
+}
+
+impl SessionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionStatus::Idle => "idle",
+            SessionStatus::Working => "working",
+            SessionStatus::NeedsInput => "needs_input",
+            SessionStatus::Failed => "failed",
+        }
+    }
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "working" => SessionStatus::Working,
+            "needs_input" => SessionStatus::NeedsInput,
+            "failed" => SessionStatus::Failed,
+            _ => SessionStatus::Idle,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Session {
+    pub id: String,
+    pub item_id: Option<String>,
+    pub agent: AgentKind,
+    pub agent_session_id: Option<String>,
+    pub title: String,
+    pub status: SessionStatus,
+    pub cwd: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionMessage {
+    pub id: i64,
+    pub session_id: String,
+    /// `user`, `assistant`, `tool` or `system`.
+    pub role: String,
+    /// `text`, `tool`, `status` or `error`.
+    pub kind: String,
+    pub content: String,
+    #[serde(default)]
+    pub meta: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Rich preview blocks for an item, cached so rendering never waits on an API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Preview {
+    pub item_id: String,
+    pub blocks: Vec<Block>,
+    pub fetched_at: Option<DateTime<Utc>>,
+    /// Older than the connector's preview TTL; a background refresh is queued.
+    pub stale: bool,
+}
+
+/// An agent asking permission to do something, shown in the chat.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Approval {
+    pub id: String,
+    pub session_id: String,
+    pub tool: String,
+    pub summary: String,
+    #[serde(default)]
+    pub input: serde_json::Value,
+}
+
+/// A task created in tab, by the person or an agent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct NewTask {
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    /// `low`, `normal`, `high` or `urgent`.
+    #[serde(default)]
+    pub priority: Option<String>,
+    /// Scheduled tasks stay snoozed until this time, then wake into the queue.
+    #[serde(default)]
+    pub due_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub url: Option<String>,
+    /// `user` or `agent`.
+    #[serde(default)]
+    pub created_by: String,
 }

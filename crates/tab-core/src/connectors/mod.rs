@@ -3,11 +3,13 @@
 mod demo;
 mod github;
 mod planned;
+pub mod tab;
 
 use std::sync::Arc;
 
 pub use demo::{DemoConnector, DemoFactory};
 pub use github::{GithubConnector, GithubFactory};
+pub use tab::{TabConnector, TabFactory};
 
 use crate::TabConfig;
 use crate::connector::{Connector, ConnectorFactory};
@@ -16,7 +18,7 @@ use crate::gateway::Gateway;
 /// Every connector type the app knows about, in display order.
 pub fn registry() -> Vec<Box<dyn ConnectorFactory>> {
     let mut v: Vec<Box<dyn ConnectorFactory>> =
-        vec![Box::new(GithubFactory), Box::new(DemoFactory)];
+        vec![Box::new(TabFactory), Box::new(GithubFactory), Box::new(DemoFactory)];
     v.extend(planned::factories());
     v
 }

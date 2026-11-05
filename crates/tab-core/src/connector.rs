@@ -50,6 +50,13 @@ pub trait Connector: Send + Sync + 'static {
     async fn preview(&self, _item: &QueueItem) -> anyhow::Result<Vec<Block>> {
         Ok(Vec::new())
     }
+
+    /// How long a cached preview counts as fresh. Older previews still
+    /// render instantly; the engine's refresher replaces them in the
+    /// background when this connector's rate budget has room.
+    fn preview_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(15 * 60)
+    }
 }
 
 pub(crate) enum EngineMsg {

@@ -26,6 +26,10 @@ impl ConnectorFactory for DemoFactory {
             kinds: vec![],
             settings: vec![],
             available: true,
+            rate_limits: vec![],
+            category: "built_in".into(),
+            features: vec![],
+            builtin: false,
         }
     }
 

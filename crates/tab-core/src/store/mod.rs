@@ -6,7 +6,10 @@
 
 mod graph;
 mod http;
+mod context;
 mod items;
+mod previews;
+mod sessions;
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -22,7 +25,11 @@ pub struct Store {
 }
 
 /// Ordered migrations; `PRAGMA user_version` records how many have run.
-const MIGRATIONS: &[&str] = &[include_str!("migrations/001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/001_init.sql"),
+    include_str!("migrations/002_tasks_context_sessions.sql"),
+    include_str!("migrations/003_previews.sql"),
+];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Millis, true)

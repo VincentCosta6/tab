@@ -18,7 +18,12 @@ use crate::TabConfig;
 use crate::connector::{Connector, ConnectorContext, EngineMsg};
 use crate::connectors;
 use crate::gateway::Gateway;
-use crate::model::{Block, ConnectorInfo, ConnectorStatus, ItemState, QueueItem};
+use crate::gateway::GatewayError;
+use crate::model::{
+    Approval, ConnectorInfo, ConnectorStatus, IncomingEvent, ItemState, NewTask, Preview,
+    QueueItem, Session, SessionMessage,
+};
+use crate::ratelimit;
 use crate::ranker::{Pipeline, Ranker};
 use crate::store::{Store, Upsert};
 
@@ -41,9 +46,23 @@ pub enum Change {
 pub enum EngineEvent {
     ItemChanged { change: Change, item: QueueItem },
     ConnectorChanged { connector: ConnectorInfo },
+    /// A cached preview was filled or refreshed.
+    PreviewChanged { preview: Preview },
+    /// Context entries on an item were added, promoted, pinned or removed.
+    ContextChanged { item_id: String },
+    SessionChanged { session: Session },
+    SessionMessage { message: SessionMessage },
+    /// Streaming text from the agent, before the full message is stored.
+    SessionDelta { session_id: String, text: String },
+    ApprovalRequested { approval: Approval },
+    ApprovalResolved { session_id: String, id: String },
 }
 
 const MAX_CONCURRENT_RANKS: usize = 4;
+/// How often the background preview refresher looks for work.
+const REFRESH_EVERY: Duration = Duration::from_secs(45);
+/// Previews refreshed per pass at most, so one pass never bursts.
+const REFRESH_BATCH: usize = 12;
 
 pub struct Engine {
     pub store: Arc<Store>,
@@ -85,6 +104,10 @@ impl Engine {
                 }
             })
             .collect();
+        // Every connector's declared limits feed the gateway's budgets.
+        for f in connectors::registry() {
+            gateway.declare_limits(&f.descriptor().rate_limits);
+        }
         let ranker = Arc::new(Pipeline::from_config(cfg, gateway.clone(), store.clone()));
         Self {
             store,
@@ -100,7 +123,7 @@ impl Engine {
 /// A running engine. Dropping it does not stop it; call [`EngineHandle::shutdown`].
 pub struct EngineHandle {
     core: Arc<Core>,
-    connectors: HashMap<String, Arc<dyn Connector>>,
+    connectors: Arc<HashMap<String, Arc<dyn Connector>>>,
     infos: Arc<Mutex<Vec<ConnectorInfo>>>,
     cancel: CancellationToken,
 }
@@ -130,6 +153,63 @@ impl Core {
             },
             Err(e) => {
                 tracing::warn!(item = %item.id, error = %e, "ranking failed; item stays unranked")
+            }
+        }
+    }
+
+    /// Stores an event and ranks it. Shared by connectors and tab's own tasks.
+    fn ingest(self: &Arc<Self>, e: &IncomingEvent) -> anyhow::Result<Option<QueueItem>> {
+        Ok(match self.store.upsert(e, Utc::now())? {
+            Upsert::Inserted(item) => {
+                self.publish(Change::Ingested, item.clone());
+                tokio::spawn(self.clone().rank(item.clone()));
+                Some(item)
+            }
+            Upsert::Updated(item) => {
+                // Keep showing the old preview; the refresher replaces it.
+                self.store.preview_mark_dirty(&item.id)?;
+                self.publish(Change::Updated, item.clone());
+                tokio::spawn(self.clone().rank(item.clone()));
+                Some(item)
+            }
+            Upsert::Unchanged => None,
+        })
+    }
+
+    /// Fetches and caches one preview. Returns `None` when the call was
+    /// deferred or refused by a rate budget; the old cache stays.
+    async fn refresh_preview(
+        &self,
+        connector: &Arc<dyn Connector>,
+        item: &QueueItem,
+    ) -> Option<Preview> {
+        match connector.preview(item).await {
+            Ok(blocks) => {
+                // Millisecond precision, matching what the store keeps.
+                let now = chrono::SubsecRound::trunc_subsecs(Utc::now(), 3);
+                if let Err(e) = self.store.preview_put(&item.id, &blocks, now) {
+                    tracing::error!(error = %e, "caching preview failed");
+                }
+                let preview = Preview {
+                    item_id: item.id.clone(),
+                    blocks,
+                    fetched_at: Some(now),
+                    stale: false,
+                };
+                let _ = self.events.send(EngineEvent::PreviewChanged {
+                    preview: preview.clone(),
+                });
+                Some(preview)
+            }
+            Err(e) => {
+                let budget = matches!(
+                    e.downcast_ref::<GatewayError>(),
+                    Some(GatewayError::Deferred { .. } | GatewayError::RateLimited { .. })
+                );
+                if !budget {
+                    tracing::warn!(item = %item.id, error = %e, "preview failed");
+                }
+                None
             }
         }
     }
@@ -187,18 +267,11 @@ impl Engine {
                     _ = ingest_cancel.cancelled() => break,
                 };
                 match msg {
-                    EngineMsg::Event(e) => match ingest.store.upsert(&e, Utc::now()) {
-                        Ok(Upsert::Inserted(item)) => {
-                            ingest.publish(Change::Ingested, item.clone());
-                            tokio::spawn(ingest.clone().rank(item));
+                    EngineMsg::Event(e) => {
+                        if let Err(e) = ingest.ingest(&e) {
+                            tracing::error!(error = %e, "storing event failed");
                         }
-                        Ok(Upsert::Updated(item)) => {
-                            ingest.publish(Change::Updated, item.clone());
-                            tokio::spawn(ingest.clone().rank(item));
-                        }
-                        Ok(Upsert::Unchanged) => {}
-                        Err(e) => tracing::error!(error = %e, "storing event failed"),
-                    },
+                    }
                     EngineMsg::Status(id, status) => {
                         let mut all = ingest_infos.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(info) = all.iter_mut().find(|c| c.descriptor.id == id)
@@ -238,13 +311,61 @@ impl Engine {
             }
         });
 
-        EngineHandle {
-            core,
-            connectors: self
-                .connectors
+        let connectors: Arc<HashMap<String, Arc<dyn Connector>>> = Arc::new(
+            self.connectors
                 .into_iter()
                 .map(|c| (c.id().to_string(), c))
                 .collect(),
+        );
+
+        // Background preview refresher. Runs every call at background
+        // priority, so the gateway defers it whenever a connector's budget
+        // is tight or it has been bursting; interactive opens always win.
+        let (refresh, refresh_conns, refresh_cancel) =
+            (core.clone(), connectors.clone(), cancel.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(REFRESH_EVERY);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = refresh_cancel.cancelled() => break,
+                }
+                let cutoff = Utc::now() - chrono::Duration::minutes(5);
+                let due = match refresh.store.previews_due(cutoff, REFRESH_BATCH * 4) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!(error = %e, "listing stale previews failed");
+                        continue;
+                    }
+                };
+                let mut backed_off = std::collections::HashSet::new();
+                let mut done = 0;
+                for (item, fetched_at, dirty) in due {
+                    if done >= REFRESH_BATCH || refresh_cancel.is_cancelled() {
+                        break;
+                    }
+                    let Some(c) = refresh_conns.get(&item.event.source) else {
+                        continue;
+                    };
+                    if backed_off.contains(&item.event.source) {
+                        continue;
+                    }
+                    let ttl = chrono::Duration::from_std(c.preview_ttl()).unwrap_or_default();
+                    if !dirty && fetched_at.is_some_and(|t| Utc::now() < t + ttl) {
+                        continue;
+                    }
+                    done += 1;
+                    let ok = ratelimit::background(refresh.refresh_preview(c, &item)).await;
+                    if ok.is_none() {
+                        backed_off.insert(item.event.source.clone());
+                    }
+                }
+            }
+        });
+
+        EngineHandle {
+            core,
+            connectors,
             infos,
             cancel,
         }
@@ -306,15 +427,82 @@ impl EngineHandle {
         ))
     }
 
-    /// Rich content for the detail pane, from the item's connector (cached by the gateway).
-    pub async fn preview(&self, id: &str) -> anyhow::Result<Vec<Block>> {
-        let Some(item) = self.core.store.get(id)? else {
-            return Ok(Vec::new());
+    /// Rich content for an item. Cached content is returned immediately,
+    /// however old; if it is past the connector's TTL a background refresh
+    /// is queued and arrives as [`EngineEvent::PreviewChanged`]. Only a
+    /// never-seen item waits on the network, at interactive priority.
+    pub async fn preview(&self, id: &str) -> anyhow::Result<Preview> {
+        let empty = Preview {
+            item_id: id.to_string(),
+            blocks: Vec::new(),
+            fetched_at: None,
+            stale: false,
         };
-        match self.connectors.get(&item.event.source) {
-            Some(c) => c.preview(&item).await,
-            None => Ok(Vec::new()),
+        let Some(item) = self.core.store.get(id)? else {
+            return Ok(empty);
+        };
+        let Some(c) = self.connectors.get(&item.event.source).cloned() else {
+            return Ok(empty);
+        };
+        if let Some((blocks, fetched_at, dirty)) = self.core.store.preview_get(id)? {
+            let ttl = chrono::Duration::from_std(c.preview_ttl()).unwrap_or_default();
+            let stale = dirty || Utc::now() >= fetched_at + ttl;
+            if stale {
+                let core = self.core.clone();
+                tokio::spawn(async move {
+                    ratelimit::background(core.refresh_preview(&c, &item)).await;
+                });
+            }
+            return Ok(Preview {
+                item_id: id.to_string(),
+                blocks,
+                fetched_at: Some(fetched_at),
+                stale,
+            });
         }
+        Ok(self.core.refresh_preview(&c, &item).await.unwrap_or(empty))
+    }
+
+    /// Creates a task in tab's own connector. A due time makes it a
+    /// scheduled task that sleeps until then.
+    pub fn create_task(&self, task: NewTask) -> anyhow::Result<QueueItem> {
+        let now = Utc::now();
+        let title = task.title.trim();
+        anyhow::ensure!(!title.is_empty(), "a task needs a title");
+        let scheduled = task.due_at.is_some_and(|d| d > now);
+        let mut metadata = serde_json::json!({ "created_by": task.created_by });
+        if let Some(p) = task.priority.as_deref().filter(|p| *p != "normal") {
+            metadata["priority"] = p.into();
+        }
+        if let Some(d) = task.due_at {
+            metadata["due_at"] = d.to_rfc3339().into();
+        }
+        let event = IncomingEvent {
+            source: crate::connectors::tab::SOURCE.into(),
+            external_id: uuid::Uuid::new_v4().to_string(),
+            kind: if scheduled { "tab.scheduled" } else { "tab.task" }.into(),
+            title: title.chars().take(200).collect(),
+            body: task.body.filter(|b| !b.trim().is_empty()),
+            url: task.url,
+            actor: Some(if task.created_by == "agent" { "agent" } else { "you" }.into()),
+            context: Some("tab".into()),
+            occurred_at: now,
+            metadata,
+            ..Default::default()
+        };
+        let item = self
+            .core
+            .ingest(&event)?
+            .ok_or_else(|| anyhow::anyhow!("task was not stored"))?;
+        if scheduled && let Some(due) = task.due_at {
+            return Ok(self.snooze(&item.id, due)?.unwrap_or(item));
+        }
+        Ok(item)
+    }
+
+    /// Publishes an event on the engine's stream (used by the agent runner).
+    pub fn emit(&self, event: EngineEvent) {
+        let _ = self.core.events.send(event);
     }
 
     /// Recomputes every open ranking, e.g. after the rules or instructions change.
@@ -462,7 +650,32 @@ mod tests {
                 .is_empty(),
             "shares acme/payments"
         );
-        assert!(handle.preview(&review.id).await.unwrap().len() >= 2);
+        let first = handle.preview(&review.id).await.unwrap();
+        assert!(first.blocks.len() >= 2 && !first.stale);
+        // Second open is served from the preview cache, not the connector.
+        let again = handle.preview(&review.id).await.unwrap();
+        assert_eq!(again.fetched_at, first.fetched_at);
+
+        // tab's own tasks: priority feeds ranking, a due time schedules it.
+        let task = handle
+            .create_task(NewTask {
+                title: "Ship the onboarding flow".into(),
+                priority: Some("urgent".into()),
+                created_by: "user".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!((task.event.source.as_str(), task.event.kind.as_str()), ("tab", "tab.task"));
+        let later = handle
+            .create_task(NewTask {
+                title: "Check the deploy".into(),
+                due_at: Some(Utc::now() + chrono::Duration::hours(2)),
+                created_by: "agent".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(later.state, ItemState::Snoozed);
+        assert_eq!(later.event.kind, "tab.scheduled");
         assert!(
             !handle
                 .store()

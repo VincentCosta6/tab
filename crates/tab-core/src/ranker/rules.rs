@@ -67,6 +67,8 @@ impl Default for RankingRules {
         Self {
             kinds: vec![
                 k("agent.needs_input", 75, "An agent is blocked on you"),
+                k("tab.scheduled", 72, "Something you scheduled is due"),
+                k("tab.task", 62, "A task you created"),
                 k(
                     "github.review_requested",
                     70,
@@ -176,6 +178,20 @@ impl RankingRules {
         {
             score += 5;
             fired.push("mentions you +5".into());
+        }
+
+        // Priority set explicitly on a tab task (or by an agent) is the
+        // person's own call, so it is a strong signal.
+        let explicit = e.metadata.get("priority").and_then(|p| p.as_str());
+        let delta = match explicit {
+            Some("urgent") => 30,
+            Some("high") => 15,
+            Some("low") => -20,
+            _ => 0,
+        };
+        if delta != 0 {
+            score += delta;
+            fired.push(format!("priority {} {delta:+}", explicit.unwrap_or_default()));
         }
 
         RuleResult {

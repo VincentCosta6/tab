@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::config::ConnectorConfig;
 use crate::connector::{Connector, ConnectorContext, ConnectorFactory};
+use crate::ratelimit::RateLimitSpec;
 use crate::gateway::{Call, Gateway, GatewayError};
 use crate::model::{
     Block, ConnectorDescriptor, ConnectorStatus, EntityRef, Field, IncomingEvent, KindInfo, Link,
@@ -64,6 +65,19 @@ impl ConnectorFactory for GithubFactory {
                 },
             ],
             available: true,
+            rate_limits: vec![
+                RateLimitSpec::new("github", "core", 5000, 3600, 40)
+                    .note("REST: 5,000 requests per hour per token"),
+                RateLimitSpec::new("github", "search", 30, 60, 10)
+                    .note("Search: 30 requests per minute"),
+            ],
+            category: "code".into(),
+            features: vec![
+                "Review pull requests in a built-in VS Code editor with side-by-side diffs".into(),
+                "Comment on lines without leaving tab".into(),
+                "Marking an item done marks the notification read".into(),
+            ],
+            builtin: false,
         }
     }
 

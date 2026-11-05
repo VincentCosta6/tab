@@ -21,6 +21,7 @@ pub mod engine;
 pub mod gateway;
 pub mod model;
 pub mod ranker;
+pub mod ratelimit;
 pub mod store;
 
 pub use config::TabConfig;

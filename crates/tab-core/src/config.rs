@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::UserProfile;
+use crate::model::{AgentKind, UserProfile};
 use crate::ranker::RankingRules;
 
 /// User configuration, persisted as JSON in the app config dir.
@@ -19,6 +19,77 @@ pub struct TabConfig {
     /// no config changes; each connector declares its fields in its descriptor.
     #[serde(default = "default_connectors")]
     pub connectors: BTreeMap<String, ConnectorConfig>,
+    #[serde(default)]
+    pub agent: AgentConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
+    /// Set once the first-launch onboarding is finished.
+    #[serde(default)]
+    pub onboarded: bool,
+}
+
+/// Which coding agent tab drives, and how.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentConfig {
+    /// `None` until onboarding picks one.
+    #[serde(default)]
+    pub kind: Option<AgentKind>,
+    /// Override for the executable (`claude`, `opencode`, or a full path).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// e.g. `sonnet` for Claude Code, `anthropic/claude-sonnet-5-5` for OpenCode.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Folder sessions start in. Defaults to the home folder.
+    #[serde(default)]
+    pub workdir: Option<String>,
+    /// Claude Code permission mode. Tool approvals that need a person are
+    /// routed to tab's chat either way.
+    #[serde(default = "default_permission_mode")]
+    pub permission_mode: String,
+    /// Use an OpenCode server that is already running instead of starting one.
+    #[serde(default)]
+    pub opencode_url: Option<String>,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            command: None,
+            model: None,
+            workdir: None,
+            permission_mode: default_permission_mode(),
+            opencode_url: None,
+        }
+    }
+}
+
+fn default_permission_mode() -> String {
+    "default".into()
+}
+
+/// tab's local MCP server, which agents use to search the queue and add context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpConfig {
+    #[serde(default = "default_mcp_port")]
+    pub port: u16,
+    /// Bearer token agents must send. Generated on first launch.
+    #[serde(default)]
+    pub token: String,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            port: default_mcp_port(),
+            token: String::new(),
+        }
+    }
+}
+
+fn default_mcp_port() -> u16 {
+    47821
 }
 
 impl Default for TabConfig {
@@ -27,6 +98,9 @@ impl Default for TabConfig {
             profile: UserProfile::default(),
             ranking: RankingConfig::default(),
             connectors: default_connectors(),
+            agent: AgentConfig::default(),
+            mcp: McpConfig::default(),
+            onboarded: false,
         }
     }
 }
@@ -73,6 +147,12 @@ pub struct ConnectorConfig {
 }
 
 impl ConnectorConfig {
+    pub fn on() -> Self {
+        Self {
+            enabled: true,
+            settings: Default::default(),
+        }
+    }
     pub fn str(&self, key: &str) -> Option<&str> {
         self.settings.get(key)?.as_str().filter(|s| !s.is_empty())
     }
@@ -88,13 +168,11 @@ fn yes() -> bool {
 
 fn default_connectors() -> BTreeMap<String, ConnectorConfig> {
     // Sample data is on for a fresh install so the queue isn't empty.
-    BTreeMap::from([(
-        "demo".to_string(),
-        ConnectorConfig {
-            enabled: true,
-            settings: Default::default(),
-        },
-    )])
+    // tab's own task connector is always on.
+    BTreeMap::from([
+        ("demo".to_string(), ConnectorConfig::on()),
+        ("tab".to_string(), ConnectorConfig::on()),
+    ])
 }
 
 impl TabConfig {
@@ -105,6 +183,12 @@ impl TabConfig {
             Err(e) => return Err(e.into()),
         };
         cfg.apply_env();
+        cfg.connectors.insert("tab".into(), ConnectorConfig::on());
+        if cfg.mcp.token.is_empty() {
+            cfg.mcp.token = uuid::Uuid::new_v4().simple().to_string();
+            // Persist it so agent configs written earlier stay valid.
+            let _ = cfg.save(path);
+        }
         Ok(cfg)
     }
 

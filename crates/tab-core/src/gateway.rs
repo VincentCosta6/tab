@@ -14,6 +14,9 @@
 //!   refusals: who called (connector), why (purpose), what, the outcome, and
 //!   the limit state the provider reported.
 //! * **Offline.** Network errors fall back to stale cache too.
+//! * **Budgets.** Connectors declare their limits; the [`Limiter`] tracks
+//!   usage and bursts so background work backs off before the provider
+//!   has to tell us to (see [`crate::ratelimit`]).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -29,6 +32,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
+use crate::ratelimit::{Limiter, Pressure, Priority, RateLimitSpec, Refusal, current_priority};
 use crate::store::{AuditEntry, CachedResponse, Store};
 
 const MAX_CONCURRENT_PER_PROVIDER: usize = 4;
@@ -46,6 +50,8 @@ pub enum Outcome {
     Stale,
     /// Refused locally or by the provider because of a rate limit.
     RateLimited,
+    /// Background call held back to keep headroom; nothing was sent.
+    Deferred,
     Error,
 }
 
@@ -57,6 +63,7 @@ impl Outcome {
             Outcome::Revalidated => "revalidated",
             Outcome::Stale => "stale",
             Outcome::RateLimited => "rate_limited",
+            Outcome::Deferred => "deferred",
             Outcome::Error => "error",
         }
     }
@@ -68,6 +75,13 @@ pub enum GatewayError {
     RateLimited {
         provider: String,
         resource: String,
+        until: DateTime<Utc>,
+    },
+    #[error("{provider} background call deferred ({reason}) until {until}")]
+    Deferred {
+        provider: String,
+        resource: String,
+        reason: String,
         until: DateTime<Utc>,
     },
     #[error("{provider} returned {status}: {body}")]
@@ -277,6 +291,7 @@ pub struct Gateway {
     provider_headers: Mutex<HashMap<String, HeaderMap>>,
     limits: Mutex<HashMap<(String, String), RateLimitState>>,
     slots: Mutex<HashMap<String, Arc<Semaphore>>>,
+    limiter: Limiter,
 }
 
 impl Gateway {
@@ -292,6 +307,7 @@ impl Gateway {
             provider_headers: Mutex::new(HashMap::new()),
             limits: Mutex::new(HashMap::new()),
             slots: Mutex::new(HashMap::new()),
+            limiter: Limiter::default(),
         }
     }
 
@@ -301,6 +317,31 @@ impl Gateway {
             .lock()
             .unwrap()
             .insert(provider.into(), headers);
+    }
+
+    /// Declares limits a connector knows about. Called by the engine for
+    /// every registered connector, so each one gets budgets for free.
+    pub fn declare_limits(&self, specs: &[RateLimitSpec]) {
+        self.limiter.declare(specs);
+    }
+
+    fn remote(&self, provider: &str, resource: &str) -> Option<(u64, Option<u64>)> {
+        let all = self.limits.lock().unwrap();
+        let st = all.get(&(provider.to_string(), resource.to_string()))?;
+        Some((st.remaining?, st.limit))
+    }
+
+    /// Usage, headroom and burst state per bucket.
+    pub fn pressure(&self) -> Vec<Pressure> {
+        self.limiter.pressure(|p, r| self.remote(p, r))
+    }
+
+    /// Whether a background call to this bucket would go out right now.
+    pub fn has_headroom(&self, provider: &str, resource: &str) -> bool {
+        // Admission with no record: a dry run.
+        self.limiter
+            .admit(provider, resource, Priority::Background, self.remote(provider, resource))
+            .is_ok()
     }
 
     pub fn rate_limits(&self) -> Vec<RateLimitState> {
@@ -421,10 +462,10 @@ impl Gateway {
                 })
             }
             None => {
-                let outcome = if matches!(err, GatewayError::RateLimited { .. }) {
-                    Outcome::RateLimited
-                } else {
-                    Outcome::Error
+                let outcome = match err {
+                    GatewayError::RateLimited { .. } => Outcome::RateLimited,
+                    GatewayError::Deferred { .. } => Outcome::Deferred,
+                    _ => Outcome::Error,
                 };
                 let status = match &err {
                     GatewayError::Http { status, .. } => Some(*status),
@@ -503,7 +544,33 @@ impl Gateway {
             return self.stale_or(&call, &audit_url, cached, started, err);
         }
 
-        // 3. Conditional request when we have something to revalidate.
+        // 3. Declared budgets, usage and bursts.
+        let remote = self.remote(&call.provider, resource);
+        match self
+            .limiter
+            .admit(&call.provider, resource, current_priority(), remote)
+        {
+            Ok(()) => {}
+            Err(Refusal::Exhausted { until }) => {
+                let err = GatewayError::RateLimited {
+                    provider: call.provider.clone(),
+                    resource: resource.into(),
+                    until,
+                };
+                return self.stale_or(&call, &audit_url, cached, started, err);
+            }
+            Err(Refusal::Deferred { reason, until }) => {
+                let err = GatewayError::Deferred {
+                    provider: call.provider.clone(),
+                    resource: resource.into(),
+                    reason,
+                    until,
+                };
+                return self.stale_or(&call, &audit_url, cached, started, err);
+            }
+        }
+
+        // 4. Conditional request when we have something to revalidate.
         if let Some(c) = &cached {
             if let Some(v) = c
                 .etag
@@ -525,6 +592,7 @@ impl Gateway {
             .acquire()
             .await
             .map_err(|e| GatewayError::Other(e.into()))?;
+        self.limiter.record(&call.provider, resource);
         let resp = match self.client.execute(req).await {
             Ok(r) => r,
             Err(e) => {
