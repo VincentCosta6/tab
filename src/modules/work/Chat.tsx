@@ -118,33 +118,33 @@ function ContextMeter({ messages }: { messages: SessionMessage[] }) {
   const base = Number(turns[0].meta.context.first_call ?? used);
   const tab = Math.min(Number(last.tab_context) || 0, base);
   const parts = [
-    { label: "Agent setup", hint: "System prompt, tools and MCP servers", n: Math.max(0, base - tab), cls: "ctx-setup" },
-    { label: "tab context", hint: "This item and the context attached to it", n: tab, cls: "ctx-tab" },
-    { label: "Conversation", hint: "Your messages, replies and tool output", n: Math.max(0, used - base), cls: "ctx-chat" },
+    { label: "Agent setup", hint: "System prompt, tools and MCP servers", n: Math.max(0, base - tab), cls: "cw-setup" },
+    { label: "tab context", hint: "This item and the context attached to it", n: tab, cls: "cw-tab" },
+    { label: "Conversation", hint: "Your messages, replies and tool output", n: Math.max(0, used - base), cls: "cw-chat" },
   ];
   const pct = Math.min(100, (used / size) * 100);
   const tone = pct >= 90 ? "danger" : pct >= 75 ? "warning" : "accent";
 
   return (
-    <div className="ctx" ref={ref}>
-      <button className="ctx-chip" onClick={() => setOpen(!open)} title="Context window">
-        <span className="ctx-ring" style={{ ["--p" as string]: `${pct}%` }} data-tone={tone} />
+    <div className="cw" ref={ref}>
+      <button className="cw-chip" onClick={() => setOpen(!open)} title="Context window">
+        <span className="cw-ring" style={{ ["--p" as string]: `${pct}%` }} data-tone={tone} />
         {k(used)} / {k(size)}
       </button>
       {open && (
-        <div className="ctx-pop">
-          <div className="ctx-pop-head">
+        <div className="cw-pop">
+          <div className="cw-pop-head">
             <strong>Context window</strong>
             <span className={`text-${tone}`}>{Math.round(pct)}% used</span>
           </div>
-          <div className="ctx-bar">
+          <div className="cw-bar">
             {parts.map((p) => <span key={p.label} className={p.cls} style={{ width: `${(p.n / size) * 100}%` }} title={`${p.label}: ${k(p.n)}`} />)}
           </div>
-          <ul className="ctx-list">
+          <ul className="cw-list">
             {parts.map((p) => (
               <li key={p.label}><i className={p.cls} /><span><strong>{p.label}</strong><small>{p.hint}</small></span><span>{k(p.n)}</span></li>
             ))}
-            <li><i className="ctx-free" /><span><strong>Free</strong></span><span>{k(Math.max(0, size - used))}</span></li>
+            <li><i className="cw-free" /><span><strong>Free</strong></span><span>{k(Math.max(0, size - used))}</span></li>
           </ul>
           <p className="subtle">
             Last call: {k(Number(last.cache_read) || 0)} from cache, {k((Number(last.cache_write) || 0) + (Number(last.fresh_input) || 0))} new, {k(Number(last.output) || 0)} written
