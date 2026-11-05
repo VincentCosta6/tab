@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, cx } from "../../design/components";
 import { Brand } from "../../design/brands";
 import { Icon } from "../../design/icons";
@@ -550,6 +550,68 @@ function ModePicker() {
   return <BarPicker value={current} options={options} title="Permission mode" className={cx(current === "auto" && "mode-auto")} onChange={async (v) => qc.setQueryData(keys.config, await api.setAgentMode(v))} />;
 }
 
+/** What Claude Code's built-in commands do; custom commands and skills show just their name. */
+const slashDescriptions: Record<string, string> = {
+  compact: "Summarise the conversation so far to free up context",
+  context: "Show what's using the context window",
+  cost: "Show this session's cost and duration",
+  init: "Write a CLAUDE.md for this codebase",
+  review: "Review a pull request",
+  "pr-comments": "Fetch the comments on a pull request",
+  "security-review": "Review the pending changes for security issues",
+  "release-notes": "Show Claude Code's release notes",
+  todos: "List the current todo items",
+};
+// Terminal-only commands that do nothing useful in a headless turn.
+const interactiveOnly = new Set(["config", "permissions", "login", "logout", "vim", "help", "exit", "quit", "clear", "theme", "terminal-setup", "doctor", "ide", "resume", "status", "statusline", "upgrade", "bug", "feedback", "memory", "agents", "mcp", "hooks", "model", "add-dir", "export", "privacy-settings", "output-style", "plugin", "install-github-app", "migrate-installer", "rewind", "keybindings-help"]);
+const fallbackSlash = ["compact", "context", "cost", "init", "review", "pr-comments", "security-review"];
+
+/**
+ * The `/` menu: Claude Code's commands, custom commands and skills, as it
+ * reported them when it last started. The command is sent as typed and
+ * Claude Code runs it.
+ */
+function useSlashMenu(text: string) {
+  const { data } = useQuery({ queryKey: ["slash-commands"], queryFn: api.slashCommands, staleTime: 60_000 });
+  const [index, setIndex] = useState(0);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const m = /^\/([\w:.-]*)$/.exec(text);
+  const q = m?.[1].toLowerCase() ?? "";
+  const names = data?.length ? data : fallbackSlash;
+  const matches = m
+    ? names
+        .filter((n) => !interactiveOnly.has(n) && n.toLowerCase().includes(q))
+        .sort((a, b) => Number(!a.toLowerCase().startsWith(q)) - Number(!b.toLowerCase().startsWith(q)))
+        .slice(0, 8)
+        .map((name) => ({ name, description: slashDescriptions[name] }))
+    : [];
+  const open = matches.length > 0 && dismissed !== text;
+  useEffect(() => setIndex(0), [q]);
+  const handleKey = (e: React.KeyboardEvent, pick: (name: string) => void) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const d = e.key === "ArrowDown" ? 1 : -1;
+      setIndex((i) => (i + d + matches.length) % matches.length);
+      return true;
+    }
+    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing)) {
+      const c = matches[Math.min(index, matches.length - 1)];
+      // A full command already typed sends on Enter.
+      if (e.key === "Enter" && c.name.toLowerCase() === q) return false;
+      e.preventDefault();
+      pick(c.name);
+      return true;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setDismissed(text);
+      return true;
+    }
+    return false;
+  };
+  return { open, matches, index, setIndex, handleKey, close: () => setDismissed(null) };
+}
+
 export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat: Chat | undefined; onSend: (text: string, attachments: string[]) => void; placeholder: string; autoFocus?: boolean; extra?: React.ReactNode }) {
   const { data: config } = useConfig();
   const [text, setText] = useState("");
@@ -560,6 +622,8 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   const ref = useRef<HTMLTextAreaElement>(null);
   const file = useRef<HTMLInputElement>(null);
   const running = !!chat?.running;
+  const slash = useSlashMenu(text);
+  const pickSlash = (name: string) => (setText(`/${name} `), slash.close(), ref.current?.focus());
 
   useEffect(() => {
     const t = ref.current;
@@ -642,9 +706,20 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
           void add(files);
         }}
         onKeyDown={(e) => {
+          if (slash.open && slash.handleKey(e, pickSlash)) return;
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) (e.preventDefault(), submit());
         }}
       />
+      {slash.open && (
+        <div className="slash-menu" role="listbox">
+          {slash.matches.map((c, i) => (
+            <button key={c.name} role="option" aria-selected={i === slash.index} className={cx(i === slash.index && "active")} onMouseDown={(e) => (e.preventDefault(), pickSlash(c.name))} onMouseEnter={() => slash.setIndex(i)}>
+              <span className="slash-name">/{c.name}</span>
+              {c.description && <span className="slash-desc">{c.description}</span>}
+            </button>
+          ))}
+        </div>
+      )}
       {error && <div className="composer-error">{error}</div>}
       <div className="composer-foot">
         <span className="subtle composer-agent">

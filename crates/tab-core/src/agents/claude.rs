@@ -224,6 +224,13 @@ impl Parser {
         match v["type"].as_str().unwrap_or_default() {
             "system" if v["subtype"] == "init" => {
                 self.billing = crate::usage::billing_from_init(v);
+                if let Some(cmds) = v["slash_commands"].as_array() {
+                    let names: Vec<String> = cmds
+                        .iter()
+                        .filter_map(|c| c.as_str().map(str::to_string))
+                        .collect();
+                    hub.save_slash_commands(&names);
+                }
                 if let Some(id) = v["session_id"].as_str() {
                     hub.update(&sid, None, Some(id));
                 }

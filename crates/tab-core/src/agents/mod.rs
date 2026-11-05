@@ -119,6 +119,24 @@ impl AgentHub {
         self.dir.join("attachments")
     }
 
+    /// The slash commands (built-ins, custom commands and skills) the agent
+    /// reported when it last started, for the composer's `/` menu.
+    pub fn slash_commands(&self) -> Vec<String> {
+        std::fs::read(self.dir.join("slash_commands.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn save_slash_commands(&self, names: &[String]) {
+        if names.is_empty() || self.slash_commands() == names {
+            return;
+        }
+        if let Ok(b) = serde_json::to_vec(names) {
+            let _ = std::fs::write(self.dir.join("slash_commands.json"), b);
+        }
+    }
+
     pub(crate) fn session_dir(&self, id: &str) -> anyhow::Result<PathBuf> {
         let d = self.dir.join("sessions").join(id);
         std::fs::create_dir_all(&d)?;

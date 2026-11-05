@@ -145,6 +145,7 @@ export const mockApi = {
   async invoke<T>(cmd: string, args: Record<string, any> = {}): Promise<T> {
     const r = await (async () => {
       switch (cmd) {
+        case "agent_slash_commands": return ["compact", "context", "cost", "init", "review", "pr-comments", "security-review", "release-notes", "frontend-design", "deploy"];
         case "agent_activity": return sessions.filter((s) => s.item_id && s.status !== "idle").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));
         case "graph_view": return mockGraph(args.projectId ?? null, args.days ?? null);
         case "graph_node": {

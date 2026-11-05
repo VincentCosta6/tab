@@ -840,6 +840,12 @@ async fn ask_chat_send(
     Ok(session)
 }
 
+/// Slash commands the agent last reported, for the composer's `/` menu.
+#[tauri::command]
+fn agent_slash_commands(state: State<'_, AppState>) -> Vec<String> {
+    state.hub.slash_commands()
+}
+
 /// Items whose agent is busy, waiting on the person, or failed, for the
 /// queue rows and the nav.
 #[tauri::command]
@@ -1462,6 +1468,7 @@ pub fn run() {
             item_set_project,
             search_index_status,
             agent_activity,
+            agent_slash_commands,
             graph_view,
             graph_node,
             ask_chat_open,

@@ -617,3 +617,11 @@ body.resizing iframe { pointer-events: none; }
 ::view-transition-group(work-composer) { animation-duration: 380ms; animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1); }
 ::view-transition-old(work-composer), ::view-transition-new(work-composer) { height: 100%; }
 ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 220ms; }
+
+/* The composer's / menu, above the box. */
+.composer { position: relative; }
+.slash-menu { position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px); z-index: 40; display: grid; gap: 1px; padding: 4px; max-height: 300px; overflow-y: auto; background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: 0 8px 24px rgb(0 0 0 / 0.22); }
+.slash-menu button { display: flex; align-items: baseline; gap: 10px; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer; }
+.slash-menu button.active { background: var(--bg-hover); }
+.slash-name { font-family: var(--font-mono, ui-monospace, monospace); flex: none; }
+.slash-desc { color: var(--fg-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

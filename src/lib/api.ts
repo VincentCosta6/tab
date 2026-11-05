@@ -51,6 +51,7 @@ export const api = {
   imageRead: (path: string) => call<ArrayBuffer>("image_read", { path }),
   startDictation: () => call<void>("start_dictation"),
   agentActivity: () => call<AgentActivity[]>("agent_activity"),
+  slashCommands: () => call<string[]>("agent_slash_commands"),
   graphView: (projectId: string | null, days: number | null, limit?: number) => call<GraphView>("graph_view", { projectId, days, limit: limit ?? null }),
   graphNode: (id: number) => call<GraphNode>("graph_node", { id }),
   askChatOpen: (projectId: string | null) => call<Chat>("ask_chat_open", { projectId }),
