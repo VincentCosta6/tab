@@ -73,9 +73,23 @@ export function WorkTab() {
 
   const visible = useMemo(() => (app ? items.filter((i) => i.kind.startsWith(`${app}.`)) : items), [items, app]);
 
-  // Changing what's listed starts from the top; otherwise keep the selection,
-  // so opening a related (or done) item from the pane sticks.
-  useEffect(() => setSelected((s) => (s === NEW ? s : null)), [view, app, query]);
+  // A new filter or search keeps the open item while it's still in the list,
+  // so typing doesn't rebuild the right pane; once the results leave it out,
+  // the top result opens. Otherwise the selection sticks, so opening a
+  // related (or done) item from the pane stays put.
+  const filterKey = `${view}|${app ?? ""}|${query}`;
+  const recheck = useRef<string | null>(null);
+  useEffect(() => {
+    recheck.current = filterKey;
+  }, [filterKey]);
+  useEffect(() => {
+    if (recheck.current === null) return;
+    setSelected((s) => {
+      if (s === NEW || (s && visible.some((i) => i.id === s))) return s;
+      recheck.current = null;
+      return visible[0]?.id ?? null;
+    });
+  }, [visible]);
   // A chat started elsewhere (e.g. "Set up with assistant" in Connections).
   useEffect(() => {
     const open = () => {
@@ -211,7 +225,7 @@ export function WorkTab() {
             setSelected(itemId);
           }} />
         ) : selected ? (
-          <ItemPane key={selected} id={selected} onActed={advance} onSelect={setSelected} />
+          <ItemPane key={selected} id={selected} onActed={advance} onSelect={(id) => ((recheck.current = null), setSelected(id))} />
         ) : (
           <EmptyState icon="inbox" title="Nothing selected">Pick something from the queue, or start a new chat.</EmptyState>
         )}
