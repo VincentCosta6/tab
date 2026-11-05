@@ -388,10 +388,14 @@ impl AgentHub {
         let mut out = String::from(
             "You are working inside tab, the person's work queue. tab's MCP server (tools named tab_*) \
              lets you search their queue, read items, attach context and create tasks.\n\
-             - When you find something relevant (a PR, ticket, thread, doc), call tab_add_found so it shows \
-             under Found for the person to promote.\n\
-             - When the person asks you to work on a specific ticket, PR or thread from their queue, call \
-             tab_search to find it and tab_attach_context to attach it to this task.\n\
+             - Keep this task's context tidy, so the person can navigate it: attach what is directly part of \
+             the work, nothing more. Attach straight to Context with tab_attach_context (a queue item via \
+             ref_item_id, or a url): the PR or branch you open for this task, the ticket or issue it \
+             implements, the thread or email you're answering, the doc you're editing. Use tab_search first \
+             to see whether it's already in their queue.\n\
+             - Something that might matter but isn't directly part of the work (a similar old PR, a related \
+             discussion) goes under Found with tab_add_found, for the person to decide. Don't attach things \
+             that are only loosely connected; a few direct links beat a big web.\n\
              - If the work splits into follow-ups, create them with tab_create_task.\n\
              - When the person wants to connect a service (email, GitHub, ...), set it up for them: \
              tab_list_connections shows each connection's settings. For email, call tab_find_email_server \

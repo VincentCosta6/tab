@@ -170,7 +170,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_add_found",
-            "description": "File something relevant you found (a PR, ticket, doc, thread, file) under Found on the current task, so the person can promote it into context.",
+            "description": "File something that might be relevant but isn't directly part of the work (a similar PR, a related discussion, a doc) under Found on the current task, so the person can decide whether to add it to context.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string" },
                 "url": { "type": "string" },
@@ -181,7 +181,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_attach_context",
-            "description": "Attach a queue item or link as context on the current task. Use when the person asks you to work on a specific ticket, PR or thread.",
+            "description": "Attach a queue item or link directly to the current task's Context. Use for things that are directly part of the work: the PR you opened for it, the ticket it implements, the thread or email you're answering, or anything the person names. For things that only might be relevant, use tab_add_found instead.",
             "inputSchema": { "type": "object", "properties": {
                 "ref_item_id": { "type": "string" },
                 "url": { "type": "string" },
