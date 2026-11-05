@@ -14,11 +14,13 @@
 //! Nothing in this crate depends on Tauri, so it can be tested headless and
 //! reused by the MCP server or a CLI later.
 
+pub mod agents;
 pub mod config;
 pub mod connector;
 pub mod connectors;
 pub mod engine;
 pub mod gateway;
+pub mod mcp;
 pub mod model;
 pub mod ranker;
 pub mod ratelimit;
