@@ -228,7 +228,7 @@ export interface PullReview {
   repo: string; number: number; node_id: string; title: string; body: string; author: string; author_avatar: string | null; url: string;
   state: "open" | "closed" | "merged"; draft: boolean; base_ref: string; head_ref: string; head_repo: string | null;
   base_sha: string; head_sha: string; additions: number; deletions: number; commits: number; created_at: string;
-  mergeable: string; merge_state: string; review_decision: string | null;
+  mergeable: string; merge_state: string; merge_method: "squash" | "merge" | "rebase"; review_decision: string | null;
   checks: { state: string | null; runs: CheckRun[] };
   labels: { name: string; color: string }[]; reviewers: string[];
   viewer: string; viewer_can_update: boolean;

@@ -152,6 +152,9 @@ function SubmitReview({ onClose }: { onClose: () => void }) {
   );
 }
 
+/** GitHub's button label for the repo's merge method. */
+const mergeLabel: Record<string, string> = { squash: "Squash and merge", merge: "Merge pull request", rebase: "Rebase and merge" };
+
 /**
  * Why GitHub wouldn't merge this right now, like its greyed-out merge button:
  * conflicts, or branch rules (required reviews or checks) not met.
@@ -233,9 +236,7 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
                 <>
                   {blocked && <div className="rv-menu-note"><Icon name="x-circle" size={13} /> {blocked}</div>}
                   {!blocked && warn && <div className="rv-menu-note warn"><Icon name="dot" size={13} /> {warn}</div>}
-                  {item("git-merge", "Squash and merge", merge("squash", "Squash and merge"), { tone: "merge", disabled: !!blocked, hint: blocked ?? undefined })}
-                  {item("git-merge", "Create a merge commit", merge("merge", "Create a merge commit"), { tone: "merge", disabled: !!blocked, hint: blocked ?? undefined })}
-                  {item("git-merge", "Rebase and merge", merge("rebase", "Rebase and merge"), { tone: "merge", disabled: !!blocked, hint: blocked ?? undefined })}
+                  {item("git-merge", mergeLabel[pr.merge_method] ?? "Merge pull request", merge(pr.merge_method, mergeLabel[pr.merge_method] ?? "Merge pull request"), { tone: "merge", disabled: !!blocked, hint: blocked ?? undefined })}
                   {pr.merge_state === "behind" && item("arrow-down", `Update branch from ${pr.base_ref}`, run(() => act({ type: "update_branch" }), "Branch update started"))}
                   <div className="rv-menu-sep" />
                 </>

@@ -541,7 +541,7 @@ function samplePull(repo: string, number: number): PullReview {
     author: "dana-k", author_avatar: null, url: `https://github.com/${repo}/pull/${number}`,
     state: "open", draft: false, base_ref: "main", head_ref: "dana/capture-retries", head_repo: repo,
     base_sha: "sample-base", head_sha: "sample-head", additions: 29, deletions: 4, commits: 3, created_at: ago(180),
-    mergeable: "mergeable", merge_state: "unstable", review_decision: "review_required",
+    mergeable: "mergeable", merge_state: "unstable", merge_method: "squash", review_decision: "review_required",
     checks: { state: "failure", runs: [
       { name: "lint", status: "completed", conclusion: "success", url: null },
       { name: "unit-tests (node 22)", status: "completed", conclusion: "failure", url: null },

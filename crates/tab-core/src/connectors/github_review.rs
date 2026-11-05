@@ -139,6 +139,9 @@ pub struct PullReview {
     pub mergeable: String,
     /// `clean`, `blocked`, `behind`, `dirty`, `unstable`, `draft`, `has_hooks`, `unknown`.
     pub merge_state: String,
+    /// The repo's merge method for this viewer, as GitHub's own button picks
+    /// it: `squash`, `merge` or `rebase`.
+    pub merge_method: String,
     /// `approved`, `changes_requested`, `review_required`, or none.
     pub review_decision: Option<String>,
     pub checks: Checks,
@@ -185,6 +188,7 @@ const PULL_QUERY: &str = r#"
 query($owner: String!, $name: String!, $number: Int!) {
   viewer { login }
   repository(owner: $owner, name: $name) {
+    viewerDefaultMergeMethod
     pullRequest(number: $number) {
       id title body url state isDraft merged createdAt
       additions deletions
@@ -449,6 +453,10 @@ pub async fn pull(
         created_at: s(pr, "createdAt"),
         mergeable: lower(pr, "mergeable"),
         merge_state: lower(pr, "mergeStateStatus"),
+        merge_method: match lower(&data["repository"], "viewerDefaultMergeMethod").as_str() {
+            "" => "merge".into(),
+            m => m.into(),
+        },
         review_decision: opt(pr, "reviewDecision").map(|d| d.to_ascii_lowercase()),
         checks: Checks {
             state: opt(rollup, "state").map(|s| s.to_ascii_lowercase()),
@@ -951,6 +959,7 @@ test("retries timeouts with the same idempotency key", async () => {
         created_at: "2026-11-04T15:02:00Z".into(),
         mergeable: "mergeable".into(),
         merge_state: "unstable".into(),
+        merge_method: "squash".into(),
         review_decision: Some("review_required".into()),
         checks: Checks {
             state: Some("failure".into()),
