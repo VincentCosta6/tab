@@ -50,12 +50,23 @@ export function UsageMeter({ onSettings }: { onSettings: () => void }) {
   const monthly = budget?.monthly_usd || null;
   const overDaily = daily != null && u.today_usd >= daily;
   const sub = u.billing === "subscription";
+  // On a Claude plan the plan's limits matter more than dollars: lead with the window closest to its cap.
+  const tightest = windows.reduce<PlanWindow | null>((a, w) => (!a || w.utilization! > a.utilization! ? w : a), null);
 
   return (
     <div className="usage" ref={ref}>
       <button className={cx("usage-chip", open && "active", overDaily && "over")} onClick={() => setOpen(!open)} title="Agent spend and plan limits">
-        <span className="usage-amount">{money(u.today_usd)}</span>
-        <span className="usage-caption">today</span>
+        {sub && tightest ? (
+          <>
+            <span className={cx("usage-amount", `text-${tone(tightest.utilization!)}`)}>{Math.max(0, Math.round((1 - tightest.utilization!) * 100))}%</span>
+            <span className="usage-caption">{shortLabel(tightest.window)} left</span>
+          </>
+        ) : (
+          <>
+            <span className="usage-amount">{money(u.today_usd)}</span>
+            <span className="usage-caption">today</span>
+          </>
+        )}
         {windows.slice(0, 2).map((w) => (
           <span key={w.window} className="usage-mini" title={`${windowLabel[w.window] ?? w.window}: ${Math.round(w.utilization! * 100)}% used`}>
             <span className="usage-mini-label">{shortLabel(w.window)}</span>
