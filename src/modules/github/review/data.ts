@@ -43,7 +43,11 @@ export function useActions(pr: PullReview | undefined) {
           throw e;
         }
         // Viewed marks don't change anything else; skip the refetch.
-        if (action.type !== "mark_viewed" && action.type !== "mark_viewed_many") await qc.invalidateQueries({ queryKey: key });
+        if (action.type !== "mark_viewed" && action.type !== "mark_viewed_many") {
+          // Context chips and cards show this PR's status too.
+          void qc.invalidateQueries({ queryKey: ["link-summary", `https://github.com/${pr.repo}/pull/${pr.number}`] });
+          await qc.invalidateQueries({ queryKey: key });
+        }
       };
       const next = queue.current.then(run, run);
       queue.current = next.catch(() => {});
