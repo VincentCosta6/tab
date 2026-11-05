@@ -115,6 +115,30 @@ pub(crate) fn get_item(conn: &Connection, id: &str) -> anyhow::Result<Option<Que
         .optional()?)
 }
 
+/// See [`Store::item_by_url`]. Query and fragment are ignored.
+pub(crate) fn item_by_url(conn: &Connection, url: &str) -> anyhow::Result<Option<QueueItem>> {
+    let url = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/');
+    if !url.starts_with("http") {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+                &format!(
+                "SELECT {COLUMNS} FROM items
+                 WHERE substr(url, 1, length(?1)) = ?1
+                   AND (length(url) = length(?1) OR substr(url, length(?1) + 1, 1) IN ('/', '#', '?'))
+                 ORDER BY (state = 'done'), occurred_at DESC LIMIT 1"
+            ),
+            [url],
+            row_to_item,
+        )
+        .optional()?)
+}
+
 fn state_list(states: &[ItemState]) -> String {
     // Values come from a closed enum, so inlining them is safe.
     states
@@ -182,6 +206,13 @@ impl Store {
 
     pub fn get(&self, id: &str) -> anyhow::Result<Option<QueueItem>> {
         get_item(&self.conn(), id)
+    }
+
+    /// The newest item for a web address. `url` should be canonical (no
+    /// query or fragment); an item whose address continues past it with
+    /// `/`, `#` or `?` (a PR's `/files` page, a comment anchor) matches too.
+    pub fn item_by_url(&self, url: &str) -> anyhow::Result<Option<QueueItem>> {
+        item_by_url(&self.conn(), url)
     }
 
     /// Every source that has items stored.
@@ -376,6 +407,30 @@ mod tests {
             entities: vec![EntityRef::new("person", "dana", "Dana", "from")],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn item_by_url_matches_subpages_only() {
+        let s = Store::in_memory().unwrap();
+        let now = Utc::now();
+        let mut e = ev("1", "PR");
+        e.url = Some("https://github.com/o/r/pull/12".into());
+        s.upsert(&e, now).unwrap();
+        let mut e2 = ev("2", "other PR");
+        e2.url = Some("https://github.com/o/r/pull/123".into());
+        s.upsert(&e2, now).unwrap();
+        let hit = |u: &str| s.item_by_url(u).unwrap().map(|i| i.event.title);
+        assert_eq!(hit("https://github.com/o/r/pull/12").as_deref(), Some("PR"));
+        assert_eq!(
+            hit("https://github.com/o/r/pull/12/").as_deref(),
+            Some("PR")
+        );
+        assert_eq!(
+            hit("https://github.com/o/r/pull/123").as_deref(),
+            Some("other PR")
+        );
+        assert_eq!(hit("https://github.com/o/r/pull/1"), None);
+        assert_eq!(hit(""), None);
     }
 
     fn rank(score: u8) -> Ranking {

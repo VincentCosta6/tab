@@ -1,3 +1,4 @@
+import { setReviewsOpener } from "./modules/github/pulls";
 import { useEffect, useState } from "react";
 import { Icon } from "./design/icons";
 import { TabMark } from "./design/brands";
@@ -36,6 +37,13 @@ function Shell() {
     window.addEventListener("tab:open-item", work);
     return () => window.removeEventListener("tab:open-item", work);
   }, []);
+
+  // GitHub PR links open in Reviews while that tab is available.
+  const reviews = visible.some((t) => t.id === "reviews");
+  useEffect(() => {
+    setReviewsOpener(reviews ? () => setActive("reviews") : null);
+    return () => setReviewsOpener(null);
+  }, [reviews]);
 
   useEffect(() => {
     const open = () => setOnboarding(true);

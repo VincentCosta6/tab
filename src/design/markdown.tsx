@@ -3,6 +3,7 @@
 // until we need a real renderer.
 
 import { createContext, useContext, type MouseEvent, type ReactNode } from "react";
+import { openLink } from "../lib/links";
 
 /**
  * Handles links that aren't http(s), such as `src/a.ts#L12` in an agent's
@@ -34,7 +35,7 @@ function inline(text: string, key: string): ReactNode[] {
     else if (t.startsWith("**")) out.push(<strong key={k}>{t.slice(2, -2)}</strong>);
     else if (t.startsWith("[")) {
       const [, label, href] = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(t)!;
-      out.push(/^https?:\/\//.test(href) ? <a key={k} href={href} target="_blank" rel="noreferrer">{label}</a> : <LocalLink key={k} href={href}>{inline(label, k)}</LocalLink>);
+      out.push(/^https?:\/\//.test(href) ? <a key={k} href={href} target="_blank" rel="noreferrer" title={href} onClick={(e) => { e.preventDefault(); void openLink(href, e); }}>{label}</a> : <LocalLink key={k} href={href}>{inline(label, k)}</LocalLink>);
     } else out.push(<em key={k}>{t.slice(1, -1)}</em>);
     last = m.index + t.length;
   }

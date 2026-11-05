@@ -3,12 +3,17 @@
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Row, params};
 
-use super::items::get_item;
+use super::items::{get_item, item_by_url};
 use super::{Store, parse_ts, ts};
 use crate::model::{ContextEntry, ContextSection, ItemContext, NewContext};
 
 const COLS: &str =
     "id, item_id, section, pinned, ref_item_id, url, title, summary, added_by, created_at";
+
+/// A link found on the item itself isn't context for it.
+fn ref_id_differs(i: &crate::model::QueueItem, r: &Row<'_>) -> bool {
+    r.get::<_, String>(1).map(|own| own != i.id).unwrap_or(true)
+}
 
 impl Store {
     fn row_to_context(
@@ -17,16 +22,23 @@ impl Store {
         r: &Row<'_>,
     ) -> rusqlite::Result<ContextEntry> {
         let ref_id: Option<String> = r.get(4)?;
-        let ref_item = ref_id
-            .and_then(|id| get_item(conn, &id).ok().flatten())
-            .map(Box::new);
+        let url: Option<String> = r.get(5)?;
+        // A link to something in the queue shows as that item.
+        let ref_item = match ref_id {
+            Some(id) => get_item(conn, &id).ok().flatten(),
+            None => url
+                .as_deref()
+                .and_then(|u| item_by_url(conn, u).ok().flatten()),
+        }
+        .filter(|i| ref_id_differs(i, r))
+        .map(Box::new);
         Ok(ContextEntry {
             id: r.get(0)?,
             item_id: r.get(1)?,
             section: ContextSection::parse(&r.get::<_, String>(2)?),
             pinned: r.get::<_, i64>(3)? != 0,
             ref_item,
-            url: r.get(5)?,
+            url,
             title: r.get(6)?,
             summary: r.get(7)?,
             added_by: r.get(8)?,

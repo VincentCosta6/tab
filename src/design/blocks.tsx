@@ -5,6 +5,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { sanitizeEmail } from "./sanitize";
 import type { Block } from "../lib/types";
 import { openUrl } from "../lib/api";
+import { openLink } from "../lib/links";
 import { Badge, Button, cx } from "./components";
 import { Icon } from "./icons";
 import { Markdown } from "./markdown";
@@ -54,7 +55,7 @@ export function BlockView({ block }: { block: Block }) {
       return (
         <div className="block-links">
           {block.items.map((l, i) => (
-            <button key={i} className="link-row" onClick={() => openUrl(l.url)}>
+            <button key={i} className="link-row" onClick={(e) => openLink(l.url, e)}>
               <Icon name="external" size={14} />
               <span>{l.label}</span>
             </button>
@@ -119,7 +120,7 @@ const HtmlFrame = memo(function HtmlFrame({ html }: { html: string }) {
         const a = (e.target as Element | null)?.closest?.("a") as HTMLAnchorElement | null;
         if (!a) return;
         e.preventDefault();
-        if (e.type === "click" && /^(https?|mailto):/i.test(a.href)) void openUrl(a.href);
+        if (e.type === "click" && /^(https?|mailto):/i.test(a.href)) void (/^https?:/i.test(a.href) ? openLink(a.href, e) : openUrl(a.href));
       };
       d.addEventListener("click", onLink);
       d.addEventListener("auxclick", onLink);

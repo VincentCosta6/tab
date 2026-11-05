@@ -202,6 +202,12 @@ async fn item_detail(state: State<'_, AppState>, id: String) -> CmdResult<Option
     Ok(Some(ItemDetail { item, related }))
 }
 
+/// The item a link points at, so links open in tab before the browser.
+#[tauri::command]
+async fn item_by_url(state: State<'_, AppState>, url: String) -> CmdResult<Option<QueueItem>> {
+    state.store.item_by_url(&url).map_err(err)
+}
+
 #[tauri::command]
 async fn item_preview(state: State<'_, AppState>, id: String) -> CmdResult<Preview> {
     with_engine!(state, e => e.preview(&id).await.map_err(err))
@@ -1279,6 +1285,7 @@ pub fn run() {
             list_items,
             search_items,
             item_detail,
+            item_by_url,
             item_preview,
             mark_done,
             snooze,

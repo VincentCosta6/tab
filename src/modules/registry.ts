@@ -8,6 +8,8 @@ import type { ConnectorInfo } from "../lib/types";
 import { AskTab } from "./ask/AskTab";
 import { ConnectionsTab } from "./connections/ConnectionsTab";
 import { ReviewsTab } from "./github/ReviewsTab";
+import { githubLinks } from "./github/pulls";
+import { registerLinks } from "../lib/links";
 import { SettingsTab } from "./settings/SettingsTab";
 import { WorkTab } from "./work/WorkTab";
 
@@ -43,3 +45,6 @@ export const modules: TabModule[] = [
 ];
 
 export const tabs: TabDef[] = modules.flatMap((m) => m.tabs);
+
+// URLs modules understand, so links render as what they are and open in tab.
+registerLinks(githubLinks);

@@ -16,19 +16,8 @@ export function openOnboarding() {
   window.dispatchEvent(new CustomEvent("tab:onboarding"));
 }
 
-/** Item the Work tab should show when it next mounts or hears `tab:open-item`. */
-export let pendingOpen: string | null = null;
-export function takePendingOpen() {
-  const id = pendingOpen;
-  pendingOpen = null;
-  return id;
-}
-
-/** Switches to the Work tab with one item (and its chat) open. */
-export function openItem(id: string) {
-  pendingOpen = id;
-  window.dispatchEvent(new CustomEvent("tab:open-item", { detail: id }));
-}
+import { openItem } from "../../lib/links";
+export { openItem, takePendingOpen } from "../../lib/links";
 
 /**
  * Starts a chat whose agent sets up a connection, and opens it. The agent

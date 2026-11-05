@@ -21,6 +21,7 @@ export const api = {
   listItems: (states: ItemState[]) => call<QueueItem[]>("list_items", { states }),
   searchItems: (query: string, states: ItemState[]) => call<QueueItem[]>("search_items", { query, states }),
   itemDetail: (id: string) => call<ItemDetail | null>("item_detail", { id }),
+  itemByUrl: (url: string) => call<QueueItem | null>("item_by_url", { url }),
   itemPreview: (id: string) => call<Preview>("item_preview", { id }),
   markDone: (id: string) => call<QueueItem | null>("mark_done", { id }),
   snooze: (id: string, minutes: number) => call<QueueItem | null>("snooze", { id, minutes }),

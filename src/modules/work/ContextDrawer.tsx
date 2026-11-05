@@ -4,7 +4,8 @@ import { Badge, ScorePill, cx } from "../../design/components";
 import { Blocks } from "../../design/blocks";
 import { SourceGlyph } from "../../design/brands";
 import { Icon } from "../../design/icons";
-import { api, openUrl } from "../../lib/api";
+import { api } from "../../lib/api";
+import { openLink, parseLink } from "../../lib/links";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useItemContext, usePreview } from "../../lib/hooks";
@@ -208,15 +209,18 @@ function EntryCard({ entry: e, onSelect, children }: { entry: ContextEntry; onSe
   } catch {
     host = e.url ?? "";
   }
+  // A link a module understands shows as what it is: a GitHub PR, not "Link".
+  const link = parseLink(e.url);
+  const bare = !e.title || e.title === e.url;
   return (
     <Card
-      glyph={<span className="source-glyph tone-neutral" style={{ width: 22, height: 22 }}><Icon name="link" size={12} /></span>}
-      type="Link"
-      title={e.title}
-      subtitle={host}
+      glyph={link ? <SourceGlyph kind={link.kind} source={link.source} icon={link.icon} size={22} /> : <span className="source-glyph tone-neutral" style={{ width: 22, height: 22 }}><Icon name="link" size={12} /></span>}
+      type={link?.label ?? "Link"}
+      title={link && bare ? link.title : e.title}
+      subtitle={link && !bare ? link.title : host}
       note={e.summary}
       pinned={e.pinned}
-      onOpen={e.url ? () => openUrl(e.url!) : undefined}
+      onOpen={e.url ? () => openLink(e.url!) : undefined}
       actions={children}
     />
   );
