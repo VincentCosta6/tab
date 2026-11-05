@@ -189,10 +189,10 @@
 .suggestions { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: center; }
 .suggestion { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 var(--space-3); border-radius: var(--radius-pill); border: 1px solid var(--border); background: var(--bg-raised); color: var(--fg-muted); cursor: pointer; font-size: var(--text-sm); }
 .suggestion:hover:not(:disabled) { color: var(--fg); border-color: var(--border-strong); }
-.new-chat { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: var(--space-5); padding: var(--space-8) 0; background: var(--bg); }
+.new-chat { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: var(--space-6); padding: var(--space-8) 0 18vh; background: var(--bg); }
 .new-chat .composer { margin-bottom: 0; }
 .new-chat-hero { display: grid; justify-items: center; gap: var(--space-2); text-align: center; padding: 0 var(--space-6); }
-.new-chat-hero h2 { margin: var(--space-2) 0 0; font-size: var(--text-2xl); font-weight: 600; letter-spacing: -0.01em; }
+.new-chat-hero h2 { margin: var(--space-3) 0 0; font-size: var(--text-2xl); font-weight: 600; letter-spacing: -0.01em; }
 .new-chat-hero p { margin: 0; max-width: 520px; }
 .mono { font-family: var(--font-mono); font-size: var(--text-sm); }
 
@@ -418,7 +418,11 @@ body.resizing iframe { pointer-events: none; }
 .pj-note-text { font-size: var(--text-sm); line-height: 1.45; }
 .pj-note-actions { display: flex; align-items: flex-start; opacity: 0; }
 .pj-note:hover .pj-note-actions { opacity: 1; }
-.new-chat-project { display: flex; justify-content: center; }
+/* The new chat's project, picked in the composer bar like the model and mode. */
+.composer-project { display: inline-flex; flex: none; }
+.composer-project .pj-trigger { background: transparent; border-color: transparent; color: var(--fg-subtle); font-size: 12px; height: 22px; padding: 0 5px 0 3px; }
+.composer-project .pj-trigger:hover, .composer-project .pj-trigger.active { border-color: var(--border); color: var(--fg); }
+.composer-project .pj-trigger.empty { padding-left: 5px; }
 .queue-filters { gap: var(--space-2); align-items: center; justify-content: space-between; }
 .item-head-text .pj-picker { margin-left: 2px; }
 
@@ -606,3 +610,4 @@ body.resizing iframe { pointer-events: none; }
 .ctx-pill .source-glyph { flex: none; }
 .ctx-pill { padding: 0 6px 0 8px; }
 .ctx-pill-mark { display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none; color: var(--fg); }
+.composer-project .pj-menu { color: var(--fg); font-size: var(--text-sm); }

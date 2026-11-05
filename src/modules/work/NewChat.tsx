@@ -9,13 +9,6 @@ import { Composer } from "./Chat";
 import { cx } from "../../design/components";
 import { ProjectPicker, useProjectTint, useRememberedProject } from "./Projects";
 
-const starters = [
-  "Work on the checkout latency incident",
-  "Resolve the review comments on my open PR",
-  "Remind me to send the SOC 2 evidence on Friday",
-  "What should I do first today?",
-];
-
 /**
  * A fresh chat. The first message becomes a tab task (so it is queued and
  * ranked like everything else) and starts the agent session on that task.
@@ -52,23 +45,15 @@ export function NewChat({ onStarted, project: filtered }: { onStarted: (itemId: 
 
   return (
     <div className={cx("new-chat", tint.className)} style={tint.style}>
-      <div className="new-chat-project">
-        <ProjectPicker value={project} onChange={setProject} />
-      </div>
       <div className="new-chat-hero">
-        <TabMark size={36} />
+        <TabMark size={40} />
         <h2>What should tab work on?</h2>
-        <p className="subtle">Describe the work, or point at something in your queue. tab files it as a task and starts an agent on it.</p>
       </div>
-      <Composer chat={busy ? { session: null, messages: [], approvals: [], running: true } : undefined} onSend={send} placeholder="Work on PAY-1234 · resolve the comments on #482 · remind me tomorrow to…" autoFocus />
+      <Composer chat={busy ? { session: null, messages: [], approvals: [], running: true } : undefined} onSend={send} placeholder="Describe a task, paste a link, or ask about your queue…"
+        autoFocus
+        extra={<span className="composer-project"><ProjectPicker value={project} onChange={setProject} compact /></span>}
+      />
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
-      <div className="suggestions">
-        {starters.map((s) => (
-          <button key={s} className="suggestion" disabled={busy} onClick={() => send(s)}>
-            <Icon name="zap" size={13} /> {s}
-          </button>
-        ))}
-      </div>
     </div>
   );
 }

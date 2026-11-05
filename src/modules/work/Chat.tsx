@@ -550,7 +550,7 @@ function ModePicker() {
   return <BarPicker value={current} options={options} title="Permission mode" className={cx(current === "auto" && "mode-auto")} onChange={async (v) => qc.setQueryData(keys.config, await api.setAgentMode(v))} />;
 }
 
-export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat | undefined; onSend: (text: string, attachments: string[]) => void; placeholder: string; autoFocus?: boolean }) {
+export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat: Chat | undefined; onSend: (text: string, attachments: string[]) => void; placeholder: string; autoFocus?: boolean; extra?: React.ReactNode }) {
   const { data: config } = useConfig();
   const [text, setText] = useState("");
   const [images, setImages] = useState<string[]>([]);
@@ -652,6 +652,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat 
           <input ref={file} type="file" accept={imageTypes.join(",")} multiple hidden onChange={(e) => (void add([...(e.target.files ?? [])]), (e.target.value = ""))} />
           <Dictation onText={(t) => setText((cur) => (cur && !/\s$/.test(cur) ? `${cur} ${t}` : cur + t))} target={ref} />
           {config?.agent.kind && <><span className="composer-brand" title={agentLabel[config.agent.kind]}><Brand name={agentBrand[config.agent.kind]} size={11} /></span><ModelPicker /><ModePicker /></>}
+          {extra}
           {chat?.messages && <ContextMeter messages={chat.messages} />}
         </span>
         {running && chat?.session ? (
