@@ -3,7 +3,7 @@
 import { Icon } from "../../../design/icons";
 import { openUrl } from "../../../lib/api";
 import { useReview } from "./context";
-import { checkCounts, openThreads, timeAgo } from "./model";
+import { checkCounts, checkSummary, openThreads, runLook, runState, sortedRuns, timeAgo } from "./model";
 import { Avatar, RichBody } from "./Thread";
 
 export function Overview() {
@@ -45,10 +45,10 @@ export function Overview() {
           </section>
         )}
         <section>
-          <div className="label-sm">Checks · {c.passed}/{c.total} passing</div>
-          {pr.checks.runs.map((r, i) => (
+          <div className="label-sm">Checks · {checkSummary(c)}</div>
+          {sortedRuns(pr.checks.runs).map((r, i) => (
             <button key={i} className="rv-side-row rv-side-btn" disabled={!r.url} onClick={() => r.url && openUrl(r.url)}>
-              <Icon name={r.status !== "completed" ? "clock" : ["success", "neutral", "skipped"].includes(r.conclusion ?? "") ? "check" : "x-circle"} size={13} className={r.status !== "completed" ? "text-warning" : ["success", "neutral", "skipped"].includes(r.conclusion ?? "") ? "text-success" : "text-danger"} />
+              <Icon name={runLook[runState(r)].icon} size={13} className={runLook[runState(r)].tone} />
               <span>{r.name}</span>
             </button>
           ))}

@@ -13,12 +13,56 @@ export function pendingComments(pr: PullReview) {
   return pr.threads.reduce((n, t) => n + t.comments.filter((c) => c.pending).length, 0);
 }
 
+export type RunState = "failing" | "cancelled" | "action" | "pending" | "success" | "neutral" | "skipped";
+
+/** How GitHub groups a check run: its icon, colour and place in the list follow from this. */
+export function runState(r: { status: string; conclusion?: string | null }): RunState {
+  if (r.status !== "completed") return "pending";
+  switch (r.conclusion) {
+    case "success": return "success";
+    case "skipped": return "skipped";
+    case "neutral": return "neutral";
+    case "cancelled": return "cancelled";
+    case "action_required": return "action";
+    case "stale": return "skipped";
+    default: return "failing";
+  }
+}
+
+/** GitHub's icon and colour for each state; skipped, neutral and cancelled are grey, never a green tick. */
+export const runLook: Record<RunState, { icon: string; tone: string; rank: number }> = {
+  failing: { icon: "x-circle", tone: "text-danger", rank: 0 },
+  action: { icon: "alert", tone: "text-warning", rank: 1 },
+  cancelled: { icon: "octagon", tone: "subtle", rank: 2 },
+  pending: { icon: "circle-dot", tone: "text-warning", rank: 3 },
+  success: { icon: "check-circle", tone: "text-success", rank: 4 },
+  neutral: { icon: "square-dash", tone: "subtle", rank: 5 },
+  skipped: { icon: "circle-slash", tone: "subtle", rank: 6 },
+};
+
+/** Runs in GitHub's order: failing first, then running, passed, and skipped last. */
+export function sortedRuns<R extends { status: string; conclusion?: string | null; name: string }>(runs: R[]): R[] {
+  return [...runs].sort((a, b) => runLook[runState(a)].rank - runLook[runState(b)].rank || a.name.localeCompare(b.name));
+}
+
 export function checkCounts(pr: PullReview) {
   const runs = pr.checks.runs;
-  const failed = runs.filter((r) => r.status === "completed" && ["failure", "timed_out", "cancelled", "action_required", "startup_failure", "error"].includes(r.conclusion ?? "")).length;
-  const pending = runs.filter((r) => r.status !== "completed").length;
-  const passed = runs.filter((r) => r.status === "completed" && ["success", "neutral", "skipped"].includes(r.conclusion ?? "")).length;
-  return { failed, pending, passed, total: runs.length };
+  const n = (...s: RunState[]) => runs.filter((r) => s.includes(runState(r))).length;
+  const failed = n("failing", "cancelled", "action");
+  const pending = n("pending");
+  const passed = n("success");
+  const skipped = n("skipped", "neutral");
+  return { failed, pending, passed, skipped, total: runs.length };
+}
+
+/** "1 failing, 12 successful, 6 skipped", like GitHub's merge box. */
+export function checkSummary(c: ReturnType<typeof checkCounts>) {
+  return [
+    c.failed && `${c.failed} failing`,
+    c.pending && `${c.pending} in progress`,
+    c.passed && `${c.passed} successful`,
+    c.skipped && `${c.skipped} skipped`,
+  ].filter(Boolean).join(", ") || "No checks";
 }
 
 /** The PR's lifecycle state, shown first in the header. */

@@ -7,7 +7,7 @@ import { Brand } from "../../../design/brands";
 import { Icon } from "../../../design/icons";
 import { api, openUrl } from "../../../lib/api";
 import { useReview } from "./context";
-import { checkCounts, pendingComments, statePill, statusPills, type Pill } from "./model";
+import { checkCounts, checkSummary, pendingComments, runLook, runState, sortedRuns, statePill, statusPills, type Pill } from "./model";
 import { Avatar, Composer } from "./Thread";
 
 function useOutside(open: boolean, close: () => void) {
@@ -75,14 +75,12 @@ function ChecksPopover({ onClose }: { onClose: () => void }) {
   const { pr } = useReview();
   const ref = useOutside(true, onClose);
   const c = checkCounts(pr);
-  const icon = (r: (typeof pr.checks.runs)[number]) =>
-    r.status !== "completed" ? <Icon name="clock" size={13} className="text-warning" /> : ["success", "neutral", "skipped"].includes(r.conclusion ?? "") ? <Icon name="check" size={13} className="text-success" /> : <Icon name="x-circle" size={13} className="text-danger" />;
   return (
     <div ref={ref} className="rv-popover rv-checks">
-      <div className="rv-popover-head"><strong>Checks</strong><span className="subtle">{c.passed} passed · {c.failed} failed · {c.pending} running</span></div>
-      {pr.checks.runs.map((r, i) => (
+      <div className="rv-popover-head"><strong>Checks</strong><span className="subtle">{checkSummary(c)}</span></div>
+      {sortedRuns(pr.checks.runs).map((r, i) => (
         <button key={i} className="rv-check-row" disabled={!r.url} onClick={() => r.url && openUrl(r.url)}>
-          {icon(r)}
+          <Icon name={runLook[runState(r)].icon} size={14} className={runLook[runState(r)].tone} />
           <span>{r.name}</span>
           <span className="rv-flex" />
           <span className="subtle">{r.status === "completed" ? r.conclusion : r.status.replace("_", " ")}</span>

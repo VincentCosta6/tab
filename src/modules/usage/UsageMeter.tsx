@@ -59,7 +59,7 @@ export function UsageMeter({ onSettings }: { onSettings: () => void }) {
         {sub && tightest ? (
           <>
             <span className={cx("usage-amount", `text-${tone(tightest.utilization!)}`)}>{Math.max(0, Math.round((1 - tightest.utilization!) * 100))}%</span>
-            <span className="usage-caption">{shortLabel(tightest.window)} left</span>
+            <span className="usage-caption" title={`${windowLabel[tightest.window] ?? tightest.window}: ${Math.round(tightest.utilization! * 100)}% used`}>{tightest.resets_at ? `resets ${timeUntil(tightest.resets_at)}` : `${shortLabel(tightest.window)} left`}</span>
           </>
         ) : (
           <>
@@ -67,7 +67,8 @@ export function UsageMeter({ onSettings }: { onSettings: () => void }) {
             <span className="usage-caption">today</span>
           </>
         )}
-        {windows.slice(0, 2).map((w) => (
+        {/* With one window the number above already says it all; with more, a bar for each. */}
+        {windows.length > 1 && windows.slice(0, 2).map((w) => (
           <span key={w.window} className="usage-mini" title={`${windowLabel[w.window] ?? w.window}: ${Math.round(w.utilization! * 100)}% used`}>
             <span className="usage-mini-label">{shortLabel(w.window)}</span>
             <span className="usage-mini-bar"><span className={`tone-${tone(w.utilization!)}`} style={{ width: `${Math.min(100, w.utilization! * 100)}%` }} /></span>
