@@ -49,6 +49,11 @@ pub(super) async fn run_turn(
     };
     cmd.args(["--permission-mode", mode]);
     cmd.arg("--append-system-prompt-file").arg(&system_file);
+    // Images the person attached live here; reading them needs no prompt.
+    let attachments = hub.attachments_dir();
+    if attachments.is_dir() {
+        cmd.arg("--add-dir").arg(&attachments);
+    }
     if let Some(mcp) = hub.mcp() {
         let mcp_file = dir.join("mcp.json");
         let config = json!({

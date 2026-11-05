@@ -4301,6 +4301,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "objc2",
  "serde",
  "serde_json",
  "tab-core",
@@ -4310,6 +4311,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

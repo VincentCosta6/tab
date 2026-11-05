@@ -6,6 +6,7 @@ import { sanitizeEmail } from "./sanitize";
 import type { Block } from "../lib/types";
 import { openUrl } from "../lib/api";
 import { openLink } from "../lib/links";
+import { openImages } from "../lib/images";
 import { Badge, Button, cx } from "./components";
 import { Icon } from "./icons";
 import { Markdown } from "./markdown";
@@ -117,7 +118,13 @@ const HtmlFrame = memo(function HtmlFrame({ html }: { html: string }) {
       // Nothing in the email navigates on its own. A link opens in the
       // browser only when clicked, and only for web and mailto addresses.
       const onLink = (e: MouseEvent) => {
+        const img = (e.target as Element | null)?.closest?.("img") as HTMLImageElement | null;
         const a = (e.target as Element | null)?.closest?.("a") as HTMLAnchorElement | null;
+        if (img && !a && e.type === "click" && img.naturalWidth > 48) {
+          const all = [...d.querySelectorAll("img")].filter((i) => i.naturalWidth > 48);
+          openImages(all.map((i) => ({ src: i.src, name: i.alt || undefined })), Math.max(0, all.indexOf(img)));
+          return;
+        }
         if (!a) return;
         e.preventDefault();
         if (e.type === "click" && /^(https?|mailto):/i.test(a.href)) void (/^https?:/i.test(a.href) ? openLink(a.href, e) : openUrl(a.href));

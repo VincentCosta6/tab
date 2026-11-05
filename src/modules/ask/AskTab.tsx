@@ -79,16 +79,16 @@ export function AskTab() {
   const chatKey = ["chat", `ask:${project ?? "all"}`];
   const { data: chat } = useQuery<Chat>({ queryKey: chatKey, queryFn: () => api.askChatOpen(project), staleTime: 0, refetchOnMount: "always" });
   const focus = node && selected != null ? [`${node.entity.label} (${node.entity.kind.replace(/_/g, " ")})`] : [];
-  const send = async (text: string) => {
+  const send = async (text: string, attachments: string[] = []) => {
     setChatOpen(true);
     qc.setQueryData<Chat>(chatKey, (c) => ({
       session: c?.session ?? null,
       approvals: c?.approvals ?? [],
       running: true,
-      messages: [...(c?.messages ?? []), { id: -Date.now(), session_id: c?.session?.id ?? "", role: "user", kind: "text", content: text, meta: null, created_at: new Date().toISOString() }],
+      messages: [...(c?.messages ?? []), { id: -Date.now(), session_id: c?.session?.id ?? "", role: "user", kind: "text", content: text, meta: attachments.length ? { attachments } : null, created_at: new Date().toISOString() }],
     }));
     try {
-      const session = await api.askChatSend(project, text, focus);
+      const session = await api.askChatSend(project, text, focus, attachments);
       qc.setQueryData<Chat>(chatKey, (c) => ({ session, approvals: c?.approvals ?? [], running: true, messages: (c?.messages ?? []).filter((m) => m.id > 0) }));
     } finally {
       qc.invalidateQueries({ queryKey: chatKey });

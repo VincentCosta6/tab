@@ -42,12 +42,19 @@ export const api = {
   contextRemove: (id: string) => call<void>("context_remove", { id }),
   createTask: (task: NewTask) => call<QueueItem>("create_task", { task }),
   chatOpen: (itemId: string) => call<Chat>("chat_open", { itemId }),
-  chatSend: (itemId: string | null, text: string, projectId?: string | null) => call<ChatStarted>("chat_send", { itemId, text, projectId: projectId ?? null }),
+  chatSend: (itemId: string | null, text: string, projectId?: string | null, attachments: string[] = []) => call<ChatStarted>("chat_send", { itemId, text, projectId: projectId ?? null, attachments }),
+  attachmentSave: async (name: string, bytes: Uint8Array): Promise<string> => {
+    if (!inTauri) return mockApi.invoke<string>("attachment_save", { name, bytes });
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<string>("attachment_save", bytes, { headers: { "x-name": encodeURIComponent(name) } });
+  },
+  imageRead: (path: string) => call<ArrayBuffer>("image_read", { path }),
+  startDictation: () => call<void>("start_dictation"),
   agentActivity: () => call<AgentActivity[]>("agent_activity"),
   graphView: (projectId: string | null, days: number | null, limit?: number) => call<GraphView>("graph_view", { projectId, days, limit: limit ?? null }),
   graphNode: (id: number) => call<GraphNode>("graph_node", { id }),
   askChatOpen: (projectId: string | null) => call<Chat>("ask_chat_open", { projectId }),
-  askChatSend: (projectId: string | null, text: string, focus: string[]) => call<Session>("ask_chat_send", { projectId, text, focus }),
+  askChatSend: (projectId: string | null, text: string, focus: string[], attachments: string[] = []) => call<Session>("ask_chat_send", { projectId, text, focus, attachments }),
   searchIndexStatus: () => call<IndexStatus>("search_index_status"),
   projectsList: () => call<Project[]>("projects_list"),
   projectSave: (p: { id?: string; name: string; color: string; icon: string }) =>
@@ -59,8 +66,8 @@ export const api = {
     call<void>("project_note_save", { projectId, id: note.id ?? null, topic: note.topic, text: note.text }),
   projectNoteDelete: (id: string) => call<void>("project_note_delete", { id }),
   reviewChatOpen: (repo: string, number: number) => call<Chat>("review_chat_open", { repo, number }),
-  reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string) =>
-    call<Session>("review_chat_send", { target, text }),
+  reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string, attachments: string[] = []) =>
+    call<Session>("review_chat_send", { target, text, attachments }),
   setAgentModel: (model: string | null) => call<TabConfig>("set_agent_model", { model }),
   setAgentMode: (mode: string) => call<TabConfig>("set_agent_mode", { mode }),
   connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),

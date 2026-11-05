@@ -33,7 +33,7 @@ export interface Ai {
   open: boolean;
   setOpen: (o: boolean) => void;
   /** Asks the agent about some code (or the PR) and opens the panel. */
-  ask: (question: string, at?: CodeRef | null) => Promise<void>;
+  ask: (question: string, at?: CodeRef | null, attachments?: string[]) => Promise<void>;
   fixes: FixItem[];
   addFix: (text: string, at: CodeRef | null, from?: FixItem["from"]) => void;
   removeFix: (id: string) => void;
@@ -106,7 +106,7 @@ export function useAi(pr: PullReview | undefined, notify: (t: string, tone?: "da
     refetchOnMount: "always",
   }).data;
 
-  const send = useCallback(async (text: string) => {
+  const send = useCallback(async (text: string, attachments: string[] = []) => {
     if (!pr) return;
     const key = chatKey(pr);
     // Show the message at once; the stored copy replaces it.
@@ -114,10 +114,10 @@ export function useAi(pr: PullReview | undefined, notify: (t: string, tone?: "da
       session: c?.session ?? null,
       approvals: c?.approvals ?? [],
       running: true,
-      messages: [...(c?.messages ?? []), { id: -Date.now(), session_id: c?.session?.id ?? "", role: "user", kind: "text", content: text, meta: null, created_at: new Date().toISOString() }],
+      messages: [...(c?.messages ?? []), { id: -Date.now(), session_id: c?.session?.id ?? "", role: "user", kind: "text", content: text, meta: attachments.length ? { attachments } : null, created_at: new Date().toISOString() }],
     }));
     try {
-      const session = await api.reviewChatSend({ repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, head_ref: pr.head_ref, base_ref: pr.base_ref }, text);
+      const session = await api.reviewChatSend({ repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, head_ref: pr.head_ref, base_ref: pr.base_ref }, text, attachments);
       qc.setQueryData<Chat>(key, (c) => ({ session, approvals: c?.approvals ?? [], running: true, messages: (c?.messages ?? []).filter((m) => m.id > 0) }));
       await qc.invalidateQueries({ queryKey: key });
     } catch (e) {
@@ -133,12 +133,12 @@ export function useAi(pr: PullReview | undefined, notify: (t: string, tone?: "da
       setOpen,
       chat,
       fixes,
-      ask: async (question, at) => {
+      ask: async (question, at, attachments = []) => {
         setOpen(true);
-        const q = question.trim() || (at ? "What does this code do?" : "Summarize this pull request.");
+        const q = question.trim() || (attachments.length ? "" : at ? "What does this code do?" : "Summarize this pull request.");
         const code = at && codeAt(at);
         const text = at ? `About [${describeRef(at)}](${anchor(at)}):\n\n${code ? `${fence(at, code)}\n\n` : ""}${q}` : q;
-        await send(text).catch((e) => notify(String(e), "danger"));
+        await send(text, attachments).catch((e) => notify(String(e), "danger"));
       },
       addFix: (text, at, from = "note") => {
         save((xs) => [...xs, { id: `fix-${Date.now()}-${xs.length}`, text: text.trim(), at, code: at ? codeAt(at) : null, from, state: "queued", added_at: new Date().toISOString() }]);
@@ -262,9 +262,9 @@ export function AiPanel({ ai, pr, openFile }: { ai: Ai; pr: PullReview; openFile
       // Per session only.
     }
   };
-  const send = async (text: string) => {
+  const send = async (text: string, attachments: string[] = []) => {
     setError(null);
-    await ai.ask(text);
+    await ai.ask(text, null, attachments);
   };
   return (
     <aside className="rv-ai">

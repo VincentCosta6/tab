@@ -4,6 +4,9 @@ import { Button, cx } from "../../design/components";
 import { Brand } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { Markdown } from "../../design/markdown";
+import { Thumbs } from "../../design/ImageViewer";
+import { imageTypes, saveAttachment } from "../../lib/images";
+import { Dictation } from "./Dictation";
 import { api } from "../../lib/api";
 import { useChat, useConfig, useStream } from "../../lib/hooks";
 import { keys } from "../../lib/query";
@@ -52,7 +55,7 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
 
-  const send = async (text: string) => {
+  const send = async (text: string, attachments: string[] = []) => {
     setError(null);
     onSent?.();
     // Show the message immediately; the stored copy replaces it.
@@ -60,10 +63,10 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
       session: c?.session ?? null,
       approvals: c?.approvals ?? [],
       running: true,
-      messages: [...(c?.messages ?? []), { id: -Date.now(), session_id: c?.session?.id ?? "", role: "user", kind: "text", content: text, meta: null, created_at: new Date().toISOString() }],
+      messages: [...(c?.messages ?? []), { id: -Date.now(), session_id: c?.session?.id ?? "", role: "user", kind: "text", content: text, meta: attachments.length ? { attachments } : null, created_at: new Date().toISOString() }],
     }));
     try {
-      const started = await api.chatSend(item.id, text);
+      const started = await api.chatSend(item.id, text, null, attachments);
       qc.setQueryData<Chat>(keys.chat(item.id), (c) => ({
         session: started.session,
         approvals: c?.approvals ?? [],
@@ -98,6 +101,7 @@ const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ?
 function ContextMeter({ messages }: { messages: SessionMessage[] }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const now = useNow(open ? 1000 : 5000);
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
@@ -106,7 +110,8 @@ function ContextMeter({ messages }: { messages: SessionMessage[] }) {
   }, [open]);
 
   const turns = messages.filter((m) => m.kind === "result" && m.meta?.context?.used);
-  const last = turns[turns.length - 1]?.meta.context;
+  const lastTurn = turns[turns.length - 1];
+  const last = lastTurn?.meta.context;
   if (!last) return null;
   const size = Number(last.window) || 200_000;
   const used = Number(last.used);
@@ -121,17 +126,32 @@ function ContextMeter({ messages }: { messages: SessionMessage[] }) {
   const pct = Math.min(100, (used / size) * 100);
   const tone = pct >= 90 ? "danger" : pct >= 75 ? "warning" : "accent";
 
+  // Prompt cache: Claude keeps the conversation's prefix cached for about
+  // five minutes after each call. A message sent while it's warm re-reads it
+  // at a tenth of the price; after that the whole context is written again.
+  const n = (k: string) => Number(last[k]) || 0;
+  const read = n("cache_read"), write = n("cache_write"), fresh = n("fresh_input");
+  const hit = read + write + fresh ? read / (read + write + fresh) : 0;
+  const cached = read + write > 0;
+  const left = cached ? Math.max(0, CACHE_TTL - (now - new Date(lastTurn.created_at).getTime())) : 0;
+  const cache = !cached ? "none" : left <= 0 ? "cold" : left < 60_000 ? "cooling" : "warm";
+  const total = turns.reduce((t, m) => {
+    const c = m.meta.context;
+    return { read: t.read + (Number(c.cache_read) || 0), all: t.all + (Number(c.cache_read) || 0) + (Number(c.cache_write) || 0) + (Number(c.fresh_input) || 0) };
+  }, { read: 0, all: 0 });
+
   return (
     <div className="cw" ref={ref}>
-      <button className="cw-chip" onClick={() => setOpen(!open)} title="Context window">
+      <button className="cw-chip" onClick={() => setOpen(!open)} title={`Context: ${k(used)} of ${k(size)} · cache ${cacheText(cache, left)}`}>
         <span className="cw-ring" style={{ ["--p" as string]: `${pct}%` }} data-tone={tone} />
-        {k(used)} / {k(size)}
+        {k(used)}
+        {cache !== "none" && <span className={cx("cw-cache", `cache-${cache}`)}>{cache === "cold" ? "cold" : clock(left)}</span>}
       </button>
       {open && (
         <div className="cw-pop">
           <div className="cw-pop-head">
             <strong>Context window</strong>
-            <span className={`text-${tone}`}>{Math.round(pct)}% used</span>
+            <span className={`text-${tone}`}>{k(used)} / {k(size)} · {Math.round(pct)}%</span>
           </div>
           <div className="cw-bar">
             {parts.map((p) => <span key={p.label} className={p.cls} style={{ width: `${(p.n / size) * 100}%` }} title={`${p.label}: ${k(p.n)}`} />)}
@@ -142,15 +162,46 @@ function ContextMeter({ messages }: { messages: SessionMessage[] }) {
             ))}
             <li><i className="cw-free" /><span><strong>Free</strong></span><span>{k(Math.max(0, size - used))}</span></li>
           </ul>
+          <div className="cw-pop-head">
+            <strong>Prompt cache</strong>
+            <span className={cx("cw-cache", `cache-${cache}`)}>{cacheText(cache, left)}</span>
+          </div>
+          <div className="cw-bar">
+            <span className="cw-read" style={{ width: `${hit * 100}%` }} title={`Read from cache: ${k(read)}`} />
+            <span className="cw-write" style={{ width: `${(read + write + fresh ? write / (read + write + fresh) : 0) * 100}%` }} title={`Written to cache: ${k(write)}`} />
+            <span className="cw-fresh" style={{ width: `${(read + write + fresh ? fresh / (read + write + fresh) : 0) * 100}%` }} title={`Uncached: ${k(fresh)}`} />
+          </div>
+          <ul className="cw-list">
+            <li><i className="cw-read" /><span><strong>Read from cache</strong><small>About a tenth of the input price</small></span><span>{k(read)}</span></li>
+            <li><i className="cw-write" /><span><strong>Written to cache</strong><small>A little over the input price, once</small></span><span>{k(write)}</span></li>
+            <li><i className="cw-fresh" /><span><strong>Uncached input</strong></span><span>{k(fresh)}</span></li>
+          </ul>
           <p className="subtle">
-            Last call: {k(Number(last.cache_read) || 0)} from cache, {k((Number(last.cache_write) || 0) + (Number(last.fresh_input) || 0))} new, {k(Number(last.output) || 0)} written
-            {last.model ? ` · ${String(last.model).replace(/^claude-/, "")}` : ""}.
+            Last call {Math.round(hit * 100)}% cached{total.all ? `, ${Math.round((total.read / total.all) * 100)}% across this chat` : ""}.{" "}
+            {cache === "cold"
+              ? `The cache has expired, so the next message writes all ${k(used)} again.`
+              : "Claude keeps it about 5 minutes after each reply. Changing model or mode starts a fresh cache."}
+            {last.model ? ` · ${String(last.model).replace(/^claude-/, "")}` : ""}
             {pct >= 75 && " The agent compacts older history when it gets close to full."}
           </p>
         </div>
       )}
     </div>
   );
+}
+
+/** Claude's default prompt-cache lifetime, refreshed on every call. */
+const CACHE_TTL = 5 * 60_000;
+const clock = (ms: number) => `${Math.floor(ms / 60_000)}:${String(Math.floor((ms % 60_000) / 1000)).padStart(2, "0")}`;
+const cacheText = (c: string, left: number) => (c === "none" ? "not used" : c === "cold" ? "expired" : `warm for ${clock(left)}`);
+
+function useNow(every: number) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), every);
+    return () => window.clearInterval(t);
+  }, [every]);
+  return now;
 }
 
 export function AgentStatus({ chat }: { chat: Chat | undefined }) {
@@ -204,7 +255,7 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
 
   return (
     <div className="transcript">
-      <div className="transcript-head"><AgentStatus chat={chat} /><ContextMeter messages={messages} /></div>
+      <div className="transcript-head"><AgentStatus chat={chat} /></div>
       {messages.map((m) => (m.kind === "tool_result" && [...results.values()].includes(m) ? null : <MessageView key={m.id} m={m} result={results.get(m.id)} onSend={onSend} />))}
       {stream && (
         <div className="msg msg-assistant streaming">
@@ -221,7 +272,15 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
 }
 
 function MessageView({ m, result, onSend }: { m: SessionMessage; result?: SessionMessage; onSend?: (text: string) => void }) {
-  if (m.role === "user") return <div className="msg msg-user">{/```|\]\(/.test(m.content) ? <Markdown text={m.content} /> : m.content}</div>;
+  if (m.role === "user") {
+    const images: string[] = Array.isArray(m.meta?.attachments) ? m.meta.attachments : [];
+    return (
+      <div className="msg msg-user">
+        {images.length > 0 && <Thumbs srcs={images} size={96} />}
+        {/```|\]\(/.test(m.content) ? <Markdown text={m.content} /> : m.content}
+      </div>
+    );
+  }
   if (m.kind === "secret_request") return m.meta?.superseded ? null : <SecretCard m={m} onSend={onSend} />;
   if (m.kind === "text") return <div className="msg msg-assistant"><Markdown text={m.content} /></div>;
   if (m.kind === "tool" && m.meta?.tool === "AskUserQuestion") {
@@ -422,6 +481,40 @@ const modelChoices: Record<AgentKind, { value: string; label: string }[]> = {
   ],
 };
 
+/** A compact picker for the composer bar: as wide as its label, menu above. */
+function BarPicker({ value, options, onChange, title, className }: { value: string; options: { value: string; label: string; help?: string }[]; onChange: (v: string) => void; title: string; className?: string }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", esc);
+    return () => (window.removeEventListener("mousedown", close), window.removeEventListener("keydown", esc));
+  }, [open]);
+  const current = options.find((o) => o.value === value) ?? { value, label: value };
+  return (
+    <span className="bar-picker" ref={ref}>
+      <button className={cx("bar-picker-btn", className)} onClick={() => setOpen((v) => !v)} title={current.help ? `${title}: ${current.help}` : title} aria-haspopup="menu" aria-expanded={open}>
+        {current.label}
+        <Icon name="chevron-down" size={11} />
+      </button>
+      {open && (
+        <span className="bar-picker-menu" role="menu">
+          {options.map((o) => (
+            <button key={o.value} role="menuitemradio" aria-checked={o.value === value} className={cx(o.value === value && "on")} onClick={() => (setOpen(false), o.value !== value && onChange(o.value))}>
+              <span>{o.label}</span>
+              {o.help && <small>{o.help}</small>}
+              {o.value === value && <Icon name="check" size={12} />}
+            </button>
+          ))}
+        </span>
+      )}
+    </span>
+  );
+}
+
 /** Which model chats run on. Applies from the next message, in every chat. */
 function ModelPicker() {
   const { data: config } = useConfig();
@@ -430,19 +523,9 @@ function ModelPicker() {
   if (!kind) return null;
   const current = config.agent.model ?? "";
   const choices = modelChoices[kind];
-  const known = !current || choices.some((c) => c.value === current);
-  return (
-    <select
-      className="model-picker"
-      value={current}
-      title="Model for chats. Applies from the next message."
-      onChange={async (e) => qc.setQueryData(keys.config, await api.setAgentModel(e.target.value || null))}
-    >
-      <option value="">Default model</option>
-      {choices.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-      {!known && <option value={current}>{current}</option>}
-    </select>
-  );
+  const options = [{ value: "", label: "Default model" }, ...choices];
+  if (current && !choices.some((c) => c.value === current)) options.push({ value: current, label: current });
+  return <BarPicker value={current} options={options} title="Model for chats, from the next message" onChange={async (v) => qc.setQueryData(keys.config, await api.setAgentModel(v || null))} />;
 }
 
 const modes = [
@@ -458,23 +541,19 @@ function ModePicker() {
   const qc = useQueryClient();
   if (config?.agent.kind !== "claude_code") return null;
   const current = config.agent.permission_mode || "default";
-  return (
-    <select
-      className={cx("model-picker", current === "auto" && "mode-auto")}
-      value={current}
-      title={modes.find((m) => m.value === current)?.help ?? "Permission mode"}
-      onChange={async (e) => qc.setQueryData(keys.config, await api.setAgentMode(e.target.value))}
-    >
-      {modes.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
-      {!modes.some((m) => m.value === current) && <option value={current}>{current}</option>}
-    </select>
-  );
+  const options = modes.some((m) => m.value === current) ? modes : [...modes, { value: current, label: current }];
+  return <BarPicker value={current} options={options} title="Permission mode" className={cx(current === "auto" && "mode-auto")} onChange={async (v) => qc.setQueryData(keys.config, await api.setAgentMode(v))} />;
 }
 
-export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat | undefined; onSend: (text: string) => void; placeholder: string; autoFocus?: boolean }) {
+export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat | undefined; onSend: (text: string, attachments: string[]) => void; placeholder: string; autoFocus?: boolean }) {
   const { data: config } = useConfig();
   const [text, setText] = useState("");
+  const [images, setImages] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const file = useRef<HTMLInputElement>(null);
   const running = !!chat?.running;
 
   useEffect(() => {
@@ -488,11 +567,30 @@ export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat 
     if (autoFocus) ref.current?.focus();
   }, [autoFocus]);
 
+  const add = async (files: File[]) => {
+    const imgs = files.filter((f) => imageTypes.includes(f.type));
+    if (files.length && !imgs.length) return setError("tab takes PNG, JPEG, GIF and WebP images.");
+    setError(null);
+    setUploading((n) => n + imgs.length);
+    for (const f of imgs) {
+      try {
+        const path = await saveAttachment(f);
+        setImages((xs) => [...xs, path]);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setUploading((n) => n - 1);
+      }
+    }
+  };
+
   const submit = () => {
     const t = text.trim();
-    if (!t || running) return;
+    if ((!t && !images.length) || running || uploading) return;
     setText("");
-    onSend(t);
+    setImages([]);
+    setError(null);
+    onSend(t, images);
   };
 
   if (config && !config.agent.kind)
@@ -505,26 +603,56 @@ export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat 
     );
 
   return (
-    <div className="composer">
+    <div
+      className={cx("composer", dragging && "dragging")}
+      onDragOver={(e) => {
+        if (![...e.dataTransfer.items].some((i) => i.kind === "file")) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node) && setDragging(false)}
+      onDrop={(e) => {
+        if (!e.dataTransfer.files.length) return;
+        e.preventDefault();
+        setDragging(false);
+        void add([...e.dataTransfer.files]);
+      }}
+    >
+      {(images.length > 0 || uploading > 0) && (
+        <div className="composer-images">
+          <Thumbs srcs={images} size={56} onRemove={(i) => setImages((xs) => xs.filter((_, j) => j !== i))} />
+          {uploading > 0 && <span className="thumb thumb-busy" style={{ width: 56, height: 56 }}><Icon name="refresh" size={14} /></span>}
+        </div>
+      )}
       <textarea
         ref={ref}
         rows={1}
         value={text}
         placeholder={placeholder}
         onChange={(e) => setText(e.target.value)}
+        onPaste={(e) => {
+          const files = [...e.clipboardData.files];
+          if (!files.length) return;
+          e.preventDefault();
+          void add(files);
+        }}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) (e.preventDefault(), submit());
         }}
       />
+      {error && <div className="composer-error">{error}</div>}
       <div className="composer-foot">
         <span className="subtle composer-agent">
-          {config?.agent.kind && <><Brand name={agentBrand[config.agent.kind]} size={11} /> <span className="composer-agent-name">{agentLabel[config.agent.kind]}</span> <ModelPicker /><ModePicker /></>}
-          <span className="composer-hint">{chat?.session ? " · continues this task's session" : " · starts a session for this task"}</span>
+          <button className="bar-icon" onClick={() => file.current?.click()} title="Attach images (or paste or drop them)" aria-label="Attach images"><Icon name="plus" size={14} /></button>
+          <input ref={file} type="file" accept={imageTypes.join(",")} multiple hidden onChange={(e) => (void add([...(e.target.files ?? [])]), (e.target.value = ""))} />
+          <Dictation onText={(t) => setText((cur) => (cur && !/\s$/.test(cur) ? `${cur} ${t}` : cur + t))} target={ref} />
+          {config?.agent.kind && <><span className="composer-brand" title={agentLabel[config.agent.kind]}><Brand name={agentBrand[config.agent.kind]} size={11} /></span><ModelPicker /><ModePicker /></>}
+          {chat?.messages && <ContextMeter messages={chat.messages} />}
         </span>
         {running && chat?.session ? (
           <Button size="sm" icon="stop" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
         ) : (
-          <Button size="sm" variant="primary" icon="arrow-up" disabled={!text.trim()} onClick={submit}>Send</Button>
+          <Button size="sm" variant="primary" icon="arrow-up" disabled={(!text.trim() && !images.length) || uploading > 0} onClick={submit}>Send</Button>
         )}
       </div>
     </div>

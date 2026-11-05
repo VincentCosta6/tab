@@ -4,6 +4,7 @@
 
 import { createContext, useContext, type MouseEvent, type ReactNode } from "react";
 import { openLink } from "../lib/links";
+import { isImagePath, isLocalPath, openImages, useImageSrc } from "../lib/images";
 
 /**
  * Handles links that aren't http(s), such as `src/a.ts#L12` in an agent's
@@ -21,9 +22,20 @@ function LocalLink({ href, children }: { href: string; children: ReactNode }) {
   );
 }
 
+/** An image in a message: a thumbnail that opens the viewer. */
+function InlineImage({ src, alt }: { src: string; alt: string }) {
+  const url = useImageSrc(/^(https?:|data:|blob:)/.test(src) || isLocalPath(src) ? src : null);
+  if (!url) return <code>{alt || src}</code>;
+  return (
+    <button className="md-image" onClick={() => openImages([{ src, name: alt || undefined }])} title={alt || src}>
+      <img src={url} alt={alt} />
+    </button>
+  );
+}
+
 function inline(text: string, key: string): ReactNode[] {
   const out: ReactNode[] = [];
-  const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)\s]+\))/g;
+  const re = /(!\[[^\]]*\]\([^)\s]+\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)\s]+\))/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let i = 0;
@@ -31,7 +43,13 @@ function inline(text: string, key: string): ReactNode[] {
     if (m.index > last) out.push(text.slice(last, m.index));
     const t = m[0];
     const k = `${key}-${i++}`;
-    if (t.startsWith("`")) out.push(<code key={k}>{t.slice(1, -1)}</code>);
+    if (t.startsWith("![")) {
+      const [, alt, src] = /!\[([^\]]*)\]\(([^)\s]+)\)/.exec(t)!;
+      out.push(<InlineImage key={k} src={src} alt={alt} />);
+    } else if (t.startsWith("`") && isImagePath(t.slice(1, -1)) && isLocalPath(t.slice(1, -1))) {
+      // A screenshot the agent saved, named by path: show it.
+      out.push(<InlineImage key={k} src={t.slice(1, -1)} alt={t.slice(1, -1)} />);
+    } else if (t.startsWith("`")) out.push(<code key={k}>{t.slice(1, -1)}</code>);
     else if (t.startsWith("**")) out.push(<strong key={k}>{t.slice(2, -2)}</strong>);
     else if (t.startsWith("[")) {
       const [, label, href] = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(t)!;

@@ -16,7 +16,7 @@ mod claude;
 mod opencode;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -112,6 +112,11 @@ impl AgentHub {
 
     pub(crate) fn emit(&self, e: EngineEvent) {
         let _ = self.events.send(e);
+    }
+
+    /// Where images the person attaches to chats are kept. Agents may read it.
+    pub fn attachments_dir(&self) -> PathBuf {
+        self.dir.join("attachments")
     }
 
     pub(crate) fn session_dir(&self, id: &str) -> anyhow::Result<PathBuf> {
@@ -231,7 +236,18 @@ impl AgentHub {
 
     /// Sends the person's message and runs one agent turn in the background.
     pub fn send(self: &Arc<Self>, session_id: &str, text: &str) -> anyhow::Result<()> {
-        self.start_turn(session_id, text, true)
+        self.start_turn(session_id, text, true, &[])
+    }
+
+    /// Sends a message with images the person attached (paths from
+    /// [`Self::attachments_dir`]). The agent is told to open them.
+    pub fn send_with(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+        attachments: &[String],
+    ) -> anyhow::Result<()> {
+        self.start_turn(session_id, text, true, attachments)
     }
 
     /// Picks up turns that were cut off when tab last quit: each session
@@ -267,7 +283,7 @@ impl AgentHub {
             self.update(&s.id, Some(SessionStatus::Idle), None);
             let prompt = "tab (the app running you) restarted in the middle of your last turn, so it was cut off. \
                           Continue where you left off; redo any tool call that didn't finish.";
-            match self.start_turn(&s.id, prompt, false) {
+            match self.start_turn(&s.id, prompt, false, &[]) {
                 Ok(()) => tracing::info!(session = %s.id, "resumed an interrupted agent turn"),
                 Err(e) => {
                     tracing::warn!(session = %s.id, error = %e, "couldn't resume an interrupted turn")
@@ -283,13 +299,24 @@ impl AgentHub {
         session_id: &str,
         text: &str,
         visible: bool,
+        attachments: &[String],
     ) -> anyhow::Result<()> {
         let session = self
             .store
             .session_get(session_id)?
             .ok_or_else(|| anyhow::anyhow!("no such session"))?;
         let text = text.trim();
-        anyhow::ensure!(!text.is_empty(), "message is empty");
+        anyhow::ensure!(
+            !text.is_empty() || !attachments.is_empty(),
+            "message is empty"
+        );
+        let dir = self.attachments_dir();
+        for a in attachments {
+            anyhow::ensure!(
+                Path::new(a).starts_with(&dir) && Path::new(a).is_file(),
+                "that attachment is missing"
+            );
+        }
         if let Some(why) = self
             .config()
             .budget
@@ -307,12 +334,32 @@ impl AgentHub {
             running.insert(session_id.into(), cancel.clone());
         }
         if visible {
-            self.post(session_id, "user", "text", text, serde_json::Value::Null);
+            let meta = if attachments.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!({ "attachments": attachments })
+            };
+            self.post(session_id, "user", "text", text, meta);
         }
         self.update(session_id, Some(SessionStatus::Working), None);
 
         let hub = self.clone();
-        let prompt = text.to_string();
+        let mut prompt = text.to_string();
+        if !attachments.is_empty() {
+            prompt.push_str(&format!(
+                "\n\nThe person attached {} (open each with your Read tool to see it):\n{}",
+                if attachments.len() == 1 {
+                    "an image"
+                } else {
+                    "images"
+                },
+                attachments
+                    .iter()
+                    .map(|a| format!("- {a}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
         tokio::spawn(async move {
             let system = hub.system_prompt(&session);
             let result = match session.agent {

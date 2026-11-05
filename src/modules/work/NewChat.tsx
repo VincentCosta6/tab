@@ -35,11 +35,11 @@ export function NewChat({ onStarted, project: filtered }: { onStarted: (itemId: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filtered]);
 
-  const send = async (text: string) => {
+  const send = async (text: string, attachments: string[] = []) => {
     setBusy(true);
     setError(null);
     try {
-      const { item, session } = await api.chatSend(null, text, project);
+      const { item, session } = await api.chatSend(null, text, project, attachments);
       qc.setQueryData(keys.item(item.id), item);
       qc.setQueryData<Chat>(keys.chat(item.id), { session, messages: [], approvals: [], running: true });
       qc.invalidateQueries({ queryKey: keys.allItems });

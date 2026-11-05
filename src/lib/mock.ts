@@ -166,7 +166,7 @@ export const mockApi = {
             session = { id: `sess-${Date.now()}`, item_id: null, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: "Ask", status: "working", cwd: key, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
             sessions.push(session);
           }
-          simulateAskTurn(session, String(args.text), args.focus ?? []);
+          simulateAskTurn(session, String(args.text), args.focus ?? [], args.attachments ?? []);
           return session;
         }
         case "search_index_status": {
@@ -216,6 +216,9 @@ export const mockApi = {
           return args.what === "pull"
             ? { title: "Retry webhook deliveries with exponential backoff", state: "open", author: "dana-k", checks: "failing", updated_at: new Date(Date.now() - 3_600_000).toISOString() }
             : { title: "Sample " + args.what, state: "open", author: "sam", checks: null, updated_at: null };
+        case "start_dictation": throw "Dictation needs the desktop app.";
+        case "attachment_save": return URL.createObjectURL(new Blob([args.bytes]));
+        case "image_read": return await (await fetch(String(args.path))).arrayBuffer();
         case "item_by_url": {
           const u = String(args.url).replace(/[?#].*$/, "").replace(/\/$/, "");
           return items.find((i) => i.url && (i.url === u || /^[/#?]/.test(i.url.slice(u.length)) && i.url.startsWith(u))) ?? null;
@@ -295,7 +298,7 @@ export const mockApi = {
             session = { id: `sess-${Date.now()}`, item_id: item.id, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: item.title, status: "working", cwd: "~/code", created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
             sessions.push(session);
           }
-          simulateTurn(session, item, String(args.text));
+          simulateTurn(session, item, String(args.text), args.attachments ?? []);
           return { item, session };
         }
         case "review_chat_open": {
@@ -309,7 +312,7 @@ export const mockApi = {
             session = { id: `sess-${Date.now()}`, item_id: null, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: args.target.title, status: "working", cwd: key, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
             sessions.push(session);
           }
-          simulateReviewTurn(session, String(args.text));
+          simulateReviewTurn(session, String(args.text), args.attachments ?? []);
           return session;
         }
         case "set_agent_mode": config = { ...config, agent: { ...config.agent, permission_mode: args.mode } }; return config;
@@ -420,10 +423,12 @@ function status(session: Session, s: Session["status"]) {
 }
 
 /** Plays back a plausible agent turn so the chat can be designed in a browser. */
-function simulateTurn(session: Session, item: QueueItem, text: string) {
+const withImages = (a: string[]) => (a.length ? { attachments: a } : null);
+
+function simulateTurn(session: Session, item: QueueItem, text: string, attachments: string[] = []) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (async () => {
-    post(session, "user", "text", text);
+    post(session, "user", "text", text, withImages(attachments));
     status(session, "working");
     await sleep(500);
     post(session, "assistant", "tool", "tab: tab_search: checkout", { tool: "mcp__tab__tab_search" });
@@ -441,7 +446,7 @@ function simulateTurn(session: Session, item: QueueItem, text: string) {
       await sleep(30);
     }
     post(session, "assistant", "text", reply);
-    post(session, "system", "result", "", { cost_usd: 0.021, duration_ms: 8400 });
+    post(session, "system", "result", "", { cost_usd: 0.021, duration_ms: 8400, context: { model: "claude-sonnet-5-5", window: 200000, used: 38200, first_call: 21000, cache_read: 30100, cache_write: 6200, fresh_input: 1100, output: 800, tab_context: 2400 } });
     status(session, "idle");
   })();
 }
@@ -471,10 +476,10 @@ function mockGraph(projectId: string | null, days: number | null): GraphView {
   };
 }
 
-function simulateAskTurn(session: Session, text: string, focus: string[]) {
+function simulateAskTurn(session: Session, text: string, focus: string[], attachments: string[] = []) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (async () => {
-    post(session, "user", "text", focus.length ? `(Selected in the graph: ${focus.join(", ")})\n\n${text}` : text);
+    post(session, "user", "text", focus.length ? `(Selected in the graph: ${focus.join(", ")})\n\n${text}` : text, withImages(attachments));
     status(session, "working");
     await sleep(400);
     post(session, "assistant", "tool", `tab: tab_graph_search: ${focus[0] ?? "payments"}`, { tool: "mcp__tab__tab_graph_search" });
@@ -491,10 +496,10 @@ function simulateAskTurn(session: Session, text: string, focus: string[]) {
 }
 
 /** A canned review answer: explains the sample's capture loop, with code links. */
-function simulateReviewTurn(session: Session, text: string) {
+function simulateReviewTurn(session: Session, text: string, attachments: string[] = []) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (async () => {
-    post(session, "user", "text", text);
+    post(session, "user", "text", text, withImages(attachments));
     status(session, "working");
     await sleep(400);
     const fixes = /fix list/i.test(text);

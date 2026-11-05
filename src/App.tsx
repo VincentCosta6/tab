@@ -1,4 +1,5 @@
 import { setReviewsOpener } from "./modules/github/pulls";
+import { ImageViewer } from "./design/ImageViewer";
 import { useEffect, useState } from "react";
 import { Icon } from "./design/icons";
 import { TabMark } from "./design/brands";
@@ -15,6 +16,7 @@ export default function App() {
     <QueryProvider>
       <AppProvider>
         <Shell />
+        <ImageViewer />
       </AppProvider>
     </QueryProvider>
   );

@@ -208,6 +208,90 @@ async fn item_by_url(state: State<'_, AppState>, url: String) -> CmdResult<Optio
     state.store.item_by_url(&url).map_err(err)
 }
 
+/// Saves an image the person pasted or dropped into a chat. The body is the
+/// raw bytes; the `x-name` header carries the original file name.
+#[tauri::command]
+async fn attachment_save(
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> CmdResult<String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected the image's bytes".into());
+    };
+    if bytes.len() > MAX_IMAGE {
+        return Err("that image is over 20 MB".into());
+    }
+    let name = request
+        .headers()
+        .get("x-name")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image.png");
+    let ext = image_ext(name).ok_or("tab takes PNG, JPEG, GIF and WebP images")?;
+    let dir = state.hub.attachments_dir();
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    let path = dir.join(format!("{}.{ext}", uuid::Uuid::new_v4()));
+    std::fs::write(&path, bytes).map_err(err)?;
+    Ok(path.display().to_string())
+}
+
+const MAX_IMAGE: usize = 20 * 1024 * 1024;
+
+fn image_ext(name: &str) -> Option<&'static str> {
+    let ext = name.rsplit('.').next()?.to_ascii_lowercase();
+    ["png", "jpg", "jpeg", "gif", "webp"]
+        .into_iter()
+        .find(|e| *e == ext)
+}
+
+/// An image file's bytes, for thumbnails and the viewer: attachments, and
+/// screenshots an agent mentions by path. Only image files are served.
+#[tauri::command]
+async fn image_read(path: String) -> CmdResult<tauri::ipc::Response> {
+    image_ext(&path).ok_or("not an image")?;
+    let meta = std::fs::metadata(&path).map_err(err)?;
+    if !meta.is_file() || meta.len() as usize > MAX_IMAGE {
+        return Err("not an image tab can show".into());
+    }
+    Ok(tauri::ipc::Response::new(
+        std::fs::read(&path).map_err(err)?,
+    ))
+}
+
+/// Starts the system's own dictation in the focused text box (macOS: the
+/// same as Edit → Start Dictation). Elsewhere, says how to start it.
+#[tauri::command]
+fn start_dictation(app: tauri::AppHandle) -> CmdResult<()> {
+    #[cfg(target_os = "macos")]
+    {
+        app.run_on_main_thread(|| {
+            use objc2::runtime::{AnyClass, AnyObject};
+            use objc2::{msg_send, sel};
+            let Some(class) = AnyClass::get(c"NSApplication") else {
+                return;
+            };
+            let none: *mut AnyObject = std::ptr::null_mut();
+            // SAFETY: plain AppKit messages on the main thread; a nil target
+            // sends the action to the first responder (the focused field).
+            unsafe {
+                let ns_app: *mut AnyObject = msg_send![class, sharedApplication];
+                let _: bool =
+                    msg_send![ns_app, sendAction: sel!(startDictation:), to: none, from: none];
+            }
+        })
+        .map_err(err)?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err(if cfg!(windows) {
+            "Press Windows + H to dictate.".into()
+        } else {
+            "Use your desktop's dictation to talk into the box.".into()
+        })
+    }
+}
+
 #[tauri::command]
 async fn item_preview(state: State<'_, AppState>, id: String) -> CmdResult<Preview> {
     with_engine!(state, e => e.preview(&id).await.map_err(err))
@@ -338,10 +422,15 @@ async fn chat_send(
     item_id: Option<String>,
     text: String,
     project_id: Option<String>,
+    attachments: Option<Vec<String>>,
 ) -> CmdResult<ChatStarted> {
-    let text = text.trim().to_string();
-    if text.is_empty() {
+    let attachments = attachments.unwrap_or_default();
+    let mut text = text.trim().to_string();
+    if text.is_empty() && attachments.is_empty() {
         return Err("message is empty".into());
+    }
+    if text.is_empty() {
+        text = "Have a look at this.".into();
     }
     if state.hub.config().kind.is_none() {
         return Err("Set up an agent first (Settings → Agent).".into());
@@ -369,7 +458,10 @@ async fn chat_send(
         }
     };
     let session = state.hub.session_for_item(&item.id).map_err(err)?;
-    state.hub.send(&session.id, &text).map_err(err)?;
+    state
+        .hub
+        .send_with(&session.id, &text, &attachments)
+        .map_err(err)?;
     Ok(ChatStarted { item, session })
 }
 
@@ -422,10 +514,15 @@ async fn review_chat_send(
     state: State<'_, AppState>,
     target: ReviewChatTarget,
     text: String,
+    attachments: Option<Vec<String>>,
 ) -> CmdResult<Session> {
-    let text = text.trim().to_string();
-    if text.is_empty() {
+    let attachments = attachments.unwrap_or_default();
+    let mut text = text.trim().to_string();
+    if text.is_empty() && attachments.is_empty() {
         return Err("message is empty".into());
+    }
+    if text.is_empty() {
+        text = "Have a look at this.".into();
     }
     if state.hub.config().kind.is_none() {
         return Err("Set up an agent first (Settings → Agent).".into());
@@ -450,7 +547,10 @@ async fn review_chat_send(
             &brief,
         )
         .map_err(err)?;
-    state.hub.send(&session.id, &text).map_err(err)?;
+    state
+        .hub
+        .send_with(&session.id, &text, &attachments)
+        .map_err(err)?;
     Ok(session)
 }
 
@@ -687,10 +787,15 @@ async fn ask_chat_send(
     project_id: Option<String>,
     text: String,
     focus: Option<Vec<String>>,
+    attachments: Option<Vec<String>>,
 ) -> CmdResult<Session> {
+    let attachments = attachments.unwrap_or_default();
     let mut text = text.trim().to_string();
-    if text.is_empty() {
+    if text.is_empty() && attachments.is_empty() {
         return Err("message is empty".into());
+    }
+    if text.is_empty() {
+        text = "Have a look at this.".into();
     }
     if state.hub.config().kind.is_none() {
         return Err("Set up an agent first (Settings → Agent).".into());
@@ -725,7 +830,10 @@ async fn ask_chat_send(
         .hub
         .session_for_key(&ask_chat_key(project_id.as_deref()), &title, &cwd, &brief)
         .map_err(err)?;
-    state.hub.send(&session.id, &text).map_err(err)?;
+    state
+        .hub
+        .send_with(&session.id, &text, &attachments)
+        .map_err(err)?;
     Ok(session)
 }
 
@@ -1319,6 +1427,9 @@ pub fn run() {
             search_items,
             item_detail,
             item_by_url,
+            attachment_save,
+            image_read,
+            start_dictation,
             github_link_summary,
             item_preview,
             mark_done,
