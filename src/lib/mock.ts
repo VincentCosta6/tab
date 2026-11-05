@@ -145,6 +145,15 @@ export const mockApi = {
   async invoke<T>(cmd: string, args: Record<string, any> = {}): Promise<T> {
     const r = await (async () => {
       switch (cmd) {
+        case "search_index_status": {
+          const on = !!config.connectors.tab?.settings?.semantic_search;
+          if (!on) return { state: "off" };
+          const total = items.length;
+          const t = (Date.now() / 1000) % 12;
+          if (t < 3) return { state: "downloading", model: "minishlab/potion-base-8M", received: Math.round((t / 3) * 31e6), total: 31e6 };
+          if (t < 6) return { state: "indexing", model: "minishlab/potion-base-8M", done: Math.round(((t - 3) / 3) * total), total };
+          return { state: "ready", model: "minishlab/potion-base-8M", dim: 256, docs: total, indexed_at: new Date().toISOString() };
+        }
         case "projects_list": return [...projects].sort((a, b) => a.name.localeCompare(b.name));
         case "project_save": {
           const p: Project = { id: args.id ?? `p-${Date.now()}`, name: String(args.name).trim(), color: args.color, icon: args.icon, created_at: new Date().toISOString() };

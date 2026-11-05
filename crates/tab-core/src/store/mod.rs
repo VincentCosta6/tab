@@ -29,6 +29,7 @@ pub struct Store {
     conn: Mutex<Connection>,
     /// Set once the embedding model has loaded; search uses it for queries.
     embedder: std::sync::RwLock<Option<std::sync::Arc<dyn crate::embed::Embed>>>,
+    index_status: Mutex<crate::embed::IndexStatus>,
 }
 
 /// Ordered migrations; `PRAGMA user_version` records how many have run.
@@ -90,11 +91,23 @@ impl Store {
         Ok(Self {
             conn: Mutex::new(conn),
             embedder: std::sync::RwLock::new(None),
+            index_status: Mutex::new(Default::default()),
         })
     }
 
     pub fn set_embedder(&self, e: std::sync::Arc<dyn crate::embed::Embed>) {
         *self.embedder.write().unwrap_or_else(|e| e.into_inner()) = Some(e);
+    }
+
+    pub fn index_status(&self) -> crate::embed::IndexStatus {
+        self.index_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_index_status(&self, s: crate::embed::IndexStatus) {
+        *self.index_status.lock().unwrap_or_else(|e| e.into_inner()) = s;
     }
 
     pub fn clear_embedder(&self) {

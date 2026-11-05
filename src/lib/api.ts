@@ -4,7 +4,7 @@
 
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
+  IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, Session, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
 } from "./types";
 import { mockApi } from "./mock";
@@ -41,6 +41,7 @@ export const api = {
   createTask: (task: NewTask) => call<QueueItem>("create_task", { task }),
   chatOpen: (itemId: string) => call<Chat>("chat_open", { itemId }),
   chatSend: (itemId: string | null, text: string, projectId?: string | null) => call<ChatStarted>("chat_send", { itemId, text, projectId: projectId ?? null }),
+  searchIndexStatus: () => call<IndexStatus>("search_index_status"),
   projectsList: () => call<Project[]>("projects_list"),
   projectSave: (p: { id?: string; name: string; color: string; icon: string }) =>
     call<Project>("project_save", { id: p.id ?? null, name: p.name, color: p.color, icon: p.icon }),

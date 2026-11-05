@@ -172,6 +172,16 @@ impl Store {
         Ok((done, (total - done).max(0)))
     }
 
+    /// When the index last took in something.
+    pub fn vectors_last_indexed(&self) -> anyhow::Result<Option<DateTime<Utc>>> {
+        let conn = self.conn();
+        let t: Option<String> =
+            conn.query_row("SELECT MAX(embedded_at) FROM doc_embeddings", [], |r| {
+                r.get(0)
+            })?;
+        Ok(t.and_then(|t| super::parse_ts(&t).ok()))
+    }
+
     /// Nearest docs to `v`, closest first, as (doc key, cosine distance).
     fn knn(&self, v: &[f32], k: usize) -> anyhow::Result<Vec<(String, f64)>> {
         let conn = self.conn();

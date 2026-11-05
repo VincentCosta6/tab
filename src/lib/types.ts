@@ -51,6 +51,15 @@ export interface QueueItem {
   updated_at: string;
 }
 
+/** Search by meaning: what the local index is doing. */
+export type IndexStatus =
+  | { state: "off" }
+  | { state: "downloading"; model: string; received: number; total: number | null }
+  | { state: "loading"; model: string }
+  | { state: "indexing"; model: string; done: number; total: number }
+  | { state: "ready"; model: string; dim: number; docs: number; indexed_at: string | null }
+  | { state: "error"; model: string; message: string; retry_at: string };
+
 /** A group of work the person defines. Chats started in it belong to it. */
 export interface Project { id: string; name: string; color: string; icon: string; created_at: string }
 

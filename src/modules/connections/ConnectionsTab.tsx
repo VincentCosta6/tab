@@ -4,7 +4,7 @@ import { Brand, hasBrand } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
-import { useConfig, useSaveConfig } from "../../lib/hooks";
+import { useConfig, useSaveConfig, useSearchIndex } from "../../lib/hooks";
 import type { ConnectorInfo, ConnectorStatus, Tone } from "../../lib/types";
 import { startSetupChat } from "../work/Chat";
 import { ApiUsage } from "./ApiUsage";
@@ -239,6 +239,8 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
         </Section>
       )}
 
+      {c.id === "tab" && <SearchIndexCard />}
+
       {settings.length > 0 && (
         <Section title="Settings">
           <Card>
@@ -296,5 +298,65 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
         </Section>
       )}
     </div>
+  );
+}
+
+const mb = (n: number) => `${(n / 1e6).toFixed(n < 1e7 ? 1 : 0)} MB`;
+const modelLabel = (m: string) => (m.endsWith("32M") ? "Larger model" : "Small model") + ` · ${m.split("/")[1]}`;
+
+/** Search by meaning: download, indexing progress, and when it last caught up. */
+function SearchIndexCard() {
+  const { data: s } = useSearchIndex();
+  if (!s) return null;
+  let tone: Tone = "neutral";
+  let title = "Off";
+  let detail = "Turn on Search by meaning below to find things by what they're about.";
+  let progress: number | null = null;
+  switch (s.state) {
+    case "downloading":
+      tone = "info";
+      title = "Downloading model";
+      detail = s.total ? `${mb(s.received)} of ${mb(s.total)}` : mb(s.received);
+      progress = s.total ? s.received / s.total : null;
+      break;
+    case "loading":
+      tone = "info";
+      title = "Loading model";
+      detail = modelLabel(s.model);
+      break;
+    case "indexing":
+      tone = "info";
+      title = "Indexing";
+      detail = `${s.done.toLocaleString()} of ${s.total.toLocaleString()} items and notes`;
+      progress = s.total ? s.done / s.total : null;
+      break;
+    case "ready":
+      tone = "success";
+      title = "Ready";
+      detail = `${s.docs.toLocaleString()} items and notes indexed${s.indexed_at ? ` · last ${timeAgo(s.indexed_at)}` : ""} · ${modelLabel(s.model)}`;
+      break;
+    case "error":
+      tone = "danger";
+      title = "Couldn't get the model";
+      detail = `${s.message} · retrying in ${timeUntil(s.retry_at)}`;
+      break;
+  }
+  return (
+    <Section title="Search index">
+      <Card>
+        <div className="index-status">
+          <div className="index-status-line">
+            <StatusDot tone={tone} />
+            <strong>{title}</strong>
+            <span className="subtle">{detail}</span>
+          </div>
+          {progress !== null && (
+            <div className="index-progress" role="progressbar" aria-valuenow={Math.round(progress * 100)} aria-valuemin={0} aria-valuemax={100}>
+              <div style={{ width: `${Math.min(100, progress * 100)}%` }} />
+            </div>
+          )}
+        </div>
+      </Card>
+    </Section>
   );
 }

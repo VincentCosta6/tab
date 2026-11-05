@@ -439,3 +439,9 @@ body.resizing iframe { pointer-events: none; }
 .queue-title .pj-trigger { height: 26px; max-width: 100%; font-size: var(--text-md, 14px); font-weight: 600; border-color: transparent; background: transparent; padding-left: 4px; }
 .queue-title .pj-trigger:hover, .queue-title .pj-trigger.active { background: var(--bg-hover); border-color: var(--border); }
 .queue-title .pj-trigger.empty { color: var(--fg); padding-left: 6px; }
+
+/* Search index status on the tab connection. */
+.index-status { display: grid; gap: var(--space-2); }
+.index-status-line { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; font-size: var(--text-sm); }
+.index-progress { height: 4px; border-radius: 2px; background: var(--bg-sunken); overflow: hidden; }
+.index-progress > div { height: 100%; background: var(--tone-info-fg); transition: width 0.4s ease; }

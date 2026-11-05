@@ -579,6 +579,14 @@ async fn mcp_info(state: State<'_, AppState>) -> CmdResult<McpInfo> {
 
 // --- Agent spend ---------------------------------------------------------
 
+/// Search by meaning: off, downloading, indexing (with progress) or ready.
+#[tauri::command]
+async fn search_index_status(
+    state: State<'_, AppState>,
+) -> CmdResult<tab_core::embed::IndexStatus> {
+    Ok(state.store.index_status())
+}
+
 #[tauri::command]
 async fn usage_summary(state: State<'_, AppState>) -> CmdResult<tab_core::store::UsageSummary> {
     state.store.usage_summary(chrono::Utc::now()).map_err(err)
@@ -1120,6 +1128,7 @@ pub fn run() {
             project_save,
             project_delete,
             item_set_project,
+            search_index_status,
             project_notes,
             project_note_save,
             project_note_delete,

@@ -27,6 +27,53 @@ pub const LARGE_MODEL: &str = "minishlab/potion-retrieval-32M";
 const FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 const BATCH: usize = 128;
 
+/// What the index is doing, for the Connections page and for agents.
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum IndexStatus {
+    #[default]
+    Off,
+    Downloading {
+        model: String,
+        received: u64,
+        total: Option<u64>,
+    },
+    Loading {
+        model: String,
+    },
+    Indexing {
+        model: String,
+        done: i64,
+        total: i64,
+    },
+    Ready {
+        model: String,
+        dim: usize,
+        docs: i64,
+        indexed_at: Option<chrono::DateTime<Utc>>,
+    },
+    Error {
+        model: String,
+        message: String,
+        retry_at: chrono::DateTime<Utc>,
+    },
+}
+
+impl IndexStatus {
+    /// A short line for agents' search results.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Off => "keyword only (search by meaning is off; the person can turn it on in Connections, under tab)".into(),
+            Self::Downloading { .. } | Self::Loading { .. } => "keyword only (the meaning model is still downloading)".into(),
+            Self::Indexing { done, total, .. } => format!(
+                "keyword + meaning, partial: {done} of {total} items indexed so far"
+            ),
+            Self::Ready { .. } => "keyword + meaning".into(),
+            Self::Error { message, .. } => format!("keyword only (meaning model failed: {message})"),
+        }
+    }
+}
+
 /// The model the settings ask for, or `None` when search by meaning is off.
 pub fn choice(cfg: &TabConfig) -> Option<&'static str> {
     let s = &cfg.connectors.get("tab")?.settings;
@@ -74,7 +121,7 @@ fn model_dir(data_dir: &Path, repo: &str) -> PathBuf {
 
 /// Fetches the model files that are missing. Each file is written to a
 /// temporary name first, so an interrupted download is retried, not loaded.
-async fn download(dir: &Path, repo: &str) -> anyhow::Result<()> {
+async fn download(store: &Store, dir: &Path, repo: &str) -> anyhow::Result<()> {
     tokio::fs::create_dir_all(dir).await?;
     let http = reqwest::Client::builder()
         .user_agent("tab-desktop")
@@ -87,13 +134,17 @@ async fn download(dir: &Path, repo: &str) -> anyhow::Result<()> {
         }
         let url = format!("https://huggingface.co/{repo}/resolve/main/{f}");
         tracing::info!(%url, "downloading embedding model file");
-        let bytes = http
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        let mut res = http.get(&url).send().await?.error_for_status()?;
+        let total = res.content_length();
+        let mut bytes = Vec::with_capacity(total.unwrap_or(0) as usize);
+        while let Some(chunk) = res.chunk().await? {
+            bytes.extend_from_slice(&chunk);
+            store.set_index_status(IndexStatus::Downloading {
+                model: repo.into(),
+                received: bytes.len() as u64,
+                total,
+            });
+        }
         let tmp = dir.join(format!("{f}.part"));
         tokio::fs::write(&tmp, &bytes).await?;
         tokio::fs::rename(&tmp, &path).await?;
@@ -101,9 +152,14 @@ async fn download(dir: &Path, repo: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn load(data_dir: &Path, repo: &'static str) -> anyhow::Result<Arc<dyn Embed>> {
+async fn load(
+    store: &Store,
+    data_dir: &Path,
+    repo: &'static str,
+) -> anyhow::Result<Arc<dyn Embed>> {
     let dir = model_dir(data_dir, repo);
-    download(&dir, repo).await?;
+    download(store, &dir, repo).await?;
+    store.set_index_status(IndexStatus::Loading { model: repo.into() });
     let model = tokio::task::spawn_blocking(move || {
         StaticModel::from_pretrained(&dir, None, Some(true), None).map(StaticModel::quantize_int8)
     })
@@ -134,11 +190,27 @@ async fn remove_models(data_dir: &Path, keep: Option<&str>) {
 /// Embeds whatever is new or changed, until nothing is. Returns how many.
 pub async fn index_pending(store: &Arc<Store>, model: &Arc<dyn Embed>) -> anyhow::Result<usize> {
     let mut total = 0;
+    let ready = |store: &Store| -> anyhow::Result<IndexStatus> {
+        let (docs, _) = store.vectors_status()?;
+        Ok(IndexStatus::Ready {
+            model: model.name().into(),
+            dim: model.dim(),
+            docs,
+            indexed_at: store.vectors_last_indexed()?,
+        })
+    };
     loop {
         let docs = store.vectors_pending(BATCH)?;
         if docs.is_empty() {
+            store.set_index_status(ready(store)?);
             return Ok(total);
         }
+        let (done, waiting) = store.vectors_status()?;
+        store.set_index_status(IndexStatus::Indexing {
+            model: model.name().into(),
+            done,
+            total: done + waiting,
+        });
         let model = model.clone();
         let texts: Vec<String> = docs.iter().map(|d| d.text.clone()).collect();
         let vecs = tokio::task::spawn_blocking(move || model.encode(&texts)).await?;
@@ -161,6 +233,7 @@ pub fn spawn_indexer(
         loop {
             let repo = *want.borrow_and_update();
             let Some(repo) = repo else {
+                store.set_index_status(IndexStatus::Off);
                 store.clear_embedder();
                 if let Err(e) = store.vectors_clear() {
                     tracing::warn!(error = %e, "couldn't clear the vector index");
@@ -176,9 +249,15 @@ pub fn spawn_indexer(
             // starts over.
             let mut wait = Duration::from_secs(30);
             let model = loop {
-                match load(&data_dir, repo).await {
+                match load(&store, &data_dir, repo).await {
                     Ok(m) => break Some(m),
                     Err(e) => {
+                        store.set_index_status(IndexStatus::Error {
+                            model: repo.into(),
+                            message: e.to_string(),
+                            retry_at: Utc::now()
+                                + chrono::Duration::from_std(wait).unwrap_or_default(),
+                        });
                         tracing::warn!(error = %e, retry_in = ?wait, "embedding model unavailable; search stays keyword-only");
                         tokio::select! {
                             _ = tokio::time::sleep(wait) => {}

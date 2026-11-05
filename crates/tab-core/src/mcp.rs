@@ -505,7 +505,7 @@ impl McpServer {
                 };
                 let mut out = json!({
                     "items": items.iter().map(brief).collect::<Vec<_>>(),
-                    "search": if qv.is_some() { "keyword + meaning" } else { "keyword only (the meaning index is still building)" },
+                    "search": self.store.index_status().summary(),
                 });
                 if let Some(w) = widened {
                     out["widened_to"] = json!(match w {

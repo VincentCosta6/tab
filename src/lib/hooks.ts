@@ -76,6 +76,16 @@ export function useSaveConfig() {
   });
 }
 
+/** Polls quickly while the index is busy, slowly otherwise. */
+export function useSearchIndex() {
+  return useQuery({
+    queryKey: ["search-index"],
+    queryFn: api.searchIndexStatus,
+    staleTime: 0,
+    refetchInterval: (q) => (["downloading", "loading", "indexing"].includes(q.state.data?.state ?? "") ? 800 : 5000),
+  });
+}
+
 export function useProjects() {
   return useQuery({ queryKey: keys.projects, queryFn: api.projectsList });
 }
