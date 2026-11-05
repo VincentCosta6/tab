@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Tabs, UrgencyLabel } from "../../design/components";
+import { Badge, Button, UrgencyLabel, cx } from "../../design/components";
 import { SourceGlyph } from "../../design/brands";
 import { api, openUrl } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
@@ -11,7 +11,7 @@ import type { QueueItem } from "../../lib/types";
 import { parsePullUrl } from "../github/pulls";
 import { ChatView } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
-import { Reader } from "./Reader";
+import { ReadModeSwitch, Reader, useHasRich, useReadMode } from "./Reader";
 import { SnoozeMenu } from "./SnoozeMenu";
 
 const ReviewView = lazy(() => import("../github/review/Workspace"));
@@ -24,6 +24,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const { data: chat } = useChat(id);
+  const [readMode, setReadMode] = useReadMode();
   const chatCount = chat?.messages.filter((m) => m.role === "user" || (m.role === "assistant" && m.kind === "text")).length ?? 0;
   // Mail is for reading: open on the message. Everything else opens on the chat.
   const [tab, setTab] = useState<"content" | "chat">(() => (id && item?.kind.startsWith("email.") ? "content" : "chat"));
@@ -104,22 +105,30 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
           )}
         </div>
       </header>
-      <ContextDrawer item={item} onSelect={onSelect} />
-      <div className="pane-tabs">
-        <Tabs<"content" | "chat">
-          value={tab}
-          onChange={setTab}
-          items={[
-            { value: "content", label: item.kind.startsWith("email.") ? "Email" : "Details" },
-            { value: "chat", label: "Chat", count: chatCount || undefined },
-          ]}
-        />
-      </div>
+      <ContextDrawer
+        item={item}
+        onSelect={onSelect}
+        left={
+          <div className="pane-tabs" role="tablist">
+            {(["content", "chat"] as const).map((t) => (
+              <button key={t} role="tab" aria-selected={tab === t} className={cx("pane-tab", tab === t && "active")} onClick={() => setTab(t)}>
+                {t === "chat" ? "Chat" : item.kind.startsWith("email.") ? "Email" : "Details"}
+                {t === "chat" && chatCount > 0 && <span className="pane-tab-count">{chatCount}</span>}
+              </button>
+            ))}
+          </div>
+        }
+        right={tab === "content" && <RichSwitch item={item} mode={readMode} onChange={setReadMode} />}
+      />
       {tab === "content" ? (
-        <ChatView item={item} body={<Reader item={item} />} onSent={() => setTab("chat")} />
+        <ChatView item={item} body={<Reader item={item} mode={readMode} />} onSent={() => setTab("chat")} />
       ) : (
         <ChatView item={item} />
       )}
     </div>
   );
+}
+
+function RichSwitch({ item, mode, onChange }: { item: QueueItem; mode: "rich" | "plain"; onChange: (m: "rich" | "plain") => void }) {
+  return useHasRich(item) ? <ReadModeSwitch mode={mode} onChange={onChange} /> : null;
 }

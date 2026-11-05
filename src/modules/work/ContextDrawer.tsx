@@ -17,7 +17,7 @@ import type { ContextEntry, QueueItem, Tone } from "../../lib/types";
  * agent is given, pinned first), and what's been Found (by the agent or the
  * knowledge graph), which can be promoted into Context.
  */
-export function ContextDrawer({ item, onSelect }: { item: QueueItem; onSelect: (id: string) => void }) {
+export function ContextDrawer({ item, onSelect, left, right }: { item: QueueItem; onSelect: (id: string) => void; left?: React.ReactNode; right?: React.ReactNode }) {
   const qc = useQueryClient();
   const { data: ctx } = useItemContext(item.id);
   const [open, setOpen] = useState(false);
@@ -38,25 +38,24 @@ export function ContextDrawer({ item, onSelect }: { item: QueueItem; onSelect: (
 
   return (
     <div className={cx("ctx", open && "open")}>
-      <button className="ctx-bar" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
-        <Icon name="graph" size={14} />
-        <span className="ctx-label">Context</span>
-        <span className="ctx-count">{context.length + 1}</span>
-        <span className="ctx-chips">
-          <span className="ctx-chip"><Icon name="dot" size={10} />This item</span>
-          {context.slice(0, 3).map((c) => (
-            <span key={c.id} className="ctx-chip" title={c.title}>
-              {c.pinned && <Icon name="pin" size={10} />}
-              {c.title}
-            </span>
-          ))}
-          {context.length > 3 && <span className="ctx-chip">+{context.length - 3}</span>}
-        </span>
-        <span className="ctx-found">
-          Found <span className={cx("ctx-count", agentFound > 0 && "fresh")}>{foundCount}</span>
-        </span>
-        <Icon name="chevron-down" size={14} className="ctx-chevron" />
-      </button>
+      <div className="pane-toolbar">
+        <div className="pane-toolbar-left">{left}</div>
+        <div className="pane-toolbar-right">
+          {right}
+          <button
+            className={cx("ctx-toggle", open && "active")}
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            title={`Context: ${context.length + 1} given to the agent, ${foundCount} found`}
+          >
+            <Icon name="graph" size={13} />
+            Context
+            <span className="ctx-count">{context.length + 1}</span>
+            {foundCount > 0 && <span className={cx("ctx-count", agentFound > 0 && "fresh")} title="Found">+{foundCount}</span>}
+            <Icon name="chevron-down" size={12} className="ctx-chevron" />
+          </button>
+        </div>
+      </div>
       {open && (
         <div className="ctx-panel">
           <section>
