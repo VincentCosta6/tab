@@ -360,3 +360,5 @@ body.resizing iframe { pointer-events: none; }
 .ctx-toggle .ctx-count { height: 16px; min-width: 16px; font-size: 10px; }
 .ctx.open .ctx-toggle .ctx-chevron { transform: rotate(180deg); }
 .reader-body { padding-top: var(--space-4); }
+.chat-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.chat-body[hidden] { display: none; }

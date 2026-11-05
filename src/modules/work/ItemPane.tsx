@@ -120,11 +120,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         }
         right={tab === "content" && <RichSwitch item={item} mode={readMode} onChange={setReadMode} />}
       />
-      {tab === "content" ? (
-        <ChatView item={item} body={<Reader item={item} mode={readMode} />} onSent={() => setTab("chat")} />
-      ) : (
-        <ChatView item={item} />
-      )}
+      <ChatView item={item} body={<Reader item={item} mode={readMode} />} showBody={tab === "content"} onSent={() => setTab("chat")} />
     </div>
   );
 }

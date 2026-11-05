@@ -58,7 +58,7 @@ function suggestions(item: QueueItem): string[] {
  * The chat for one item. With `body`, that replaces the transcript (e.g. an
  * email being read) and `onSent` fires after a message goes out.
  */
-export function ChatView({ item, body, onSent }: { item: QueueItem; body?: React.ReactNode; onSent?: () => void }) {
+export function ChatView({ item, body, showBody = true, onSent }: { item: QueueItem; body?: React.ReactNode; showBody?: boolean; onSent?: () => void }) {
   const { data: chat } = useChat(item.id);
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +90,9 @@ export function ChatView({ item, body, onSent }: { item: QueueItem; body?: React
 
   return (
     <div className="chat">
-      {body ?? <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />}
+      {/* The body stays mounted while hidden, so switching back doesn't reload it. */}
+      {body && <div className="chat-body" hidden={!showBody}>{body}</div>}
+      {(!body || !showBody) && <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />}
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
       <Composer chat={chat} onSend={send} placeholder={`Ask about this, or tell the agent what to do…`} />
     </div>
