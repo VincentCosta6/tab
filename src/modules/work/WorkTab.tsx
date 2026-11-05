@@ -17,6 +17,9 @@ import { SnoozeMenu } from "./SnoozeMenu";
 const urgencyOrder: Urgency[] = ["now", "today", "this_week", "whenever"];
 const urgencyHeading: Record<Urgency, string> = { now: "Now", today: "Today", this_week: "This week", whenever: "Whenever" };
 const NEW = "__new__";
+const WIDTH_KEY = "tab.queueWidth";
+const DEFAULT_LIST_WIDTH = 420;
+const clampWidth = (w: number) => Math.round(Math.min(Math.max(w, 300), Math.max(320, window.innerWidth - 560)));
 
 export function WorkTab() {
   const { apps } = useApp();
@@ -27,6 +30,40 @@ export function WorkTab() {
   const { data: items = [] } = useItems(view, query);
   const [selected, setSelected] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const [listWidth, setListWidth] = useState(() => {
+    try {
+      return clampWidth(Number(localStorage.getItem(WIDTH_KEY)) || DEFAULT_LIST_WIDTH);
+    } catch {
+      return DEFAULT_LIST_WIDTH;
+    }
+  });
+  const saveWidth = (w: number) => {
+    setListWidth(clampWidth(w));
+    try {
+      localStorage.setItem(WIDTH_KEY, String(clampWidth(w)));
+    } catch {
+      /* private mode: the width just isn't remembered */
+    }
+  };
+  const startResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const x0 = e.clientX;
+    const w0 = listWidth;
+    let w = w0;
+    const move = (ev: MouseEvent) => {
+      w = clampWidth(w0 + ev.clientX - x0);
+      setListWidth(w);
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      document.body.classList.remove("resizing");
+      saveWidth(w);
+    };
+    document.body.classList.add("resizing");
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
 
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -116,8 +153,9 @@ export function WorkTab() {
   }, [visible, view, query]);
 
   return (
-    <div className="work">
+    <div className="work" style={{ gridTemplateColumns: `${listWidth}px 1fr` }}>
       <section className="queue">
+        <div className="queue-resize" onMouseDown={startResize} onDoubleClick={() => saveWidth(DEFAULT_LIST_WIDTH)} title="Drag to resize. Double-click to reset." />
         <div className="queue-top">
           <div className="queue-title">
             <h1>Work</h1>

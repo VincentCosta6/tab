@@ -62,7 +62,7 @@ export function ContextDrawer({ item, onSelect }: { item: QueueItem; onSelect: (
           <section>
             <h4 className="label-sm">Context <span className="subtle">· given to the agent with every message</span></h4>
             <div className="cc-list">
-              <ItemCard item={item} note="This item" />
+              <ItemCard item={item} note="This item" noDetails />
               {context.map((e) => (
                 <EntryCard key={e.id} entry={e} onSelect={onSelect}>
                   <IconButton icon="pin" label={e.pinned ? "Unpin" : "Pin"} active={e.pinned} onClick={() => pin(e)} />
@@ -161,7 +161,7 @@ function Card({ glyph, type, title, subtitle, status, note, pinned, onOpen, acti
   );
 }
 
-function ItemCard({ item, note, onOpen, pinned, summary, children }: { item: QueueItem; note?: string; onOpen?: () => void; pinned?: boolean; summary?: string | null; children?: React.ReactNode }) {
+function ItemCard({ item, note, onOpen, pinned, summary, noDetails, children }: { item: QueueItem; note?: string; onOpen?: () => void; pinned?: boolean; summary?: string | null; noDetails?: boolean; children?: React.ReactNode }) {
   const { kind } = useApp();
   const k = kind(item.kind);
   return (
@@ -175,7 +175,7 @@ function ItemCard({ item, note, onOpen, pinned, summary, children }: { item: Que
       pinned={pinned}
       onOpen={onOpen}
       actions={children}
-      details={() => <ItemDetails item={item} />}
+      details={noDetails ? undefined : () => <ItemDetails item={item} />}
     />
   );
 }

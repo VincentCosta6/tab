@@ -54,13 +54,18 @@ function suggestions(item: QueueItem): string[] {
 }
 
 /** The chat for one item. Its first message starts a session; later ones resume it. */
-export function ChatView({ item }: { item: QueueItem }) {
+/**
+ * The chat for one item. With `body`, that replaces the transcript (e.g. an
+ * email being read) and `onSent` fires after a message goes out.
+ */
+export function ChatView({ item, body, onSent }: { item: QueueItem; body?: React.ReactNode; onSent?: () => void }) {
   const { data: chat } = useChat(item.id);
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
 
   const send = async (text: string) => {
     setError(null);
+    onSent?.();
     // Show the message immediately; the stored copy replaces it.
     qc.setQueryData<Chat>(keys.chat(item.id), (c) => ({
       session: c?.session ?? null,
@@ -85,7 +90,7 @@ export function ChatView({ item }: { item: QueueItem }) {
 
   return (
     <div className="chat">
-      <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />
+      {body ?? <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />}
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
       <Composer chat={chat} onSend={send} placeholder={`Ask about this, or tell the agent what to do…`} />
     </div>

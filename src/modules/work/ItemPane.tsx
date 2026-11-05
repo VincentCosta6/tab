@@ -1,16 +1,17 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, UrgencyLabel } from "../../design/components";
+import { Badge, Button, Tabs, UrgencyLabel } from "../../design/components";
 import { SourceGlyph } from "../../design/brands";
 import { api, openUrl } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
-import { useItem } from "../../lib/hooks";
+import { useChat, useItem } from "../../lib/hooks";
 import { keys } from "../../lib/query";
 import type { QueueItem } from "../../lib/types";
 import { parsePullUrl } from "../github/pulls";
 import { ChatView } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
+import { Reader } from "./Reader";
 import { SnoozeMenu } from "./SnoozeMenu";
 
 const ReviewView = lazy(() => import("../github/review/Workspace"));
@@ -22,6 +23,15 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   const { data: item } = useItem(id);
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [reviewing, setReviewing] = useState(false);
+  const { data: chat } = useChat(id);
+  const chatCount = chat?.messages.filter((m) => m.role === "user" || (m.role === "assistant" && m.kind === "text")).length ?? 0;
+  // Mail is for reading: open on the message. Everything else opens on the chat.
+  const [tab, setTab] = useState<"content" | "chat">(() => (id && item?.kind.startsWith("email.") ? "content" : "chat"));
+  useEffect(() => {
+    if (item?.kind.startsWith("email.") && !chatCount) setTab("content");
+    // Only when the item first loads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [item?.id]);
 
   const pull = item ? parsePullUrl(item.url) : null;
 
@@ -95,7 +105,21 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         </div>
       </header>
       <ContextDrawer item={item} onSelect={onSelect} />
-      <ChatView item={item} />
+      <div className="pane-tabs">
+        <Tabs<"content" | "chat">
+          value={tab}
+          onChange={setTab}
+          items={[
+            { value: "content", label: item.kind.startsWith("email.") ? "Email" : "Details" },
+            { value: "chat", label: "Chat", count: chatCount || undefined },
+          ]}
+        />
+      </div>
+      {tab === "content" ? (
+        <ChatView item={item} body={<Reader item={item} />} onSent={() => setTab("chat")} />
+      ) : (
+        <ChatView item={item} />
+      )}
     </div>
   );
 }
