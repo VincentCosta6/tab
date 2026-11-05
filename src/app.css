@@ -239,27 +239,6 @@
 .onboarding-foot { display: flex; justify-content: space-between; align-items: center; gap: var(--space-3); border-top: 1px solid var(--border); padding-top: var(--space-4); }
 .tips { text-align: left; display: grid; gap: var(--space-2); color: var(--fg-muted); }
 
-/* GitHub review */
-.review-page { height: 100%; }
-.review { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg-raised); }
-.review-bar { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-4); border-bottom: 1px solid var(--border); }
-.review-title { display: grid; flex: 1; min-width: 0; }
-.review-title strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.review-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px 1fr 260px; }
-.review-files { border-right: 1px solid var(--border); overflow: auto; padding: var(--space-3) var(--space-2); display: grid; align-content: start; gap: 2px; }
-.review-files .label-sm { padding: 0 var(--space-2); }
-.review-file { display: grid; grid-template-columns: auto 1fr; gap: 2px 6px; align-items: center; padding: 6px var(--space-2); border: 0; border-radius: var(--radius-md); background: transparent; cursor: pointer; text-align: left; color: var(--fg); font-size: var(--text-sm); }
-.review-file:hover { background: var(--bg-hover); }
-.review-file.active { background: var(--bg-selected); }
-.review-file-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
-.review-file-stat { grid-column: 2; font-size: var(--text-xs); font-family: var(--font-mono); }
-.review-editor { min-width: 0; min-height: 0; }
-.review-comments { border-left: 1px solid var(--border); overflow: auto; padding: var(--space-3); display: grid; align-content: start; gap: var(--space-3); font-size: var(--text-sm); }
-.review-comment { padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--bg-sunken); }
-.review-comment p { margin: 4px 0 0; }
-.review-compose { display: grid; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--border); }
-.review-commented-line { background: color-mix(in srgb, var(--tone-warning-fg) 10%, transparent); }
-.review-comment-glyph { background: var(--tone-warning-fg); border-radius: 50%; width: 8px !important; height: 8px !important; margin: 6px 0 0 6px; }
 .ctx-this-toggle { justify-self: start; }
 
 /* GitHub CLI sign-in */

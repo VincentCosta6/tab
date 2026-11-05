@@ -4,8 +4,8 @@
 
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  ItemContext, ItemDetail, ItemState, NewContext, NewTask, Pressure, Preview, PullReview, QueueItem,
-  RateLimitState, TabConfig, UsageRow, UsageSummary,
+  ItemContext, ItemDetail, ItemState, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
+  RateLimitState, ReviewAction, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
 } from "./types";
 import { mockApi } from "./mock";
 
@@ -52,8 +52,15 @@ export const api = {
   mcpInfo: () => call<{ url: string | null; token: string }>("mcp_info"),
   githubPull: (repo: string, number: number, sample: boolean) => call<PullReview>("github_pull", { repo, number, sample }),
   githubFile: (repo: string, sha: string, path: string) => call<string>("github_file", { repo, sha, path }),
-  githubComment: (c: { repo: string; number: number; commitId: string; path: string; line: number; side: string; body: string }) =>
-    call<void>("github_comment", c),
+  githubReviewAction: (pr: PrRef, action: ReviewAction) => call<void>("github_review_action", { pr, action }),
+  workspacePrepare: (target: { repo: string; number: number; head_sha: string; base_sha: string; base_ref: string }) =>
+    call<ReviewWorkspace>("review_workspace_prepare", { target }),
+  workspaceFile: (repo: string, sha: string, path: string) => call<string>("review_workspace_file", { repo, sha, path }),
+  workspaceFiles: (repo: string, number: number, paths: string[]) => call<[string, string][]>("review_workspace_files", { repo, number, paths }),
+  workspaceSearch: (repo: string, number: number, query: SearchQuery) => call<SearchHit[]>("review_workspace_search", { repo, number, query }),
+  workspaceOpen: (repo: string, number: number, target: "vscode" | "folder", path?: string, line?: number) =>
+    call<void>("review_workspace_open", { repo, number, target, path: path ?? null, line: line ?? null }),
+  vscodeAvailable: () => call<boolean>("review_vscode_available"),
 };
 
 export async function openUrl(url: string) {
@@ -76,4 +83,11 @@ export async function onEngineEvent(cb: (e: EngineEvent) => void): Promise<() =>
   if (!inTauri) return mockApi.subscribe(cb);
   const { listen } = await import("@tauri-apps/api/event");
   return listen<EngineEvent>("tab://event", (e) => cb(e.payload));
+}
+
+/** Clone and checkout progress while a review workspace is prepared. */
+export async function onWorkspaceProgress(cb: (p: WorkspaceProgress) => void): Promise<() => void> {
+  if (!inTauri) return mockApi.onWorkspace(cb);
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<WorkspaceProgress>("tab://workspace", (e) => cb(e.payload));
 }

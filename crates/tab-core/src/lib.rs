@@ -27,6 +27,7 @@ pub mod ranker;
 pub mod ratelimit;
 pub mod store;
 pub mod usage;
+pub mod workspace;
 
 pub use config::TabConfig;
 pub use engine::{Change, Engine, EngineEvent, EngineHandle};

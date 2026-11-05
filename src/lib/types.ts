@@ -166,9 +166,49 @@ export interface Pressure {
   deferred: number;
 }
 
-export interface PrFile { filename: string; status: string; additions: number; deletions: number; previous_filename?: string | null; original?: string | null; modified?: string | null }
-export interface ReviewComment { id: number; path: string; line: number | null; side: string | null; body: string; user: string; created_at: string }
-export interface PullReview { repo: string; number: number; title: string; author: string; url: string; base_sha: string; head_sha: string; files: PrFile[]; comments: ReviewComment[]; sample: boolean }
+export interface PrFile {
+  filename: string; status: string; additions: number; deletions: number; previous_filename?: string | null;
+  /** `viewed`, `unviewed`, or `dismissed` (viewed, then changed since). */
+  viewed: string;
+  original?: string | null; modified?: string | null;
+}
+export interface ThreadComment { id: string; database_id: number | null; author: string; avatar: string | null; body: string; created_at: string; pending: boolean; url: string | null; viewer_did_author: boolean }
+export interface ReviewThread {
+  id: string; path: string; line: number | null; start_line: number | null; original_line: number | null;
+  side: "LEFT" | "RIGHT"; resolved: boolean; outdated: boolean; can_resolve: boolean; can_reply: boolean; diff_hunk: string | null;
+  comments: ThreadComment[];
+}
+export interface CheckRun { name: string; status: string; conclusion: string | null; url: string | null }
+export interface PullReview {
+  repo: string; number: number; node_id: string; title: string; body: string; author: string; author_avatar: string | null; url: string;
+  state: "open" | "closed" | "merged"; draft: boolean; base_ref: string; head_ref: string; head_repo: string | null;
+  base_sha: string; head_sha: string; additions: number; deletions: number; commits: number; created_at: string;
+  mergeable: string; merge_state: string; review_decision: string | null;
+  checks: { state: string | null; runs: CheckRun[] };
+  labels: { name: string; color: string }[]; reviewers: string[];
+  viewer: string; viewer_can_update: boolean;
+  files: PrFile[]; threads: ReviewThread[]; pending_review: { id: string; body: string } | null;
+  sample_tree: { path: string; content: string }[];
+  sample: boolean;
+}
+export interface ReviewWorkspace { path: string; head_sha: string; merge_base: string; files: string[]; reused: boolean }
+export interface WorkspaceProgress { repo: string; number: number; step: "clone" | "fetch" | "checkout" | "index"; state: "running" | "done" | "error"; message: string; percent: number | null }
+export interface SearchHit { path: string; line: number; column: number; text: string }
+export interface SearchQuery { query: string; regex: boolean; case_sensitive: boolean; whole_word: boolean; include: string | null }
+export type ReviewAction =
+  | { type: "mark_viewed"; path: string; viewed: boolean }
+  | { type: "add_thread"; path: string; line: number; start_line: number | null; side: "LEFT" | "RIGHT"; body: string; pending: boolean }
+  | { type: "reply"; thread_id: string; comment_id: number | null; body: string; pending: boolean }
+  | { type: "edit_comment"; comment_id: string; body: string }
+  | { type: "delete_comment"; comment_id: string }
+  | { type: "resolve"; thread_id: string; resolved: boolean }
+  | { type: "submit"; event: "comment" | "approve" | "request_changes"; body: string }
+  | { type: "discard" }
+  | { type: "set_state"; state: "open" | "closed" }
+  | { type: "set_draft"; draft: boolean }
+  | { type: "merge"; method: "merge" | "squash" | "rebase" }
+  | { type: "update_branch" };
+export interface PrRef { repo: string; number: number; node_id: string; head_sha: string; pending_review_id: string | null }
 
 export interface RateLimitState {
   provider: string;
