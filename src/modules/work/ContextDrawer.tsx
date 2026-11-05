@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, ScorePill, cx } from "../../design/components";
 import { Blocks } from "../../design/blocks";
-import { SourceGlyph } from "../../design/brands";
+import { Brand, SourceGlyph, brandFor } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
 import { openLink, parseLink } from "../../lib/links";
@@ -169,6 +169,12 @@ function useLinkSummary(url: string | null | undefined) {
  * A direct context entry, in the bar above the chat so it's one click away:
  * what it is, a short name and one status badge.
  */
+/** The product mark for a chip: the link's module, else the item's source. */
+function brandOf(link: { kind: string; source: string } | null, item: QueueItem | null | undefined) {
+  if (link) return brandFor(link.kind, link.source);
+  return item ? brandFor(item.kind, item.source) : null;
+}
+
 function ContextChip({ entry: e, onSelect }: { entry: ContextEntry; onSelect: (id: string) => void }) {
   const { kind } = useApp();
   const url = e.url ?? e.ref_item?.url;
@@ -185,7 +191,7 @@ function ContextChip({ entry: e, onSelect }: { entry: ContextEntry; onSelect: (i
   };
   return (
     <button className="ctx-pill" onClick={open} title={[link?.label ?? k?.label, name, status?.label].filter(Boolean).join(" · ")}>
-      {link ? <SourceGlyph kind={link.kind} source={link.source} icon={link.icon} size={16} /> : item && k ? <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={16} /> : <Icon name="link" size={12} />}
+      <span className="ctx-pill-mark">{brandOf(link, item) ? <Brand name={brandOf(link, item)!} size={14} /> : <Icon name={link?.icon ?? k?.icon ?? "link"} size={13} />}</span>
       <span className="ctx-pill-name">{name}</span>
       {status && <Badge tone={status.tone}>{status.label}</Badge>}
     </button>
