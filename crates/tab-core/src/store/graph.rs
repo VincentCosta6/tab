@@ -116,15 +116,21 @@ impl Store {
             .optional()?)
     }
 
-    /// Items linked to an entity, most recent first.
-    pub fn entity_items(&self, entity_id: i64, limit: usize) -> anyhow::Result<Vec<QueueItem>> {
+    /// Items linked to an entity, most recent first, optionally only since a time.
+    pub fn entity_items(
+        &self,
+        entity_id: i64,
+        since: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<QueueItem>> {
         let conn = self.conn();
         let ids: Vec<String> = conn
             .prepare(
                 "SELECT i.id FROM item_entities ie JOIN items i ON i.id = ie.item_id
-                 WHERE ie.entity_id = ?1 ORDER BY i.occurred_at DESC LIMIT ?2",
+                 WHERE ie.entity_id = ?1 AND (?3 IS NULL OR i.occurred_at >= ?3)
+                 ORDER BY i.occurred_at DESC LIMIT ?2",
             )?
-            .query_map(params![entity_id, limit], |r| r.get(0))?
+            .query_map(params![entity_id, limit, since.map(ts)], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
@@ -140,6 +146,7 @@ impl Store {
         &self,
         entity_id: i64,
         kind: Option<&str>,
+        since: Option<DateTime<Utc>>,
         limit: usize,
     ) -> anyhow::Result<Vec<(Entity, i64)>> {
         let conn = self.conn();
@@ -150,9 +157,10 @@ impl Store {
                  JOIN item_entities other ON other.item_id = mine.item_id AND other.entity_id != mine.entity_id
                  JOIN entities e ON e.id = other.entity_id
                  WHERE mine.entity_id = ?1 AND (?2 IS NULL OR e.kind = ?2)
+                   AND (?4 IS NULL OR mine.item_id IN (SELECT id FROM items WHERE occurred_at >= ?4))
                  GROUP BY e.id ORDER BY shared DESC, e.label LIMIT ?3"
             ))?
-            .query_map(params![entity_id, kind, limit], |r| Ok((row_to_entity(r)?, r.get(5)?)))?
+            .query_map(params![entity_id, kind, limit, since.map(ts)], |r| Ok((row_to_entity(r)?, r.get(5)?)))?
             .collect::<Result<_, _>>()?;
         Ok(rows)
     }

@@ -178,7 +178,13 @@ async fn search_items(
     query: String,
     states: Vec<ItemState>,
 ) -> CmdResult<Vec<QueueItem>> {
-    state.store.search(&query, &states, 200).map_err(err)
+    // Keyword matches first; then things that mean the same, once the
+    // embedding model is ready.
+    let qv = state.store.embed_query(&query);
+    state
+        .store
+        .search_hybrid(&query, qv.as_deref(), &states, &Default::default(), 200)
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -1004,6 +1010,13 @@ pub fn run() {
             let config = TabConfig::load(&config_path)?;
             let store = Arc::new(Store::open(&data_dir.join("tab.db"))?);
             let gateway = Arc::new(Gateway::new(store.clone()));
+            // Embeddings for search, built in the background.
+            {
+                let (store, dir) = (store.clone(), data_dir.clone());
+                tauri::async_runtime::spawn(async move {
+                    tab_core::embed::spawn_indexer(store, dir);
+                });
+            }
             let (events, _) = broadcast::channel(1024);
 
             // Forward engine events to the UI.

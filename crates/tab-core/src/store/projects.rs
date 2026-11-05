@@ -166,14 +166,19 @@ impl Store {
     }
 
     /// The project's most recently active items, open ones first.
-    pub fn project_items(&self, project_id: &str, limit: usize) -> anyhow::Result<Vec<QueueItem>> {
+    pub fn project_items(
+        &self,
+        project_id: &str,
+        since: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<QueueItem>> {
         let conn = self.conn();
         let ids: Vec<String> = conn
             .prepare(
-                "SELECT id FROM items WHERE project_id = ?1
+                "SELECT id FROM items WHERE project_id = ?1 AND (?3 IS NULL OR occurred_at >= ?3)
                  ORDER BY state = 'done', occurred_at DESC LIMIT ?2",
             )?
-            .query_map(params![project_id, limit], |r| r.get(0))?
+            .query_map(params![project_id, limit, since.map(ts)], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
@@ -187,6 +192,7 @@ impl Store {
     pub fn project_entities(
         &self,
         project_id: &str,
+        since: Option<DateTime<Utc>>,
         limit: usize,
     ) -> anyhow::Result<Vec<(Entity, i64)>> {
         let conn = self.conn();
@@ -195,10 +201,10 @@ impl Store {
                 "SELECT e.id, e.kind, e.key, e.label,
                         (SELECT COUNT(*) FROM item_entities x WHERE x.entity_id = e.id), COUNT(*) AS n
                  FROM items i JOIN item_entities ie ON ie.item_id = i.id JOIN entities e ON e.id = ie.entity_id
-                 WHERE i.project_id = ?1 AND e.kind != 'project'
+                 WHERE i.project_id = ?1 AND e.kind != 'project' AND (?3 IS NULL OR i.occurred_at >= ?3)
                  GROUP BY e.id ORDER BY n DESC, e.label LIMIT ?2",
             )?
-            .query_map(params![project_id, limit], |r| {
+            .query_map(params![project_id, limit, since.map(ts)], |r| {
                 Ok((
                     Entity { id: r.get(0)?, kind: r.get(1)?, key: r.get(2)?, label: r.get(3)?, item_count: r.get(4)? },
                     r.get(5)?,
@@ -206,6 +212,17 @@ impl Store {
             })?
             .collect::<Result<_, _>>()?;
         Ok(rows)
+    }
+
+    pub fn note_get(&self, id: &str) -> anyhow::Result<Option<ProjectNote>> {
+        let conn = self.conn();
+        Ok(conn
+            .query_row(
+                &format!("SELECT {NOTE_COLS} FROM project_notes WHERE id = ?1"),
+                [id],
+                note_row,
+            )
+            .optional()?)
     }
 
     pub fn project_notes(&self, project_id: &str) -> anyhow::Result<Vec<ProjectNote>> {
@@ -364,7 +381,7 @@ mod tests {
                 .added_by,
             "user"
         );
-        assert_eq!(s.project_items(&p.id, 5).unwrap().len(), 1);
+        assert_eq!(s.project_items(&p.id, None, 5).unwrap().len(), 1);
         assert_eq!(s.project_find("payments").unwrap().unwrap().id, p.id);
 
         s.project_save(Some(&p.id), "Billing", "#00aa88", "card", now)

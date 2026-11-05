@@ -397,6 +397,9 @@ impl AgentHub {
              discussion) goes under Found with tab_add_found, for the person to decide. Don't attach things \
              that are only loosely connected; a few direct links beat a big web.\n\
              - If the work splits into follow-ups, create them with tab_create_task.\n\
+             - tab_search matches by keyword and by meaning. Give it a window (within_days, or since/until) \
+             and project: \"current\" when the person means recent or this project's work; it widens on its \
+             own if the window is too narrow.\n\
              - When the person mentions something you don't recognise (a project, a codename, a person, a \
              repo), call tab_graph_search before asking them: it searches everything tab knows and shows \
              what's connected to it. tab_graph_expand follows one connection further. tab_project shows a \

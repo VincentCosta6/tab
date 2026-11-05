@@ -12,6 +12,7 @@ mod previews;
 mod projects;
 mod sessions;
 mod usage;
+mod vectors;
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -20,11 +21,14 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::Connection;
 
 pub use http::{AuditEntry, AuditQuery, CachedResponse, UsageRow};
-pub use items::Upsert;
+pub use items::{Scope, Upsert};
 pub use usage::{NewUsage, PlanWindow, UsageSummary};
+pub use vectors::Doc;
 
 pub struct Store {
     conn: Mutex<Connection>,
+    /// Set once the embedding model has loaded; search uses it for queries.
+    embedder: std::sync::OnceLock<std::sync::Arc<dyn crate::embed::Embed>>,
 }
 
 /// Ordered migrations; `PRAGMA user_version` records how many have run.
@@ -36,6 +40,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/005_email_previews.sql"),
     include_str!("migrations/006_session_keys.sql"),
     include_str!("migrations/007_projects.sql"),
+    include_str!("migrations/008_embeddings.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {
@@ -62,10 +67,12 @@ impl Store {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        vectors::register();
         Self::init(Connection::open(path)?)
     }
 
     pub fn in_memory() -> anyhow::Result<Self> {
+        vectors::register();
         Self::init(Connection::open_in_memory()?)
     }
 
@@ -82,7 +89,18 @@ impl Store {
         }
         Ok(Self {
             conn: Mutex::new(conn),
+            embedder: std::sync::OnceLock::new(),
         })
+    }
+
+    pub fn set_embedder(&self, e: std::sync::Arc<dyn crate::embed::Embed>) {
+        let _ = self.embedder.set(e);
+    }
+
+    /// The query's vector, once the model is ready.
+    pub fn embed_query(&self, q: &str) -> Option<Vec<f32>> {
+        let e = self.embedder.get()?;
+        e.encode(&[q.to_string()]).pop()
     }
 
     pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {

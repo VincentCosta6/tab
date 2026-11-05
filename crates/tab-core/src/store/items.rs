@@ -32,6 +32,26 @@ const COLUMNS: &str = "items.id, items.source, items.external_id, items.kind, it
     items.ranked_by, items.created_at, items.updated_at, items.project_id";
 
 /// Display order. Fully deterministic: ties fall back to recency, then id.
+/// Narrows a search: when things happened, and which project they're in.
+#[derive(Debug, Clone, Default)]
+pub struct Scope {
+    pub since: Option<DateTime<Utc>>,
+    pub until: Option<DateTime<Utc>>,
+    pub project_id: Option<String>,
+}
+
+impl Scope {
+    pub fn contains(&self, i: &QueueItem) -> bool {
+        let t = i.event.occurred_at;
+        self.since.is_none_or(|s| t >= s)
+            && self.until.is_none_or(|u| t < u)
+            && self
+                .project_id
+                .as_ref()
+                .is_none_or(|p| i.project_id.as_ref() == Some(p))
+    }
+}
+
 const ORDER: &str = "ORDER BY COALESCE(items.score, 50) DESC, items.occurred_at DESC, items.id";
 
 fn json_col<T: serde::de::DeserializeOwned + Default>(
@@ -296,22 +316,41 @@ impl Store {
         states: &[ItemState],
         limit: usize,
     ) -> anyhow::Result<Vec<QueueItem>> {
+        self.search_in(query, states, &Scope::default(), limit)
+    }
+
+    /// Keyword search limited to a time window and/or a project.
+    pub fn search_in(
+        &self,
+        query: &str,
+        states: &[ItemState],
+        scope: &Scope,
+        limit: usize,
+    ) -> anyhow::Result<Vec<QueueItem>> {
         let conn = self.conn();
         let states = state_list(states);
+        // Unset bounds match everything; `occurred_at` is indexed.
+        let window =
+            "AND (?3 IS NULL OR items.occurred_at >= ?3) AND (?4 IS NULL OR items.occurred_at < ?4)
+                      AND (?5 IS NULL OR items.project_id = ?5)";
+        let (since, until) = (scope.since.map(ts), scope.until.map(ts));
         let items = match fts_phrase(query) {
             Some(phrase) => conn
                 .prepare(&format!(
                     "SELECT {COLUMNS} FROM items_fts JOIN items ON items.rowid = items_fts.rowid
-                     WHERE items_fts MATCH ?1 AND items.state IN ({states})
+                     WHERE items_fts MATCH ?1 AND items.state IN ({states}) {window}
                      ORDER BY bm25(items_fts, 10.0, 2.0, 4.0, 4.0, 1.0), items.id LIMIT ?2"
                 ))?
-                .query_map(params![phrase, limit], row_to_item)?
+                .query_map(params![phrase, limit, since, until, scope.project_id], row_to_item)?
                 .collect::<Result<_, _>>()?,
             None => conn
                 .prepare(&format!(
-                    "SELECT {COLUMNS} FROM items WHERE title LIKE ?1 AND state IN ({states}) {ORDER} LIMIT ?2"
+                    "SELECT {COLUMNS} FROM items WHERE title LIKE ?1 AND state IN ({states}) {window} {ORDER} LIMIT ?2"
                 ))?
-                .query_map(params![format!("%{}%", query.trim()), limit], row_to_item)?
+                .query_map(
+                    params![format!("%{}%", query.trim()), limit, since, until, scope.project_id],
+                    row_to_item,
+                )?
                 .collect::<Result<_, _>>()?,
         };
         Ok(items)

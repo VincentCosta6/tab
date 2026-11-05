@@ -26,6 +26,8 @@ async-imap = { version = "0.12", default-features = false, features = ["runtime-
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 webpki-roots = "1"
 mail-parser = "0.11"
+sqlite-vec = "0.1.6"
+model2vec-rs = { version = "0.4", default-features = false, features = ["fancy-regex", "local-only"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

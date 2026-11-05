@@ -149,6 +149,7 @@ fn brief(i: &QueueItem) -> Value {
         "from": i.event.actor,
         "where": i.event.context,
         "url": i.event.url,
+        "when": i.event.occurred_at.format("%Y-%m-%d %H:%M UTC").to_string(),
         "state": i.state,
         "urgency": i.ranking.as_ref().map(|r| r.urgency),
         "score": i.ranking.as_ref().map(|r| r.score),
@@ -170,9 +171,14 @@ pub fn tools() -> Value {
     json!([
         {
             "name": "tab_search",
-            "description": "Search the person's work queue (Slack, GitHub, email, meetings, Jira, tab tasks) by substring. Returns items with ids you can attach or read.",
+            "description": "Search the person's work (Slack, GitHub, email, meetings, Jira, tab tasks) by keyword and by meaning, so both exact names and paraphrases match. Narrow it to a time window and/or a project for more relevant results; if a window finds too little it widens automatically (say so if you rely on older results). Also returns project notes that match. Returns items with ids you can attach or read.",
             "inputSchema": { "type": "object", "properties": {
-                "query": { "type": "string", "description": "Words to look for; at least 3 characters works best." },
+                "query": { "type": "string", "description": "Words or a short description of what you're looking for." },
+                "within_days": { "type": "integer", "minimum": 1, "description": "Only things from the last N days. Start small (7 or 30) for recent work." },
+                "since": { "type": "string", "description": "ISO date or time; only things at or after it." },
+                "until": { "type": "string", "description": "ISO date or time; only things before it." },
+                "project": { "type": "string", "description": "Project name or id, or \"current\" for this chat's project." },
+                "expand": { "type": "boolean", "description": "Widen the window when it finds fewer than 3 results. Default true." },
                 "include_done": { "type": "boolean" },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
             }, "required": ["query"] }
@@ -221,6 +227,7 @@ pub fn tools() -> Value {
             "description": "Search tab's knowledge graph: the projects, repos, people, PRs, tickets, channels and email contacts that appear across the person's work. Use it when they mention something you don't recognise. Each match comes with what it's most connected to, its recent items, and for a project its notes.",
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string", "description": "A name or part of one: \"billing\", \"dana\", \"acme/web\"." },
+                "within_days": { "type": "integer", "minimum": 1, "description": "Only count activity from the last N days, so what is connected now shows first. Leave out for all time." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 10 }
             }, "required": ["query"] }
         },
@@ -230,6 +237,7 @@ pub fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "entity_id": { "type": "integer" },
                 "kind": { "type": "string" },
+                "within_days": { "type": "integer", "minimum": 1, "description": "Only count activity from the last N days, so what is connected now shows first. Leave out for all time." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 30 }
             }, "required": ["entity_id"] }
         },
@@ -237,7 +245,8 @@ pub fn tools() -> Value {
             "name": "tab_project",
             "description": "A project's overview: its notes, the repos, people and tickets its work is about, and its recent items. Defaults to this chat's project; with no project, lists them all.",
             "inputSchema": { "type": "object", "properties": {
-                "project": { "type": "string", "description": "Project name or id." }
+                "project": { "type": "string", "description": "Project name or id." },
+                "within_days": { "type": "integer", "minimum": 1, "description": "Only count activity from the last N days, so what is connected now shows first. Leave out for all time." }
             } }
         },
         {
@@ -440,10 +449,80 @@ impl McpServer {
                     vec![ItemState::Open, ItemState::Snoozed]
                 };
                 let limit = args["limit"].as_u64().unwrap_or(15).clamp(1, 50) as usize;
-                let items = self.store.search(&q, &states, limit)?;
-                Ok(text(serde_json::to_string_pretty(
-                    &items.iter().map(brief).collect::<Vec<_>>(),
-                )?))
+                let date = |k: &str| -> anyhow::Result<Option<chrono::DateTime<Utc>>> {
+                    let Some(v) = s(k) else { return Ok(None) };
+                    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&v) {
+                        return Ok(Some(t.with_timezone(&Utc)));
+                    }
+                    let d = chrono::NaiveDate::parse_from_str(&v, "%Y-%m-%d").map_err(|_| {
+                        anyhow::anyhow!("{k} should be an ISO date like 2026-11-01")
+                    })?;
+                    Ok(Some(d.and_hms_opt(0, 0, 0).unwrap().and_utc()))
+                };
+                let now = Utc::now();
+                let mut scope = crate::store::Scope {
+                    since: date("since")?.or(args["within_days"]
+                        .as_i64()
+                        .map(|d| now - chrono::Duration::days(d.max(1)))),
+                    until: date("until")?,
+                    project_id: match s("project").as_deref() {
+                        None => None,
+                        Some("current") => self.project_arg(session, &json!({}))?.map(|p| p.id),
+                        Some(_) => self.project_arg(session, &args)?.map(|p| p.id),
+                    },
+                };
+                let qv = self.store.embed_query(&q);
+                let mut items =
+                    self.store
+                        .search_hybrid(&q, qv.as_deref(), &states, &scope, limit)?;
+                // Too little in the window: look further back, a step at a time.
+                let mut widened = None;
+                if args["expand"].as_bool().unwrap_or(true) {
+                    while items.len() < 3.min(limit) {
+                        let Some(since) = scope.since else { break };
+                        let span =
+                            (scope.until.unwrap_or(now) - since).max(chrono::Duration::days(1));
+                        let wider = since - span * 3;
+                        scope.since = (wider > now - chrono::Duration::days(365)).then_some(wider);
+                        items =
+                            self.store
+                                .search_hybrid(&q, qv.as_deref(), &states, &scope, limit)?;
+                        widened = Some(scope.since);
+                    }
+                }
+                let notes = match &qv {
+                    Some(v) => self.store.notes_near(v, 3)?,
+                    None => Vec::new(),
+                };
+                let mut out = json!({
+                    "items": items.iter().map(brief).collect::<Vec<_>>(),
+                    "search": if qv.is_some() { "keyword + meaning" } else { "keyword only (the meaning index is still building)" },
+                });
+                if let Some(w) = widened {
+                    out["widened_to"] = json!(match w {
+                        Some(t) => format!("since {}", t.format("%Y-%m-%d")),
+                        None => "all time".into(),
+                    });
+                }
+                if !notes.is_empty() {
+                    let names: std::collections::HashMap<String, String> = self
+                        .store
+                        .projects()?
+                        .into_iter()
+                        .map(|p| (p.id, p.name))
+                        .collect();
+                    out["project_notes"] = json!(
+                        notes
+                            .iter()
+                            .map(|n| {
+                                let mut v = note_json(n);
+                                v["project"] = json!(names.get(&n.project_id));
+                                v
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                }
+                Ok(text(serde_json::to_string_pretty(&out)?))
             }
             "tab_get_item" => {
                 let id = s("item_id").ok_or_else(|| anyhow::anyhow!("item_id is required"))?;
@@ -535,6 +614,9 @@ impl McpServer {
                 )))
             }
             "tab_graph_search" => {
+                let since = args["within_days"]
+                    .as_i64()
+                    .map(|d| Utc::now() - chrono::Duration::days(d.max(1)));
                 let q = s("query").ok_or_else(|| anyhow::anyhow!("query is required"))?;
                 let limit = args["limit"].as_u64().unwrap_or(5).clamp(1, 10) as usize;
                 let found = self.store.search_entities(&q, limit)?;
@@ -546,12 +628,12 @@ impl McpServer {
                 let mut out = Vec::new();
                 for e in &found {
                     let mut v = entity_json(e);
-                    v["connected"] = json!(self.store.co_entities(e.id, None, 8)?.iter()
+                    v["connected"] = json!(self.store.co_entities(e.id, None, since, 8)?.iter()
                         .map(|(n, shared)| json!({ "entity_id": n.id, "kind": n.kind, "label": n.label, "shared_items": shared }))
                         .collect::<Vec<_>>());
                     v["recent_items"] = json!(
                         self.store
-                            .entity_items(e.id, 5)?
+                            .entity_items(e.id, since, 5)?
                             .iter()
                             .map(brief)
                             .collect::<Vec<_>>()
@@ -574,6 +656,9 @@ impl McpServer {
                 Ok(text(serde_json::to_string_pretty(&out)?))
             }
             "tab_graph_expand" => {
+                let since = args["within_days"]
+                    .as_i64()
+                    .map(|d| Utc::now() - chrono::Duration::days(d.max(1)));
                 let id = args["entity_id"]
                     .as_i64()
                     .ok_or_else(|| anyhow::anyhow!("entity_id is required"))?;
@@ -585,13 +670,16 @@ impl McpServer {
                 let kind = s("kind");
                 Ok(text(serde_json::to_string_pretty(&json!({
                     "entity": entity_json(&e),
-                    "connected": self.store.co_entities(id, kind.as_deref(), limit)?.iter()
+                    "connected": self.store.co_entities(id, kind.as_deref(), since, limit)?.iter()
                         .map(|(n, shared)| json!({ "entity_id": n.id, "kind": n.kind, "label": n.label, "shared_items": shared }))
                         .collect::<Vec<_>>(),
-                    "recent_items": self.store.entity_items(id, 10)?.iter().map(brief).collect::<Vec<_>>(),
+                    "recent_items": self.store.entity_items(id, since, 10)?.iter().map(brief).collect::<Vec<_>>(),
                 }))?))
             }
             "tab_project" => {
+                let since = args["within_days"]
+                    .as_i64()
+                    .map(|d| Utc::now() - chrono::Duration::days(d.max(1)));
                 let Some(p) = self.project_arg(session, &args)? else {
                     let all = self.store.projects()?;
                     return Ok(text(if all.is_empty() {
@@ -609,10 +697,10 @@ impl McpServer {
                 Ok(text(serde_json::to_string_pretty(&json!({
                     "project": { "id": p.id, "name": p.name },
                     "notes": self.store.project_notes(&p.id)?.iter().map(note_json).collect::<Vec<_>>(),
-                    "about": self.store.project_entities(&p.id, 15)?.iter()
+                    "about": self.store.project_entities(&p.id, since, 15)?.iter()
                         .map(|(e, n)| json!({ "entity_id": e.id, "kind": e.kind, "label": e.label, "items_in_project": n }))
                         .collect::<Vec<_>>(),
-                    "recent_items": self.store.project_items(&p.id, 15)?.iter().map(brief).collect::<Vec<_>>(),
+                    "recent_items": self.store.project_items(&p.id, since, 15)?.iter().map(brief).collect::<Vec<_>>(),
                 }))?))
             }
             "tab_project_note" => {
