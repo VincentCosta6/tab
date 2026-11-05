@@ -1023,3 +1023,159 @@ test("retries timeouts with the same idempotency key", async () => {
         sample: true,
     }
 }
+
+/// What a github.com link points at, for a link card: title, state, author
+/// and CI. Cheap and cached for two minutes, so cards can ask freely.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct LinkSummary {
+    pub title: String,
+    /// `open`, `draft`, `merged` or `closed`. Empty for commits.
+    pub state: String,
+    pub author: Option<String>,
+    /// `passing`, `failing` or `pending`, for PRs and commits with checks.
+    pub checks: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// `what` is `pull`, `issues` or `commit`, as in the github.com path.
+pub async fn link_summary(
+    gw: &Gateway,
+    repo: &str,
+    what: &str,
+    id: &str,
+) -> anyhow::Result<LinkSummary> {
+    split_repo(repo)?;
+    let ttl = Duration::from_secs(120);
+    let fetch = |purpose: &'static str, url: String| gw.send(get(purpose, url, ttl));
+    let str_at = |v: &Value, p: &str| v.pointer(p).and_then(Value::as_str).map(str::to_string);
+    match what {
+        "pull" => {
+            let n: u64 = id.parse()?;
+            let pr: Value = fetch(
+                "link: pull request",
+                format!("{API}/repos/{repo}/pulls/{n}"),
+            )
+            .await?
+            .json()?;
+            let state = if pr["merged"].as_bool() == Some(true) {
+                "merged"
+            } else if pr["state"] == "closed" {
+                "closed"
+            } else if pr["draft"].as_bool() == Some(true) {
+                "draft"
+            } else {
+                "open"
+            };
+            let checks = match str_at(&pr, "/head/sha") {
+                Some(sha) if state == "open" || state == "draft" => {
+                    commit_checks(gw, repo, &sha).await
+                }
+                _ => None,
+            };
+            Ok(LinkSummary {
+                title: str_at(&pr, "/title").unwrap_or_default(),
+                state: state.into(),
+                author: str_at(&pr, "/user/login"),
+                checks,
+                updated_at: str_at(&pr, "/updated_at"),
+            })
+        }
+        "issues" => {
+            let n: u64 = id.parse()?;
+            let i: Value = fetch("link: issue", format!("{API}/repos/{repo}/issues/{n}"))
+                .await?
+                .json()?;
+            Ok(LinkSummary {
+                title: str_at(&i, "/title").unwrap_or_default(),
+                state: str_at(&i, "/state").unwrap_or_default(),
+                author: str_at(&i, "/user/login"),
+                checks: None,
+                updated_at: str_at(&i, "/updated_at"),
+            })
+        }
+        "commit" => {
+            if !id.chars().all(|c| c.is_ascii_hexdigit()) {
+                anyhow::bail!("not a commit: {id}");
+            }
+            let c: Value = fetch("link: commit", format!("{API}/repos/{repo}/commits/{id}"))
+                .await?
+                .json()?;
+            let message = str_at(&c, "/commit/message").unwrap_or_default();
+            Ok(LinkSummary {
+                title: message.lines().next().unwrap_or("").to_string(),
+                state: String::new(),
+                author: str_at(&c, "/author/login").or_else(|| str_at(&c, "/commit/author/name")),
+                checks: commit_checks(gw, repo, id).await,
+                updated_at: str_at(&c, "/commit/committer/date"),
+            })
+        }
+        _ => anyhow::bail!("tab doesn't summarise GitHub {what} links"),
+    }
+}
+
+/// Rolls a commit's check runs up into one word. None when it has none or
+/// they can't be read.
+async fn commit_checks(gw: &Gateway, repo: &str, sha: &str) -> Option<String> {
+    let v: Value = gw
+        .send(
+            get(
+                "link: checks",
+                format!("{API}/repos/{repo}/commits/{sha}/check-runs"),
+                Duration::from_secs(120),
+            )
+            .query("per_page", "100"),
+        )
+        .await
+        .ok()?
+        .json()
+        .ok()?;
+    let runs = v["check_runs"].as_array()?;
+    rollup(
+        runs.iter()
+            .map(|r| (r["status"].as_str().unwrap_or(""), r["conclusion"].as_str())),
+    )
+}
+
+fn rollup<'a>(runs: impl Iterator<Item = (&'a str, Option<&'a str>)>) -> Option<String> {
+    let (mut any, mut pending) = (false, false);
+    for (status, conclusion) in runs {
+        any = true;
+        match conclusion {
+            Some("failure" | "timed_out" | "cancelled" | "action_required" | "startup_failure") => {
+                return Some("failing".into());
+            }
+            None if status != "completed" => pending = true,
+            _ => {}
+        }
+    }
+    any.then(|| if pending { "pending" } else { "passing" }.into())
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::rollup;
+
+    #[test]
+    fn checks_roll_up_failing_first() {
+        assert_eq!(
+            rollup(
+                [
+                    ("completed", Some("success")),
+                    ("completed", Some("failure"))
+                ]
+                .into_iter()
+            )
+            .as_deref(),
+            Some("failing")
+        );
+        assert_eq!(
+            rollup([("completed", Some("success")), ("in_progress", None)].into_iter()).as_deref(),
+            Some("pending")
+        );
+        assert_eq!(
+            rollup([("completed", Some("skipped"))].into_iter()).as_deref(),
+            Some("passing")
+        );
+        assert_eq!(rollup(std::iter::empty()), None);
+    }
+}

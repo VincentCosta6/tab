@@ -106,6 +106,23 @@ impl Store {
     }
 
     /// Puts an item in a project, or takes it out (`None`).
+    /// Files `attached` under `owner`'s project when it has none of its own,
+    /// for things attached as context to a chat. Returns the moved item.
+    pub fn adopt_project(
+        &self,
+        owner: &str,
+        attached: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<QueueItem>> {
+        let (Some(o), Some(a)) = (self.get(owner)?, self.get(attached)?) else {
+            return Ok(None);
+        };
+        match (o.project_id, a.project_id) {
+            (Some(p), None) if owner != attached => self.item_set_project(attached, Some(&p), now),
+            _ => Ok(None),
+        }
+    }
+
     pub fn item_set_project(
         &self,
         item_id: &str,
@@ -317,6 +334,39 @@ mod tests {
     use super::*;
     use crate::model::IncomingEvent;
     use crate::store::Upsert;
+
+    #[test]
+    fn attached_items_adopt_the_chats_project_only_when_unfiled() {
+        let s = Store::in_memory().unwrap();
+        let now = Utc::now();
+        let a = s.project_save(None, "A", "#7c5cff", "folder", now).unwrap();
+        let b = s.project_save(None, "B", "#7c5cff", "folder", now).unwrap();
+        let add = |id: &str| {
+            let e = IncomingEvent {
+                source: "tab".into(),
+                external_id: id.into(),
+                kind: "tab.task".into(),
+                title: id.into(),
+                occurred_at: now,
+                ..Default::default()
+            };
+            match s.upsert(&e, now).unwrap() {
+                Upsert::Inserted(i) => i.id,
+                _ => panic!(),
+            }
+        };
+        let (chat, pr, other) = (add("chat"), add("pr"), add("other"));
+        s.item_set_project(&chat, Some(&a.id), now).unwrap();
+        s.item_set_project(&other, Some(&b.id), now).unwrap();
+        let moved = s.adopt_project(&chat, &pr, now).unwrap().unwrap();
+        assert_eq!(moved.project_id.as_deref(), Some(a.id.as_str()));
+        // Already filed elsewhere: left alone.
+        assert!(s.adopt_project(&chat, &other, now).unwrap().is_none());
+        assert_eq!(
+            s.get(&other).unwrap().unwrap().project_id.as_deref(),
+            Some(b.id.as_str())
+        );
+    }
 
     #[test]
     fn items_join_and_leave_projects() {

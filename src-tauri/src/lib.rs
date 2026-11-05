@@ -235,8 +235,27 @@ async fn context_add(
         .store
         .context_add(&item_id, &entry, Utc::now())
         .map_err(err)?;
+    adopt_project(&state, &e);
     let _ = state.events.send(EngineEvent::ContextChanged { item_id });
     Ok(e)
+}
+
+/// Something added to a chat's Context joins the chat's project, unless it
+/// already has one.
+fn adopt_project(state: &AppState, e: &ContextEntry) {
+    let Some(r) = e
+        .ref_item
+        .as_ref()
+        .filter(|_| e.section == ContextSection::Context)
+    else {
+        return;
+    };
+    if let Ok(Some(item)) = state.store.adopt_project(&e.item_id, &r.id, Utc::now()) {
+        let _ = state.events.send(EngineEvent::ItemChanged {
+            change: tab_core::engine::Change::Updated,
+            item,
+        });
+    }
 }
 
 #[tauri::command]
@@ -251,6 +270,7 @@ async fn context_update(
         .context_update(&id, section, pinned)
         .map_err(err)?;
     if let Some(e) = &e {
+        adopt_project(&state, e);
         let _ = state.events.send(EngineEvent::ContextChanged {
             item_id: e.item_id.clone(),
         });
@@ -791,6 +811,19 @@ async fn github_pull(
         .map_err(err)
 }
 
+/// Title, state, author and CI for a github.com PR, issue or commit link.
+#[tauri::command]
+async fn github_link_summary(
+    state: State<'_, AppState>,
+    repo: String,
+    what: String,
+    id: String,
+) -> CmdResult<github_review::LinkSummary> {
+    github_review::link_summary(&state.gateway, &repo, &what, &id)
+        .await
+        .map_err(err)
+}
+
 #[tauri::command]
 async fn github_file(
     state: State<'_, AppState>,
@@ -1286,6 +1319,7 @@ pub fn run() {
             search_items,
             item_detail,
             item_by_url,
+            github_link_summary,
             item_preview,
             mark_done,
             snooze,

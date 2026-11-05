@@ -1,6 +1,6 @@
-// Links open in tab first. A link to something in the queue opens that item;
-// a link a module knows (a GitHub PR) opens the module's own view; anything
-// else goes to the browser. Every in-app view keeps its own "Open on GitHub"
+// Links open in tab first. A link a module has its own view for (a GitHub
+// PR) opens that view; otherwise a link to something in the queue opens that
+// item; anything else goes to the browser. Every in-app view keeps its own "Open on GitHub"
 // style button, and ⌘, Ctrl or Shift click always goes to the browser.
 
 import { api, openUrl } from "./api";
@@ -17,6 +17,8 @@ export interface LinkKind {
   title: string;
   /** The address without query or fragment, used to find a queue item. */
   canonical: string;
+  /** Fetches the title and state, for a richer card. */
+  summary?: () => Promise<import("./types").LinkSummary>;
   /** Opens the module's own view. Returns false when it can't right now. */
   open?: () => boolean;
 }
@@ -66,9 +68,9 @@ export async function openLink(url: string, e?: Modifiers) {
   if (e && (e.metaKey || e.ctrlKey || e.shiftKey)) return openUrl(url);
   if (/^https?:\/\//i.test(url)) {
     const link = parseLink(url);
+    if (link?.open?.()) return;
     const item = await api.itemByUrl(link?.canonical ?? url).catch(() => null);
     if (item) return openItem(item.id);
-    if (link?.open?.()) return;
   }
   return openUrl(url);
 }

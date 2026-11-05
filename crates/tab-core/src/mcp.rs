@@ -198,17 +198,19 @@ pub fn tools() -> Value {
                 "url": { "type": "string" },
                 "ref_item_id": { "type": "string", "description": "A tab item id, if what you found is in the queue." },
                 "summary": { "type": "string", "description": "One or two sentences on why it matters." },
-                "item_id": { "type": "string", "description": "Task to file it on. Defaults to this session's task." }
+                "item_id": { "type": "string", "description": "Task to file it on. Defaults to this session's task." },
+                "project": { "type": "string", "description": "Optional. Also file the found queue item under this project (name or id), or \"none\". Found items keep their project unless you pass one." }
             }, "required": ["title"] }
         },
         {
             "name": "tab_attach_context",
-            "description": "Attach a queue item or link directly to the current task's Context. Use for things that are directly part of the work: the PR you opened for it, the ticket it implements, the thread or email you're answering, or anything the person names. For things that only might be relevant, use tab_add_found instead.",
+            "description": "Attach a queue item or link directly to the current task's Context. Use for things that are directly part of the work: the PR you opened for it, the ticket it implements, the thread or email you're answering, or anything the person names. For things that only might be relevant, use tab_add_found instead. A link to something in the queue attaches that item. The attached item joins this chat's project unless it already has one; pass `project` when it clearly belongs elsewhere (another repo or team), or \"none\" for things that aren't project work, and say which you chose.",
             "inputSchema": { "type": "object", "properties": {
                 "ref_item_id": { "type": "string" },
                 "url": { "type": "string" },
                 "title": { "type": "string" },
-                "item_id": { "type": "string", "description": "Task to attach to. Defaults to this session's task." }
+                "item_id": { "type": "string", "description": "Task to attach to. Defaults to this session's task." },
+                "project": { "type": "string", "description": "Optional. Project (name or id) to file the attached item under, or \"none\". Defaults to this chat's project when the item has none." }
             } }
         },
         {
@@ -554,15 +556,18 @@ impl McpServer {
             }
             "tab_add_found" | "tab_attach_context" => {
                 let item_id = self.session_item(session, &args)?;
-                let ref_item_id = s("ref_item_id");
-                let ref_item = match &ref_item_id {
+                let ref_item = match s("ref_item_id") {
                     Some(r) => Some(
                         self.store
-                            .get(r)?
+                            .get(&r)?
                             .ok_or_else(|| anyhow::anyhow!("no item {r}"))?,
                     ),
-                    None => None,
+                    // A link to something in the queue attaches that item.
+                    None => s("url")
+                        .and_then(|u| self.store.item_by_url(&u).ok().flatten())
+                        .filter(|i| i.id != item_id),
                 };
+                let ref_item_id = ref_item.as_ref().map(|i| i.id.clone());
                 let title = s("title")
                     .or(ref_item.as_ref().map(|i| i.event.title.clone()))
                     .or(s("url"))
@@ -588,9 +593,54 @@ impl McpServer {
                     },
                     Utc::now(),
                 )?;
+                // File the attached item: the project asked for, else (for
+                // Context) the chat's project when it has none.
+                let mut filed = String::new();
+                if let Some(r) = &ref_item {
+                    let asked = args["project"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty());
+                    let moved = match asked {
+                        Some(p) if p.eq_ignore_ascii_case("none") => {
+                            self.store.item_set_project(&r.id, None, Utc::now())?
+                        }
+                        Some(p) => {
+                            let proj = self
+                                .store
+                                .project_find(p)?
+                                .ok_or_else(|| anyhow::anyhow!("no project named {p}"))?;
+                            self.store
+                                .item_set_project(&r.id, Some(&proj.id), Utc::now())?
+                        }
+                        None if section == ContextSection::Context => {
+                            self.store.adopt_project(&item_id, &r.id, Utc::now())?
+                        }
+                        None => None,
+                    };
+                    let now_in = moved
+                        .as_ref()
+                        .map_or(r.project_id.clone(), |m| m.project_id.clone());
+                    let name = match &now_in {
+                        Some(p) => self.store.project_find(p)?.map(|p| p.name),
+                        None => None,
+                    };
+                    filed = match (moved.is_some(), name) {
+                        (true, Some(n)) => format!(" Filed it under {n}."),
+                        (true, None) => " Took it out of its project.".into(),
+                        (false, Some(n)) => format!(" It stays in {n}."),
+                        (false, None) => " It has no project.".into(),
+                    };
+                    if let Some(m) = moved {
+                        let _ = self.events.send(EngineEvent::ItemChanged {
+                            change: crate::engine::Change::Updated,
+                            item: m,
+                        });
+                    }
+                }
                 let _ = self.events.send(EngineEvent::ContextChanged { item_id });
                 Ok(text(format!(
-                    "Added \"{}\" under {}.",
+                    "Added \"{}\" under {}.{filed}",
                     entry.title,
                     entry.section.as_str()
                 )))

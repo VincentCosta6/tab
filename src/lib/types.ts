@@ -61,6 +61,9 @@ export interface QueueItem {
   updated_at: string;
 }
 
+/** What a github.com link points at, for a link card. */
+export interface LinkSummary { title: string; state: "open" | "draft" | "merged" | "closed" | ""; author: string | null; checks: "passing" | "failing" | "pending" | null; updated_at: string | null }
+
 /** An item whose agent isn't idle. */
 export interface AgentActivity { item_id: string; agent: AgentKind; status: SessionStatus; updated_at: string }
 

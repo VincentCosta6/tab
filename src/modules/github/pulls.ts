@@ -1,3 +1,4 @@
+import { api } from "../../lib/api";
 import type { LinkMatcher } from "../../lib/links";
 
 /** A PR the Reviews tab should open when it next mounts or hears `tab:open-pr`. */
@@ -30,12 +31,13 @@ export const githubLinks: LinkMatcher = (u) => {
   if (!owner || !repo) return null;
   const base = `https://github.com/${owner}/${repo}`;
   const name = `${owner}/${repo}`;
+  const summary = (what: string, id: string) => () => api.githubLinkSummary(name, what, id);
   if (what === "pull" && /^\d+$/.test(id ?? ""))
-    return { kind: "github.pull_request", source: "github", label: "Pull request", icon: "git-pull-request", title: `${name} #${id}`, canonical: `${base}/pull/${id}`, open: () => openPull(name, Number(id)) };
+    return { kind: "github.pull_request", source: "github", label: "Pull request", icon: "git-pull-request", title: `${name} #${id}`, canonical: `${base}/pull/${id}`, summary: summary("pull", id), open: () => openPull(name, Number(id)) };
   if (what === "issues" && /^\d+$/.test(id ?? ""))
-    return { kind: "github.issue", source: "github", label: "Issue", icon: "ticket", title: `${name} #${id}`, canonical: `${base}/issues/${id}` };
+    return { kind: "github.issue", source: "github", label: "Issue", icon: "ticket", title: `${name} #${id}`, canonical: `${base}/issues/${id}`, summary: summary("issues", id) };
   if (what === "commit" && id)
-    return { kind: "github.commit", source: "github", label: "Commit", icon: "git-branch", title: `${name} @ ${id.slice(0, 7)}`, canonical: `${base}/commit/${id}` };
+    return { kind: "github.commit", source: "github", label: "Commit", icon: "git-branch", title: `${name} @ ${id.slice(0, 7)}`, canonical: `${base}/commit/${id}`, summary: summary("commit", id) };
   if (!what) return { kind: "github.repo", source: "github", label: "Repository", icon: "folder", title: name, canonical: base };
   return null;
 };

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, ScorePill, cx } from "../../design/components";
 import { Blocks } from "../../design/blocks";
 import { SourceGlyph } from "../../design/brands";
@@ -10,7 +10,7 @@ import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useItemContext, usePreview } from "../../lib/hooks";
 import { keys } from "../../lib/query";
-import type { ContextEntry, QueueItem, Tone } from "../../lib/types";
+import type { ContextEntry, LinkSummary, QueueItem, Tone } from "../../lib/types";
 
 /**
  * Everything around an item, rolled up into one bar above the chat. Open it
@@ -111,6 +111,22 @@ const urgencyLabel: Record<string, { label: string; tone: Tone }> = {
 };
 
 /** The one status that says most about an item: PR state, done/snoozed, or urgency. */
+const checkStatus: Record<string, { label: string; tone: Tone }> = {
+  failing: { label: "CI failing", tone: "danger" },
+  pending: { label: "CI running", tone: "warning" },
+  passing: { label: "CI passing", tone: "success" },
+};
+
+/** One badge for a linked PR or issue: why it matters most first. */
+function linkStatus(s: LinkSummary): { label: string; tone: Tone } | null {
+  if (s.state === "merged") return { label: "Merged", tone: "accent" };
+  if (s.state === "closed") return { label: "Closed", tone: "neutral" };
+  if (s.checks && s.checks !== "passing") return checkStatus[s.checks];
+  if (s.state === "draft") return { label: "Draft", tone: "neutral" };
+  if (s.checks) return checkStatus[s.checks];
+  return s.state === "open" ? { label: "Open", tone: "success" } : null;
+}
+
 function statusOf(item: QueueItem): { label: string; tone: Tone } | null {
   const pr = (item.metadata as { pr_state?: string } | null)?.pr_state;
   if (pr === "draft") return { label: "Draft", tone: "neutral" };
@@ -197,9 +213,11 @@ function ItemDetails({ item }: { item: QueueItem }) {
 }
 
 function EntryCard({ entry: e, onSelect, children }: { entry: ContextEntry; onSelect: (id: string) => void; children: React.ReactNode }) {
+  // A PR link opens the review workspace even when it's also a queue item.
+  const opener = parseLink(e.url ?? e.ref_item?.url)?.open;
   if (e.ref_item)
     return (
-      <ItemCard item={e.ref_item} pinned={e.pinned} summary={e.summary} note={e.added_by === "agent" ? "Found by agent" : undefined} onOpen={() => onSelect(e.ref_item!.id)}>
+      <ItemCard item={e.ref_item} pinned={e.pinned} summary={e.summary} note={e.added_by === "agent" ? "Found by agent" : undefined} onOpen={() => opener?.() || onSelect(e.ref_item!.id)}>
         {children}
       </ItemCard>
     );
@@ -211,13 +229,27 @@ function EntryCard({ entry: e, onSelect, children }: { entry: ContextEntry; onSe
   }
   // A link a module understands shows as what it is: a GitHub PR, not "Link".
   const link = parseLink(e.url);
+  const { data: sum } = useQuery({
+    queryKey: ["link-summary", link?.canonical ?? ""],
+    queryFn: () => link!.summary!(),
+    enabled: !!link?.summary,
+    staleTime: 120_000,
+    retry: false,
+  });
   const bare = !e.title || e.title === e.url;
+  // "#968 · Retry webhooks" from GitHub, else the link's own title.
+  const ref = link?.title.split(" ").pop() ?? "";
+  const title = sum?.title ? `${ref.startsWith("#") ? `${ref} · ` : ""}${sum.title}` : link && bare ? link.title : e.title;
+  const subtitle = link
+    ? [sum?.title || !bare ? link.title.replace(/ [#@] ?\S+$/, "") : host, sum?.author && `by ${sum.author}`, sum?.updated_at && timeAgo(sum.updated_at)].filter(Boolean).join(" · ")
+    : host;
   return (
     <Card
       glyph={link ? <SourceGlyph kind={link.kind} source={link.source} icon={link.icon} size={22} /> : <span className="source-glyph tone-neutral" style={{ width: 22, height: 22 }}><Icon name="link" size={12} /></span>}
       type={link?.label ?? "Link"}
-      title={link && bare ? link.title : e.title}
-      subtitle={link && !bare ? link.title : host}
+      title={title}
+      subtitle={subtitle}
+      status={sum ? linkStatus(sum) : null}
       note={e.summary}
       pinned={e.pinned}
       onOpen={e.url ? () => openLink(e.url!) : undefined}
