@@ -83,7 +83,7 @@ impl ConnectorFactory for EmailFactory {
             ],
             available: true,
             rate_limits: Vec::new(),
-            category: "email".into(),
+            category: "communication".into(),
             features: vec![
                 "New mail arrives in seconds through IMAP IDLE".into(),
                 "Your host's spam filter runs first; leftover spam and failed-DMARC mail are skipped".into(),
@@ -187,7 +187,7 @@ pub struct EmailConnector {
     settings: Settings,
 }
 
-async fn connect(s: &Settings) -> anyhow::Result<Imap> {
+fn tls_config() -> anyhow::Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     // A private CA, for self-hosted servers (and tests): TAB_IMAP_CA=/path/to/ca.pem
@@ -197,31 +197,297 @@ async fn connect(s: &Settings) -> anyhow::Result<Imap> {
             roots.add(cert?)?;
         }
     }
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
     .with_safe_default_protocol_versions()?
     .with_root_certificates(roots)
-    .with_no_client_auth();
-    let tcp = tokio::time::timeout(
-        Duration::from_secs(20),
-        TcpStream::connect((s.host.as_str(), s.port)),
+    .with_no_client_auth())
+}
+
+/// Opens IMAP over TLS and reads the server's greeting, without signing in.
+async fn open(
+    host: &str,
+    port: u16,
+    wait: Duration,
+) -> anyhow::Result<async_imap::Client<TlsStream<TcpStream>>> {
+    let tcp = tokio::time::timeout(wait, TcpStream::connect((host, port)))
+        .await
+        .map_err(|_| anyhow::anyhow!("{host} didn't answer on port {port}"))??;
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())?;
+    let tls = tokio::time::timeout(
+        wait,
+        TlsConnector::from(Arc::new(tls_config()?)).connect(name, tcp),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("{} didn't answer on port {}", s.host, s.port))??;
-    let name = rustls::pki_types::ServerName::try_from(s.host.clone())?;
-    let tls = TlsConnector::from(Arc::new(config))
-        .connect(name, tcp)
-        .await?;
+    .map_err(|_| anyhow::anyhow!("{host} didn't finish TLS on port {port}"))?
+    .map_err(|e| anyhow::anyhow!("TLS with {host} failed: {e}"))?;
     let mut client = async_imap::Client::new(tls);
-    client
-        .read_response()
+    tokio::time::timeout(wait, client.read_response())
+        .await
+        .map_err(|_| anyhow::anyhow!("{host} sent no IMAP greeting"))??
+        .ok_or_else(|| anyhow::anyhow!("{host} closed the connection"))?;
+    Ok(client)
+}
+
+async fn connect(s: &Settings) -> anyhow::Result<Imap> {
+    open(&s.host, s.port, Duration::from_secs(20))
         .await?
-        .ok_or_else(|| anyhow::anyhow!("{} closed the connection", s.host))?;
-    client
         .login(&s.username, &s.password)
         .await
         .map_err(|(e, _)| anyhow::anyhow!("Signing in to {} failed: {e}", s.host))
+}
+
+/// Signs in with saved settings and reports what tab will read, for the
+/// setup assistant. Never returns the password.
+pub async fn check(cfg: &ConnectorConfig) -> anyhow::Result<String> {
+    let s = Settings::from_config(cfg)?;
+    let mut imap = connect(&s).await?;
+    let names: Vec<String> = imap
+        .list(Some(""), Some("*"))
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .iter()
+        .map(|n| n.name().to_string())
+        .collect();
+    let mut out = format!(
+        "Signed in to {}:{} as {}.\nFolders on the server: {}\n",
+        s.host,
+        s.port,
+        s.username,
+        names.join(", ")
+    );
+    for f in &s.folders {
+        match imap.examine(f).await {
+            Ok(m) => out.push_str(&format!("tab reads {f}: {} messages.\n", m.exists)),
+            Err(e) => out.push_str(&format!("Can't open folder {f}: {e}\n")),
+        }
+    }
+    let skipped: Vec<_> = names.iter().filter(|n| is_spam_folder(n)).collect();
+    if !skipped.is_empty() {
+        out.push_str(&format!(
+            "Never read (spam and trash): {}\n",
+            skipped
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let _ = imap.logout().await;
+    Ok(out)
+}
+
+/// An IMAP server that might serve an address.
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct ImapCandidate {
+    pub host: String,
+    pub port: u16,
+    /// Where the guess came from: provider, ISPDB, MX, or a common name.
+    pub source: String,
+    /// It answered with a valid certificate and an IMAP greeting.
+    pub reachable: bool,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Discovery {
+    pub domain: String,
+    pub mx: Vec<String>,
+    pub provider: Option<String>,
+    /// Provider-specific advice, e.g. "needs an app password".
+    pub advice: Option<String>,
+    /// Best first: known provider settings, then servers that answered.
+    pub candidates: Vec<ImapCandidate>,
+}
+
+/// Mail hosts tab knows by their MX records.
+fn known_provider(
+    mx: &[String],
+    domain: &str,
+) -> Option<(&'static str, Option<String>, &'static str)> {
+    let any =
+        |pat: &str| mx.iter().any(|m| m.ends_with(pat)) || domain == pat.trim_start_matches('.');
+    if let Some(m) = mx
+        .iter()
+        .find(|m| m.ends_with(".mxrouting.net") || m.ends_with(".mxlogin.com"))
+    {
+        return Some((
+            "MXroute",
+            Some(m.clone()),
+            "MXroute's IMAP server is the server name from your welcome email, which matches your MX record. Use your full email address and mailbox password.",
+        ));
+    }
+    if any(".google.com") || any(".googlemail.com") || domain == "gmail.com" {
+        return Some((
+            "Google",
+            Some("imap.gmail.com".into()),
+            "Gmail needs IMAP turned on and an app password (Google Account → Security → App passwords). Your normal password won't work.",
+        ));
+    }
+    if any(".outlook.com")
+        || any(".hotmail.com")
+        || domain == "outlook.com"
+        || domain == "hotmail.com"
+    {
+        return Some((
+            "Microsoft",
+            Some("outlook.office365.com".into()),
+            "Microsoft turned off password sign-in for IMAP on most accounts, so this may fail. If it does, tab needs OAuth for Outlook, which it doesn't have yet.",
+        ));
+    }
+    if any(".icloud.com") || domain == "icloud.com" || domain == "me.com" {
+        return Some((
+            "iCloud",
+            Some("imap.mail.me.com".into()),
+            "iCloud needs an app-specific password (account.apple.com → Sign-In and Security).",
+        ));
+    }
+    if any(".messagingengine.com") || domain == "fastmail.com" {
+        return Some((
+            "Fastmail",
+            Some("imap.fastmail.com".into()),
+            "Fastmail needs an app password (Settings → Privacy & Security → App passwords).",
+        ));
+    }
+    if any(".yahoodns.net") || domain == "yahoo.com" {
+        return Some((
+            "Yahoo",
+            Some("imap.mail.yahoo.com".into()),
+            "Yahoo needs an app password (Account security → Generate app password).",
+        ));
+    }
+    None
+}
+
+/// MX hosts from a DNS-over-HTTPS JSON answer, lowest preference first.
+fn parse_mx(v: &serde_json::Value) -> Vec<String> {
+    let mut mx: Vec<(u32, String)> = v["Answer"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| a["type"].as_u64() == Some(15))
+        .filter_map(|a| {
+            let (pref, host) = a["data"].as_str()?.split_once(' ')?;
+            Some((
+                pref.parse().ok()?,
+                host.trim_end_matches('.').to_ascii_lowercase(),
+            ))
+        })
+        .collect();
+    mx.sort();
+    mx.into_iter().map(|(_, h)| h).collect()
+}
+
+/// IMAP servers from a Thunderbird autoconfig (ISPDB) document.
+fn parse_autoconfig(xml: &str, address: &str, domain: &str) -> Vec<(String, u16)> {
+    let tag = |block: &str, name: &str| -> Option<String> {
+        let open = format!("<{name}>");
+        let start = block.find(&open)? + open.len();
+        let end = block[start..].find(&format!("</{name}>"))? + start;
+        Some(block[start..end].trim().to_string())
+    };
+    xml.split("<incomingServer")
+        .skip(1)
+        .filter(|b| b.starts_with(" type=\"imap\""))
+        .filter(|b| tag(b, "socketType").as_deref() == Some("SSL"))
+        .filter_map(|b| {
+            let host = tag(b, "hostname")?
+                .replace("%EMAILDOMAIN%", domain)
+                .replace("%EMAILADDRESS%", address);
+            Some((host, tag(b, "port")?.parse().ok()?))
+        })
+        .collect()
+}
+
+/// Works out which IMAP server serves an address: known providers from the
+/// MX records, Thunderbird's provider database, then common host names, each
+/// checked live for a TLS certificate and an IMAP greeting.
+pub async fn discover(address: &str) -> anyhow::Result<Discovery> {
+    let address = address.trim();
+    let domain = address
+        .rsplit_once('@')
+        .map(|(_, d)| d)
+        .unwrap_or(address)
+        .trim()
+        .to_ascii_lowercase();
+    anyhow::ensure!(
+        domain.contains('.'),
+        "{address} doesn't look like an email address"
+    );
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()?;
+
+    let mx = match http
+        .get("https://cloudflare-dns.com/dns-query")
+        .query(&[("name", domain.as_str()), ("type", "MX")])
+        .header("accept", "application/dns-json")
+        .send()
+        .await
+    {
+        Ok(r) => parse_mx(&r.json().await.unwrap_or_default()),
+        Err(_) => Vec::new(),
+    };
+
+    let mut guesses: Vec<(String, u16, String)> = Vec::new();
+    let known = known_provider(&mx, &domain);
+    if let Some((name, Some(host), _)) = &known {
+        guesses.push((host.clone(), 993, format!("{name} (known provider)")));
+    }
+    // Thunderbird's provider database, by domain and then by the MX's domain.
+    let mut lookups = vec![domain.clone()];
+    if let Some(m) = mx.first() {
+        let parts: Vec<_> = m.split('.').collect();
+        if parts.len() >= 2 {
+            lookups.push(parts[parts.len() - 2..].join("."));
+        }
+    }
+    for d in lookups {
+        if let Ok(r) = http
+            .get(format!("https://autoconfig.thunderbird.net/v1.1/{d}"))
+            .send()
+            .await
+            && r.status().is_success()
+            && let Ok(xml) = r.text().await
+        {
+            for (h, p) in parse_autoconfig(&xml, address, &domain) {
+                guesses.push((h, p, "Thunderbird provider database".into()));
+            }
+            break;
+        }
+    }
+    for m in mx.iter().take(2) {
+        guesses.push((m.clone(), 993, "MX record".into()));
+    }
+    for prefix in ["imap", "mail"] {
+        guesses.push((format!("{prefix}.{domain}"), 993, "common name".into()));
+    }
+    let mut seen = std::collections::HashSet::new();
+    guesses.retain(|(h, p, _)| seen.insert((h.clone(), *p)));
+    guesses.truncate(8);
+
+    let probes = guesses.into_iter().map(|(host, port, source)| async move {
+        let r = open(&host, port, Duration::from_secs(6)).await;
+        ImapCandidate {
+            reachable: r.is_ok(),
+            note: r.err().map(|e| e.to_string()),
+            host,
+            port,
+            source,
+        }
+    });
+    let mut candidates = futures_util::future::join_all(probes).await;
+    // Keep the order of confidence, but servers that answered go first.
+    candidates.sort_by_key(|c| !c.reachable);
+    Ok(Discovery {
+        domain,
+        mx,
+        provider: known.as_ref().map(|k| k.0.to_string()),
+        advice: known.map(|k| k.2.to_string()),
+        candidates,
+    })
 }
 
 /// What one message turned into, or why it was left out.
@@ -731,5 +997,33 @@ mod tests {
         assert_eq!(e.body.as_deref(), Some("Can you look at this today?"));
         assert_eq!(e.external_id, "abc@x");
         assert!(is_spam_folder("Junk") && is_spam_folder("INBOX.spam") && !is_spam_folder("INBOX"));
+    }
+
+    #[test]
+    fn finds_imap_hosts_from_mx_and_autoconfig() {
+        let doh = json!({"Answer": [
+            {"type": 15, "data": "20 backup.mxrouting.net."},
+            {"type": 15, "data": "10 heracles.mxrouting.net."},
+            {"type": 5, "data": "ignored"}
+        ]});
+        let mx = parse_mx(&doh);
+        assert_eq!(mx, vec!["heracles.mxrouting.net", "backup.mxrouting.net"]);
+        let p = known_provider(&mx, "vince.dev").unwrap();
+        assert_eq!(
+            (p.0, p.1.as_deref()),
+            ("MXroute", Some("heracles.mxrouting.net"))
+        );
+        assert_eq!(known_provider(&[], "gmail.com").unwrap().0, "Google");
+        assert!(known_provider(&["mx.example.org".into()], "example.org").is_none());
+
+        let xml = r#"<clientConfig><emailProvider id="x">
+          <incomingServer type="pop3"><hostname>pop.x.com</hostname><port>995</port><socketType>SSL</socketType></incomingServer>
+          <incomingServer type="imap"><hostname>imap.%EMAILDOMAIN%</hostname><port>993</port><socketType>SSL</socketType></incomingServer>
+          <incomingServer type="imap"><hostname>plain.x.com</hostname><port>143</port><socketType>STARTTLS</socketType></incomingServer>
+        </emailProvider></clientConfig>"#;
+        assert_eq!(
+            parse_autoconfig(xml, "a@x.com", "x.com"),
+            vec![("imap.x.com".to_string(), 993)]
+        );
     }
 }

@@ -271,3 +271,13 @@
 .usage-window-head { display: flex; justify-content: space-between; }
 .usage-window .subtle { font-size: var(--text-xs); }
 .usage-pop > button { justify-self: start; }
+
+/* Connection setup assistant */
+.assist { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.assist-row { display: flex; align-items: center; gap: 12px; margin: 4px 0 16px; flex-wrap: wrap; }
+.assist-row .assist { align-items: flex-start; }
+.secret-card { display: flex; flex-direction: column; gap: 10px; border-color: var(--tone-info-fg); background: var(--tone-info-bg); }
+.secret-card .approval-head { color: var(--tone-info-fg); }
+.secret-card .setting { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.secret-card .toolbar { align-items: center; }
+.secret-card p { margin: 0; font-size: 12px; }

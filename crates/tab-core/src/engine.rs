@@ -77,6 +77,8 @@ pub enum EngineEvent {
         session_id: String,
         id: String,
     },
+    /// Settings were saved, by the person or by an agent setting up a connection.
+    ConfigChanged,
 }
 
 const MAX_CONCURRENT_RANKS: usize = 4;

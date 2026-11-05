@@ -16,6 +16,33 @@ export function openOnboarding() {
   window.dispatchEvent(new CustomEvent("tab:onboarding"));
 }
 
+/** Item the Work tab should show when it next mounts or hears `tab:open-item`. */
+export let pendingOpen: string | null = null;
+export function takePendingOpen() {
+  const id = pendingOpen;
+  pendingOpen = null;
+  return id;
+}
+
+/** Switches to the Work tab with one item (and its chat) open. */
+export function openItem(id: string) {
+  pendingOpen = id;
+  window.dispatchEvent(new CustomEvent("tab:open-item", { detail: id }));
+}
+
+/**
+ * Starts a chat whose agent sets up a connection, and opens it. The agent
+ * finds settings itself (for email, the IMAP server from the address) and
+ * asks for passwords only through a card in the chat.
+ */
+export async function startSetupChat(connectorName?: string) {
+  const text = connectorName
+    ? `Help me connect ${connectorName} to tab. Work out the settings for me and ask me only for what you can't find.`
+    : "Help me connect a new service to tab. Ask me which one, then work out the settings for me.";
+  const { item } = await api.chatSend(null, text);
+  openItem(item.id);
+}
+
 function suggestions(item: QueueItem): string[] {
   const app = item.kind.split(".")[0];
   if (item.kind === "github.review_requested") return ["Review this PR and list the risks", "Check out the branch and run the tests", "Draft review comments"];
@@ -58,7 +85,7 @@ export function ChatView({ item }: { item: QueueItem }) {
 
   return (
     <div className="chat">
-      <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} />
+      <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
       <Composer chat={chat} onSend={send} placeholder={`Ask about this, or tell the agent what to do…`} />
     </div>
@@ -78,7 +105,7 @@ export function AgentStatus({ chat }: { chat: Chat | undefined }) {
   );
 }
 
-export function Transcript({ chat, suggestions, onSuggest, intro }: { chat: Chat | undefined; suggestions?: string[]; onSuggest?: (s: string) => void; intro?: React.ReactNode }) {
+export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { chat: Chat | undefined; suggestions?: string[]; onSuggest?: (s: string) => void; onSend?: (text: string) => void; intro?: React.ReactNode }) {
   const stream = useStream(chat?.session?.id);
   const end = useRef<HTMLDivElement>(null);
   const messages = chat?.messages ?? [];
@@ -111,7 +138,7 @@ export function Transcript({ chat, suggestions, onSuggest, intro }: { chat: Chat
   return (
     <div className="transcript">
       <div className="transcript-head"><AgentStatus chat={chat} /></div>
-      {messages.map((m) => (m.kind === "tool_result" && [...results.values()].includes(m) ? null : <MessageView key={m.id} m={m} result={results.get(m.id)} />))}
+      {messages.map((m) => (m.kind === "tool_result" && [...results.values()].includes(m) ? null : <MessageView key={m.id} m={m} result={results.get(m.id)} onSend={onSend} />))}
       {stream && (
         <div className="msg msg-assistant streaming">
           <Markdown text={stream} />
@@ -126,8 +153,9 @@ export function Transcript({ chat, suggestions, onSuggest, intro }: { chat: Chat
   );
 }
 
-function MessageView({ m, result }: { m: SessionMessage; result?: SessionMessage }) {
+function MessageView({ m, result, onSend }: { m: SessionMessage; result?: SessionMessage; onSend?: (text: string) => void }) {
   if (m.role === "user") return <div className="msg msg-user">{m.content}</div>;
+  if (m.kind === "secret_request") return <SecretCard m={m} onSend={onSend} />;
   if (m.kind === "text") return <div className="msg msg-assistant"><Markdown text={m.content} /></div>;
   if (m.kind === "tool")
     return (
@@ -148,6 +176,65 @@ function MessageView({ m, result }: { m: SessionMessage; result?: SessionMessage
     return <div className="msg-note">{[secs != null && `${secs}s`, cost != null && `$${Number(cost).toFixed(3)}`].filter(Boolean).join(" · ")}</div>;
   }
   return <div className="msg-note">{m.content}</div>;
+}
+
+const MASK = "••••••••";
+
+/**
+ * Where the person types a connection's password or token. It goes straight
+ * into tab's settings; the agent only hears that it was entered.
+ */
+function SecretCard({ m, onSend }: { m: SessionMessage; onSend?: (text: string) => void }) {
+  const { data: config } = useConfig();
+  const qc = useQueryClient();
+  const fields: { key: string; label: string; help?: string | null }[] = m.meta?.fields ?? [];
+  const id: string = m.meta?.connector_id;
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const saved = config?.connectors[id]?.settings ?? {};
+  const allSet = fields.every((f) => saved[f.key] === MASK);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await api.connectionSetSecrets(id, values);
+      qc.setQueryData(keys.config, next);
+      setDone(true);
+      setValues({});
+      onSend?.(`I entered my ${fields.map((f) => f.label.toLowerCase()).join(" and ")} for ${m.meta?.name ?? id}. Please test the connection.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form className="approval secret-card" onSubmit={(e) => (e.preventDefault(), submit())}>
+      <div className="approval-head"><Icon name="lock" size={14} /> {m.content}</div>
+      {m.meta?.reason && <p className="subtle">{m.meta.reason}</p>}
+      {fields.map((f) => (
+        <label key={f.key} className="setting">
+          {f.label}
+          <span className="input">
+            <input type="password" autoComplete="off" value={values[f.key] ?? ""} placeholder={allSet ? "Saved. Type to replace" : ""} onChange={(e) => setValues({ ...values, [f.key]: e.target.value })} />
+          </span>
+          {f.help && <small>{f.help}</small>}
+        </label>
+      ))}
+      <p className="subtle">Saved straight to tab's settings on this computer. The agent never sees it.</p>
+      {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
+      <div className="toolbar">
+        <Button type="submit" size="sm" variant="primary" icon="check" disabled={busy || fields.some((f) => !values[f.key]?.trim())}>
+          {busy ? "Saving…" : "Save"}
+        </Button>
+        {(done || allSet) && <span className="subtle"><Icon name="check" size={12} /> Saved</span>}
+      </div>
+    </form>
+  );
 }
 
 function ApprovalCard({ approval }: { approval: Approval }) {

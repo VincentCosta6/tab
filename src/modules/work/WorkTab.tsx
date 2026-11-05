@@ -9,6 +9,7 @@ import { timeAgo, timeUntil } from "../../lib/format";
 import { useItems } from "../../lib/hooks";
 import { keys } from "../../lib/query";
 import type { ItemState, QueueItem, Urgency } from "../../lib/types";
+import { takePendingOpen } from "./Chat";
 import { ItemPane } from "./ItemPane";
 import { NewChat } from "./NewChat";
 import { SnoozeMenu } from "./SnoozeMenu";
@@ -38,6 +39,22 @@ export function WorkTab() {
   // Changing what's listed starts from the top; otherwise keep the selection,
   // so opening a related (or done) item from the pane sticks.
   useEffect(() => setSelected((s) => (s === NEW ? s : null)), [view, app, query]);
+  // A chat started elsewhere (e.g. "Set up with assistant" in Connections).
+  useEffect(() => {
+    const open = () => {
+      const id = takePendingOpen();
+      if (!id) return;
+      setView("open");
+      setApp(null);
+      setQuery("");
+      // After the reset above clears the selection.
+      setTimeout(() => setSelected(id));
+      qc.invalidateQueries({ queryKey: keys.allItems });
+    };
+    open();
+    window.addEventListener("tab:open-item", open);
+    return () => window.removeEventListener("tab:open-item", open);
+  }, [qc]);
   useEffect(() => {
     if (!selected && visible.length) setSelected(visible[0].id);
   }, [visible, selected]);

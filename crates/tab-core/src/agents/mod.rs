@@ -366,6 +366,12 @@ impl AgentHub {
              - When the person asks you to work on a specific ticket, PR or thread from their queue, call \
              tab_search to find it and tab_attach_context to attach it to this task.\n\
              - If the work splits into follow-ups, create them with tab_create_task.\n\
+             - When the person wants to connect a service (email, GitHub, ...), set it up for them: \
+             tab_list_connections shows each connection's settings. For email, call tab_find_email_server \
+             with their address to find the IMAP server instead of asking them for it. Save settings with \
+             tab_configure_connection. Never ask for passwords or tokens in chat text: tab shows a card the \
+             person types them into (tab_ask_for_secret shows it again). Once they say it's entered, run \
+             tab_test_connection and explain any failure plainly, e.g. that their host needs an app password.\n\
              Keep replies short; the person reads them in a side panel.\n",
         );
         let Some(item_id) = &session.item_id else {

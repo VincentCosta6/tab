@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde::Serialize;
 use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint};
+use tab_core::config::ConnectorConfig;
 use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
 use tab_core::connectors::registry;
 use tab_core::gateway::RateLimitState;
@@ -28,37 +29,64 @@ const SECRET_MASK: &str = "••••••••";
 
 type SharedEngine = Arc<RwLock<Option<EngineHandle>>>;
 
-struct AppState {
+/// What the app and the MCP server share: the store, the running engine and settings.
+struct Core {
     store: Arc<Store>,
     gateway: Arc<Gateway>,
     events: broadcast::Sender<EngineEvent>,
     engine: SharedEngine,
     hub: Arc<AgentHub>,
-    mcp_url: std::sync::Mutex<Option<String>>,
     config: Mutex<TabConfig>,
     config_path: PathBuf,
+}
+
+struct AppState {
+    core: Arc<Core>,
+    mcp_url: std::sync::Mutex<Option<String>>,
     workspaces: Arc<Workspaces>,
 }
 
+impl std::ops::Deref for AppState {
+    type Target = Core;
+    fn deref(&self) -> &Core {
+        &self.core
+    }
+}
+
 /// Lets the MCP server reach whichever engine is running now.
-struct LiveEngine(SharedEngine);
+struct LiveEngine(Arc<Core>);
 
 #[async_trait]
 impl EngineAccess for LiveEngine {
     async fn create_task(&self, task: NewTask) -> anyhow::Result<QueueItem> {
-        let guard = self.0.read().await;
+        let guard = self.0.engine.read().await;
         guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
             .create_task(task)
     }
     async fn preview(&self, item_id: &str) -> anyhow::Result<Preview> {
-        let guard = self.0.read().await;
+        let guard = self.0.engine.read().await;
         guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
             .preview(item_id)
             .await
+    }
+    async fn connectors(&self) -> anyhow::Result<Vec<ConnectorInfo>> {
+        let guard = self.0.engine.read().await;
+        Ok(guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
+            .connectors())
+    }
+    async fn connector_config(&self, id: &str) -> anyhow::Result<Option<ConnectorConfig>> {
+        Ok(self.0.config.lock().await.connectors.get(id).cloned())
+    }
+    async fn save_connector(&self, id: &str, cfg: ConnectorConfig) -> anyhow::Result<()> {
+        let mut next = self.0.config.lock().await.clone();
+        next.connectors.insert(id.to_string(), cfg);
+        self.0.apply(next).await.map(|_| ())
     }
 }
 
@@ -68,7 +96,7 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-impl AppState {
+impl Core {
     async fn restart(&self, cfg: &TabConfig) {
         let mut engine = self.engine.write().await;
         if let Some(old) = engine.take() {
@@ -101,6 +129,22 @@ impl AppState {
             )
             .start(),
         );
+    }
+
+    /// Saves settings, restarts the engine with them and tells the UI.
+    async fn apply(&self, next: TabConfig) -> anyhow::Result<TabConfig> {
+        let mut current = self.config.lock().await;
+        next.save(&self.config_path)?;
+        let ranking_changed = next.ranking != current.ranking || next.profile != current.profile;
+        *current = next.clone();
+        drop(current);
+        self.hub.set_config(next.agent.clone()).await;
+        self.restart(&next).await;
+        if ranking_changed && let Some(e) = self.engine.read().await.as_ref() {
+            e.rerank_all()?;
+        }
+        let _ = self.events.send(EngineEvent::ConfigChanged);
+        Ok(next)
     }
 }
 
@@ -607,18 +651,42 @@ async fn get_config(state: State<'_, AppState>) -> CmdResult<TabConfig> {
 
 #[tauri::command]
 async fn save_config(state: State<'_, AppState>, config: TabConfig) -> CmdResult<TabConfig> {
-    let mut current = state.config.lock().await;
-    let next = unmask(config, &current);
-    next.save(&state.config_path).map_err(err)?;
-    let ranking_changed = next.ranking != current.ranking || next.profile != current.profile;
-    *current = next.clone();
-    drop(current);
-    state.hub.set_config(next.agent.clone()).await;
-    state.restart(&next).await;
-    if ranking_changed {
-        with_engine!(state, e => e.rerank_all().map_err(err))?;
+    let next = unmask(config, &*state.config.lock().await);
+    state.apply(next).await.map(|c| masked(&c)).map_err(err)
+}
+
+/// Saves secrets the person typed into a setup card in the chat, and turns
+/// the connection on once everything it needs is set. Only secret fields are
+/// accepted here; agents fill in the rest.
+#[tauri::command]
+async fn connection_set_secrets(
+    state: State<'_, AppState>,
+    id: String,
+    values: serde_json::Map<String, serde_json::Value>,
+) -> CmdResult<TabConfig> {
+    let descriptor = registry()
+        .into_iter()
+        .map(|f| f.descriptor())
+        .find(|d| d.id == id)
+        .ok_or("no such connection")?;
+    let mut next = state.config.lock().await.clone();
+    let cfg = next.connectors.entry(id.clone()).or_default();
+    for (k, v) in values {
+        let secret = descriptor
+            .settings
+            .iter()
+            .any(|f| f.key == k && f.kind == SettingKind::Secret);
+        if !secret {
+            return Err(format!("{k} isn't a secret setting"));
+        }
+        cfg.settings.insert(k, v);
     }
-    Ok(masked(&next))
+    cfg.enabled = descriptor.settings.iter().filter(|f| f.required).all(|f| {
+        cfg.settings
+            .get(&f.key)
+            .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty()))
+    });
+    state.apply(next).await.map(|c| masked(&c)).map_err(err)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -664,15 +732,18 @@ pub fn run() {
                 data_dir.clone(),
             );
             let engine: SharedEngine = Arc::new(RwLock::new(None));
-            let state = AppState {
+            let core = Arc::new(Core {
                 store: store.clone(),
                 gateway,
                 events: events.clone(),
-                engine: engine.clone(),
+                engine,
                 hub: hub.clone(),
-                mcp_url: std::sync::Mutex::new(None),
                 config: Mutex::new(config.clone()),
                 config_path,
+            });
+            let state = AppState {
+                core: core.clone(),
+                mcp_url: std::sync::Mutex::new(None),
                 workspaces: Arc::new(Workspaces::new(data_dir.join("workspaces"))),
             };
             tauri::async_runtime::block_on(async {
@@ -681,7 +752,7 @@ pub fn run() {
                 let server = Arc::new(McpServer {
                     store,
                     hub: hub.clone(),
-                    engine: Arc::new(LiveEngine(engine)),
+                    engine: Arc::new(LiveEngine(core)),
                     events,
                     token: config.mcp.token.clone(),
                 });
@@ -714,6 +785,7 @@ pub fn run() {
             api_usage,
             get_config,
             save_config,
+            connection_set_secrets,
             rate_pressure,
             item_context,
             context_add,

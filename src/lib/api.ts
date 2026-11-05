@@ -41,6 +41,7 @@ export const api = {
   createTask: (task: NewTask) => call<QueueItem>("create_task", { task }),
   chatOpen: (itemId: string) => call<Chat>("chat_open", { itemId }),
   chatSend: (itemId: string | null, text: string) => call<ChatStarted>("chat_send", { itemId, text }),
+  connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),
   chatStop: (sessionId: string) => call<void>("chat_stop", { sessionId }),
   approvalResolve: (id: string, decision: "allow" | "always" | "deny", message?: string) =>
     call<boolean>("approval_resolve", { id, decision, message: message ?? null }),

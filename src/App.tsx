@@ -32,6 +32,12 @@ function Shell() {
   }, [config]);
 
   useEffect(() => {
+    const work = () => setActive("work");
+    window.addEventListener("tab:open-item", work);
+    return () => window.removeEventListener("tab:open-item", work);
+  }, []);
+
+  useEffect(() => {
     const open = () => setOnboarding(true);
     window.addEventListener("tab:onboarding", open);
     return () => window.removeEventListener("tab:onboarding", open);

@@ -143,6 +143,10 @@ function LiveEvents() {
           if (key) qc.setQueryData<Chat>(key, (c) => (c ? { ...c, approvals: [...c.approvals.filter((a) => a.id !== e.approval.id), e.approval] } : c));
           break;
         }
+        case "config_changed":
+          qc.invalidateQueries({ queryKey: keys.config });
+          qc.invalidateQueries({ queryKey: keys.connectors });
+          break;
         case "approval_resolved": {
           const key = chatKeyForSession(qc, e.session_id);
           if (key) qc.setQueryData<Chat>(key, (c) => (c ? { ...c, approvals: c.approvals.filter((a) => a.id !== e.id) } : c));

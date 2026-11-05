@@ -6,6 +6,7 @@ import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useConfig, useSaveConfig } from "../../lib/hooks";
 import type { ConnectorInfo, ConnectorStatus, Tone } from "../../lib/types";
+import { startSetupChat } from "../work/Chat";
 import { ApiUsage } from "./ApiUsage";
 import { GhConnect } from "./GhConnect";
 
@@ -52,6 +53,7 @@ export function ConnectionsTab() {
       <PageHeader
         title="Connections"
         subtitle="Everything tab knows comes in through a connection. Each one brings its own kinds of work, settings and rate budgets."
+        actions={<AssistButton />}
       />
       <div className="page-tabs">
         <Tabs<View>
@@ -90,6 +92,38 @@ export function ConnectionsTab() {
         })}
       {view === "usage" && <ApiUsage />}
     </div>
+  );
+}
+
+/** Hands setup to the agent in a new chat. */
+function AssistButton({ name, primary }: { name?: string; primary?: boolean }) {
+  const { data: config } = useConfig();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (config && !config.agent.kind) return null;
+  return (
+    <span className="assist">
+      <Button
+        size="sm"
+        variant={primary ? "primary" : "secondary"}
+        icon="bot"
+        disabled={busy}
+        title="An agent works out the settings with you in a chat. Passwords go into a card, never the chat."
+        onClick={async () => {
+          setBusy(true);
+          setError(null);
+          try {
+            await startSetupChat(name);
+          } catch (e) {
+            setError(String(e));
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? "Starting…" : name ? "Set up with assistant" : "Connect with assistant"}
+      </Button>
+      {error && <small className="text-danger">{error}</small>}
+    </span>
   );
 }
 
@@ -177,6 +211,12 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
         ))}
       </header>
       <p className="connector-desc large">{c.description}</p>
+      {c.available && !c.builtin && (
+        <div className="assist-row">
+          <AssistButton name={c.name} primary={!c.enabled && c.id === "email"} />
+          <span className="subtle">{c.id === "email" ? "Give it your address and it finds your mail server, signs in and checks your folders." : "An agent fills in the settings with you in a chat."}</span>
+        </div>
+      )}
       {error && <p className="chat-error">{error}</p>}
 
       {c.features.length > 0 && (

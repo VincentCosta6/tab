@@ -1,7 +1,7 @@
 //! Built-in connectors. Each file is one integration; [`registry`] lists them all.
 
 mod demo;
-mod email;
+pub mod email;
 mod github;
 pub mod github_review;
 mod planned;

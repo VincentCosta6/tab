@@ -9,6 +9,10 @@
 //! * `tab_add_found`: file something relevant under the item's Found section.
 //! * `tab_attach_context`: attach a queue item (or link) as Context.
 //! * `tab_create_task`: create a tab task, optionally scheduled.
+//! * `tab_list_connections`, `tab_find_email_server`, `tab_configure_connection`,
+//!   `tab_ask_for_secret`, `tab_test_connection`: the setup assistant. Agents
+//!   fill in everything but secrets; secrets go through a card in the chat
+//!   that the person types into, so the agent never sees them.
 //! * `approve`: Claude Code's `--permission-prompt-tool`; asks the person.
 
 use std::sync::Arc;
@@ -23,8 +27,11 @@ use chrono::Utc;
 use serde_json::{Value, json};
 
 use crate::agents::{AgentHub, Decision, summarize_tool};
+use crate::config::ConnectorConfig;
 use crate::engine::EngineEvent;
-use crate::model::{ContextSection, ItemState, NewContext, NewTask, Preview, QueueItem};
+use crate::model::{
+    ConnectorInfo, ContextSection, ItemState, NewContext, NewTask, Preview, QueueItem, SettingKind,
+};
 use crate::store::Store;
 
 /// What the MCP server needs from the running engine.
@@ -32,6 +39,19 @@ use crate::store::Store;
 pub trait EngineAccess: Send + Sync + 'static {
     async fn create_task(&self, task: NewTask) -> anyhow::Result<QueueItem>;
     async fn preview(&self, item_id: &str) -> anyhow::Result<Preview>;
+
+    /// Connector types and their live state.
+    async fn connectors(&self) -> anyhow::Result<Vec<ConnectorInfo>> {
+        anyhow::bail!("connections can't be changed from here")
+    }
+    /// One connection's saved settings, secrets included. Never sent to agents.
+    async fn connector_config(&self, _id: &str) -> anyhow::Result<Option<ConnectorConfig>> {
+        anyhow::bail!("connections can't be changed from here")
+    }
+    /// Saves one connection and restarts the engine with it.
+    async fn save_connector(&self, _id: &str, _cfg: ConnectorConfig) -> anyhow::Result<()> {
+        anyhow::bail!("connections can't be changed from here")
+    }
 }
 
 pub struct McpServer {
@@ -181,6 +201,42 @@ pub fn tools() -> Value {
             }, "required": ["title"] }
         },
         {
+            "name": "tab_list_connections",
+            "description": "List tab's connections (email, GitHub, Slack, ...): whether each is installed, its status, its settings fields and their current values. Secret values are shown only as set or not set.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "tab_find_email_server",
+            "description": "Work out the IMAP server for an email address: reads its MX records, recognizes known providers (MXroute, Gmail, iCloud, Fastmail, ...), checks Thunderbird's provider database, and tests each candidate live for a valid TLS certificate and an IMAP greeting.",
+            "inputSchema": { "type": "object", "properties": {
+                "address": { "type": "string", "description": "The person's email address." }
+            }, "required": ["address"] }
+        },
+        {
+            "name": "tab_configure_connection",
+            "description": "Save a connection's settings (everything except secrets) and install it. If a required secret such as a password is missing, a card appears in the chat for the person to type it; wait for them to say it's entered, then call tab_test_connection.",
+            "inputSchema": { "type": "object", "properties": {
+                "connector_id": { "type": "string" },
+                "settings": { "type": "object", "description": "Setting keys from tab_list_connections and their values. Leave out secrets." },
+                "enable": { "type": "boolean", "description": "Install it once everything required is set. Default true." }
+            }, "required": ["connector_id", "settings"] }
+        },
+        {
+            "name": "tab_ask_for_secret",
+            "description": "Show the card in the chat where the person types a connection's secrets (password, token) again, for example after a failed sign-in. Never ask for secrets in chat text.",
+            "inputSchema": { "type": "object", "properties": {
+                "connector_id": { "type": "string" },
+                "reason": { "type": "string", "description": "One line shown on the card, e.g. what kind of password is needed." }
+            }, "required": ["connector_id"] }
+        },
+        {
+            "name": "tab_test_connection",
+            "description": "Check a connection with its saved settings. For email, signs in and reports the folders and message counts; errors come back as text to act on.",
+            "inputSchema": { "type": "object", "properties": {
+                "connector_id": { "type": "string" }
+            }, "required": ["connector_id"] }
+        },
+        {
             "name": "approve",
             "description": "Permission prompt: asks the person in tab whether a tool call may run.",
             "inputSchema": { "type": "object", "properties": {
@@ -192,7 +248,52 @@ pub fn tools() -> Value {
     ])
 }
 
+/// Labels of required settings that have no value yet.
+fn missing_required(info: &ConnectorInfo, cfg: &ConnectorConfig) -> Vec<String> {
+    info.descriptor
+        .settings
+        .iter()
+        .filter(|f| f.required)
+        .filter(|f| match cfg.settings.get(&f.key) {
+            None | Some(Value::Null) => true,
+            Some(Value::String(s)) => s.trim().is_empty(),
+            _ => false,
+        })
+        .map(|f| f.label.clone())
+        .collect()
+}
+
 impl McpServer {
+    async fn connector_info(&self, id: &str) -> anyhow::Result<ConnectorInfo> {
+        self.engine
+            .connectors()
+            .await?
+            .into_iter()
+            .find(|c| c.descriptor.id == id)
+            .ok_or_else(|| anyhow::anyhow!("no connection {id}; see tab_list_connections"))
+    }
+
+    /// Puts the card in the chat where the person types a connection's secrets.
+    fn ask_secret(&self, session: Option<&str>, info: &ConnectorInfo, reason: Option<String>) {
+        let Some(session) = session.filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let d = &info.descriptor;
+        let fields: Vec<_> = d
+            .settings
+            .iter()
+            .filter(|f| f.kind == SettingKind::Secret)
+            .map(|f| json!({ "key": f.key, "label": f.label, "help": f.help }))
+            .collect();
+        self.hub.post(
+            session,
+            "system",
+            "secret_request",
+            &format!("Enter your {} details", d.name),
+            json!({ "connector_id": d.id, "name": d.name, "icon": d.icon, "fields": fields, "reason": reason }),
+        );
+    }
+
     async fn dispatch(&self, session: Option<&str>, req: Value) -> Option<Value> {
         let id = req.get("id").cloned();
         let method = req["method"].as_str().unwrap_or_default();
@@ -203,7 +304,7 @@ impl McpServer {
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "tab", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "tab is the person's work queue. Search it, read items, file what you find under Found, attach context and create tasks."
+                "instructions": "tab is the person's work queue. Search it, read items, file what you find under Found, attach context and create tasks, and set up connections (email, GitHub, ...) for the person."
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": tools() })),
@@ -342,6 +443,143 @@ impl McpServer {
                     item.id, item.event.kind
                 )))
             }
+            "tab_list_connections" => {
+                let mut out = Vec::new();
+                for c in self.engine.connectors().await? {
+                    let saved = self.engine.connector_config(&c.descriptor.id).await?;
+                    let fields: Vec<_> = c
+                        .descriptor
+                        .settings
+                        .iter()
+                        .map(|f| {
+                            let v = saved.as_ref().and_then(|s| s.settings.get(&f.key));
+                            let value = if f.kind == SettingKind::Secret {
+                                json!(
+                                    if v.and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
+                                        "(set)"
+                                    } else {
+                                        "(not set)"
+                                    }
+                                )
+                            } else {
+                                v.cloned().unwrap_or(Value::Null)
+                            };
+                            json!({ "key": f.key, "label": f.label, "kind": f.kind,
+                                    "required": f.required, "help": f.help, "value": value })
+                        })
+                        .collect();
+                    out.push(json!({
+                        "id": c.descriptor.id,
+                        "name": c.descriptor.name,
+                        "description": c.descriptor.description,
+                        "available": c.descriptor.available,
+                        "installed": c.enabled,
+                        "status": c.status,
+                        "settings": fields,
+                    }));
+                }
+                Ok(text(serde_json::to_string_pretty(&out)?))
+            }
+            "tab_find_email_server" => {
+                let address = s("address").ok_or_else(|| anyhow::anyhow!("address is required"))?;
+                let found = crate::connectors::email::discover(&address).await?;
+                Ok(text(serde_json::to_string_pretty(&found)?))
+            }
+            "tab_configure_connection" => {
+                let id =
+                    s("connector_id").ok_or_else(|| anyhow::anyhow!("connector_id is required"))?;
+                let info = self.connector_info(&id).await?;
+                let d = &info.descriptor;
+                anyhow::ensure!(d.available, "{} isn't built yet", d.name);
+                let mut cfg = self.engine.connector_config(&id).await?.unwrap_or_default();
+                let given = args["settings"].as_object().cloned().unwrap_or_default();
+                for (k, v) in given {
+                    let field = d.settings.iter().find(|f| f.key == k).ok_or_else(|| {
+                        anyhow::anyhow!("{} has no setting {k}; see tab_list_connections", d.name)
+                    })?;
+                    anyhow::ensure!(
+                        field.kind != SettingKind::Secret,
+                        "Don't pass {}: the person types secrets into the card from tab_ask_for_secret.",
+                        field.label
+                    );
+                    cfg.settings.insert(k, v);
+                }
+                let missing = missing_required(&info, &cfg);
+                let enable = args["enable"].as_bool().unwrap_or(true);
+                cfg.enabled = enable && missing.is_empty();
+                self.engine.save_connector(&id, cfg.clone()).await?;
+                let secrets: Vec<_> = d
+                    .settings
+                    .iter()
+                    .filter(|f| f.kind == SettingKind::Secret && missing.contains(&f.label))
+                    .collect();
+                if !secrets.is_empty() {
+                    self.ask_secret(session, &info, None);
+                    return Ok(text(format!(
+                        "Saved. {} still needs {} from the person: a card is now in the chat for them to type it. \
+                         Tell them it's there, then stop and wait for their next message before testing.",
+                        d.name,
+                        missing.join(", ")
+                    )));
+                }
+                if !missing.is_empty() {
+                    return Ok(text(format!(
+                        "Saved, but not installed yet: still missing {}.",
+                        missing.join(", ")
+                    )));
+                }
+                Ok(text(if cfg.enabled {
+                    format!(
+                        "Saved and installed {}. Call tab_test_connection to check it.",
+                        d.name
+                    )
+                } else {
+                    format!("Saved {} without installing it.", d.name)
+                }))
+            }
+            "tab_ask_for_secret" => {
+                let id =
+                    s("connector_id").ok_or_else(|| anyhow::anyhow!("connector_id is required"))?;
+                let info = self.connector_info(&id).await?;
+                anyhow::ensure!(
+                    info.descriptor
+                        .settings
+                        .iter()
+                        .any(|f| f.kind == SettingKind::Secret),
+                    "{} has no secrets to enter",
+                    info.descriptor.name
+                );
+                self.ask_secret(session, &info, s("reason"));
+                Ok(text(
+                    "The card is in the chat. Stop and wait for the person to say they've entered it.",
+                ))
+            }
+            "tab_test_connection" => {
+                let id =
+                    s("connector_id").ok_or_else(|| anyhow::anyhow!("connector_id is required"))?;
+                let info = self.connector_info(&id).await?;
+                let cfg = self.engine.connector_config(&id).await?.unwrap_or_default();
+                let missing = missing_required(&info, &cfg);
+                anyhow::ensure!(missing.is_empty(), "Not set yet: {}", missing.join(", "));
+                if id == "email" {
+                    return Ok(text(match crate::connectors::email::check(&cfg).await {
+                        Ok(report) => format!(
+                            "{report}{}",
+                            if cfg.enabled {
+                                "The connection is installed and syncing."
+                            } else {
+                                "Signed in, but the connection is off: call tab_configure_connection with enable true."
+                            }
+                        ),
+                        Err(e) => format!("Sign-in failed: {e:#}"),
+                    }));
+                }
+                Ok(text(format!(
+                    "{} has no live test; its status is {}",
+                    info.descriptor.name,
+                    serde_json::to_string(&info.status)?
+                )))
+            }
             "approve" => {
                 let tool = s("tool_name").unwrap_or_else(|| "tool".into());
                 let input = args["input"].clone();
@@ -446,7 +684,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 11);
 
         // Create a task, a ticket to find, then file it under Found on the task.
         let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}});
@@ -505,6 +743,119 @@ mod tests {
                 .unwrap()
                 .contains("PAY-12")
         );
+    }
+
+    /// An engine with connections kept in memory.
+    struct Connections(std::sync::Mutex<std::collections::HashMap<String, ConnectorConfig>>);
+
+    #[async_trait]
+    impl EngineAccess for Connections {
+        async fn create_task(&self, _: NewTask) -> anyhow::Result<QueueItem> {
+            anyhow::bail!("unused")
+        }
+        async fn preview(&self, _: &str) -> anyhow::Result<Preview> {
+            anyhow::bail!("unused")
+        }
+        async fn connectors(&self) -> anyhow::Result<Vec<ConnectorInfo>> {
+            let saved = self.0.lock().unwrap();
+            Ok(crate::connectors::registry()
+                .into_iter()
+                .map(|f| {
+                    let descriptor = f.descriptor();
+                    ConnectorInfo {
+                        enabled: saved.get(&descriptor.id).is_some_and(|c| c.enabled),
+                        descriptor,
+                        status: crate::model::ConnectorStatus::Disabled,
+                    }
+                })
+                .collect())
+        }
+        async fn connector_config(&self, id: &str) -> anyhow::Result<Option<ConnectorConfig>> {
+            Ok(self.0.lock().unwrap().get(id).cloned())
+        }
+        async fn save_connector(&self, id: &str, cfg: ConnectorConfig) -> anyhow::Result<()> {
+            self.0.lock().unwrap().insert(id.into(), cfg);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn sets_up_a_connection_without_seeing_the_password() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let engine = Arc::new(Connections(Default::default()));
+        let server = McpServer {
+            store: store.clone(),
+            hub,
+            engine: engine.clone(),
+            events,
+            token: "t".into(),
+        };
+        let session = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let out = |v: anyhow::Result<Value>| {
+            v.map(|v| v["content"][0]["text"].as_str().unwrap().to_string())
+        };
+
+        // Secrets can't be passed by the agent.
+        let refused = out(server
+            .call(
+                Some(&session.id),
+                "tab_configure_connection",
+                json!({"connector_id": "email", "settings": {"password": "x"}}),
+            )
+            .await);
+        assert!(refused.unwrap_err().to_string().contains("card"));
+
+        let saved = out(server
+            .call(
+                Some(&session.id),
+                "tab_configure_connection",
+                json!({"connector_id": "email",
+                "settings": {"host": "heracles.mxrouting.net", "username": "v@x.dev"}}),
+            )
+            .await)
+        .unwrap();
+        assert!(saved.contains("Password"), "{saved}");
+        let cfg = engine.0.lock().unwrap()["email"].clone();
+        assert!(!cfg.enabled, "not on until the password is in");
+        assert_eq!(cfg.str("host"), Some("heracles.mxrouting.net"));
+
+        // The card is in the chat, with the field to type into.
+        let card = store.messages(&session.id).unwrap().pop().unwrap();
+        assert_eq!(card.kind, "secret_request");
+        assert_eq!(card.meta["fields"][0]["key"], "password");
+
+        let listed = out(server.call(None, "tab_list_connections", json!({})).await).unwrap();
+        assert!(listed.contains("(not set)") && listed.contains("heracles"));
+
+        // Once the person typed it, it shows as set, never as the value.
+        engine
+            .0
+            .lock()
+            .unwrap()
+            .get_mut("email")
+            .unwrap()
+            .settings
+            .insert("password".into(), json!("hunter2"));
+        let listed = out(server.call(None, "tab_list_connections", json!({})).await).unwrap();
+        assert!(listed.contains("(set)") && !listed.contains("hunter2"));
+
+        let bad = out(server
+            .call(
+                None,
+                "tab_configure_connection",
+                json!({"connector_id": "email", "settings": {"nope": 1}}),
+            )
+            .await);
+        assert!(bad.is_err());
     }
 
     async fn server_call(url: &str, session: &str, body: Value) -> Value {

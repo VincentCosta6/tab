@@ -91,7 +91,8 @@ export type EngineEvent =
   | { type: "session_message"; message: SessionMessage }
   | { type: "session_delta"; session_id: string; text: string }
   | { type: "approval_requested"; approval: Approval }
-  | { type: "approval_resolved"; session_id: string; id: string };
+  | { type: "approval_resolved"; session_id: string; id: string }
+  | { type: "config_changed" };
 
 export interface Preview { item_id: string; blocks: Block[]; fetched_at: string | null; stale: boolean }
 
@@ -128,7 +129,7 @@ export interface SessionMessage {
   id: number;
   session_id: string;
   role: "user" | "assistant" | "tool" | "system";
-  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result";
+  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request";
   content: string;
   meta: any;
   created_at: string;
