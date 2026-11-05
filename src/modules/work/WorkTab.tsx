@@ -1,47 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Badge, EmptyState, ScorePill, SourceIcon, Tabs, TextInput, cx } from "../../design/components";
+import { useQueryClient } from "@tanstack/react-query";
+import { Badge, Button, EmptyState, ScorePill, Tabs, TextInput, cx } from "../../design/components";
+import { Brand, SourceGlyph, hasBrand } from "../../design/brands";
 import { Icon } from "../../design/icons";
-import { api, onEngineEvent } from "../../lib/api";
+import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
-import type { ItemState, QueueItem, Tone, Urgency } from "../../lib/types";
-import { ItemDetailPane } from "./ItemDetail";
+import { useItems } from "../../lib/hooks";
+import { keys } from "../../lib/query";
+import type { ItemState, QueueItem, Urgency } from "../../lib/types";
+import { ItemPane } from "./ItemPane";
+import { NewChat } from "./NewChat";
+import { SnoozeMenu } from "./SnoozeMenu";
 
 const urgencyOrder: Urgency[] = ["now", "today", "this_week", "whenever"];
 const urgencyHeading: Record<Urgency, string> = { now: "Now", today: "Today", this_week: "This week", whenever: "Whenever" };
+const NEW = "__new__";
 
 export function WorkTab() {
-  const { kind, apps } = useApp();
+  const { apps } = useApp();
+  const qc = useQueryClient();
   const [view, setView] = useState<ItemState>("open");
   const [app, setApp] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [items, setItems] = useState<QueueItem[]>([]);
+  const { data: items = [] } = useItems(view, query);
   const [selected, setSelected] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-
-  const load = useCallback(async () => {
-    const states: ItemState[] = [view];
-    setItems(query.trim() ? await api.searchItems(query, states) : await api.listItems(states));
-  }, [view, query]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  // Live updates: coalesce bursts of engine events into one reload.
-  useEffect(() => {
-    let t: number | undefined;
-    let off: (() => void) | undefined;
-    onEngineEvent((e) => {
-      if (e.type !== "item_changed") return;
-      clearTimeout(t);
-      t = window.setTimeout(load, 150);
-    }).then((u) => (off = u));
-    return () => {
-      clearTimeout(t);
-      off?.();
-    };
-  }, [load]);
 
   const counts = useMemo(() => {
     const c: Record<string, number> = {};
@@ -52,8 +36,8 @@ export function WorkTab() {
   const visible = useMemo(() => (app ? items.filter((i) => i.kind.startsWith(`${app}.`)) : items), [items, app]);
 
   // Changing what's listed starts from the top; otherwise keep the selection,
-  // so opening a related (or done) item from the detail pane sticks.
-  useEffect(() => setSelected(null), [view, app, query]);
+  // so opening a related (or done) item from the pane sticks.
+  useEffect(() => setSelected((s) => (s === NEW ? s : null)), [view, app, query]);
   useEffect(() => {
     if (!selected && visible.length) setSelected(visible[0].id);
   }, [visible, selected]);
@@ -73,21 +57,35 @@ export function WorkTab() {
   /** After acting on an item, select the next one so triage keeps flowing. */
   const advance = useCallback(
     (id: string) => {
+      if (id !== selected) return;
       const idx = visible.findIndex((i) => i.id === id);
       const next = visible[idx + 1] ?? visible[idx - 1];
       setSelected(next?.id ?? null);
     },
-    [visible],
+    [visible, selected],
+  );
+
+  // Optimistic: the row leaves the list right away; the engine event confirms.
+  const act = useCallback(
+    async (item: QueueItem, action: "done" | "reopen" | { snooze: number }) => {
+      advance(item.id);
+      qc.setQueriesData<QueueItem[]>({ queryKey: keys.allItems }, (xs) => xs?.filter((x) => x.id !== item.id));
+      if (action === "done") await api.markDone(item.id);
+      else if (action === "reopen") await api.reopen(item.id);
+      else await api.snooze(item.id, action.snooze);
+    },
+    [advance, qc],
   );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+      const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement)?.isContentEditable;
       if (e.key === "Escape" && typing) (e.target as HTMLElement).blur();
       if (typing || e.metaKey || e.ctrlKey) return;
       if (e.key === "j" || e.key === "ArrowDown") (e.preventDefault(), move(1));
       if (e.key === "k" || e.key === "ArrowUp") (e.preventDefault(), move(-1));
       if (e.key === "/") (e.preventDefault(), searchRef.current?.focus());
+      if (e.key === "n") (e.preventDefault(), setSelected(NEW));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -106,6 +104,11 @@ export function WorkTab() {
         <div className="queue-top">
           <div className="queue-title">
             <h1>Work</h1>
+            <Button variant={selected === NEW ? "primary" : "secondary"} size="sm" icon="plus" shortcut="N" onClick={() => setSelected(NEW)}>
+              New
+            </Button>
+          </div>
+          <div className="queue-filters">
             <Tabs<ItemState>
               value={view}
               onChange={setView}
@@ -125,7 +128,7 @@ export function WorkTab() {
               .filter((a) => counts[a.id])
               .map((a) => (
                 <button key={a.id} className={cx("chip", app === a.id && "active")} onClick={() => setApp(app === a.id ? null : a.id)}>
-                  <Icon name={a.icon} size={12} /> {a.label} <span className="count">{counts[a.id]}</span>
+                  {hasBrand(a.icon) ? <Brand name={a.icon} size={12} /> : <Icon name={a.icon} size={12} />} {a.label} <span className="count">{counts[a.id]}</span>
                 </button>
               ))}
           </div>
@@ -140,33 +143,74 @@ export function WorkTab() {
             <div key={g.urgency ?? "all"}>
               {g.urgency && <div className={cx("urgency-group", `urgency-${g.urgency}`)}>{urgencyHeading[g.urgency]}</div>}
               {g.items.map((i) => (
-                <QueueRow key={i.id} item={i} selected={i.id === selected} onSelect={() => setSelected(i.id)} kindIcon={kind(i.kind).icon} kindTone={kind(i.kind).tone} />
+                <QueueRow key={i.id} item={i} selected={i.id === selected} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
               ))}
             </div>
           ))}
         </div>
       </section>
-      <section className="detail">
-        {selected ? <ItemDetailPane id={selected} onActed={advance} onSelect={setSelected} /> : <EmptyState icon="inbox" title="Nothing selected" />}
+      <section className="pane">
+        {selected === NEW ? (
+          <NewChat onStarted={(itemId) => {
+            setView("open");
+            setSelected(itemId);
+          }} />
+        ) : selected ? (
+          <ItemPane key={selected} id={selected} onActed={advance} onSelect={setSelected} />
+        ) : (
+          <EmptyState icon="inbox" title="Nothing selected">Pick something from the queue, or start a new chat.</EmptyState>
+        )}
       </section>
     </div>
   );
 }
 
-export function QueueRow({ item, selected, onSelect, kindIcon, kindTone }: { item: QueueItem; selected: boolean; onSelect: () => void; kindIcon: string; kindTone: Tone }) {
+/**
+ * One queue row. Hover actions sit in an overlay on the right edge, on top
+ * of the score and time, so showing them never moves or wraps any content.
+ */
+export function QueueRow({ item, selected, onSelect, onAct, compact }: {
+  item: QueueItem;
+  selected: boolean;
+  onSelect: () => void;
+  onAct?: (a: "done" | "reopen" | { snooze: number }) => void;
+  compact?: boolean;
+}) {
+  const { kind } = useApp();
+  const k = kind(item.kind);
+  const [menu, setMenu] = useState(false);
   return (
-    <div id={`row-${item.id}`} role="option" aria-selected={selected} className={cx("row", selected && "selected")} onClick={onSelect}>
-      <SourceIcon icon={kindIcon} tone={kindTone} />
+    <div id={compact ? undefined : `row-${item.id}`} role="option" aria-selected={selected} className={cx("row", selected && "selected", menu && "menu-open", compact && "compact")} onClick={onSelect}>
+      <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={compact ? 24 : 28} />
       <div className="row-main">
         <div className="row-title">{item.title}</div>
         <div className="row-meta">{[item.actor, item.context].filter(Boolean).join(" · ")}</div>
-        {item.ranking && <div className="row-reason">{item.ranking.reason}</div>}
+        {!compact && item.body && <div className="row-snippet">{item.body}</div>}
       </div>
       <div className="row-side">
         <ScorePill score={item.ranking?.score} urgency={item.ranking?.urgency} pending={!item.ranking} />
         <span className="row-time">{timeAgo(item.occurred_at)}</span>
         {item.state === "snoozed" && item.snoozed_until && <Badge icon="clock">{timeUntil(item.snoozed_until)}</Badge>}
       </div>
+      {onAct && (
+        <div className="row-actions" onClick={(e) => e.stopPropagation()}>
+          {item.state === "done" ? (
+            <button className="row-action" title="Reopen" onClick={() => onAct("reopen")}>
+              <Icon name="undo" size={15} />
+            </button>
+          ) : (
+            <>
+              <button className={cx("row-action", menu && "active")} title="Snooze" onClick={() => setMenu((v) => !v)}>
+                <Icon name="clock" size={15} />
+              </button>
+              <button className="row-action" title="Done" onClick={() => onAct("done")}>
+                <Icon name="check" size={15} />
+              </button>
+            </>
+          )}
+          {menu && <SnoozeMenu onPick={(m) => (setMenu(false), onAct({ snooze: m }))} onClose={() => setMenu(false)} />}
+        </div>
+      )}
     </div>
   );
 }

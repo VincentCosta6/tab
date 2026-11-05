@@ -1,0 +1,61 @@
+import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { TabMark } from "../../design/brands";
+import { Icon } from "../../design/icons";
+import { api } from "../../lib/api";
+import { keys } from "../../lib/query";
+import type { Chat } from "../../lib/types";
+import { Composer } from "./Chat";
+
+const starters = [
+  "Work on the checkout latency incident",
+  "Resolve the review comments on my open PR",
+  "Remind me to send the SOC 2 evidence on Friday",
+  "What should I do first today?",
+];
+
+/**
+ * A fresh chat. The first message becomes a tab task (so it is queued and
+ * ranked like everything else) and starts the agent session on that task.
+ * Asking about something already in the queue ("work on PAY-12") lets the
+ * agent find it and attach it as context.
+ */
+export function NewChat({ onStarted }: { onStarted: (itemId: string) => void }) {
+  const qc = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const send = async (text: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const { item, session } = await api.chatSend(null, text);
+      qc.setQueryData(keys.item(item.id), item);
+      qc.setQueryData<Chat>(keys.chat(item.id), { session, messages: [], approvals: [], running: true });
+      qc.invalidateQueries({ queryKey: keys.allItems });
+      onStarted(item.id);
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="new-chat">
+      <div className="new-chat-hero">
+        <TabMark size={36} />
+        <h2>What should tab work on?</h2>
+        <p className="subtle">Describe the work, or point at something in your queue. tab files it as a task and starts an agent on it.</p>
+      </div>
+      <Composer chat={busy ? { session: null, messages: [], approvals: [], running: true } : undefined} onSend={send} placeholder="Work on PAY-1234 · resolve the comments on #482 · remind me tomorrow to…" autoFocus />
+      {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
+      <div className="suggestions">
+        {starters.map((s) => (
+          <button key={s} className="suggestion" disabled={busy} onClick={() => send(s)}>
+            <Icon name="zap" size={13} /> {s}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}

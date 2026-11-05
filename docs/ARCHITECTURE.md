@@ -95,8 +95,15 @@ Every call is a `Call { provider, connector, purpose, method, url, cache_ttl }`.
 - **Concurrency**: at most 4 in-flight calls per provider.
 - **Audit**: one row per attempt in `api_audit`: provider, connector, purpose, method, redacted URL, outcome (`network`, `cache_hit`, `revalidated`, `stale`, `rate_limited`, `error`), status, duration, and the limit state at the time. Secrets in query strings are masked. 30-day retention. The Connections tab shows limits, usage grouped by caller and purpose, and the raw log.
 
+**Budgets (built)**: every `ConnectorDescriptor` declares `rate_limits` (`RateLimitSpec { provider, resource, requests, per_seconds, burst }`), and the engine registers them with the gateway's `Limiter` for every connector, installed or not. The limiter keeps a sliding window of requests that actually went over the network and computes *headroom* as the lower of local (declared budget minus usage) and remote (provider-reported remaining over limit).
+- Calls carry a priority via a task-local: anything inside `ratelimit::background(...)` is background work; everything else is interactive. Connectors don't change.
+- Interactive calls go out unless the declared budget is fully spent.
+- Background calls are deferred (`Outcome::Deferred`, served stale when cached) when headroom is under 30%, or for 30 seconds after a burst (more than `burst` requests in 10 seconds).
+- The Connections → API usage tab shows live pressure per bucket: usage, headroom, recent burst count, cool-down, deferred count.
+
+**Preview cache (built)**: `previews` holds each item's rendered blocks. `EngineHandle::preview` returns whatever is cached immediately, however old, and queues a background refresh if it is past the connector's `preview_ttl()`. Only a never-seen item waits on the network. A refresher task runs every 45 seconds, takes the most important open items with missing, dirty (item changed upstream) or stale previews, and refreshes at most 12 per pass at background priority, skipping a connector for the rest of the pass once it is deferred. Results arrive in the UI as `PreviewChanged` events. In the UI, React Query runs with `staleTime` and `gcTime` at infinity and is persisted to localStorage; engine events patch exactly the affected queries, so nothing polls.
+
 **Next (designed)**:
-- *Budgets*: per-connector share of a provider's limit, and priority classes (interactive preview > background poll > backfill). Background work yields when remaining quota drops below a reserve.
 - *CLI tools*: a `CommandProvider` that runs `gh`, `jira`, etc. through the same audit and concurrency limits, with output caching keyed by argv.
 - *Local token buckets* for providers that don't send limit headers (Slack tiers are documented, not reported).
 
@@ -156,9 +163,11 @@ schedule (cron)
 - The **visual builder** is a node canvas (trigger → condition → action) generated from action descriptors, the same metadata pattern connectors use. Connectors can contribute actions.
 - Safety: dry-run mode, per-automation rate limits, and confirmation for destructive actions until the automation is marked trusted.
 
-## MCP server (designed)
+## MCP server (built: core tools; designed: the rest)
 
-A local MCP server (Streamable HTTP on localhost with a per-install token, plus stdio for CLI agents) so any agent (Claude, ChatGPT, OpenCode) can use and configure tab.
+Built: Streamable HTTP (JSON responses) on `127.0.0.1:47821` (next free port if taken), bearer token generated on first launch and shown in Settings. Tools: `tab_search`, `tab_get_item`, `tab_add_found`, `tab_attach_context`, `tab_create_task`, and `approve` (Claude Code's `--permission-prompt-tool`). Sessions started by tab send `X-Tab-Session`, so "add to Found" lands on the right task without an id.
+
+Designed: a local MCP server (Streamable HTTP on localhost with a per-install token, plus stdio for CLI agents) so any agent (Claude, ChatGPT, OpenCode) can use and configure tab.
 
 - **Read**: `queue_list`, `queue_search`, `item_get` (with preview blocks), `graph_search`, `graph_neighbors`, `item_related`.
 - **Act**: `item_done`, `item_snooze`, `link_context` (attach an artifact or note to items/entities), `report_status` (for agent sessions).
@@ -167,7 +176,14 @@ A local MCP server (Streamable HTTP on localhost with a per-install token, plus 
 
 Configuration tools write the same config and tables the UI does, so "set up an automation that snoozes Dependabot PRs until Friday" in chat produces exactly what the builder would.
 
-## Agent sessions (designed)
+## Agent sessions (built: Claude Code and OpenCode)
+
+Built (`tab-core/src/agents`): one session per item, reused on every message; transcripts in `sessions` / `session_messages`; events `SessionChanged`, `SessionMessage`, `SessionDelta` (streaming text), `ApprovalRequested` / `ApprovalResolved`.
+- *Claude Code*: one `claude -p --output-format stream-json --include-partial-messages` process per turn, `--resume` with the stored session id, `--append-system-prompt-file` with the item and its Context, `--mcp-config` pointing at tab, and `--permission-prompt-tool mcp__tab__approve` so approvals come to the chat. Runs the user's own Claude Code install and login. `bypassPermissions` is never offered.
+- *OpenCode*: tab starts `opencode serve` on a free localhost port (or uses a configured URL), injects its MCP server through `OPENCODE_CONFIG_CONTENT`, creates a session per task, sends `prompt_async` with the context as `system`, follows `GET /event` (SSE) for text deltas, tool parts and `permission.asked`, and answers permissions with `POST /permission/{id}/reply`.
+- Windows: executables are resolved with `which` (so npm `.cmd` shims work) and started without a console window.
+
+Still designed: a PTY terminal view for arbitrary CLI agents (below).
 
 Agent-agnostic by design. The only hard requirement is that the agent's terminal can be streamed into tab and answered from tab.
 
@@ -179,7 +195,9 @@ Agent-agnostic by design. The only hard requirement is that the agent's terminal
 - `needs_input` and `needs_review` become queue items (kinds `agent.needs_input`, `agent.needs_review`) ranked like everything else; the detail pane embeds the live terminal, and `Choices` blocks become one-click answers.
 - Transcripts are stored as files and linked into the graph (agent_session entity ↔ repo, PR, items it touched).
 
-## GitHub review tool (designed)
+## GitHub review tool (built: diff and line comments)
+
+Built: the GitHub module adds a Reviews tab (shown while GitHub or sample data is installed) and a Review action on PR items. Monaco is bundled locally with its workers. PR metadata is cached briefly; file contents are fetched by commit SHA and cached for a month; comments post to `pulls/{n}/comments` through the gateway. Below is the remaining design.
 
 A module that adds a review surface for PR items and a GitHub tab.
 

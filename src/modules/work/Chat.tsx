@@ -1,0 +1,230 @@
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Button, cx } from "../../design/components";
+import { Brand } from "../../design/brands";
+import { Icon } from "../../design/icons";
+import { Markdown } from "../../design/markdown";
+import { api } from "../../lib/api";
+import { useChat, useConfig, useStream } from "../../lib/hooks";
+import { keys } from "../../lib/query";
+import type { AgentKind, Approval, Chat, QueueItem, SessionMessage, SessionStatus } from "../../lib/types";
+
+export const agentLabel: Record<AgentKind, string> = { claude_code: "Claude Code", opencode: "OpenCode" };
+const agentBrand: Record<AgentKind, string> = { claude_code: "claude", opencode: "opencode" };
+
+export function openOnboarding() {
+  window.dispatchEvent(new CustomEvent("tab:onboarding"));
+}
+
+function suggestions(item: QueueItem): string[] {
+  const app = item.kind.split(".")[0];
+  if (item.kind === "github.review_requested") return ["Review this PR and list the risks", "Check out the branch and run the tests", "Draft review comments"];
+  if (item.kind === "github.ci_failed") return ["Find why CI failed and fix it", "Show me the failing test"];
+  if (app === "slack" || app === "email") return ["Draft a reply", "Find everything related to this", "Summarize the thread"];
+  if (item.kind === "meeting.action_item") return ["Start a draft of this", "Find related docs and tickets"];
+  if (app === "tab") return ["Work on this", "Break this into steps", "Find related work in my queue"];
+  return ["Summarize this and suggest next steps", "Work on this", "Find related work in my queue"];
+}
+
+/** The chat for one item. Its first message starts a session; later ones resume it. */
+export function ChatView({ item }: { item: QueueItem }) {
+  const { data: chat } = useChat(item.id);
+  const qc = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+
+  const send = async (text: string) => {
+    setError(null);
+    // Show the message immediately; the stored copy replaces it.
+    qc.setQueryData<Chat>(keys.chat(item.id), (c) => ({
+      session: c?.session ?? null,
+      approvals: c?.approvals ?? [],
+      running: true,
+      messages: [...(c?.messages ?? []), { id: -Date.now(), session_id: c?.session?.id ?? "", role: "user", kind: "text", content: text, meta: null, created_at: new Date().toISOString() }],
+    }));
+    try {
+      const started = await api.chatSend(item.id, text);
+      qc.setQueryData<Chat>(keys.chat(item.id), (c) => ({
+        session: started.session,
+        approvals: c?.approvals ?? [],
+        running: true,
+        messages: (c?.messages ?? []).filter((m) => m.id > 0),
+      }));
+      qc.invalidateQueries({ queryKey: keys.chat(item.id) });
+    } catch (e) {
+      setError(String(e));
+      qc.invalidateQueries({ queryKey: keys.chat(item.id) });
+    }
+  };
+
+  return (
+    <div className="chat">
+      <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} />
+      {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
+      <Composer chat={chat} onSend={send} placeholder={`Ask about this, or tell the agent what to do…`} />
+    </div>
+  );
+}
+
+export function AgentStatus({ chat }: { chat: Chat | undefined }) {
+  const s = chat?.session;
+  if (!s) return null;
+  const status: SessionStatus = chat.approvals.length ? "needs_input" : s.status;
+  const text = { idle: "Idle", working: "Working…", needs_input: "Needs you", failed: "Failed" }[status];
+  return (
+    <span className={cx("agent-status", `agent-${status}`)}>
+      <Brand name={agentBrand[s.agent]} size={12} />
+      {agentLabel[s.agent]} · {text}
+    </span>
+  );
+}
+
+export function Transcript({ chat, suggestions, onSuggest, intro }: { chat: Chat | undefined; suggestions?: string[]; onSuggest?: (s: string) => void; intro?: React.ReactNode }) {
+  const stream = useStream(chat?.session?.id);
+  const end = useRef<HTMLDivElement>(null);
+  const messages = chat?.messages ?? [];
+  const results = new Map<number, SessionMessage>();
+  // Pair each tool call with the result that follows it.
+  messages.forEach((m, i) => {
+    if (m.kind === "tool" && messages[i + 1]?.kind === "tool_result") results.set(m.id, messages[i + 1]);
+  });
+
+  useLayoutEffect(() => {
+    end.current?.scrollIntoView({ block: "end" });
+  }, [messages.length, stream, chat?.approvals.length]);
+
+  if (!messages.length && !stream)
+    return (
+      <div className="transcript empty-chat">
+        {intro}
+        {suggestions && onSuggest && (
+          <div className="suggestions">
+            {suggestions.map((s) => (
+              <button key={s} className="suggestion" onClick={() => onSuggest(s)}>
+                <Icon name="zap" size={13} /> {s}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+
+  return (
+    <div className="transcript">
+      <div className="transcript-head"><AgentStatus chat={chat} /></div>
+      {messages.map((m) => (m.kind === "tool_result" && [...results.values()].includes(m) ? null : <MessageView key={m.id} m={m} result={results.get(m.id)} />))}
+      {stream && (
+        <div className="msg msg-assistant streaming">
+          <Markdown text={stream} />
+        </div>
+      )}
+      {chat?.running && !stream && !chat.approvals.length && (
+        <div className="msg-working"><span className="dots"><i /><i /><i /></span> Working</div>
+      )}
+      {chat?.approvals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
+      <div ref={end} />
+    </div>
+  );
+}
+
+function MessageView({ m, result }: { m: SessionMessage; result?: SessionMessage }) {
+  if (m.role === "user") return <div className="msg msg-user">{m.content}</div>;
+  if (m.kind === "text") return <div className="msg msg-assistant"><Markdown text={m.content} /></div>;
+  if (m.kind === "tool")
+    return (
+      <details className={cx("msg-tool", result?.meta?.is_error && "failed")}>
+        <summary>
+          <Icon name={m.meta?.tool?.startsWith("mcp__tab") || m.meta?.tool?.startsWith("tab_") ? "graph" : "terminal"} size={12} />
+          <span>{m.content.replace(/^mcp__tab__/, "tab: ")}</span>
+        </summary>
+        {result?.content && <pre>{result.content}</pre>}
+      </details>
+    );
+  if (m.kind === "tool_result") return <details className="msg-tool"><summary><Icon name="terminal" size={12} />Output</summary><pre>{m.content}</pre></details>;
+  if (m.kind === "error") return <div className="msg-error"><Icon name="x-circle" size={14} /><span>{m.content}</span></div>;
+  if (m.kind === "result") {
+    const cost = m.meta?.cost_usd;
+    const secs = m.meta?.duration_ms ? Math.round(m.meta.duration_ms / 1000) : null;
+    if (cost == null && secs == null) return null;
+    return <div className="msg-note">{[secs != null && `${secs}s`, cost != null && `$${Number(cost).toFixed(3)}`].filter(Boolean).join(" · ")}</div>;
+  }
+  return <div className="msg-note">{m.content}</div>;
+}
+
+function ApprovalCard({ approval }: { approval: Approval }) {
+  const [busy, setBusy] = useState(false);
+  const answer = async (d: "allow" | "always" | "deny") => {
+    setBusy(true);
+    await api.approvalResolve(approval.id, d);
+  };
+  return (
+    <div className="approval">
+      <div className="approval-head"><Icon name="shield" size={14} /> The agent wants to run</div>
+      <code className="approval-what">{approval.summary}</code>
+      <div className="toolbar">
+        <Button size="sm" variant="primary" icon="check" disabled={busy} onClick={() => answer("allow")}>Allow</Button>
+        <Button size="sm" disabled={busy} onClick={() => answer("always")}>Always allow</Button>
+        <Button size="sm" variant="ghost" icon="x" disabled={busy} onClick={() => answer("deny")}>Deny</Button>
+      </div>
+    </div>
+  );
+}
+
+export function Composer({ chat, onSend, placeholder, autoFocus }: { chat: Chat | undefined; onSend: (text: string) => void; placeholder: string; autoFocus?: boolean }) {
+  const { data: config } = useConfig();
+  const [text, setText] = useState("");
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const running = !!chat?.running;
+
+  useEffect(() => {
+    const t = ref.current;
+    if (!t) return;
+    t.style.height = "auto";
+    t.style.height = `${Math.min(220, t.scrollHeight)}px`;
+  }, [text]);
+
+  useEffect(() => {
+    if (autoFocus) ref.current?.focus();
+  }, [autoFocus]);
+
+  const submit = () => {
+    const t = text.trim();
+    if (!t || running) return;
+    setText("");
+    onSend(t);
+  };
+
+  if (config && !config.agent.kind)
+    return (
+      <div className="composer composer-setup">
+        <Icon name="bot" size={16} />
+        <span>Chatting runs an agent on your machine. Set one up first.</span>
+        <Button size="sm" variant="primary" onClick={openOnboarding}>Set up agent</Button>
+      </div>
+    );
+
+  return (
+    <div className="composer">
+      <textarea
+        ref={ref}
+        rows={1}
+        value={text}
+        placeholder={placeholder}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) (e.preventDefault(), submit());
+        }}
+      />
+      <div className="composer-foot">
+        <span className="subtle">
+          {config?.agent.kind && <><Brand name={agentBrand[config.agent.kind]} size={11} /> {agentLabel[config.agent.kind]}</>}
+          {chat?.session ? " · continues this task's session" : " · starts a session for this task"}
+        </span>
+        {running && chat?.session ? (
+          <Button size="sm" icon="stop" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
+        ) : (
+          <Button size="sm" variant="primary" icon="arrow-up" disabled={!text.trim()} onClick={submit}>Send</Button>
+        )}
+      </div>
+    </div>
+  );
+}

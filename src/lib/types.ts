@@ -63,6 +63,8 @@ export type ConnectorStatus =
   | { state: "error"; message: string }
   | { state: "stopped" };
 
+export interface RateLimitSpec { provider: string; resource: string; requests: number; per_seconds: number; burst: number; note: string }
+
 export interface ConnectorInfo {
   id: string;
   name: string;
@@ -71,6 +73,10 @@ export interface ConnectorInfo {
   kinds: KindInfo[];
   settings: SettingField[];
   available: boolean;
+  rate_limits: RateLimitSpec[];
+  category: string;
+  features: string[];
+  builtin: boolean;
   enabled: boolean;
   status: ConnectorStatus;
 }
@@ -78,7 +84,79 @@ export interface ConnectorInfo {
 export type Change = "ingested" | "updated" | "ranked" | "snoozed" | "woke" | "done" | "reopened";
 export type EngineEvent =
   | { type: "item_changed"; change: Change; item: QueueItem }
-  | { type: "connector_changed"; connector: ConnectorInfo };
+  | { type: "connector_changed"; connector: ConnectorInfo }
+  | { type: "preview_changed"; preview: Preview }
+  | { type: "context_changed"; item_id: string }
+  | { type: "session_changed"; session: Session }
+  | { type: "session_message"; message: SessionMessage }
+  | { type: "session_delta"; session_id: string; text: string }
+  | { type: "approval_requested"; approval: Approval }
+  | { type: "approval_resolved"; session_id: string; id: string };
+
+export interface Preview { item_id: string; blocks: Block[]; fetched_at: string | null; stale: boolean }
+
+export type ContextSection = "context" | "found";
+export interface ContextEntry {
+  id: string;
+  item_id: string;
+  section: ContextSection;
+  pinned: boolean;
+  ref_item: QueueItem | null;
+  url: string | null;
+  title: string;
+  summary: string | null;
+  added_by: string;
+  created_at: string;
+}
+export interface NewContext { section: ContextSection; ref_item_id?: string | null; url?: string | null; title: string; summary?: string | null; added_by: string }
+export interface ItemContext { item: QueueItem; entries: ContextEntry[]; related: QueueItem[] }
+
+export type AgentKind = "claude_code" | "opencode";
+export type SessionStatus = "idle" | "working" | "needs_input" | "failed";
+export interface Session {
+  id: string;
+  item_id: string | null;
+  agent: AgentKind;
+  agent_session_id: string | null;
+  title: string;
+  status: SessionStatus;
+  cwd: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface SessionMessage {
+  id: number;
+  session_id: string;
+  role: "user" | "assistant" | "tool" | "system";
+  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result";
+  content: string;
+  meta: any;
+  created_at: string;
+}
+export interface Approval { id: string; session_id: string; tool: string; summary: string; input: unknown }
+export interface Chat { session: Session | null; messages: SessionMessage[]; approvals: Approval[]; running: boolean }
+export interface ChatStarted { item: QueueItem; session: Session }
+export interface NewTask { title: string; body?: string | null; priority?: string | null; due_at?: string | null; url?: string | null; created_by: string }
+export interface AgentProbe { kind: AgentKind; found: boolean; path: string | null; version: string | null; error: string | null }
+
+export interface Pressure {
+  provider: string;
+  resource: string;
+  used: number;
+  budget: number | null;
+  window_seconds: number | null;
+  remote_remaining: number | null;
+  remote_limit: number | null;
+  headroom: number;
+  recent: number;
+  burst_threshold: number;
+  cooling_until: string | null;
+  deferred: number;
+}
+
+export interface PrFile { filename: string; status: string; additions: number; deletions: number; previous_filename?: string | null; original?: string | null; modified?: string | null }
+export interface ReviewComment { id: number; path: string; line: number | null; side: string | null; body: string; user: string; created_at: string }
+export interface PullReview { repo: string; number: number; title: string; author: string; url: string; base_sha: string; head_sha: string; files: PrFile[]; comments: ReviewComment[]; sample: boolean }
 
 export interface RateLimitState {
   provider: string;
@@ -90,7 +168,7 @@ export interface RateLimitState {
   updated_at: string;
 }
 
-export type Outcome = "network" | "cache_hit" | "revalidated" | "stale" | "rate_limited" | "error";
+export type Outcome = "network" | "cache_hit" | "revalidated" | "stale" | "rate_limited" | "deferred" | "error";
 
 export interface AuditEntry {
   id: number;
@@ -142,4 +220,16 @@ export interface TabConfig {
     ai: { enabled: boolean; api_key: string | null; model: string | null; instructions: string };
   };
   connectors: Record<string, { enabled: boolean; settings: Record<string, unknown> }>;
+  agent: AgentConfig;
+  mcp: { port: number; token: string };
+  onboarded: boolean;
+}
+
+export interface AgentConfig {
+  kind: AgentKind | null;
+  command: string | null;
+  model: string | null;
+  workdir: string | null;
+  permission_mode: string;
+  opencode_url: string | null;
 }

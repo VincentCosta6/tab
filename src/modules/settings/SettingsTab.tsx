@@ -1,4 +1,7 @@
 import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { openOnboarding } from "../work/Chat";
+import { keys } from "../../lib/query";
 import { Button, Card, FormRow, PageHeader, Section, TextArea, TextInput, Toggle } from "../../design/components";
 import { api } from "../../lib/api";
 import type { TabConfig } from "../../lib/types";
@@ -10,6 +13,8 @@ export function SettingsTab() {
   const [draft, setDraft] = useState<TabConfig | null>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const qc = useQueryClient();
+  const mcp = useQuery({ queryKey: ["mcp"], queryFn: api.mcpInfo });
 
   useEffect(() => {
     api.getConfig().then((c) => (setSaved(c), setDraft(c)));
@@ -30,6 +35,7 @@ export function SettingsTab() {
     setBusy(true);
     try {
       const c = await api.saveConfig(draft);
+      qc.setQueryData(keys.config, c);
       setSaved(c);
       setDraft(c);
       setNote("Saved. Open items are being re-ranked; unchanged AI verdicts come from cache.");
@@ -85,6 +91,53 @@ export function SettingsTab() {
                 )
               }
             />
+          </FormRow>
+        </Card>
+      </Section>
+
+      <Section title="Agent" description="The coding agent tab runs for chats. Tool approvals come to you in the chat; nothing runs with permissions bypassed." actions={<Button size="sm" onClick={openOnboarding}>Run setup again</Button>}>
+        <Card>
+          <FormRow label="Agent">
+            <select className="select" value={draft.agent.kind ?? ""} onChange={(e) => set((c) => void (c.agent.kind = (e.target.value || null) as typeof c.agent.kind))}>
+              <option value="">Not set up</option>
+              <option value="opencode">OpenCode</option>
+              <option value="claude_code">Claude Code</option>
+            </select>
+          </FormRow>
+          <FormRow label="Command" help="Leave empty to find it on PATH, or give a full path.">
+            <TextInput placeholder={draft.agent.kind === "opencode" ? "opencode" : "claude"} value={draft.agent.command ?? ""} onChange={(e) => set((c) => void (c.agent.command = e.target.value || null))} />
+          </FormRow>
+          <FormRow label="Work folder" help="Where sessions start.">
+            <TextInput value={draft.agent.workdir ?? ""} onChange={(e) => set((c) => void (c.agent.workdir = e.target.value || null))} />
+          </FormRow>
+          <FormRow label="Model" help={draft.agent.kind === "opencode" ? "provider/model" : "e.g. sonnet, opus"}>
+            <TextInput placeholder="Agent default" value={draft.agent.model ?? ""} onChange={(e) => set((c) => void (c.agent.model = e.target.value || null))} />
+          </FormRow>
+          {draft.agent.kind === "claude_code" && (
+            <FormRow label="Permission mode" help="Anything that still needs approval is asked in the chat.">
+              <select className="select" value={draft.agent.permission_mode} onChange={(e) => set((c) => void (c.agent.permission_mode = e.target.value))}>
+                <option value="default">Ask for edits and commands</option>
+                <option value="acceptEdits">Accept file edits, ask for commands</option>
+                <option value="plan">Plan only</option>
+                <option value="auto">Auto (Claude decides what's safe)</option>
+              </select>
+            </FormRow>
+          )}
+          {draft.agent.kind === "opencode" && (
+            <FormRow label="Server URL" help="Leave empty and tab starts its own OpenCode server.">
+              <TextInput placeholder="http://127.0.0.1:4096" value={draft.agent.opencode_url ?? ""} onChange={(e) => set((c) => void (c.agent.opencode_url = e.target.value || null))} />
+            </FormRow>
+          )}
+        </Card>
+      </Section>
+
+      <Section title="MCP server" description="Agents tab starts are connected automatically. Point any other MCP client here to let it search your queue, file what it finds, and create tasks.">
+        <Card>
+          <FormRow label="URL">
+            <code className="mono">{mcp.data?.url ?? "not running"}</code>
+          </FormRow>
+          <FormRow label="Token" help="Send as Authorization: Bearer …">
+            <Button size="sm" icon="copy" onClick={() => mcp.data && navigator.clipboard.writeText(mcp.data.token)}>Copy token</Button>
           </FormRow>
         </Card>
       </Section>

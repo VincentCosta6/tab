@@ -2,7 +2,8 @@
 // sample data closely enough to design against.
 
 import type {
-  AuditEntry, Block, ConnectorInfo, EngineEvent, ItemState, QueueItem, RateLimitState, TabConfig, Urgency, UsageRow,
+  AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
+  Session, SessionMessage, TabConfig, Urgency, UsageRow,
 } from "./types";
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
@@ -48,8 +49,22 @@ let items: QueueItem[] = seeds.map(([kind, title, body, actor, context, url, min
   };
 });
 
+const base = { rate_limits: [], category: "built_in", features: [] as string[], builtin: false };
 const connectors: ConnectorInfo[] = [
-  { id: "github", name: "GitHub", icon: "github", description: "Review requests, CI failures, mentions and comments from your GitHub notifications.", available: true, enabled: false, status: { state: "disabled" },
+  { ...base, id: "tab", name: "tab", icon: "tab", builtin: true, description: "tab's own tasks and schedules. Anything you or an agent asks tab to do becomes a task here, with a priority, an optional due time, and its own agent session.", available: true, enabled: true, status: { state: "running", last_sync: ago(0) },
+    features: ["Tasks with priority (low, normal, high, urgent) and due times", "Scheduled tasks wake up in the queue when they are due", "Every task can own an agent session", "Agents create and update tasks through tab's MCP server"],
+    kinds: [
+      { kind: "tab.task", label: "Task", icon: "check-square", tone: "accent" },
+      { kind: "tab.scheduled", label: "Scheduled", icon: "clock", tone: "warning" },
+      { kind: "agent.needs_input", label: "Agent needs input", icon: "bot", tone: "warning" },
+      { kind: "agent.needs_review", label: "Agent ready for review", icon: "bot", tone: "accent" },
+    ], settings: [] },
+  { ...base, id: "github", name: "GitHub", icon: "github", category: "code", description: "Review requests, CI failures, mentions and comments from your GitHub notifications.", available: true, enabled: false, status: { state: "disabled" },
+    features: ["Review pull requests in a built-in VS Code editor with side-by-side diffs", "Comment on lines without leaving tab", "Marking an item done marks the notification read"],
+    rate_limits: [
+      { provider: "github", resource: "core", requests: 5000, per_seconds: 3600, burst: 40, note: "REST: 5,000 requests per hour per token" },
+      { provider: "github", resource: "search", requests: 30, per_seconds: 60, burst: 10, note: "Search: 30 requests per minute" },
+    ],
     kinds: [
       { kind: "github.review_requested", label: "Review requested", icon: "git-pull-request", tone: "accent" },
       { kind: "github.ci_failed", label: "CI failed", icon: "x-circle", tone: "danger" },
@@ -59,26 +74,23 @@ const connectors: ConnectorInfo[] = [
       { key: "token", label: "Personal access token", kind: "secret", help: "Needs notifications and repo read access.", required: true },
       { key: "poll_seconds", label: "Poll interval (seconds)", kind: "number", help: "GitHub's requested interval wins if it is longer. Minimum 30.", required: false },
     ] },
-  { id: "demo", name: "Sample data", icon: "sparkles", description: "Realistic sample work from every kind of source, so you can try tab before connecting anything.", available: true, enabled: true, status: { state: "running", last_sync: ago(1) }, kinds: [], settings: [] },
-  { id: "agents", name: "Agent sessions", icon: "bot", description: "Claude Code, Codex, OpenCode or any CLI agent, streamed live with its terminal. Sessions that need you land in the queue.", available: false, enabled: false, status: { state: "disabled" },
-    kinds: [
-      { kind: "agent.needs_input", label: "Agent needs input", icon: "bot", tone: "warning" },
-      { kind: "agent.needs_review", label: "Agent ready for review", icon: "bot", tone: "accent" },
-    ], settings: [] },
-  { id: "slack", name: "Slack", icon: "slack", description: "Mentions, DMs and threads you're in.", available: false, enabled: false, status: { state: "disabled" },
+  { ...base, id: "demo", name: "Sample data", icon: "sparkles", description: "Realistic sample work from every kind of source, so you can try tab before connecting anything.", available: true, enabled: true, status: { state: "running", last_sync: ago(1) }, kinds: [], settings: [] },
+  { ...base, id: "slack", name: "Slack", icon: "slack", category: "communication", description: "Mentions, DMs and threads you're in, with who said it, where, and a short preview.", available: false, enabled: false, status: { state: "disabled" },
+    rate_limits: [{ provider: "slack", resource: "default", requests: 50, per_seconds: 60, burst: 15, note: "Tier 3 methods: about 50 requests per minute" }],
     kinds: [
       { kind: "slack.mention", label: "Mention", icon: "slack", tone: "info" },
       { kind: "slack.dm", label: "Direct message", icon: "slack", tone: "info" },
       { kind: "slack.channel", label: "Channel", icon: "slack", tone: "neutral" },
     ], settings: [] },
-  { id: "gmail", name: "Gmail", icon: "mail", description: "Mail addressed to you, with newsletters and bots filtered down.", available: false, enabled: false, status: { state: "disabled" },
+  { ...base, id: "gmail", name: "Gmail", icon: "gmail", category: "communication", description: "Mail addressed to you, with newsletters and bots filtered down.", available: false, enabled: false, status: { state: "disabled" },
     kinds: [
-      { kind: "email.direct", label: "Email", icon: "mail", tone: "neutral" },
-      { kind: "email.newsletter", label: "Newsletter", icon: "mail", tone: "neutral" },
+      { kind: "email.direct", label: "Email", icon: "gmail", tone: "neutral" },
+      { kind: "email.newsletter", label: "Newsletter", icon: "gmail", tone: "neutral" },
     ], settings: [] },
-  { id: "zoom", name: "Zoom", icon: "video", description: "Action items assigned to you from meeting AI summaries.", available: false, enabled: false, status: { state: "disabled" },
-    kinds: [{ kind: "meeting.action_item", label: "Meeting action item", icon: "video", tone: "accent" }], settings: [] },
-  { id: "jira", name: "Jira", icon: "ticket", description: "Issues assigned to you, mentions, and status changes on work you own.", available: false, enabled: false, status: { state: "disabled" }, kinds: [], settings: [] },
+  { ...base, id: "zoom", name: "Zoom", icon: "zoom", category: "communication", description: "Action items assigned to you from meeting AI summaries.", available: false, enabled: false, status: { state: "disabled" },
+    kinds: [{ kind: "meeting.action_item", label: "Meeting action item", icon: "zoom", tone: "accent" }], settings: [] },
+  { ...base, id: "jira", name: "Jira", icon: "jira", category: "work", description: "Issues assigned to you, mentions, and status changes on work you own.", available: false, enabled: false, status: { state: "disabled" },
+    kinds: [{ kind: "jira.assigned", label: "Assigned issue", icon: "jira", tone: "accent" }], settings: [] },
 ];
 
 const usage: UsageRow[] = [
@@ -110,7 +122,10 @@ let config: TabConfig = {
     rules: { kinds: [], default_score: 30, keywords: [{ contains: "outage", delta: 20 }, { contains: "urgent", delta: 15 }], vip_actors: [], vip_boost: 15, muted: [] },
     ai: { enabled: true, api_key: "••••••••", model: null, instructions: "Anything from on-call or my manager is urgent. Dependabot can wait until Friday." },
   },
-  connectors: { demo: { enabled: true, settings: {} } },
+  connectors: { demo: { enabled: true, settings: {} }, tab: { enabled: true, settings: {} } },
+  agent: { kind: "claude_code", command: null, model: null, workdir: "C:\\Users\\vince\\code", permission_mode: "default", opencode_url: null },
+  mcp: { port: 47821, token: "mock-token" },
+  onboarded: true,
 };
 
 const listeners = new Set<(e: EngineEvent) => void>();
@@ -142,12 +157,13 @@ export const mockApi = {
         }
         case "item_preview": {
           const item = items.find((i) => i.id === args.id);
-          if (!item || !(item.kind.startsWith("github.") || item.kind === "agent.needs_review")) return [];
-          return [
+          const wrap = (blocks: Block[]) => ({ item_id: args.id, blocks, fetched_at: ago(3), stale: false });
+          if (!item || !(item.kind.startsWith("github.") || item.kind === "agent.needs_review")) return wrap([]);
+          return wrap([
             { type: "stats", items: [{ label: "added", value: "+612", tone: "success" }, { label: "removed", value: "−203", tone: "danger" }, { label: "files", value: "14" }, { label: "commits", value: "6" }] },
             { type: "fields", items: [{ label: "State", value: "Open", tone: "success" }, { label: "Branch", value: "idempotency-keys → main" }, { label: "Checks", value: "11 passed, 1 pending", tone: "warning" }] },
             { type: "text", markdown: true, text: "Adds an `Idempotency-Key` header to all webhook deliveries and stores processed keys for 24h.\n\n- Dedupes retries from the queue worker\n- Backfills keys for in-flight deliveries" },
-          ] satisfies Block[];
+          ] satisfies Block[]);
         }
         case "mark_done": return setState(args.id, "done");
         case "snooze": return setState(args.id, "snoozed", new Date(Date.now() + args.minutes * 60_000).toISOString());
@@ -158,6 +174,60 @@ export const mockApi = {
         case "api_usage": return usage;
         case "get_config": return config;
         case "save_config": config = args.config; return config;
+        case "rate_pressure": return pressure();
+        case "item_context": {
+          const item = items.find((i) => i.id === args.id);
+          if (!item) return null;
+          const entries = contexts.filter((c) => c.item_id === item.id);
+          const keys = new Set(item.entities.map((e) => e.key));
+          const attached = new Set(entries.map((e) => e.ref_item?.id));
+          const related = items.filter((o) => o.id !== item.id && !attached.has(o.id) && o.entities.some((e) => keys.has(e.key))).slice(0, 6);
+          return { item, entries, related };
+        }
+        case "context_add": {
+          const ref = items.find((i) => i.id === args.entry.ref_item_id) ?? null;
+          const e: ContextEntry = { id: `ctx-${Date.now()}`, item_id: args.itemId, section: args.entry.section, pinned: false, ref_item: ref, url: args.entry.url ?? null, title: args.entry.title, summary: args.entry.summary ?? null, added_by: args.entry.added_by, created_at: new Date().toISOString() };
+          contexts.push(e);
+          emit({ type: "context_changed", item_id: args.itemId });
+          return e;
+        }
+        case "context_update": {
+          const e = contexts.find((c) => c.id === args.id);
+          if (!e) return null;
+          if (args.section) e.section = args.section;
+          if (args.pinned !== null && args.pinned !== undefined) e.pinned = args.pinned;
+          emit({ type: "context_changed", item_id: e.item_id });
+          return e;
+        }
+        case "context_remove": {
+          const e = contexts.find((c) => c.id === args.id);
+          contexts = contexts.filter((c) => c.id !== args.id);
+          if (e) emit({ type: "context_changed", item_id: e.item_id });
+          return null;
+        }
+        case "create_task": return createTask(args.task.title, args.task.body ?? null);
+        case "chat_open": {
+          const session = sessions.find((s) => s.item_id === args.itemId) ?? null;
+          return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: false } satisfies Chat;
+        }
+        case "chat_send": {
+          const item = args.itemId ? items.find((i) => i.id === args.itemId)! : createTask(String(args.text).split("\n")[0].slice(0, 80), null);
+          let session = sessions.find((s) => s.item_id === item.id);
+          if (!session) {
+            session = { id: `sess-${Date.now()}`, item_id: item.id, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: item.title, status: "working", cwd: "~/code", created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+            sessions.push(session);
+          }
+          simulateTurn(session, item, String(args.text));
+          return { item, session };
+        }
+        case "chat_stop": return null;
+        case "approval_resolve": return true;
+        case "detect_agents": return [
+          { kind: "opencode", found: false, path: null, version: null, error: "`opencode` was not found on PATH." },
+          { kind: "claude_code", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\claude.cmd", version: "2.1.318 (Claude Code)", error: null },
+        ];
+        case "mcp_info": return { url: "http://127.0.0.1:47821/mcp", token: "mock-token" };
+        case "github_pull": return samplePull(args.repo, args.number);
         default: throw new Error(`mock: unknown command ${cmd}`);
       }
     })();
@@ -168,3 +238,81 @@ export const mockApi = {
     return () => listeners.delete(cb);
   },
 };
+
+let contexts: ContextEntry[] = [];
+const sessions: Session[] = [];
+const messages: SessionMessage[] = [];
+let msgId = 1;
+
+function createTask(title: string, body: string | null): QueueItem {
+  const now = new Date().toISOString();
+  const item: QueueItem = {
+    id: `task-${Date.now()}`, source: "tab", external_id: String(Date.now()), kind: "tab.task", title, body, url: null, actor: "you", context: "tab",
+    occurred_at: now, blocks: [], entities: [], metadata: {}, state: "open", snoozed_until: null, created_at: now, updated_at: now,
+    ranking: { score: 62, base_score: 62, ai_adjustment: null, urgency: "today", reason: "A task you created", ranked_by: "rules" },
+  };
+  items = [item, ...items];
+  emit({ type: "item_changed", change: "ingested", item });
+  return item;
+}
+
+function post(session: Session, role: SessionMessage["role"], kind: SessionMessage["kind"], content: string, meta: unknown = null) {
+  const m: SessionMessage = { id: msgId++, session_id: session.id, role, kind, content, meta, created_at: new Date().toISOString() };
+  messages.push(m);
+  emit({ type: "session_message", message: m });
+}
+
+function status(session: Session, s: Session["status"]) {
+  session.status = s;
+  session.agent_session_id = session.agent_session_id ?? "4f1c-mock";
+  emit({ type: "session_changed", session: { ...session } });
+}
+
+/** Plays back a plausible agent turn so the chat can be designed in a browser. */
+function simulateTurn(session: Session, item: QueueItem, text: string) {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    post(session, "user", "text", text);
+    status(session, "working");
+    await sleep(500);
+    post(session, "assistant", "tool", "tab: tab_search: checkout", { tool: "mcp__tab__tab_search" });
+    post(session, "tool", "tool_result", "2 results");
+    const related = items.find((i) => i.id !== item.id && i.kind.startsWith("slack."));
+    if (related) {
+      contexts.push({ id: `ctx-${Date.now()}`, item_id: item.id, section: "found", pinned: false, ref_item: related, url: null, title: related.title, summary: "Same incident; on-call is asking about the cart cache.", added_by: "agent", created_at: new Date().toISOString() });
+      emit({ type: "context_changed", item_id: item.id });
+      post(session, "assistant", "tool", `tab: tab_add_found: ${related.title}`, { tool: "mcp__tab__tab_add_found" });
+      post(session, "tool", "tool_result", "Added under found.");
+    }
+    const reply = `I looked through your queue for context on **${item.title}**.\n\n- The #incident-checkout thread is the same problem, so I filed it under Found.\n- Next I'd check the cart cache TTL change from the 14:10 deploy.\n\nWant me to open a branch and draft the fix?`;
+    for (let i = 0; i < reply.length; i += 12) {
+      emit({ type: "session_delta", session_id: session.id, text: reply.slice(i, i + 12) });
+      await sleep(30);
+    }
+    post(session, "assistant", "text", reply);
+    post(session, "system", "result", "", { cost_usd: 0.021, duration_ms: 8400 });
+    status(session, "idle");
+  })();
+}
+
+function pressure(): Pressure[] {
+  return [
+    { provider: "anthropic", resource: "requests", used: 11, budget: 50, window_seconds: 60, remote_remaining: 3988, remote_limit: 4000, headroom: 0.78, recent: 2, burst_threshold: 10, cooling_until: null, deferred: 0 },
+    { provider: "github", resource: "core", used: 129, budget: 5000, window_seconds: 3600, remote_remaining: 4871, remote_limit: 5000, headroom: 0.97, recent: 3, burst_threshold: 40, cooling_until: null, deferred: 0 },
+    { provider: "github", resource: "search", used: 28, budget: 30, window_seconds: 60, remote_remaining: 2, remote_limit: 30, headroom: 0.07, recent: 12, burst_threshold: 10, cooling_until: new Date(Date.now() + 22_000).toISOString(), deferred: 4 },
+  ];
+}
+
+function samplePull(repo: string, number: number) {
+  const before = `import { Charge } from "./types";\nimport { stripe } from "./clients";\n\nexport async function capture(charge: Charge) {\n  const result = await stripe.charges.capture(charge.id);\n  if (result.status !== "succeeded") {\n    throw new Error(\`capture failed: \${result.status}\`);\n  }\n  return result;\n}\n`;
+  const after = `import { Charge } from "./types";\nimport { stripe } from "./clients";\nimport { backoff } from "./backoff";\n\nconst MAX_ATTEMPTS = 4;\n\nexport async function capture(charge: Charge) {\n  for (let attempt = 1; ; attempt++) {\n    try {\n      const result = await stripe.charges.capture(charge.id, {\n        idempotencyKey: \`capture-\${charge.id}\`,\n      });\n      if (result.status !== "succeeded") {\n        throw new Error(\`capture failed: \${result.status}\`);\n      }\n      return result;\n    } catch (err) {\n      if (attempt >= MAX_ATTEMPTS || !isRetryable(err)) throw err;\n      await backoff(attempt);\n    }\n  }\n}\n`;
+  return {
+    repo, number, title: "Retry payment capture with idempotency keys", author: "dana-k", url: `https://github.com/${repo}/pull/${number}`,
+    base_sha: "sample-base", head_sha: "sample-head", sample: true,
+    files: [
+      { filename: "src/capture.ts", status: "modified", additions: 18, deletions: 4, original: before, modified: after },
+      { filename: "src/backoff.ts", status: "added", additions: 5, deletions: 0, original: "", modified: "export function backoff(attempt: number) {\n  const ceiling = Math.min(8000, 250 * 2 ** attempt);\n  return new Promise((r) => setTimeout(r, Math.random() * ceiling));\n}\n" },
+    ],
+    comments: [{ id: 1, path: "src/capture.ts", line: 18, side: "RIGHT", body: "Should card_declined ever be retried?", user: "dana-k", created_at: ago(60) }],
+  };
+}

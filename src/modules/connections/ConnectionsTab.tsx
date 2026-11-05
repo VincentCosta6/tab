@@ -1,15 +1,19 @@
-import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, Card, PageHeader, Section, SourceIcon, StatusDot, Toggle } from "../../design/components";
-import { api } from "../../lib/api";
+import { useEffect, useState } from "react";
+import { Badge, Button, Card, PageHeader, Section, StatusDot, Tabs, Toggle, cx } from "../../design/components";
+import { Brand, hasBrand } from "../../design/brands";
+import { Icon } from "../../design/icons";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
-import type { ConnectorInfo, ConnectorStatus, TabConfig, Tone } from "../../lib/types";
+import { useConfig, useSaveConfig } from "../../lib/hooks";
+import type { ConnectorInfo, ConnectorStatus, Tone } from "../../lib/types";
 import { ApiUsage } from "./ApiUsage";
 
-function statusView(s: ConnectorStatus, available: boolean): { tone: Tone; text: string } {
+type View = "installed" | "marketplace" | "usage";
+
+export function statusView(s: ConnectorStatus, available: boolean): { tone: Tone; text: string } {
   if (!available) return { tone: "neutral", text: "Coming soon" };
   switch (s.state) {
-    case "disabled": return { tone: "neutral", text: "Not connected" };
+    case "disabled": return { tone: "neutral", text: "Not installed" };
     case "starting": return { tone: "info", text: "Starting…" };
     case "running": return { tone: "success", text: s.last_sync ? `Synced ${timeAgo(s.last_sync)}` : "Connected" };
     case "rate_limited": return { tone: "warning", text: `Rate limited, resumes in ${timeUntil(s.until)}` };
@@ -18,123 +22,224 @@ function statusView(s: ConnectorStatus, available: boolean): { tone: Tone; text:
   }
 }
 
-export function ConnectionsTab() {
-  const { connectors, refreshConnectors } = useApp();
-  const [config, setConfig] = useState<TabConfig | null>(null);
-
-  useEffect(() => {
-    api.getConfig().then(setConfig);
-  }, []);
-
-  const save = useCallback(
-    async (next: TabConfig) => {
-      setConfig(await api.saveConfig(next));
-      await refreshConnectors();
-    },
-    [refreshConnectors],
+export function ConnectorMark({ c, size = 34 }: { c: ConnectorInfo; size?: number }) {
+  return (
+    <span className="source-glyph branded" style={{ width: size, height: size }}>
+      {hasBrand(c.icon) ? <Brand name={c.icon} size={Math.round(size * 0.58)} /> : <Icon name={c.icon} size={Math.round(size * 0.55)} />}
+    </span>
   );
+}
 
-  const connected = connectors.filter((c) => c.enabled).length;
+const shelves: { id: string; label: string }[] = [
+  { id: "code", label: "Code" },
+  { id: "communication", label: "Communication" },
+  { id: "work", label: "Planning" },
+  { id: "built_in", label: "Built in" },
+];
+
+export function ConnectionsTab() {
+  const { connectors } = useApp();
+  const [view, setView] = useState<View>("installed");
+  const [open, setOpen] = useState<string | null>(null);
+  const installed = connectors.filter((c) => c.enabled);
+  const current = connectors.find((c) => c.id === open);
+
+  if (current) return <ConnectorDetail c={current} onBack={() => setOpen(null)} />;
+
   return (
     <div className="page">
-      <PageHeader title="Connections" subtitle={`${connected} connected. Everything tab knows comes in through a connection.`} />
-      <Section title="Sources" description="Each connection turns activity in another tool into ranked work.">
-        <div className="connector-grid">
-          {connectors.map((c) => (
-            <ConnectorCard key={c.id} connector={c} config={config} onSave={save} />
+      <PageHeader
+        title="Connections"
+        subtitle="Everything tab knows comes in through a connection. Each one brings its own kinds of work, settings and rate budgets."
+      />
+      <div className="page-tabs">
+        <Tabs<View>
+          value={view}
+          onChange={setView}
+          items={[
+            { value: "installed", label: "Installed", count: installed.length },
+            { value: "marketplace", label: "Marketplace", count: connectors.filter((c) => !c.enabled).length },
+            { value: "usage", label: "API usage" },
+          ]}
+        />
+      </div>
+      {view === "installed" && (
+        <div className="connector-list">
+          {installed.map((c) => (
+            <InstalledRow key={c.id} c={c} onOpen={() => setOpen(c.id)} />
           ))}
+          <button className="connector-add" onClick={() => setView("marketplace")}>
+            <Icon name="store" size={16} /> Browse the marketplace
+          </button>
         </div>
-      </Section>
-      <ApiUsage />
+      )}
+      {view === "marketplace" &&
+        shelves.map((shelf) => {
+          const items = connectors.filter((c) => (c.category || "built_in") === shelf.id && !c.enabled);
+          if (!items.length) return null;
+          return (
+            <Section key={shelf.id} title={shelf.label}>
+              <div className="connector-grid">
+                {items.map((c) => (
+                  <MarketCard key={c.id} c={c} onOpen={() => setOpen(c.id)} />
+                ))}
+              </div>
+            </Section>
+          );
+        })}
+      {view === "usage" && <ApiUsage />}
     </div>
   );
 }
 
-function ConnectorCard({ connector: c, config, onSave }: { connector: ConnectorInfo; config: TabConfig | null; onSave: (c: TabConfig) => Promise<void> }) {
+function InstalledRow({ c, onOpen }: { c: ConnectorInfo; onOpen: () => void }) {
+  const s = statusView(c.status, c.available);
+  return (
+    <button className="connector-row" onClick={onOpen}>
+      <ConnectorMark c={c} />
+      <div className="connector-row-main">
+        <div className="connector-name">
+          {c.name} {c.builtin && <Badge>Built in</Badge>}
+        </div>
+        <div className="connector-status"><StatusDot tone={s.tone} /> <span>{s.text}</span></div>
+      </div>
+      <div className="connector-row-kinds">
+        {c.kinds.slice(0, 3).map((k) => <Badge key={k.kind} tone={k.tone}>{k.label}</Badge>)}
+      </div>
+      <Icon name="chevron-right" size={16} />
+    </button>
+  );
+}
+
+function MarketCard({ c, onOpen }: { c: ConnectorInfo; onOpen: () => void }) {
+  return (
+    <Card className={cx("connector", !c.available && "unavailable")}>
+      <div className="connector-head">
+        <ConnectorMark c={c} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="connector-name">{c.name}</div>
+          <div className="subtle">{c.available ? (c.settings.some((s) => s.required) ? "Needs a token" : "One click") : "Coming soon"}</div>
+        </div>
+        {c.available && <Button size="sm" variant="primary" onClick={onOpen}>Install</Button>}
+      </div>
+      <p className="connector-desc">{c.description}</p>
+      {c.features.length > 0 && (
+        <ul className="feature-list">
+          {c.features.slice(0, 2).map((f) => (
+            <li key={f}><Icon name="check" size={12} /> {f}</li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+/** One connection: what it brings, its settings, its rate budget, install / remove. */
+function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }) {
+  const { data: config } = useConfig();
+  const save = useSaveConfig();
   const saved = config?.connectors[c.id];
   const [draft, setDraft] = useState<Record<string, unknown>>(saved?.settings ?? {});
-  const [editing, setEditing] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const status = statusView(c.status, c.available);
+  const [error, setError] = useState<string | null>(null);
+  const s = statusView(c.status, c.available);
 
   useEffect(() => setDraft(saved?.settings ?? {}), [saved]);
 
-  const write = async (enabled: boolean, settings: Record<string, unknown>) => {
+  const missingRequired = c.settings.some((f) => f.required && !String(draft[f.key] ?? "").trim());
+  const write = async (enabled: boolean) => {
     if (!config) return;
-    setBusy(true);
+    setError(null);
     try {
-      await onSave({ ...config, connectors: { ...config.connectors, [c.id]: { enabled, settings } } });
-      setEditing(false);
-    } finally {
-      setBusy(false);
+      await save.mutateAsync({ ...config, connectors: { ...config.connectors, [c.id]: { enabled, settings: draft } } });
+    } catch (e) {
+      setError(String(e));
     }
   };
 
-  const missingRequired = c.settings.some((s) => s.required && !String(draft[s.key] ?? "").trim());
-
   return (
-    <Card className={c.available ? "connector" : "connector unavailable"}>
-      <div className="connector-head">
-        <SourceIcon icon={c.icon} tone={c.enabled ? "accent" : "neutral"} size={34} />
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="connector-name">{c.name}</div>
-          <div className="connector-status" title={status.text}>
-            <StatusDot tone={status.tone} />
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{status.text}</span>
-          </div>
+    <div className="page page-narrow">
+      <Button size="sm" variant="ghost" icon="arrow-left" onClick={onBack}>Connections</Button>
+      <header className="connector-detail-head">
+        <ConnectorMark c={c} size={48} />
+        <div style={{ flex: 1 }}>
+          <h1 className="page-title">{c.name}</h1>
+          <div className="connector-status"><StatusDot tone={s.tone} /> <span>{s.text}</span></div>
         </div>
-        {c.available && (
-          <Toggle
-            label={`Enable ${c.name}`}
-            checked={c.enabled}
-            onChange={(on) => (on && c.settings.length && missingRequired ? setEditing(true) : write(on, draft))}
-          />
-        )}
-      </div>
-      <p className="connector-desc">{c.description}</p>
+        {c.available && !c.builtin && (c.enabled ? (
+          <Button onClick={() => write(false)} disabled={save.isPending}>Uninstall</Button>
+        ) : (
+          <Button variant="primary" onClick={() => write(true)} disabled={save.isPending || missingRequired}>
+            {save.isPending ? "Installing…" : "Install"}
+          </Button>
+        ))}
+      </header>
+      <p className="connector-desc large">{c.description}</p>
+      {error && <p className="chat-error">{error}</p>}
+
+      {c.features.length > 0 && (
+        <Section title="What it adds">
+          <ul className="feature-list">
+            {c.features.map((f) => <li key={f}><Icon name="check" size={13} /> {f}</li>)}
+          </ul>
+        </Section>
+      )}
+
+      {c.settings.length > 0 && (
+        <Section title="Settings">
+          <Card>
+            <form className="connector-settings" onSubmit={(e) => (e.preventDefault(), write(true))}>
+              {c.settings.map((f) => (
+                <label key={f.key} className="setting">
+                  {f.label}
+                  {f.kind === "toggle" ? (
+                    <Toggle label={f.label} checked={!!draft[f.key]} onChange={(v) => setDraft({ ...draft, [f.key]: v })} />
+                  ) : (
+                    <span className="input">
+                      <input
+                        type={f.kind === "secret" ? "password" : f.kind === "number" ? "number" : "text"}
+                        value={String(draft[f.key] ?? "")}
+                        required={f.required}
+                        autoComplete="off"
+                        onChange={(e) => setDraft({ ...draft, [f.key]: f.kind === "number" ? (e.target.value ? Number(e.target.value) : "") : e.target.value })}
+                      />
+                    </span>
+                  )}
+                  {f.help && <small>{f.help}</small>}
+                </label>
+              ))}
+              <div className="toolbar">
+                <Button type="submit" variant="primary" disabled={save.isPending || missingRequired}>
+                  {c.enabled ? "Save" : "Save and install"}
+                </Button>
+              </div>
+            </form>
+          </Card>
+        </Section>
+      )}
+
       {c.kinds.length > 0 && (
-        <div className="block-badges">
-          {c.kinds.slice(0, 4).map((k) => (
-            <Badge key={k.kind} tone={k.tone}>{k.label}</Badge>
-          ))}
-          {c.kinds.length > 4 && <Badge>+{c.kinds.length - 4}</Badge>}
-        </div>
-      )}
-      {c.available && c.settings.length > 0 && !editing && (
-        <div className="connector-foot">
-          <span className="subtle">{saved?.settings && Object.keys(saved.settings).length ? "Configured" : "Needs setup"}</span>
-          <Button size="sm" icon="settings" onClick={() => setEditing(true)}>Configure</Button>
-        </div>
-      )}
-      {editing && (
-        <form
-          className="connector-settings"
-          onSubmit={(e) => {
-            e.preventDefault();
-            write(true, draft);
-          }}
-        >
-          {c.settings.map((s) => (
-            <label key={s.key} className="setting">
-              {s.label}
-              <span className="input">
-                <input
-                  type={s.kind === "secret" ? "password" : s.kind === "number" ? "number" : "text"}
-                  value={String(draft[s.key] ?? "")}
-                  required={s.required}
-                  autoComplete="off"
-                  onChange={(e) => setDraft({ ...draft, [s.key]: s.kind === "number" ? (e.target.value ? Number(e.target.value) : "") : e.target.value })}
-                />
-              </span>
-              {s.help && <small>{s.help}</small>}
-            </label>
-          ))}
-          <div className="toolbar">
-            <Button type="submit" variant="primary" disabled={busy || missingRequired}>{busy ? "Connecting…" : "Save and connect"}</Button>
-            <Button type="button" variant="ghost" onClick={() => setEditing(false)}>Cancel</Button>
+        <Section title="Kinds of work" description="What lands in your queue from this connection. Scores are set in Settings → Ranking.">
+          <div className="block-badges">
+            {c.kinds.map((k) => <Badge key={k.kind} tone={k.tone}>{k.label}</Badge>)}
           </div>
-        </form>
+        </Section>
       )}
-    </Card>
+
+      {c.rate_limits.length > 0 && (
+        <Section title="Rate budget" description="Declared limits. tab budgets against these, backs off background refreshes when headroom is low or after a burst, and shows live usage under API usage.">
+          <div className="limits">
+            {c.rate_limits.map((l) => (
+              <Card key={`${l.provider}:${l.resource}`}>
+                <div className="limit">
+                  <div className="limit-head"><strong>{l.resource}</strong><span className="limit-value">{l.requests.toLocaleString()}</span></div>
+                  <div className="subtle">per {l.per_seconds >= 3600 ? `${l.per_seconds / 3600} hour` : l.per_seconds >= 60 ? `${l.per_seconds / 60} min` : `${l.per_seconds}s`} · burst over {l.burst} in 10s cools down</div>
+                  {l.note && <div className="subtle">{l.note}</div>}
+                </div>
+              </Card>
+            ))}
+          </div>
+        </Section>
+      )}
+    </div>
   );
 }

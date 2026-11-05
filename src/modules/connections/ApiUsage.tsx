@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Badge, Card, Meter, Section, cx } from "../../design/components";
 import { api } from "../../lib/api";
+import { usePressure } from "../../lib/hooks";
 import { timeAgo, timeUntil } from "../../lib/format";
 import type { AuditEntry, Outcome, RateLimitState, Tone, UsageRow } from "../../lib/types";
 
@@ -10,6 +11,7 @@ const outcomeTone: Record<Outcome, Tone> = {
   revalidated: "info",
   stale: "warning",
   rate_limited: "danger",
+  deferred: "neutral",
   error: "danger",
 };
 const outcomeLabel: Record<Outcome, string> = {
@@ -18,6 +20,7 @@ const outcomeLabel: Record<Outcome, string> = {
   revalidated: "Revalidated (304)",
   stale: "Served stale",
   rate_limited: "Rate limited",
+  deferred: "Deferred (background)",
   error: "Error",
 };
 
@@ -54,6 +57,7 @@ export function ApiUsage() {
 
   return (
     <>
+      <Budgets />
       <Section title="Rate limits" description="What each provider last reported. Calls are refused locally once a limit is spent, and cached data is served instead.">
         {limits.length === 0 ? (
           <p className="subtle">No provider has reported limits yet.</p>
@@ -214,5 +218,48 @@ function OutcomeBar({ row }: { row: UsageRow }) {
     <div className="outcome-bar" title={parts.filter(([, n]) => n).map(([o, n]) => `${outcomeLabel[o]}: ${n}`).join("\n")}>
       {parts.map(([o, n]) => n > 0 && <span key={o} className={`tone-${outcomeTone[o]}`} style={{ flex: n }} />)}
     </div>
+  );
+}
+
+/**
+ * Client-side budgets from each connector's declared limits: how much of the
+ * window we've used, recent bursts, and whether background work (preview
+ * refreshes, polls) is cooling down. Interactive calls always go first.
+ */
+function Budgets() {
+  const { data: pressure = [] } = usePressure();
+  return (
+    <Section title="Budgets" description="Every connector declares its provider's limits. tab tracks its own usage against them, backs off background refreshes when headroom drops below 30% or after a burst, and keeps interactive calls flowing.">
+      {pressure.length === 0 ? (
+        <p className="subtle">No calls yet.</p>
+      ) : (
+        <div className="limits">
+          {pressure.map((p) => {
+            const pct = Math.round(p.headroom * 100);
+            const tone: Tone = pct < 10 ? "danger" : pct < 30 ? "warning" : "success";
+            return (
+              <Card key={`${p.provider}:${p.resource}`}>
+                <div className="limit">
+                  <div className="limit-head">
+                    <strong>{p.provider} · {p.resource}</strong>
+                    <span className="limit-value">{pct}%</span>
+                  </div>
+                  <Meter value={p.headroom} max={1} tone={tone} />
+                  <div className="subtle">
+                    {p.budget ? `${p.used} of ${p.budget} per ${p.window_seconds! >= 3600 ? `${p.window_seconds! / 3600}h` : `${p.window_seconds}s`}` : `${p.used} sent`}
+                    {p.remote_limit != null && ` · provider says ${p.remote_remaining}/${p.remote_limit}`}
+                  </div>
+                  <div className="toolbar">
+                    <Badge tone={p.recent > p.burst_threshold ? "warning" : "neutral"}>{p.recent} in 10s (burst {p.burst_threshold})</Badge>
+                    {p.cooling_until && <Badge tone="warning" icon="clock">cooling {timeUntil(p.cooling_until)}</Badge>}
+                    {p.deferred > 0 && <Badge>{p.deferred} deferred</Badge>}
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
+    </Section>
   );
 }
