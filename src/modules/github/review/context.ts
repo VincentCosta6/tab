@@ -1,5 +1,6 @@
 import { createContext, useContext } from "react";
 import type { PullReview, ReviewAction } from "../../../lib/types";
+import type { Ai } from "./ai";
 import type { Source } from "./data";
 
 export type Side = "LEFT" | "RIGHT";
@@ -21,6 +22,8 @@ export interface ReviewCtx {
   /** Runs a workspace search for some text. */
   searchFor: (text: string) => void;
   notify: (text: string, tone?: "danger" | "success") => void;
+  /** The PR's agent chat, Ask AI and the fix list. */
+  ai: Ai;
 }
 
 export const Ctx = createContext<ReviewCtx | null>(null);

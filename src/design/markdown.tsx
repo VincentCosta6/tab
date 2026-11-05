@@ -2,7 +2,23 @@
 // *italic* and links. No HTML passthrough. Enough for PR bodies and comments
 // until we need a real renderer.
 
-import type { ReactNode } from "react";
+import { createContext, useContext, type MouseEvent, type ReactNode } from "react";
+
+/**
+ * Handles links that aren't http(s), such as `src/a.ts#L12` in an agent's
+ * reply about a repository. Without one, those links show as plain text.
+ */
+export const MarkdownLinks = createContext<((href: string, e: MouseEvent) => void) | null>(null);
+
+function LocalLink({ href, children }: { href: string; children: ReactNode }) {
+  const on = useContext(MarkdownLinks);
+  if (!on) return <>{children}</>;
+  return (
+    <a href={href} className="md-code-link" title={href} onClick={(e) => { e.preventDefault(); on(href, e); }}>
+      {children}
+    </a>
+  );
+}
 
 function inline(text: string, key: string): ReactNode[] {
   const out: ReactNode[] = [];
@@ -18,7 +34,7 @@ function inline(text: string, key: string): ReactNode[] {
     else if (t.startsWith("**")) out.push(<strong key={k}>{t.slice(2, -2)}</strong>);
     else if (t.startsWith("[")) {
       const [, label, href] = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(t)!;
-      out.push(/^https?:\/\//.test(href) ? <a key={k} href={href} target="_blank" rel="noreferrer">{label}</a> : label);
+      out.push(/^https?:\/\//.test(href) ? <a key={k} href={href} target="_blank" rel="noreferrer">{label}</a> : <LocalLink key={k} href={href}>{inline(label, k)}</LocalLink>);
     } else out.push(<em key={k}>{t.slice(1, -1)}</em>);
     last = m.index + t.length;
   }

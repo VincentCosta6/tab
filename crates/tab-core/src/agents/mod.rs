@@ -118,7 +118,7 @@ impl AgentHub {
         Ok(d)
     }
 
-    pub(crate) fn workdir(&self) -> String {
+    pub fn workdir(&self) -> String {
         self.config()
             .workdir
             .filter(|w| !w.trim().is_empty())
@@ -193,6 +193,33 @@ impl AgentHub {
         self.emit(EngineEvent::SessionChanged {
             session: session.clone(),
         });
+        Ok(session)
+    }
+
+    /// A session keyed to something other than an item (a PR under review),
+    /// running in `cwd`. A new one starts if the working directory moved, since
+    /// agents tie their own sessions to a directory.
+    pub fn session_for_key(
+        &self,
+        key: &str,
+        title: &str,
+        cwd: &str,
+        brief: &str,
+    ) -> anyhow::Result<Session> {
+        let session = match self.store.session_for_key(key)? {
+            Some(s) if s.cwd == cwd => s,
+            _ => {
+                let kind = self.config().kind.ok_or_else(|| {
+                    anyhow::anyhow!("no agent is set up yet; finish onboarding in Settings")
+                })?;
+                let s = self
+                    .store
+                    .session_create_keyed(key, kind, title, cwd, Utc::now())?;
+                self.emit(EngineEvent::SessionChanged { session: s.clone() });
+                s
+            }
+        };
+        self.store.session_set_brief(&session.id, brief)?;
         Ok(session)
     }
 
@@ -374,6 +401,11 @@ impl AgentHub {
              tab_test_connection and explain any failure plainly, e.g. that their host needs an app password.\n\
              Keep replies short; the person reads them in a side panel.\n",
         );
+        if let Ok(Some(brief)) = self.store.session_brief(&session.id) {
+            out.push('\n');
+            out.push_str(&brief);
+            out.push('\n');
+        }
         let Some(item_id) = &session.item_id else {
             return out;
         };
@@ -529,5 +561,39 @@ pub(crate) fn summarize_tool(tool: &str, input: &serde_json::Value) -> String {
     match detail {
         Some(d) => format!("{tool}: {}", d.chars().take(300).collect::<String>()),
         None => tool.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod keyed_tests {
+    use super::*;
+
+    #[test]
+    fn keyed_sessions_are_reused_per_directory_and_carry_a_brief() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = broadcast::channel(16);
+        let cfg = AgentConfig {
+            kind: Some(AgentKind::ClaudeCode),
+            ..Default::default()
+        };
+        let hub = AgentHub::new(store.clone(), tx, cfg, std::env::temp_dir());
+        let a = hub
+            .session_for_key("review:o/r#1", "PR", "/w/pr-1", "About PR 1")
+            .unwrap();
+        let b = hub
+            .session_for_key("review:o/r#1", "PR", "/w/pr-1", "About PR 1, updated")
+            .unwrap();
+        assert_eq!(a.id, b.id);
+        assert!(hub.system_prompt(&b).contains("About PR 1, updated"));
+        let c = hub
+            .session_for_key("review:o/r#1", "PR", "/elsewhere", "x")
+            .unwrap();
+        assert_ne!(a.id, c.id);
+        assert_ne!(
+            hub.session_for_key("review:o/r#2", "PR", "/w/pr-2", "y")
+                .unwrap()
+                .id,
+            c.id
+        );
     }
 }

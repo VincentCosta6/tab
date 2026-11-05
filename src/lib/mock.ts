@@ -228,6 +228,20 @@ export const mockApi = {
           simulateTurn(session, item, String(args.text));
           return { item, session };
         }
+        case "review_chat_open": {
+          const session = sessions.find((s) => s.cwd === `review:${args.repo}#${args.number}`) ?? null;
+          return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: false } satisfies Chat;
+        }
+        case "review_chat_send": {
+          const key = `review:${args.target.repo}#${args.target.number}`;
+          let session = sessions.find((s) => s.cwd === key);
+          if (!session) {
+            session = { id: `sess-${Date.now()}`, item_id: null, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: args.target.title, status: "working", cwd: key, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+            sessions.push(session);
+          }
+          simulateReviewTurn(session, String(args.text));
+          return session;
+        }
         case "chat_stop": return null;
         case "approval_resolve": return true;
         case "detect_agents": return [
@@ -346,6 +360,35 @@ function simulateTurn(session: Session, item: QueueItem, text: string) {
     }
     post(session, "assistant", "text", reply);
     post(session, "system", "result", "", { cost_usd: 0.021, duration_ms: 8400 });
+    status(session, "idle");
+  })();
+}
+
+/** A canned review answer: explains the sample's capture loop, with code links. */
+function simulateReviewTurn(session: Session, text: string) {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    post(session, "user", "text", text);
+    status(session, "working");
+    await sleep(400);
+    const fixes = /fix list/i.test(text);
+    if (fixes) {
+      post(session, "assistant", "tool", "Edit src/capture.ts", { tool: "Edit" });
+      post(session, "tool", "tool_result", "Applied 1 edit");
+      await sleep(300);
+    } else {
+      post(session, "assistant", "tool", "Read src/backoff.ts", { tool: "Read" });
+      post(session, "tool", "tool_result", "5 lines");
+    }
+    const reply = fixes
+      ? "Done, one change per item:\n\n- Stopped retrying `card_declined`: [isRetryable](src/capture.ts#L23) now only matches timeouts, resets and rate limits.\n\nNothing is committed; review the change in the checkout."
+      : "It retries the capture up to [MAX_ATTEMPTS](src/capture.ts#L5) times. Each attempt reuses the same idempotency key, so Stripe never captures twice, and failures that [isRetryable](src/capture.ts#L23) rejects are thrown at once.\n\nBetween attempts it waits with [backoff](src/backoff.ts#L2), which sleeps a random time up to 250ms × 2^attempt, capped at 8s.";
+    for (let i = 0; i < reply.length; i += 14) {
+      emit({ type: "session_delta", session_id: session.id, text: reply.slice(i, i + 14) });
+      await sleep(25);
+    }
+    post(session, "assistant", "text", reply);
+    post(session, "system", "result", "", { cost_usd: 0.012, duration_ms: 5200 });
     status(session, "idle");
   })();
 }

@@ -5,7 +5,7 @@
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   ItemContext, ItemDetail, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
-  RateLimitState, ReviewAction, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
+  RateLimitState, ReviewAction, Session, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
 } from "./types";
 import { mockApi } from "./mock";
 
@@ -41,6 +41,9 @@ export const api = {
   createTask: (task: NewTask) => call<QueueItem>("create_task", { task }),
   chatOpen: (itemId: string) => call<Chat>("chat_open", { itemId }),
   chatSend: (itemId: string | null, text: string) => call<ChatStarted>("chat_send", { itemId, text }),
+  reviewChatOpen: (repo: string, number: number) => call<Chat>("review_chat_open", { repo, number }),
+  reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string) =>
+    call<Session>("review_chat_send", { target, text }),
   setAgentModel: (model: string | null) => call<TabConfig>("set_agent_model", { model }),
   connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),
   chatStop: (sessionId: string) => call<void>("chat_stop", { sessionId }),

@@ -33,6 +33,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/003_previews.sql"),
     include_str!("migrations/004_agent_usage.sql"),
     include_str!("migrations/005_email_previews.sql"),
+    include_str!("migrations/006_session_keys.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {

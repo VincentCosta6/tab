@@ -13,6 +13,7 @@ import { api } from "../../../lib/api";
 import { keys } from "../../../lib/query";
 import { useLanguageServers } from "../lsp";
 import { loadProject, projectStore, setOpener } from "../monaco";
+import { AiPanel, FixBanner, useAi } from "./ai";
 import { Boot } from "./Boot";
 import { Ctx, type ComposerTarget, type DiffMode, type ReviewCtx } from "./context";
 import { readFile, useActions, usePull, useSource, useWorkspace } from "./data";
@@ -177,9 +178,10 @@ export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo
     };
   }, [setSideWidth]);
 
+  const ai = useAi(pr, notify);
   const ctx = useMemo<ReviewCtx | null>(
-    () => (pr && src ? { pr, src, act, mode, dark, composer, setComposer, openFile, showChange, searchFor, notify } : null),
-    [pr, src, act, mode, dark, composer, openFile, showChange, searchFor, notify],
+    () => (pr && src && ai ? { pr, src, act, mode, dark, composer, setComposer, openFile, showChange, searchFor, notify, ai } : null),
+    [pr, src, act, mode, dark, composer, openFile, showChange, searchFor, notify, ai],
   );
 
   if (pull.error && !pr)
@@ -208,7 +210,8 @@ export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo
     <Ctx.Provider value={ctx}>
       <div className="rv">
         <Header onBack={onBack} local={local} onRefresh={() => qc.invalidateQueries({ queryKey: keys.pull(repo, number) })} refreshing={pull.isFetching} />
-        <div className="rv-body" style={{ gridTemplateColumns: panel ? `48px ${sideWidth}px 1fr` : "48px 1fr" }}>
+        <FixBanner ai={ctx.ai} local={boot.phase !== "remote"} />
+        <div className="rv-body" style={{ gridTemplateColumns: `48px ${panel ? `${sideWidth}px ` : ""}minmax(0, 1fr)${ctx.ai.open ? " minmax(320px, 400px)" : ""}` }}>
           <ActivityBar panel={panel} onPanel={(p) => setPanel(panel === p ? null : p)} unread={unread} threads={openThreads(pr)} />
           {panel && (
             <aside className="rv-side">
@@ -266,6 +269,7 @@ export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo
               {tab.kind === "file" && <FileView key={tab.path} path={tab.path} reveal={tab.reveal} />}
             </div>
           </main>
+          {ctx.ai.open && <AiPanel ai={ctx.ai} pr={pr} openFile={openFile} />}
         </div>
         <footer className="rv-statusbar">
           <span><Icon name="git-branch" size={12} /> {pr.head_ref}</span>

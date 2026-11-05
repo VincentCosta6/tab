@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint};
 use tab_core::config::ConnectorConfig;
 use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
@@ -331,6 +331,115 @@ async fn chat_send(
     let session = state.hub.session_for_item(&item.id).map_err(err)?;
     state.hub.send(&session.id, &text).map_err(err)?;
     Ok(ChatStarted { item, session })
+}
+
+/// The PR a review chat is about.
+#[derive(Deserialize)]
+struct ReviewChatTarget {
+    repo: String,
+    number: u64,
+    title: String,
+    url: String,
+    head_ref: String,
+    base_ref: String,
+}
+
+fn review_chat_key(repo: &str, number: u64) -> String {
+    format!("review:{repo}#{number}")
+}
+
+/// The agent chat for a pull request under review.
+#[tauri::command]
+async fn review_chat_open(
+    state: State<'_, AppState>,
+    repo: String,
+    number: u64,
+) -> CmdResult<Chat> {
+    let session = state
+        .store
+        .session_for_key(&review_chat_key(&repo, number))
+        .map_err(err)?;
+    let (messages, approvals, running) = match &session {
+        Some(s) => (
+            state.store.messages(&s.id).map_err(err)?,
+            state.hub.pending_approvals(&s.id),
+            state.hub.is_running(&s.id),
+        ),
+        None => (Vec::new(), Vec::new(), false),
+    };
+    Ok(Chat {
+        session,
+        messages,
+        approvals,
+        running,
+    })
+}
+
+/// Sends a message to the PR's agent chat. The agent runs in the PR's local
+/// checkout when there is one.
+#[tauri::command]
+async fn review_chat_send(
+    state: State<'_, AppState>,
+    target: ReviewChatTarget,
+    text: String,
+) -> CmdResult<Session> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("message is empty".into());
+    }
+    if state.hub.config().kind.is_none() {
+        return Err("Set up an agent first (Settings → Agent).".into());
+    }
+    let dir = state
+        .workspaces
+        .worktree(&target.repo, target.number)
+        .map_err(err)?;
+    let local = dir.exists();
+    let cwd = if local {
+        dir.display().to_string()
+    } else {
+        state.hub.workdir()
+    };
+    let brief = review_brief(&target, local.then_some(cwd.as_str()));
+    let session = state
+        .hub
+        .session_for_key(
+            &review_chat_key(&target.repo, target.number),
+            &format!("{}#{}: {}", target.repo, target.number, target.title),
+            &cwd,
+            &brief,
+        )
+        .map_err(err)?;
+    state.hub.send(&session.id, &text).map_err(err)?;
+    Ok(session)
+}
+
+fn review_brief(t: &ReviewChatTarget, checkout: Option<&str>) -> String {
+    let mut b = format!(
+        "This session is about pull request {}#{} \"{}\" ({}), merging {} into {}. \
+         The person is reviewing it in tab's review workspace and talks to you from a side panel.\n",
+        t.repo, t.number, t.title, t.url, t.head_ref, t.base_ref
+    );
+    match checkout {
+        Some(dir) => b.push_str(&format!(
+            "The PR's head is checked out at {dir} (your working directory), with the base branch \
+             fetched, so `git diff origin/{}...HEAD` shows the PR's changes. Read code there instead of guessing.\n",
+            t.base_ref
+        )),
+        None => b.push_str(
+            "There is no local checkout of this PR; use `gh pr view` / `gh pr diff` or the GitHub API to read it.\n",
+        ),
+    }
+    b.push_str(
+        "- Link every piece of code you mention as a markdown link to its path from the repository root \
+         with a line anchor, like [refund()](src/refund.ts#L12) or [the retry loop](src/capture.ts#L8-L20). \
+         tab opens these in its editor, so prefer linking definitions over pasting them.\n\
+         - When asked what code does, explain briefly and link the definitions and call sites that matter.\n\
+         - When given a fix list, make each fix in the checkout, keeping changes minimal, then reply with \
+         one line per fix saying what you changed (linked) or why you didn't. Don't commit or push unless \
+         the person asks; they review your changes first.\n",
+    );
+    b
 }
 
 #[tauri::command]
@@ -902,6 +1011,8 @@ pub fn run() {
             chat_open,
             chat_send,
             chat_stop,
+            review_chat_open,
+            review_chat_send,
             approval_resolve,
             detect_agents,
             mcp_info,
