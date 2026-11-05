@@ -74,7 +74,7 @@ export function QueryProvider({ children }: { children: ReactNode }) {
         maxAge: Infinity,
         buster: CACHE_VERSION,
         // Streaming buffers and live telemetry are not worth restoring.
-        dehydrateOptions: { shouldDehydrateQuery: (q) => !["stream", "pressure", "search-index"].includes(String(q.queryKey[0])) && q.state.status === "success" },
+        dehydrateOptions: { shouldDehydrateQuery: (q) => !["stream", "pressure", "search-index", "workflow-issues"].includes(String(q.queryKey[0])) && q.state.status === "success" },
       }}
       // The queue is a cheap local read, so re-read it once after restoring:
       // items can change while the app is closed (or a connection was turned off).
@@ -104,6 +104,7 @@ function LiveEvents() {
       switch (e.type) {
         case "item_changed": {
           qc.setQueryData<QueueItem>(keys.item(e.item.id), e.item);
+          if (e.change !== "ranked") qc.invalidateQueries({ queryKey: ["activity", e.item.id] });
           qc.setQueriesData<ItemContext | null>({ queryKey: keys.context(e.item.id) }, (c) => (c ? { ...c, item: e.item } : c));
           // Lists are local SQLite reads; coalesce bursts into one refetch.
           clearTimeout(reload);
@@ -118,13 +119,22 @@ function LiveEvents() {
           break;
         case "context_changed":
           qc.invalidateQueries({ queryKey: keys.context(e.item_id) });
+          qc.invalidateQueries({ queryKey: ["activity", e.item_id] });
           break;
         case "project_changed":
           qc.invalidateQueries({ queryKey: keys.notes(e.project_id) });
           break;
+        case "workflows_changed":
+          qc.invalidateQueries({ queryKey: ["workflows"] });
+          break;
+        case "workflow_run":
+          qc.invalidateQueries({ queryKey: ["workflow-runs"] });
+          if (e.run.item_id && e.run.finished_at) qc.invalidateQueries({ queryKey: ["activity", e.run.item_id] });
+          break;
         case "approval_requested":
         case "approval_resolved":
         case "session_changed":
+          if (e.type === "session_changed" && e.session.item_id) qc.invalidateQueries({ queryKey: ["activity", e.session.item_id] });
           clearTimeout(activity);
           activity = window.setTimeout(() => qc.invalidateQueries({ queryKey: keys.agentActivity }), 150);
           break;
