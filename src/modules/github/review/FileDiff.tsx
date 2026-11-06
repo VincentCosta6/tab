@@ -106,9 +106,16 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
     setReady((n) => n + 1);
     return () => {
       // The models are shared with the project and other editors; keep them.
-      ed.setModel(null);
-      ed.dispose();
       editor.current = null;
+      // Monaco throws an AggregateError when any child (a view zone, a model
+      // another editor already released) fails to dispose. Teardown must never
+      // crash the tab, so swallow it and log what actually failed.
+      try { ed.setModel(null); } catch (e) { console.warn("[tab] diff editor detach", e); }
+      try {
+        ed.dispose();
+      } catch (e) {
+        console.warn("[tab] diff editor dispose", e, (e as { errors?: unknown }).errors);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -151,12 +158,21 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
     const root = wrap.current?.closest<HTMLElement>(".rv-stack");
     if (fill || !ed || !root) return;
     const modified = ed.getModifiedEditor();
-    const size = () => setViewH(Math.max(120, Math.min(height, root.clientHeight)));
+    // The file's header is sticky and covers the top of the scroll area; the
+    // editor pins just below it, so it only gets the space that's left.
+    const headH = () => wrap.current?.closest(".rv-stack-item")?.querySelector<HTMLElement>(":scope > .rv-file-head")?.offsetHeight ?? 0;
+    const size = () => {
+      const head = headH();
+      wrap.current?.style.setProperty("--rv-head", `${head}px`);
+      setViewH(Math.max(120, Math.min(height, root.clientHeight - head)));
+    };
     const follow = () => {
       const w = wrap.current;
       if (!w) return;
-      const hostH = Math.min(height, root.clientHeight);
-      const off = Math.max(0, Math.min(height - hostH, root.getBoundingClientRect().top - w.getBoundingClientRect().top));
+      const head = headH();
+      const hostH = Math.min(height, Math.max(120, root.clientHeight - head));
+      // Where the pinned editor sits on screen is where its first visible line is.
+      const off = Math.max(0, Math.min(height - hostH, root.getBoundingClientRect().top + head - w.getBoundingClientRect().top));
       if (Math.abs(modified.getScrollTop() - off) > 0.5) {
         expectedTop.current = off;
         modified.setScrollTop(off);
