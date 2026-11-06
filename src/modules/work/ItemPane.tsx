@@ -1,8 +1,9 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, UrgencyLabel, cx } from "../../design/components";
+import { OpenMenu } from "../../design/OpenMenu";
 import { SourceGlyph } from "../../design/brands";
-import { api, openUrl } from "../../lib/api";
+import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useChat, useItem } from "../../lib/hooks";
@@ -60,7 +61,6 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
       if (snoozeOpen) return;
       if (e.key === "e") item.state === "done" ? reopen(item) : done(item);
       if (e.key === "s") setSnoozeOpen(true);
-      if (e.key === "o" && item.url) openUrl(item.url);
       if (e.key === "r" && pull) setReviewing(true);
     };
     window.addEventListener("keydown", onKey);
@@ -101,7 +101,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         <div className="item-actions">
           <ProjectPicker value={item.project_id ?? null} onChange={(p) => move(item, p)} align="right" compact />
           {pull && <Button size="sm" icon="code" shortcut="R" onClick={() => setReviewing(true)}>Review</Button>}
-          {item.url && <Button size="sm" icon="external" shortcut="O" onClick={() => openUrl(item.url!)}>Open</Button>}
+          {item.url && <OpenMenu url={item.url} onOpenInTab={pull ? () => setReviewing(true) : undefined} tabLabel="Open in tab (review)" />}
           {item.state !== "done" && (
             <span className="menu-anchor">
               <Button size="sm" icon="clock" shortcut="S" onClick={() => setSnoozeOpen((v) => !v)}>Snooze</Button>

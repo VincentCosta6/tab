@@ -1,4 +1,5 @@
 import { setReviewsOpener } from "./modules/github/pulls";
+import { BrowserDock } from "./design/BrowserDock";
 import { ImageViewer } from "./design/ImageViewer";
 import { useEffect, useState } from "react";
 import { Icon } from "./design/icons";
@@ -96,6 +97,7 @@ function Shell() {
           <Active />
         </ErrorBoundary>
       </main>
+      <BrowserDock />
       {onboarding && <Onboarding onClose={() => setOnboarding(false)} />}
     </div>
   );
