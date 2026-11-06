@@ -29,7 +29,7 @@ pub(crate) fn fingerprint(e: &IncomingEvent) -> String {
 const COLUMNS: &str = "items.id, items.source, items.external_id, items.kind, items.title, items.body, items.url, \
     items.actor, items.context, items.occurred_at, items.blocks, items.entities, items.metadata, items.state, \
     items.snoozed_until, items.score, items.base_score, items.ai_adjustment, items.urgency, items.reason, \
-    items.ranked_by, items.created_at, items.updated_at, items.project_id";
+    items.ranked_by, items.fired, items.created_at, items.updated_at, items.project_id";
 
 /// Display order. Fully deterministic: ties fall back to recency, then id.
 /// Narrows a search: when things happened, and which project they're in.
@@ -77,6 +77,10 @@ fn row_to_item(r: &Row<'_>) -> rusqlite::Result<QueueItem> {
             urgency,
             reason: r.get::<_, Option<String>>("reason")?.unwrap_or_default(),
             ranked_by: r.get::<_, Option<String>>("ranked_by")?.unwrap_or_default(),
+            fired: r
+                .get::<_, Option<String>>("fired")?
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
         }),
         _ => None,
     };
@@ -171,7 +175,7 @@ impl Store {
                     "UPDATE items SET kind = ?2, title = ?3, body = ?4, url = ?5, actor = ?6, context = ?7,
                          occurred_at = ?8, blocks = ?9, entities = ?10, metadata = ?11, fingerprint = ?12,
                          state = 'open', snoozed_until = NULL, score = NULL, base_score = NULL,
-                         ai_adjustment = NULL, urgency = NULL, reason = NULL, ranked_by = NULL, updated_at = ?13
+                         ai_adjustment = NULL, urgency = NULL, reason = NULL, ranked_by = NULL, fired = NULL, updated_at = ?13
                      WHERE id = ?1",
                     params![
                         id, e.kind, e.title, e.body, e.url, e.actor, e.context, ts(e.occurred_at),
@@ -244,9 +248,12 @@ impl Store {
         let conn = self.conn();
         conn.execute(
             "UPDATE items SET score = ?2, base_score = ?3, ai_adjustment = ?4, urgency = ?5, reason = ?6,
-                 ranked_by = ?7
+                 ranked_by = ?7, fired = ?8
              WHERE id = ?1",
-            params![id, r.score, r.base_score, r.ai_adjustment, r.urgency.as_str(), r.reason, r.ranked_by],
+            params![
+                id, r.score, r.base_score, r.ai_adjustment, r.urgency.as_str(), r.reason, r.ranked_by,
+                serde_json::to_string(&r.fired)?
+            ],
         )?;
         get_item(&conn, id)
     }
@@ -255,7 +262,7 @@ impl Store {
     pub fn clear_rankings(&self) -> anyhow::Result<usize> {
         Ok(self.conn().execute(
             "UPDATE items SET score = NULL, base_score = NULL, ai_adjustment = NULL, urgency = NULL,
-                 reason = NULL, ranked_by = NULL
+                 reason = NULL, ranked_by = NULL, fired = NULL
              WHERE state != 'done'",
             [],
         )?)
@@ -441,6 +448,7 @@ mod tests {
             urgency: Urgency::from_score(score),
             reason: "r".into(),
             ranked_by: "rules".into(),
+            fired: vec!["kind test = 1".into()],
         }
     }
 

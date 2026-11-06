@@ -39,6 +39,8 @@ export interface Ranking {
   urgency: Urgency;
   reason: string;
   ranked_by: string;
+  /** Rules that fired, in order; empty for rankings stored before this was recorded. */
+  fired: string[];
 }
 
 export interface QueueItem {

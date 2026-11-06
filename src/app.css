@@ -53,6 +53,19 @@
 .menu { position: absolute; top: 34px; z-index: 5; display: grid; min-width: 180px; padding: var(--space-1); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-md); }
 .menu button { text-align: left; border: 0; background: transparent; padding: 6px var(--space-2); border-radius: var(--radius-sm); cursor: pointer; display: flex; justify-content: space-between; gap: var(--space-3); }
 .menu button:hover { background: var(--bg-hover); }
+.context-menu { position: fixed; top: auto; z-index: 50; }
+.menu-label { padding: 4px var(--space-2); color: var(--fg-subtle); font-size: var(--text-xs); }
+.menu-sep { height: 1px; margin: var(--space-1) 0; background: var(--border); }
+.score-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; background: rgba(0, 0, 0, 0.35); }
+.score-card { width: min(420px, calc(100vw - 32px)); padding: var(--space-4); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-md); box-shadow: var(--shadow-md); cursor: default; }
+.score-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
+.score-card-title { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.score-note { margin: var(--space-2) 0; color: var(--fg-subtle); }
+.score-lines { display: grid; gap: 2px; }
+.score-line { display: flex; justify-content: space-between; gap: var(--space-3); padding: 4px 0; font-variant-numeric: tabular-nums; }
+.score-line.muted { color: var(--fg-subtle); }
+.score-line.total { border-top: 1px solid var(--border); font-weight: 600; margin-top: 2px; }
+.score-card-foot { display: flex; justify-content: flex-end; margin-top: var(--space-3); }
 .skeleton { height: 64px; border-radius: var(--radius-md); background: linear-gradient(90deg, var(--bg-sunken), var(--bg-hover), var(--bg-sunken)); background-size: 200% 100%; animation: shimmer 1.2s infinite; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 

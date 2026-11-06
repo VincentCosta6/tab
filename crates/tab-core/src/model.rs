@@ -232,6 +232,10 @@ pub struct Ranking {
     pub reason: String,
     /// e.g. `rules` or `rules+claude-haiku-5-5`.
     pub ranked_by: String,
+    /// The rules that fired, in order (`kind github.review_requested = 90`,
+    /// `keyword "outage" +8`, ...). Empty for rankings stored before this existed.
+    #[serde(default)]
+    pub fired: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
