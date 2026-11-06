@@ -11,7 +11,9 @@ import { useAgentActivity, useItems } from "../../lib/hooks";
 import { keys } from "../../lib/query";
 import type { AgentActivity, ItemState, QueueItem, Urgency } from "../../lib/types";
 import { takePendingOpen } from "./Chat";
+import { FileViewer } from "./FileViewer";
 import { ItemPane } from "./ItemPane";
+import { registerViewerHost, useViewer } from "../../lib/viewer";
 import { NewChat } from "./NewChat";
 import { ProjectChip, ProjectPicker, useRememberedProject } from "./Projects";
 import { SnoozeMenu, snoozeOptions } from "./SnoozeMenu";
@@ -173,8 +175,12 @@ export function WorkTab() {
       .filter((g) => g.items.length);
   }, [visible, view, query]);
 
+  // With a file open it takes the middle; the queue steps aside and the chat stays on the right.
+  const viewing = useViewer().current !== null;
+  useEffect(() => registerViewerHost(), []);
+
   return (
-    <div className="work" style={{ gridTemplateColumns: `${listWidth}px 1fr` }}>
+    <div className={cx("work", viewing && "viewing")} style={{ gridTemplateColumns: viewing ? undefined : `${listWidth}px 1fr` }}>
       <section className="queue">
         <div className="queue-resize" onMouseDown={startResize} onDoubleClick={() => saveWidth(DEFAULT_LIST_WIDTH)} title="Drag to resize. Double-click to reset." />
         <div className="queue-top">
@@ -225,6 +231,7 @@ export function WorkTab() {
           ))}
         </div>
       </section>
+      <FileViewer />
       <section className="pane work-pane">
         {selected === NEW ? (
           <NewChat project={project} onStarted={(itemId) => {
