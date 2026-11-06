@@ -661,3 +661,6 @@ body.resizing iframe { pointer-events: none; }
 .agent-notice-cmd:hover { border-color: var(--border-strong); }
 .agent-notice-x { flex: none; border: 0; background: transparent; color: var(--fg-subtle); cursor: pointer; padding: 2px; }
 .agent-notice-x:hover { color: var(--fg); }
+
+.markdown a.pr-pill { display: inline-block; font-size: var(--text-xs); border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; text-decoration: none; font-variant-numeric: tabular-nums; }
+.markdown a.pr-pill:hover { background: var(--bg-hover, transparent); }
