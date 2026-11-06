@@ -158,12 +158,21 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
     const root = wrap.current?.closest<HTMLElement>(".rv-stack");
     if (fill || !ed || !root) return;
     const modified = ed.getModifiedEditor();
-    const size = () => setViewH(Math.max(120, Math.min(height, root.clientHeight)));
+    // The file's header is sticky and covers the top of the scroll area; the
+    // editor pins just below it, so it only gets the space that's left.
+    const headH = () => wrap.current?.closest(".rv-stack-item")?.querySelector<HTMLElement>(":scope > .rv-file-head")?.offsetHeight ?? 0;
+    const size = () => {
+      const head = headH();
+      wrap.current?.style.setProperty("--rv-head", `${head}px`);
+      setViewH(Math.max(120, Math.min(height, root.clientHeight - head)));
+    };
     const follow = () => {
       const w = wrap.current;
       if (!w) return;
-      const hostH = Math.min(height, root.clientHeight);
-      const off = Math.max(0, Math.min(height - hostH, root.getBoundingClientRect().top - w.getBoundingClientRect().top));
+      const head = headH();
+      const hostH = Math.min(height, Math.max(120, root.clientHeight - head));
+      // Where the pinned editor sits on screen is where its first visible line is.
+      const off = Math.max(0, Math.min(height - hostH, root.getBoundingClientRect().top + head - w.getBoundingClientRect().top));
       if (Math.abs(modified.getScrollTop() - off) > 0.5) {
         expectedTop.current = off;
         modified.setScrollTop(off);

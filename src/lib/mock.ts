@@ -580,6 +580,10 @@ function samplePull(repo: string, number: number): PullReview {
   const testAfter = testBefore + `\ntest("retries timeouts with the same idempotency key", async () => {\n  const calls = mockStripe(["timeout", "timeout", "succeeded"]);\n  await capture(fixture("ch_flaky"));\n  expect(calls.map((c) => c.idempotencyKey)).toEqual(Array(3).fill("capture-ch_flaky"));\n});\n`;
   const f = (filename: string, status: string, additions: number, deletions: number, original: string, modified: string) =>
     ({ filename, status, additions, deletions, previous_filename: null, viewed: "unviewed", original, modified });
+  // A long file with scattered edits, to exercise big stacked diffs.
+  const bigLines = Array.from({ length: 3000 }, (_, i) => `export const entry${i} = { id: ${i}, label: "ledger entry ${i}", amount: ${(i * 37) % 1000} };`);
+  const bigAfter = bigLines.map((l, i) => (i % 150 === 75 ? l.replace("ledger entry", "settled entry") : l));
+  bigAfter.splice(1500, 0, "// settled entries are archived monthly", "export const ARCHIVE_AFTER_DAYS = 30;");
   return {
     repo, number, node_id: "sample", title: "Retry payment capture with idempotency keys",
     body: "Captures sometimes time out on Stripe's side and we drop the charge.\n\nThis retries timeouts and connection resets up to four times with jittered backoff, and sends an idempotency key so a retry can't double-capture.\n\n- `capture()` retries transient errors\n- new `backoff()` helper\n- test for the retry path",
@@ -597,6 +601,7 @@ function samplePull(repo: string, number: number): PullReview {
       f("src/capture.ts", "modified", 18, 4, before, after),
       f("src/backoff.ts", "added", 5, 0, "", backoff),
       f("test/capture.test.ts", "modified", 6, 0, testBefore, testAfter),
+      f("src/ledger.ts", "modified", 22, 20, bigLines.join("\n") + "\n", bigAfter.join("\n") + "\n"),
     ],
     threads: [{
       id: "sample-thread-1", path: "src/capture.ts", line: 19, start_line: null, original_line: 19, side: "RIGHT",
