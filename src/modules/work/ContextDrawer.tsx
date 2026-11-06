@@ -103,12 +103,12 @@ export function ContextDrawer({ item, onSelect, left, right }: { item: QueueItem
 }
 
 /** Two links to the same thing, ignoring query, fragment and subpages like a PR's /files. */
-function sameLink(a: string, b: string) {
+export function sameLink(a: string, b: string) {
   const c = (u: string) => parseLink(u)?.canonical ?? u.split(/[?#]/)[0].replace(/\/$/, "");
   return c(a) === c(b);
 }
 
-function IconButton({ icon, label, onClick, active }: { icon: string; label: string; onClick: () => void; active?: boolean }) {
+export function IconButton({ icon, label, onClick, active }: { icon: string; label: string; onClick: () => void; active?: boolean }) {
   return (
     <button className={cx("icon-btn", active && "active")} title={label} aria-label={label} onClick={onClick}>
       <Icon name={icon} size={14} />
@@ -288,7 +288,7 @@ function ItemDetails({ item }: { item: QueueItem }) {
   );
 }
 
-function EntryCard({ entry: e, onSelect, children }: { entry: ContextEntry; onSelect: (id: string) => void; children: React.ReactNode }) {
+export function EntryCard({ entry: e, onSelect, children }: { entry: ContextEntry; onSelect: (id: string) => void; children: React.ReactNode }) {
   // A PR link opens the review workspace even when it's also a queue item.
   const opener = parseLink(e.url ?? e.ref_item?.url)?.open;
   if (e.ref_item)
