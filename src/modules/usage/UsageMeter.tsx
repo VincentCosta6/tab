@@ -49,8 +49,10 @@ export function UsageMeter({ onSettings }: { onSettings: () => void }) {
   const daily = budget?.daily_usd || null;
   const monthly = budget?.monthly_usd || null;
   const overDaily = daily != null && u.today_usd >= daily;
-  const sub = u.billing === "subscription";
-  // On a Claude plan the plan's limits matter more than dollars: lead with the window closest to its cap.
+  // Claude Code only reports plan windows for claude.ai logins, so their presence means the plan's limits
+  // matter more than dollars, even when billing isn't flagged "subscription" (e.g. usage-based cloud plans).
+  const sub = u.billing === "subscription" || windows.length > 0;
+  // Lead with the window closest to its cap.
   const tightest = windows.reduce<PlanWindow | null>((a, w) => (!a || w.utilization! > a.utilization! ? w : a), null);
 
   return (
