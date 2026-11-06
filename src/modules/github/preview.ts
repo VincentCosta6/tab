@@ -58,6 +58,7 @@ export function toPreview(s: LinkSummary): LinkPreview {
     updated_at: s.updated_at,
     facts,
     // "unknown" means GitHub is still working out mergeability.
+    final: s.state === "merged" || s.state === "closed",
     settling: s.state === "open" && s.review_decision !== undefined && (!s.merge_state || s.merge_state === "unknown"),
   };
 }
