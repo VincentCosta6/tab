@@ -150,13 +150,6 @@ function SubmitReview({ onClose }: { onClose: () => void }) {
   );
 }
 
-/** Hover text for the main button: why it's disabled, or what to know before merging. */
-function primaryTitle(a: NonNullable<ReturnType<typeof primaryAction>>) {
-  if (a.kind !== "merge") return undefined;
-  if (a.blockers.length) return ["Can't merge yet:", ...a.blockers.map((b) => `• ${b}`), ...a.warnings.map((w) => `• ${w}`)].join("\n");
-  return a.warnings.length ? a.warnings.join("\n") : "All requirements met";
-}
-
 function copy(text: string) {
   navigator.clipboard?.writeText(text).catch(() => {});
 }
@@ -168,6 +161,9 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
   const [checks, setChecks] = useState(false);
   const [confirm, setConfirm] = useState<null | { title: string; body: ReactNode; confirm: string; danger?: boolean; run: () => Promise<void> }>(null);
   const [vscode, setVscode] = useState(false);
+  const [split, setSplit] = useState(false);
+  const [hover, setHover] = useState(false);
+  const splitRef = useOutside(split, () => setSplit(false));
   const menuRef = useOutside(menu, () => setMenu(false));
   const pending = pendingComments(pr);
   const pills = statusPills(pr);
@@ -250,22 +246,68 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
           )}
         </div>
         {primary ? (
-          <span className="rv-menu-wrap rv-primary-wrap" title={primaryTitle(primary)}>
+          <div className="rv-split" ref={splitRef} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+            <span className="rv-primary-wrap">
+              <Button
+                size="sm"
+                variant="primary"
+                icon={primary.kind === "merge" ? "git-merge" : "git-pull-request"}
+                className={cx("rv-split-main", primary.kind === "merge" && "rv-btn-merge")}
+                disabled={primary.kind === "merge" && primary.blockers.length > 0}
+                onClick={() => {
+                  if (primary.kind === "ready") run(() => act({ type: "set_draft", draft: false }), "Ready for review")();
+                  else if (primary.kind === "reopen") run(() => act({ type: "set_state", state: "open" }), "Reopened")();
+                  else merge(pr.merge_method, primary.label)();
+                }}
+              >
+                {primary.label}
+              </Button>
+            </span>
             <Button
               size="sm"
               variant="primary"
-              icon={primary.kind === "merge" ? "git-merge" : "git-pull-request"}
-              className={primary.kind === "merge" ? "rv-btn-merge" : undefined}
-              disabled={primary.kind === "merge" && primary.blockers.length > 0}
-              onClick={() => {
-                if (primary.kind === "ready") run(() => act({ type: "set_draft", draft: false }), "Ready for review")();
-                else if (primary.kind === "reopen") run(() => act({ type: "set_state", state: "open" }), "Reopened")();
-                else merge(pr.merge_method, primary.label)();
-              }}
-            >
-              {primary.label}
-            </Button>
-          </span>
+              icon="chevron-down"
+              className={cx("rv-split-more", primary.kind === "merge" && "rv-btn-merge")}
+              aria-label="More pull request actions"
+              onClick={() => { setHover(false); setSplit((o) => !o); }}
+            />
+            {hover && !split && (primary.kind === "merge" || primary.kind === "ready") && (
+              <div className="rv-hovercard" role="tooltip">
+                {primary.kind === "ready" ? (
+                  <p>Marks this draft as ready so reviewers are notified.</p>
+                ) : primary.blockers.length ? (
+                  <>
+                    <strong>Can't merge yet</strong>
+                    <ul>{primary.blockers.map((b) => <li key={b} className="bad"><Icon name="x-circle" size={13} />{b}</li>)}</ul>
+                  </>
+                ) : (
+                  <strong className="good"><Icon name="check-circle" size={13} /> All requirements met</strong>
+                )}
+                {primary.kind === "merge" && primary.warnings.length > 0 && (
+                  <ul>{primary.warnings.map((w) => <li key={w} className="warn"><Icon name="dot" size={13} />{w}</li>)}</ul>
+                )}
+              </div>
+            )}
+            {split && (
+              <div className="rv-menu rv-menu-right">
+                {primary.kind === "merge" && (
+                  <>
+                    {(["squash", "merge", "rebase"] as const).map((m) =>
+                      item("git-merge", mergeLabel[m], () => { setSplit(false); merge(m, mergeLabel[m])(); }, { tone: "merge", disabled: primary.blockers.length > 0, hint: m === pr.merge_method ? "default" : undefined }),
+                    )}
+                    {pr.merge_state === "behind" && item("arrow-down", `Update branch from ${pr.base_ref}`, () => { setSplit(false); run(() => act({ type: "update_branch" }), "Branch update started")(); })}
+                    {item("git-pull-request-draft", "Convert to draft", () => { setSplit(false); run(() => act({ type: "set_draft", draft: true }), "Converted to draft")(); }, { tone: "muted" })}
+                    <div className="rv-menu-sep" />
+                  </>
+                )}
+                {pr.state === "open" && item("git-pull-request-closed", "Close pull request", () => {
+                  setSplit(false);
+                  setConfirm({ title: "Close this pull request?", body: "You can reopen it later.", confirm: "Close pull request", danger: true, run: () => act({ type: "set_state", state: "closed" }) });
+                }, { danger: true, tone: "close" })}
+                {item("external", "View on GitHub", () => { setSplit(false); openUrl(pr.url); })}
+              </div>
+            )}
+          </div>
         ) : (
           <div className="rv-menu-wrap">
             <Button size="sm" variant="primary" icon="send" onClick={() => setSubmit((s) => !s)} disabled={pr.state === "merged"}>
