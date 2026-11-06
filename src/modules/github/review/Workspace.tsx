@@ -10,6 +10,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { cx } from "../../../design/components";
 import { Icon } from "../../../design/icons";
 import { api } from "../../../lib/api";
+import { openItem } from "../../../lib/links";
+import type { QueueItem } from "../../../lib/types";
+import { ContextDrawer } from "../../work/ContextDrawer";
 import { keys } from "../../../lib/query";
 import { useLanguageServers } from "../lsp";
 import { loadProject, projectStore, setOpener } from "../monaco";
@@ -66,7 +69,7 @@ function useDark() {
 
 let nonce = 0;
 
-export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo: string; number: number; sample: boolean; onBack: () => void }) {
+export default function ReviewWorkspace({ repo, number, sample, item, onBack }: { repo: string; number: number; sample: boolean; item?: QueueItem; onBack: () => void }) {
   const qc = useQueryClient();
   const dark = useDark();
   const pull = usePull(repo, number, sample);
@@ -210,6 +213,7 @@ export default function ReviewWorkspace({ repo, number, sample, onBack }: { repo
     <Ctx.Provider value={ctx}>
       <div className="rv">
         <Header onBack={onBack} local={local} onRefresh={() => qc.invalidateQueries({ queryKey: keys.pull(repo, number) })} refreshing={pull.isFetching} />
+        {item && <ContextDrawer item={item} onSelect={openItem} />}
         <FixBanner ai={ctx.ai} local={boot.phase !== "remote"} />
         <div className="rv-body" style={{ gridTemplateColumns: `48px ${panel ? `${sideWidth}px ` : ""}minmax(0, 1fr)${ctx.ai.open ? " minmax(320px, 400px)" : ""}` }}>
           <ActivityBar panel={panel} onPanel={(p) => setPanel(panel === p ? null : p)} unread={unread} threads={openThreads(pr)} />

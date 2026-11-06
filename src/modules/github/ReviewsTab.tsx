@@ -39,7 +39,7 @@ export function ReviewsTab() {
     return (
       <div className="review-page">
         <Suspense fallback={<div className="skeleton" />}>
-          <ReviewView key={`${pr.repo}#${pr.number}`} repo={pr.repo} number={pr.number} sample={sample} onBack={() => (setOpen(null), setLinked(null))} />
+          <ReviewView key={`${pr.repo}#${pr.number}`} repo={pr.repo} number={pr.number} sample={sample} item={current ?? queued} onBack={() => (setOpen(null), setLinked(null))} />
         </Suspense>
       </div>
     );
