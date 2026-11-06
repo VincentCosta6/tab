@@ -580,7 +580,7 @@ function samplePull(repo: string, number: number): PullReview {
       { name: "unit-tests (node 22)", status: "completed", conclusion: "failure", url: null },
       { name: "build", status: "completed", conclusion: "success", url: null },
     ] },
-    labels: [{ name: "payments", color: "0e8a16" }], reviewers: ["you"], viewer: "you", viewer_can_update: true,
+    labels: [{ name: "payments", color: "0e8a16" }], reviewers: ["you"], timeline: [], viewer: "you", viewer_can_update: true,
     files: [
       f("src/capture.ts", "modified", 18, 4, before, after),
       f("src/backoff.ts", "added", 5, 0, "", backoff),

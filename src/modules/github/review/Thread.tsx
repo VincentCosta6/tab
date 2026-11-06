@@ -279,6 +279,62 @@ function CommentView({ thread, c, range }: { thread: ReviewThread; c: ThreadComm
   );
 }
 
+/**
+ * "Add to fix list" with a caret beside it: the caret opens a box for
+ * instructions the agent should follow for this one fix.
+ */
+export function FixSplit({ onAdd, queued }: { onAdd: (instructions?: string) => void; queued?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const on = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
+    const key = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    window.addEventListener("mousedown", on);
+    window.addEventListener("keydown", key);
+    return () => {
+      window.removeEventListener("mousedown", on);
+      window.removeEventListener("keydown", key);
+    };
+  }, [open]);
+  return (
+    <span className="rv-menu-wrap rv-split" ref={ref}>
+      <Button size="sm" variant="ghost" icon={queued ? "check" : "zap"} className="rv-split-main" title="Queue this for your agent to fix; nothing is posted to GitHub" onClick={() => onAdd()}>
+        {queued ? "In fix list" : "Add to fix list"}
+      </Button>
+      <button className="rv-split-caret" title="Add with instructions for the agent" aria-label="Add with instructions" onClick={() => setOpen((o) => !o)}>
+        <Icon name="chevron-down" size={13} />
+      </button>
+      {open && (
+        <div className="rv-popover rv-split-pop">
+          <label className="label-sm" htmlFor="rv-fix-instr">Instructions for the agent</label>
+          <textarea
+            id="rv-fix-instr"
+            className="rv-textarea"
+            rows={3}
+            autoFocus
+            value={text}
+            placeholder="e.g. Keep the public API unchanged, and add a test"
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                onAdd(text);
+                setText("");
+                setOpen(false);
+              }
+            }}
+          />
+          <div className="rv-modal-actions">
+            <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button size="sm" variant="primary" icon="zap" onClick={() => { onAdd(text); setText(""); setOpen(false); }}>Add to fix list</Button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 export function ThreadCard({ thread }: { thread: ReviewThread }) {
   const { pr, act, notify, ai } = useReview();
   const [open, setOpen] = useState(!thread.resolved);
@@ -288,9 +344,10 @@ export function ThreadCard({ thread }: { thread: ReviewThread }) {
   const where = range ? (range[0] === range[1] ? `Line ${range[1]}` : `Lines ${range[0]}–${range[1]}`) : thread.original_line ? `Line ${thread.original_line}` : "File";
   const resolve = (resolved: boolean) => act({ type: "resolve", thread_id: thread.id, resolved }).catch((e) => notify(String(e), "danger"));
   const onlyPending = thread.comments.every((c) => c.pending);
+  const threadText = thread.comments.map((c) => `${c.author}: ${c.body}`).join("\n\n");
 
   return (
-    <div className={cx("rv-thread", thread.resolved && "resolved", onlyPending && "pending")}>
+    <div className={cx("rv-thread",thread.resolved && "resolved", onlyPending && "pending")}>
       <button className="rv-thread-head" onClick={() => setOpen((o) => !o)}>
         <Icon name={open ? "chevron-down" : "chevron-right"} size={13} />
         <span>{where}{thread.side === "LEFT" ? " (base)" : ""}</span>
@@ -322,15 +379,10 @@ export function ThreadCard({ thread }: { thread: ReviewThread }) {
             ) : (
               <div className="rv-thread-actions">
                 {thread.can_reply && <button className="rv-reply-fake" onClick={() => setReplying(true)}>Reply…</button>}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  icon="zap"
-                  title="Queue this thread for your agent to fix"
-                  onClick={() => ai.addFix(thread.comments.map((c) => `${c.author}: ${c.body}`).join("\n\n"), range ? { path: thread.path, side: thread.side, start: range[0], end: range[1] } : null, "thread")}
-                >
-                  Fix list
-                </Button>
+                <FixSplit
+                  queued={ai.fixes.some((f) => f.state === "queued" && f.from === "thread" && f.text === threadText)}
+                  onAdd={(instructions) => ai.addFix(threadText, range ? { path: thread.path, side: thread.side, start: range[0], end: range[1] } : null, "thread", instructions)}
+                />
                 {thread.can_resolve && !onlyPending && (
                   <Button size="sm" icon={thread.resolved ? "undo" : "check"} onClick={() => { resolve(!thread.resolved); if (!thread.resolved) setOpen(false); }}>
                     {thread.resolved ? "Unresolve" : "Resolve"}
