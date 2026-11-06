@@ -11,6 +11,7 @@ import type { QueueItem } from "../../lib/types";
 import { parsePullUrl } from "../github/pulls";
 import { ChatView } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
+import { ContextRail } from "./ContextRail";
 import { ReadModeSwitch, Reader, useHasRich, useReadMode } from "./Reader";
 import { ProjectPicker, useProjectTint } from "./Projects";
 import { SnoozeMenu } from "./SnoozeMenu";
@@ -129,7 +130,10 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         }
         right={tab === "content" && <RichSwitch item={item} mode={readMode} onChange={setReadMode} />}
       />
-      <ChatView item={item} body={tab === "timeline" ? <Timeline itemId={item.id} /> : <Reader item={item} mode={readMode} />} showBody={tab !== "chat"} onSent={() => setTab("chat")} />
+      <div className="item-body">
+        <ChatView item={item} body={tab === "timeline" ? <Timeline itemId={item.id} /> : <Reader item={item} mode={readMode} />} showBody={tab !== "chat"} onSent={() => setTab("chat")} />
+        <ContextRail key={item.id} item={item} onSelect={onSelect} />
+      </div>
     </div>
   );
 }
