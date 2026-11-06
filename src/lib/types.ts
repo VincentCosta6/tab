@@ -279,7 +279,7 @@ export interface PullReview {
   base_sha: string; head_sha: string; additions: number; deletions: number; commits: number; created_at: string;
   mergeable: string; merge_state: string; merge_method: "squash" | "merge" | "rebase"; review_decision: string | null;
   checks: { state: string | null; runs: CheckRun[] };
-  labels: { name: string; color: string }[]; reviewers: string[];
+  labels: { name: string; color: string }[]; reviewers: string[]; timeline: TimelineEvent[];
   viewer: string; viewer_can_update: boolean;
   files: PrFile[]; threads: ReviewThread[]; pending_review: { id: string; body: string } | null;
   sample_tree: { path: string; content: string }[];
@@ -313,7 +313,13 @@ export type ReviewAction =
   | { type: "set_state"; state: "open" | "closed" }
   | { type: "set_draft"; draft: boolean }
   | { type: "merge"; method: "merge" | "squash" | "rebase" }
-  | { type: "update_branch" };
+  | { type: "update_branch" }
+  | { type: "add_reviewers"; logins: string[] }
+  | { type: "remove_reviewers"; logins: string[] }
+  | { type: "add_labels"; labels: string[] }
+  | { type: "remove_label"; label: string };
+export interface TimelineEvent { kind: string; actor: string | null; avatar: string | null; at: string; text: string; url: string | null }
+export interface ReviewOptions { labels: { name: string; color: string }[]; users: string[] }
 export interface PrRef { repo: string; number: number; node_id: string; head_sha: string; pending_review_id: string | null }
 
 export interface RateLimitState {

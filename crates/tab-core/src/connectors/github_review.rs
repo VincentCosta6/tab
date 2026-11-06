@@ -98,6 +98,27 @@ pub struct Label {
     pub color: String,
 }
 
+/// One entry in the PR's conversation timeline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TimelineEvent {
+    /// `commit`, `comment`, `review`, `labeled`, `unlabeled`, `review_requested`,
+    /// `ready`, `draft`, `merged`, `closed`, `reopened`.
+    pub kind: String,
+    pub actor: Option<String>,
+    pub avatar: Option<String>,
+    pub at: String,
+    /// The commit message, comment text, label, or reviewer.
+    pub text: String,
+    pub url: Option<String>,
+}
+
+/// What the Overview can add to a PR: the repo's labels and people.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReviewOptions {
+    pub labels: Vec<Label>,
+    pub users: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PendingReview {
     pub id: String,
@@ -147,6 +168,9 @@ pub struct PullReview {
     pub checks: Checks,
     pub labels: Vec<Label>,
     pub reviewers: Vec<String>,
+    /// Commits, comments, reviews, label and state changes, oldest first.
+    #[serde(default)]
+    pub timeline: Vec<TimelineEvent>,
     pub viewer: String,
     pub viewer_can_update: bool,
     pub files: Vec<PrFile>,
@@ -201,6 +225,22 @@ query($owner: String!, $name: String!, $number: Int!) {
       reviewRequests(first: 20) {
         nodes { requestedReviewer { ... on User { login } ... on Team { name } } }
       }
+      timelineItems(first: 100, itemTypes: [PULL_REQUEST_COMMIT, ISSUE_COMMENT, PULL_REQUEST_REVIEW, LABELED_EVENT, UNLABELED_EVENT, REVIEW_REQUESTED_EVENT, READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT, MERGED_EVENT, CLOSED_EVENT, REOPENED_EVENT]) {
+        nodes {
+          __typename
+          ... on PullRequestCommit { url commit { messageHeadline committedDate author { user { login avatarUrl } name } } }
+          ... on IssueComment { url body createdAt author { login avatarUrl } }
+          ... on PullRequestReview { url body state submittedAt createdAt author { login avatarUrl } }
+          ... on LabeledEvent { createdAt actor { login avatarUrl } label { name } }
+          ... on UnlabeledEvent { createdAt actor { login avatarUrl } label { name } }
+          ... on ReviewRequestedEvent { createdAt actor { login avatarUrl } requestedReviewer { ... on User { login } ... on Team { name } } }
+          ... on ReadyForReviewEvent { createdAt actor { login avatarUrl } }
+          ... on ConvertToDraftEvent { createdAt actor { login avatarUrl } }
+          ... on MergedEvent { createdAt actor { login avatarUrl } }
+          ... on ClosedEvent { createdAt actor { login avatarUrl } }
+          ... on ReopenedEvent { createdAt actor { login avatarUrl } }
+        }
+      }
       files(first: 100) { nodes { path viewerViewedState } }
       reviews(first: 1, states: [PENDING]) { nodes { id body } }
       reviewThreads(first: 100) {
@@ -235,6 +275,84 @@ query($owner: String!, $name: String!, $number: Int!) {
   }
 }
 "#;
+
+fn timeline_event(n: &Value) -> Option<TimelineEvent> {
+    let ev = |kind: &str, actor: &Value, at: String, text: String, url: Option<String>| {
+        Some(TimelineEvent {
+            kind: kind.into(),
+            actor: opt(actor, "login"),
+            avatar: opt(actor, "avatarUrl"),
+            at,
+            text,
+            url,
+        })
+    };
+    match n["__typename"].as_str()? {
+        "PullRequestCommit" => {
+            let c = &n["commit"];
+            let user = &c["author"]["user"];
+            Some(TimelineEvent {
+                kind: "commit".into(),
+                actor: opt(user, "login").or_else(|| opt(&c["author"], "name")),
+                avatar: opt(user, "avatarUrl"),
+                at: s(c, "committedDate"),
+                text: s(c, "messageHeadline"),
+                url: opt(n, "url"),
+            })
+        }
+        "IssueComment" => ev("comment", &n["author"], s(n, "createdAt"), s(n, "body"), opt(n, "url")),
+        "PullRequestReview" => {
+            let state = s(n, "state").to_ascii_lowercase();
+            let body = s(n, "body");
+            // The viewer's pending review is shown with their threads.
+            if state == "pending" {
+                return None;
+            }
+            let at = opt(n, "submittedAt").unwrap_or_else(|| s(n, "createdAt"));
+            let text = if body.is_empty() { state } else { format!("{state}\n{body}") };
+            ev("review", &n["author"], at, text, opt(n, "url"))
+        }
+        "LabeledEvent" => ev("labeled", &n["actor"], s(n, "createdAt"), s(&n["label"], "name"), None),
+        "UnlabeledEvent" => ev("unlabeled", &n["actor"], s(n, "createdAt"), s(&n["label"], "name"), None),
+        "ReviewRequestedEvent" => {
+            let r = &n["requestedReviewer"];
+            let who = opt(r, "login").or_else(|| opt(r, "name")).unwrap_or_default();
+            ev("review_requested", &n["actor"], s(n, "createdAt"), who, None)
+        }
+        "ReadyForReviewEvent" => ev("ready", &n["actor"], s(n, "createdAt"), String::new(), None),
+        "ConvertToDraftEvent" => ev("draft", &n["actor"], s(n, "createdAt"), String::new(), None),
+        "MergedEvent" => ev("merged", &n["actor"], s(n, "createdAt"), String::new(), None),
+        "ClosedEvent" => ev("closed", &n["actor"], s(n, "createdAt"), String::new(), None),
+        "ReopenedEvent" => ev("reopened", &n["actor"], s(n, "createdAt"), String::new(), None),
+        _ => None,
+    }
+}
+
+/// The repo's labels and the people who can be asked to review.
+pub async fn options(gw: &Gateway, repo: &str) -> anyhow::Result<ReviewOptions> {
+    let (owner, name) = split_repo(repo)?;
+    let data = graphql(
+        gw,
+        "review: labels and people",
+        "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
+           labels(first: 100) { nodes { name color } }
+           assignableUsers(first: 100) { nodes { login } }
+         } }",
+        json!({ "owner": owner, "name": name }),
+    )
+    .await?;
+    let repo = &data["repository"];
+    Ok(ReviewOptions {
+        labels: nodes(repo, &["labels"])
+            .into_iter()
+            .map(|l| Label { name: s(l, "name"), color: s(l, "color") })
+            .collect(),
+        users: nodes(repo, &["assignableUsers"])
+            .into_iter()
+            .map(|u| s(u, "login"))
+            .collect(),
+    })
+}
 
 fn split_repo(repo: &str) -> anyhow::Result<(&str, &str)> {
     repo.split_once('/')
@@ -476,6 +594,10 @@ pub async fn pull(
                 opt(rr, "login").or_else(|| opt(rr, "name"))
             })
             .collect(),
+        timeline: nodes(pr, &["timelineItems"])
+            .into_iter()
+            .filter_map(timeline_event)
+            .collect(),
         viewer: s(&data["viewer"], "login"),
         viewer_can_update: pr["viewerCanUpdate"].as_bool().unwrap_or(false),
         files,
@@ -581,6 +703,19 @@ pub enum ReviewAction {
         method: String,
     },
     UpdateBranch,
+    /// Asks people to review.
+    AddReviewers {
+        logins: Vec<String>,
+    },
+    RemoveReviewers {
+        logins: Vec<String>,
+    },
+    AddLabels {
+        labels: Vec<String>,
+    },
+    RemoveLabel {
+        label: String,
+    },
 }
 
 async fn rest(
@@ -857,6 +992,22 @@ async fn act_inner(gw: &Gateway, pr: &PrRef, action: ReviewAction) -> anyhow::Re
             )
             .await?;
         }
+        ReviewAction::AddReviewers { logins } => {
+            rest(gw, Method::POST, "review: request reviewers", format!("{base}/requested_reviewers"), json!({ "reviewers": logins })).await?;
+        }
+        ReviewAction::RemoveReviewers { logins } => {
+            rest(gw, Method::DELETE, "review: remove reviewers", format!("{base}/requested_reviewers"), json!({ "reviewers": logins })).await?;
+        }
+        ReviewAction::AddLabels { labels } => {
+            rest(gw, Method::POST, "review: add labels", format!("/repos/{}/issues/{}/labels", pr.repo, pr.number), json!({ "labels": labels })).await?;
+        }
+        ReviewAction::RemoveLabel { label } => {
+            let enc: String = label
+                .bytes()
+                .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+                .collect();
+            rest(gw, Method::DELETE, "review: remove label", format!("/repos/{}/issues/{}/labels/{enc}", pr.repo, pr.number), Value::Null).await?;
+        }
         ReviewAction::UpdateBranch => {
             rest(
                 gw,
@@ -1000,6 +1151,7 @@ test("retries timeouts with the same idempotency key", async () => {
             color: "0e8a16".into(),
         }],
         reviewers: vec!["you".into()],
+        timeline: Vec::new(),
         viewer: "you".into(),
         viewer_can_update: true,
         files: vec![

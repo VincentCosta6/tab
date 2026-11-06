@@ -25,6 +25,8 @@ export interface FixItem {
   code: string | null;
   /** Where it came from: a new note or a review thread. */
   from: "note" | "thread";
+  /** Extra direction for the agent on this one fix. */
+  instructions?: string;
   state: "queued" | "sent";
   added_at: string;
 }
@@ -35,7 +37,7 @@ export interface Ai {
   /** Asks the agent about some code (or the PR) and opens the panel. */
   ask: (question: string, at?: CodeRef | null, attachments?: string[]) => Promise<void>;
   fixes: FixItem[];
-  addFix: (text: string, at: CodeRef | null, from?: FixItem["from"]) => void;
+  addFix: (text: string, at: CodeRef | null, from?: FixItem["from"], instructions?: string) => void;
   removeFix: (id: string) => void;
   runFixes: () => Promise<void>;
   clearSent: () => void;
@@ -140,8 +142,8 @@ export function useAi(pr: PullReview | undefined, notify: (t: string, tone?: "da
         const text = at ? `About [${describeRef(at)}](${anchor(at)}):\n\n${code ? `${fence(at, code)}\n\n` : ""}${q}` : q;
         await send(text, attachments).catch((e) => notify(String(e), "danger"));
       },
-      addFix: (text, at, from = "note") => {
-        save((xs) => [...xs, { id: `fix-${Date.now()}-${xs.length}`, text: text.trim(), at, code: at ? codeAt(at) : null, from, state: "queued", added_at: new Date().toISOString() }]);
+      addFix: (text, at, from = "note", instructions) => {
+        save((xs) => [...xs, { id: `fix-${Date.now()}-${xs.length}`, text: text.trim(), instructions: instructions?.trim() || undefined, at, code: at ? codeAt(at) : null, from, state: "queued", added_at: new Date().toISOString() }]);
         notify("Added to the fix list", "success");
       },
       removeFix: (id) => save((xs) => xs.filter((x) => x.id !== id)),
@@ -153,7 +155,8 @@ export function useAi(pr: PullReview | undefined, notify: (t: string, tone?: "da
           .map((f, i) => {
             const where = f.at ? `[${describeRef(f.at)}](${anchor(f.at)})` : "General";
             const code = f.at && f.code ? `\n\n${fence(f.at, f.code)}` : "";
-            return `${i + 1}. ${where}: ${f.text.replace(/\n/g, "\n   ")}${code.replace(/\n/g, "\n   ")}`;
+            const extra = f.instructions ? `\n   Instructions: ${f.instructions.replace(/\n/g, "\n   ")}` : "";
+            return `${i + 1}. ${where}: ${f.text.replace(/\n/g, "\n   ")}${extra}${code.replace(/\n/g, "\n   ")}`;
           })
           .join("\n\n");
         setOpen(true);
@@ -216,7 +219,7 @@ export function FixBanner({ ai, local }: { ai: Ai; local: boolean }) {
             }
           }}
         >
-          {busy ? "Sending…" : `Run fix list${queued.length ? ` (${queued.length})` : ""}`}
+          {busy ? "Sending…" : `Batch submit fixes${queued.length ? ` (${queued.length})` : ""}`}
         </Button>
       </div>
       {list && (
@@ -226,6 +229,7 @@ export function FixBanner({ ai, local }: { ai: Ai; local: boolean }) {
               <div className="rv-fix-text">
                 {f.at && <span className="rv-mono subtle">{describeRef(f.at)}</span>}
                 <span>{f.text}</span>
+                {f.instructions && <span className="subtle">Instructions: {f.instructions}</span>}
               </div>
               {f.state === "sent" ? <span className="subtle">Sent</span> : null}
               <button className="rv-icon-btn" title="Remove" onClick={() => ai.removeFix(f.id)}><Icon name="x" size={12} /></button>

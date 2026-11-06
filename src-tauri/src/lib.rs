@@ -1049,6 +1049,16 @@ async fn github_review_action(
         .map_err(err)
 }
 
+#[tauri::command]
+async fn github_review_options(
+    state: State<'_, AppState>,
+    repo: String,
+) -> CmdResult<github_review::ReviewOptions> {
+    github_review::options(&state.gateway, &repo)
+        .await
+        .map_err(err)
+}
+
 // --- Review workspace (local checkout) ------------------------------------
 
 impl AppState {
@@ -1799,6 +1809,7 @@ pub fn run() {
             github_pull,
             github_file,
             github_review_action,
+            github_review_options,
             review_workspace_prepare,
             review_workspace_file,
             review_workspace_files,

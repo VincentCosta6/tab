@@ -26,14 +26,16 @@ import { FileView } from "./FileView";
 import { Header } from "./Header";
 import { LanguageStatus } from "./LanguageServers";
 import { buildTree, compactTree, isViewed, openThreads, splitPath, treeOrder } from "./model";
+import { Comments } from "./Comments";
 import { Overview } from "./Overview";
 import "./review.css";
 import { ActivityBar, ChangesPanel, Explorer, SearchPanel, ThreadsPanel, type Panel } from "./Sidebar";
 
 type Tab =
   | { id: "changes"; kind: "changes" }
-  | { id: "overview"; kind: "overview" }
   | { id: string; kind: "file" | "diff"; path: string; preview: boolean; reveal?: { line: number; column?: number; nonce: number } };
+
+type View = "overview" | "comments" | "changes";
 
 function stored<T>(key: string, fallback: T): [T, (v: T) => void] {
   const [v, setV] = useState<T>(() => {
@@ -82,8 +84,10 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack }: 
   const [mode, setMode] = stored<DiffMode>("mode", "split");
   const [autoRead, setAutoRead] = stored("autoRead", true);
   const [sideWidth, setSideWidth] = stored("sideWidth", 280);
-  const [tabs, setTabs] = useState<Tab[]>([{ id: "changes", kind: "changes" }, { id: "overview", kind: "overview" }]);
+  const [tabs, setTabs] = useState<Tab[]>([{ id: "changes", kind: "changes" }]);
   const [active, setActive] = useState("changes");
+  // Overview and Comments are pages of their own; Changes is the editor.
+  const [view, setView] = stored<View>("view", "changes");
   const [composer, setComposer] = useState<ComposerTarget | null>(null);
   const [scrollTo, setScrollTo] = useState<{ path: string; nonce: number } | null>(null);
   const [seed, setSeed] = useState<{ text: string; nonce: number } | null>(null);
@@ -109,6 +113,7 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack }: 
     const kind = changed.has(path) ? "diff" : "file";
     const id = `${kind}:${path}`;
     const reveal = line ? { line, column, nonce: ++nonce } : undefined;
+    setView("changes");
     setTabs((ts) => {
       const existing = ts.find((t) => t.id === id);
       if (existing) return ts.map((t) => (t.id === id && (t.kind === "file" || t.kind === "diff") ? { ...t, reveal: reveal ?? t.reveal } : t));
@@ -117,12 +122,13 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack }: 
       return [...next, { id, kind, path, preview: true, reveal }];
     });
     setActive(id);
-  }, [changed]);
+  }, [changed, setView]);
 
   const showChange = useCallback((path: string) => {
+    setView("changes");
     setActive("changes");
     setScrollTo({ path, nonce: ++nonce });
-  }, []);
+  }, [setView]);
 
   const searchFor = useCallback((text: string) => {
     setPanel("search");
@@ -214,8 +220,23 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack }: 
       <div className="rv">
         <Header onBack={onBack} local={local} onRefresh={() => qc.invalidateQueries({ queryKey: keys.pull(repo, number) })} refreshing={pull.isFetching} />
         {item && <ContextDrawer item={item} onSelect={openItem} />}
+        <nav className="rv-views" aria-label="Pull request views">
+          {([
+            ["overview", "git-pull-request", "Overview", 0],
+            ["comments", "message", "Comments", openThreads(pr)],
+            ["changes", "file-diff", "Changes", pr.files.length],
+          ] as const).map(([id, icon, label, count]) => (
+            <button key={id} className={cx("rv-view", view === id && "active")} onClick={() => setView(id)} aria-pressed={view === id}>
+              <Icon name={icon} size={14} />
+              {label}
+              {count > 0 && <span className="rv-tab-count">{count}</span>}
+            </button>
+          ))}
+        </nav>
         <FixBanner ai={ctx.ai} local={boot.phase !== "remote"} />
-        <div className="rv-body" style={{ gridTemplateColumns: `48px ${panel ? `${sideWidth}px ` : ""}minmax(0, 1fr)${ctx.ai.open ? " minmax(320px, 400px)" : ""}` }}>
+        {view === "overview" && <div className="rv-page"><Overview /></div>}
+        {view === "comments" && <div className="rv-page"><Comments /></div>}
+        <div className="rv-body" hidden={view !== "changes"} style={{ gridTemplateColumns: `48px ${panel ? `${sideWidth}px ` : ""}minmax(0, 1fr)${ctx.ai.open ? " minmax(320px, 400px)" : ""}` }}>
           <ActivityBar panel={panel} onPanel={(p) => setPanel(panel === p ? null : p)} unread={unread} threads={openThreads(pr)} />
           {panel && (
             <aside className="rv-side">
@@ -229,8 +250,8 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack }: 
           <main className="rv-main">
             <div className="rv-tabs">
               {tabs.map((t) => {
-                const label = t.kind === "changes" ? "Changes" : t.kind === "overview" ? "Overview" : splitPath(t.path).name;
-                const icon = t.kind === "changes" ? "file-diff" : t.kind === "overview" ? "git-pull-request" : t.kind === "diff" ? "file-diff" : "file";
+                const label = t.kind === "changes" ? "Changes" : splitPath(t.path).name;
+                const icon = t.kind === "changes" || t.kind === "diff" ? "file-diff" : "file";
                 const closable = t.kind === "file" || t.kind === "diff";
                 return (
                   <div
@@ -260,7 +281,6 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack }: 
             </div>
             <div className="rv-editor">
               {tab.kind === "changes" && <DiffStack files={ordered} autoRead={autoRead} scrollTo={scrollTo} />}
-              {tab.kind === "overview" && <Overview />}
               {tab.kind === "diff" && (() => {
                 const f = pr.files.find((x) => x.filename === tab.path);
                 return f ? (

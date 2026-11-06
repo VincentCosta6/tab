@@ -168,6 +168,14 @@ export function applyLocal(pr: PullReview, a: ReviewAction): PullReview {
       return { ...pr, state: "merged" };
     case "update_branch":
       return { ...pr, merge_state: pr.merge_state === "behind" ? "blocked" : pr.merge_state };
+    case "add_reviewers":
+      return { ...pr, reviewers: [...new Set([...pr.reviewers, ...a.logins])] };
+    case "remove_reviewers":
+      return { ...pr, reviewers: pr.reviewers.filter((r) => !a.logins.includes(r)) };
+    case "add_labels":
+      return { ...pr, labels: [...pr.labels, ...a.labels.filter((n) => !pr.labels.some((l) => l.name === n)).map((name) => ({ name, color: "8b949e" }))] };
+    case "remove_label":
+      return { ...pr, labels: pr.labels.filter((l) => l.name !== a.label) };
   }
 }
 

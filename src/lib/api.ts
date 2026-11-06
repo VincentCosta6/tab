@@ -5,7 +5,7 @@
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, GraphNode, GraphView, LinkSummary, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
-  RateLimitState, ReviewAction, Session, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
+  RateLimitState, ReviewAction, ReviewOptions, Session, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun,
 } from "./types";
 import { mockApi } from "./mock";
@@ -86,6 +86,7 @@ export const api = {
   mcpInfo: () => call<{ url: string | null; token: string }>("mcp_info"),
   githubPull: (repo: string, number: number, sample: boolean) => call<PullReview>("github_pull", { repo, number, sample }),
   githubFile: (repo: string, sha: string, path: string) => call<string>("github_file", { repo, sha, path }),
+  githubReviewOptions: (repo: string) => call<ReviewOptions>("github_review_options", { repo }),
   githubReviewAction: (pr: PrRef, action: ReviewAction) => call<void>("github_review_action", { pr, action }),
   workspacePrepare: (target: { repo: string; number: number; head_sha: string; base_sha: string; base_ref: string }) =>
     call<ReviewWorkspace>("review_workspace_prepare", { target }),
