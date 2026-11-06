@@ -132,7 +132,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
       />
       <div className="item-body">
         <ChatView item={item} body={tab === "timeline" ? <Timeline itemId={item.id} /> : <Reader item={item} mode={readMode} />} showBody={tab !== "chat"} onSent={() => setTab("chat")} />
-        <ContextRail item={item} onSelect={onSelect} />
+        <ContextRail key={item.id} item={item} onSelect={onSelect} />
       </div>
     </div>
   );

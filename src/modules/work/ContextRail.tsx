@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Brand } from "../../design/brands";
 import { brandFor } from "../../design/brands";
@@ -8,7 +8,7 @@ import { useItemContext } from "../../lib/hooks";
 import { parseLink } from "../../lib/links";
 import { keys } from "../../lib/query";
 import type { ContextEntry, QueueItem } from "../../lib/types";
-import { EntryCard, IconButton, sameLink } from "./ContextDrawer";
+import { EntryCard, IconButton, ItemCard, sameLink } from "./ContextDrawer";
 
 const groupNames: Record<string, string> = {
   github: "GitHub", slack: "Slack", gmail: "Email", zoom: "Meetings", jira: "Jira", linear: "Linear", tab: "tab",
@@ -29,6 +29,7 @@ function connectorOf(e: ContextEntry): string {
 export function ContextRail({ item, onSelect }: { item: QueueItem; onSelect: (id: string) => void }) {
   const qc = useQueryClient();
   const { data: ctx } = useItemContext(item.id);
+  const [foundOpen, setFoundOpen] = useState(false);
   const groups = useMemo(() => {
     const own = (e: ContextEntry) => e.ref_item?.id === item.id || (!!e.url && !!item.url && sameLink(e.url, item.url));
     const entries = (ctx?.entries ?? []).filter((e) => e.section === "context" && !own(e));
@@ -42,10 +43,15 @@ export function ContextRail({ item, onSelect }: { item: QueueItem; onSelect: (id
     return [...by.entries()].sort(([, a], [, b]) => Number(b.some((e) => e.pinned)) - Number(a.some((e) => e.pinned)) || b.length - a.length);
   }, [ctx, item.id, item.url]);
 
-  if (!groups.length) return null;
+  const found = (ctx?.entries ?? []).filter((e) => e.section === "found" && e.ref_item?.id !== item.id && !(e.url && item.url && sameLink(e.url, item.url)));
+  const related = (ctx?.related ?? []).filter((r) => r.id !== item.id);
+  const foundCount = found.length + related.length;
+  if (!groups.length && !foundCount) return null;
   const refresh = () => qc.invalidateQueries({ queryKey: keys.context(item.id) });
   const pin = async (e: ContextEntry) => (await api.contextUpdate(e.id, { pinned: !e.pinned }), refresh());
   const remove = async (e: ContextEntry) => (await api.contextRemove(e.id), refresh());
+  const promote = async (e: ContextEntry) => (await api.contextUpdate(e.id, { section: "context" }), refresh());
+  const attach = async (r: QueueItem) => (await api.contextAdd(item.id, { section: "context", ref_item_id: r.id, title: r.title, added_by: "user" }), refresh());
 
   return (
     <aside className="ctx-rail" aria-label="Context">
@@ -66,6 +72,31 @@ export function ContextRail({ item, onSelect }: { item: QueueItem; onSelect: (id
           </div>
         </section>
       ))}
+      {foundCount > 0 && (
+        <section className="ctx-rail-group ctx-rail-found">
+          <button className="ctx-rail-head ctx-rail-toggle" aria-expanded={foundOpen} onClick={() => setFoundOpen((v) => !v)}>
+            <Icon name="chevron-down" size={12} className="ctx-chevron" />
+            Found
+            <span className="ctx-count">{foundCount}</span>
+            <span className="subtle">may be relevant</span>
+          </button>
+          {foundOpen && (
+            <div className="cc-list">
+              {found.map((e) => (
+                <EntryCard key={e.id} entry={e} onSelect={onSelect}>
+                  <IconButton icon="plus" label="Add to context" onClick={() => promote(e)} />
+                  <IconButton icon="x" label="Dismiss" onClick={() => remove(e)} />
+                </EntryCard>
+              ))}
+              {related.map((r) => (
+                <ItemCard key={r.id} item={r} note="Related" onOpen={() => onSelect(r.id)}>
+                  <IconButton icon="plus" label="Add to context" onClick={() => attach(r)} />
+                </ItemCard>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
     </aside>
   );
 }

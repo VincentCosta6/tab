@@ -253,7 +253,7 @@ function Card({ glyph, type, title, subtitle, status, note, pinned, onOpen, acti
   );
 }
 
-function ItemCard({ item, note, onOpen, pinned, summary, noDetails, children }: { item: QueueItem; note?: string; onOpen?: () => void; pinned?: boolean; summary?: string | null; noDetails?: boolean; children?: React.ReactNode }) {
+export function ItemCard({ item, note, onOpen, pinned, summary, noDetails, children }: { item: QueueItem; note?: string; onOpen?: () => void; pinned?: boolean; summary?: string | null; noDetails?: boolean; children?: React.ReactNode }) {
   const { kind } = useApp();
   const k = kind(item.kind);
   return (

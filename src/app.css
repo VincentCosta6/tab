@@ -678,3 +678,9 @@ body.resizing iframe { pointer-events: none; }
   .ctx-rail { display: grid; }
   .item-pane:has(.ctx-rail) .ctx-pills { display: none; }
 }
+.ctx-rail-found { margin-top: auto; padding-top: var(--space-3); border-top: 1px solid var(--border); }
+.ctx-rail-toggle { border: 0; background: none; padding: 0; cursor: pointer; width: 100%; text-align: left; font-family: inherit; }
+.ctx-rail-toggle:hover { color: var(--fg); }
+.ctx-rail-toggle .subtle { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.ctx-rail-toggle .ctx-chevron { transform: rotate(-90deg); }
+.ctx-rail-toggle[aria-expanded="true"] .ctx-chevron { transform: none; }
