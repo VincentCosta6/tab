@@ -139,6 +139,20 @@ pub struct AgentHub {
     opencode: tokio::sync::Mutex<Option<Arc<opencode::Server>>>,
 }
 
+/// The checkout a dev build of tab runs from, so agents can be told not to
+/// edit it under the running app. None in release builds.
+fn dev_checkout() -> Option<String> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = root.canonicalize().ok()?;
+    root.join(".git").exists().then(|| {
+        let s = root.display().to_string();
+        s.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(s)
+    })
+}
+
 impl AgentHub {
     pub fn new(
         store: Arc<Store>,
@@ -652,6 +666,15 @@ impl AgentHub {
              tab_test_connection and explain any failure plainly, e.g. that their host needs an app password.\n\
              Keep replies short; the person reads them in a side panel.\n",
         );
+        if let Some(root) = dev_checkout() {
+            out.push_str(&format!(
+                "\nThis is a dev build of tab, running from {root}. Don't edit files in that checkout: each \
+                 save hot-reloads or rebuilds the app you are running inside, and a half-written edit can \
+                 blank it or end this chat. To change tab's code, work in a separate worktree (git -C \"{root}\" \
+                 worktree add ../tab-<topic> -b <branch> origin/main), and commit, push and open a PR from \
+                 there.\n"
+            ));
+        }
         if let Ok(Some(brief)) = self.store.session_brief(&session.id) {
             out.push('\n');
             out.push_str(&brief);

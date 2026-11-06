@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Icon } from "./design/icons";
 import { TabMark } from "./design/brands";
 import { cx } from "./design/components";
+import { ErrorBoundary } from "./design/ErrorBoundary";
 import { AppProvider, useApp } from "./lib/app-context";
 import { useAgentActivity, useConfig } from "./lib/hooks";
 import { QueryProvider } from "./lib/query";
@@ -15,8 +16,10 @@ export default function App() {
   return (
     <QueryProvider>
       <AppProvider>
-        <Shell />
-        <ImageViewer />
+        <ErrorBoundary label="tab">
+          <Shell />
+          <ImageViewer />
+        </ErrorBoundary>
       </AppProvider>
     </QueryProvider>
   );
@@ -87,7 +90,9 @@ function Shell() {
         </div>
       </nav>
       <main className="main">
-        <Active />
+        <ErrorBoundary key={tab.id} label={tab.label}>
+          <Active />
+        </ErrorBoundary>
       </main>
       {onboarding && <Onboarding onClose={() => setOnboarding(false)} />}
     </div>

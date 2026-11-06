@@ -41,6 +41,16 @@ export GITHUB_TOKEN=...        # enables the GitHub connector (notifications + r
 
 UI-only iteration without the desktop shell: `pnpm dev` and open http://localhost:1420. The UI falls back to an in-memory mock backend (`src/lib/mock.ts`).
 
+### Working on tab from inside tab
+
+`pnpm tauri dev` hot-reloads the UI and rebuilds the backend on every save, so an agent chat that edits the checkout tab is running from can blank the window or restart the app mid-turn. Dev builds tell agents which checkout that is and to use a worktree instead. To do it by hand:
+
+```sh
+git worktree add ../tab-<topic> -b <branch> origin/main
+```
+
+For day-to-day use, run a built copy (`pnpm tauri build`, then install the bundle from `target/release/bundle`) and keep `pnpm tauri dev` for testing changes. Both use the same config and `tab.db`, so quit one before starting the other.
+
 ## Test
 
 ```sh
