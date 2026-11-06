@@ -627,9 +627,9 @@ impl AgentHub {
             .retain(|_, (a, _)| a.session_id != session_id);
     }
 
-    /// Attaches the PR URLs in a `gh pr create` result to the session's task
-    /// as Context, so a PR the agent opens never depends on it remembering to.
-    pub(crate) fn attach_opened_prs(&self, session_id: &str, output: &str) {
+    /// Attaches the links in a creating call's result (a PR, an issue, a ticket) to the session's task
+    /// as Context, so something the agent creates never depends on it remembering to.
+    pub(crate) fn attach_created_links(&self, session_id: &str, output: &str) {
         let Some(item_id) = self
             .store
             .session_get(session_id)
@@ -639,7 +639,7 @@ impl AgentHub {
         else {
             return;
         };
-        for url in pr_urls(output) {
+        for (url, label) in crate::links::found(output) {
             let linked = self.store.item_by_url(&url).ok().flatten();
             if linked.as_ref().is_some_and(|i| i.id == item_id) {
                 continue;
@@ -649,14 +649,14 @@ impl AgentHub {
                 title: linked
                     .as_ref()
                     .map(|i| i.event.title.clone())
-                    .unwrap_or_else(|| pr_label(&url)),
+                    .unwrap_or(label),
                 ref_item_id: linked.map(|i| i.id),
                 url: Some(url),
                 summary: None,
                 added_by: "agent".into(),
             };
             if let Err(e) = self.store.context_add(&item_id, &new, Utc::now()) {
-                tracing::warn!(error = %e, "couldn't attach the opened PR");
+                tracing::warn!(error = %e, "couldn't attach the created link");
             }
         }
     }
@@ -1001,50 +1001,5 @@ mod install_tests {
             "npm install -g @anthropic-ai/claude-code@latest"
         );
         assert_eq!(cmd("/Users/v/.local/bin/claude"), "claude update");
-    }
-}
-
-/// GitHub pull request URLs in text, once each, in order.
-pub(crate) fn pr_urls(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for word in text.split(|c: char| c.is_whitespace() || "<>()[]\"'`".contains(c)) {
-        let Some(rest) = word.strip_prefix("https://github.com/") else {
-            continue;
-        };
-        let parts: Vec<&str> = rest.split('/').collect();
-        if parts.len() >= 4
-            && parts[2] == "pull"
-            && !parts[0].is_empty()
-            && !parts[1].is_empty()
-            && !parts[3].is_empty()
-            && parts[3].chars().all(|c| c.is_ascii_digit())
-        {
-            let url = format!("https://github.com/{}/{}/pull/{}", parts[0], parts[1], parts[3]);
-            if !out.contains(&url) {
-                out.push(url);
-            }
-        }
-    }
-    out
-}
-
-/// `owner/repo#12` for a PR URL.
-fn pr_label(url: &str) -> String {
-    let p: Vec<&str> = url.trim_start_matches("https://github.com/").split('/').collect();
-    format!("{}/{}#{}", p[0], p[1], p[3])
-}
-
-#[cfg(test)]
-mod pr_url_tests {
-    use super::*;
-
-    #[test]
-    fn finds_pr_urls_in_gh_output() {
-        let out = "Warning: 1 uncommitted change
-https://github.com/VincentCosta6/tab/pull/18
-";
-        assert_eq!(pr_urls(out), ["https://github.com/VincentCosta6/tab/pull/18"]);
-        assert!(pr_urls("https://github.com/a/b/pull/new/branch https://github.com/a/b/issues/3").is_empty());
-        assert_eq!(pr_label("https://github.com/a/b/pull/7"), "a/b#7");
     }
 }
