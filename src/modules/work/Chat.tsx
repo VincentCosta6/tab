@@ -273,6 +273,53 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
       )}
       {chat?.approvals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
       <div ref={end} />
+      <ProgressBar messages={messages} running={!!chat?.running} />
+    </div>
+  );
+}
+
+interface Todo { content: string; status: "pending" | "in_progress" | "completed"; activeForm?: string }
+
+/**
+ * Pinned to the bottom of the chat while the agent works: its todo list
+ * (from TodoWrite) with progress, and the step it's on right now.
+ */
+function ProgressBar({ messages, running }: { messages: SessionMessage[]; running: boolean }) {
+  const [open, setOpen] = useState(false);
+  let todos: Todo[] = [];
+  let step = "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "user") break; // only this turn's work
+    if (m.kind !== "tool") continue;
+    if (m.meta?.tool === "TodoWrite") {
+      if (!todos.length) todos = (m.meta?.input?.todos as Todo[]) ?? [];
+    } else if (!step && m.meta?.tool !== "AskUserQuestion") step = m.content.replace(/^mcp__tab__/, "tab: ");
+    if (todos.length && step) break;
+  }
+  if (!running && !todos.length) return null;
+  const done = todos.filter((t) => t.status === "completed").length;
+  const active = todos.find((t) => t.status === "in_progress");
+  const label = active ? active.activeForm || active.content : step || "Working";
+  return (
+    <div className={cx("progress-bar", running && "running")}>
+      <button className="progress-head" onClick={() => todos.length && setOpen(!open)} aria-expanded={open}>
+        {running ? <span className="dots"><i /><i /><i /></span> : <Icon name="check" size={12} />}
+        <span className="progress-label">{running ? label : "Done"}</span>
+        {todos.length > 0 && <span className="progress-count">{done}/{todos.length}</span>}
+      </button>
+      {todos.length > 0 && <div className="progress-track"><i style={{ width: `${(done / todos.length) * 100}%` }} /></div>}
+      {open && (
+        <ul className="progress-list">
+          {todos.map((t, i) => (
+            <li key={i} className={t.status}>
+              <Icon name={t.status === "completed" ? "check" : "circle-dot"} size={11} />
+              <span>{t.status === "in_progress" ? t.activeForm || t.content : t.content}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {running && step && active && <div className="progress-step">{step}</div>}
     </div>
   );
 }
@@ -322,6 +369,8 @@ interface Question { question: string; header?: string; multiSelect?: boolean; o
 function QuestionForm({ questions, done, onSubmit }: { questions: Question[]; done: boolean; onSubmit: (answers: Record<string, string>) => void }) {
   const [picked, setPicked] = useState<Record<number, string[]>>({});
   const [sent, setSent] = useState(done);
+  // Free-text "Other" answer per question; it counts as a pick of its own.
+  const [other, setOther] = useState<Record<number, string>>({});
   const toggle = (qi: number, label: string, multi?: boolean) =>
     setPicked((p) => {
       const cur = p[qi] ?? [];
@@ -329,7 +378,12 @@ function QuestionForm({ questions, done, onSubmit }: { questions: Question[]; do
     });
   const submit = (all: Record<number, string[]>) => {
     const answers: Record<string, string> = {};
-    questions.forEach((q, i) => all[i]?.length && (answers[q.question] = all[i].join(", ")));
+    questions.forEach((q, i) => {
+      const typed = other[i]?.trim();
+      // Single-select: typed text replaces the button pick. Multi-select: it's added.
+      const picks = q.multiSelect ? [...(all[i] ?? []), ...(typed ? [typed] : [])] : typed && !all[i]?.length ? [typed] : all[i] ?? [];
+      if (picks.length) answers[q.question] = picks.join(", ");
+    });
     if (!Object.keys(answers).length) return;
     setSent(true);
     onSubmit(answers);
@@ -353,10 +407,24 @@ function QuestionForm({ questions, done, onSubmit }: { questions: Question[]; do
                 {o.description && <small>{o.description}</small>}
               </button>
             ))}
+            <input
+              className="question-other"
+              disabled={sent}
+              placeholder="Other: type your own answer"
+              value={other[qi] ?? ""}
+              onChange={(e) => setOther({ ...other, [qi]: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" || !other[qi]?.trim()) return;
+                e.preventDefault();
+                single ? submit({}) : submit(picked);
+              }}
+            />
           </div>
         </div>
       ))}
-      {!single && !sent && <Button size="sm" variant="primary" disabled={!Object.values(picked).some((v) => v.length)} onClick={() => submit(picked)}>Answer</Button>}
+      {!sent && (!single || Object.values(other).some((v) => v.trim())) && (
+        <Button size="sm" variant="primary" disabled={!Object.values(picked).some((v) => v.length) && !Object.values(other).some((v) => v.trim())} onClick={() => submit(picked)}>Answer</Button>
+      )}
     </div>
   );
 }
