@@ -59,6 +59,7 @@ impl Ranker for Pipeline {
             urgency: Urgency::from_score(base.score),
             reason: base.reason.clone(),
             ranked_by: "rules".into(),
+            fired: base.fired.clone(),
         };
         // Muted items are final; don't spend tokens on them.
         if base.muted {

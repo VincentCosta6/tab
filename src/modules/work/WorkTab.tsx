@@ -1,7 +1,7 @@
 import { flushSync } from "react-dom";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, EmptyState, ScorePill, Tabs, TextInput, cx } from "../../design/components";
+import { Badge, Button, EmptyState, Tabs, TextInput, cx } from "../../design/components";
 import { Brand, SourceGlyph, hasBrand } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
@@ -14,7 +14,8 @@ import { takePendingOpen } from "./Chat";
 import { ItemPane } from "./ItemPane";
 import { NewChat } from "./NewChat";
 import { ProjectChip, ProjectPicker, useRememberedProject } from "./Projects";
-import { SnoozeMenu } from "./SnoozeMenu";
+import { SnoozeMenu, snoozeOptions } from "./SnoozeMenu";
+import { ScoreBreakdown } from "./ScoreBreakdown";
 
 const urgencyOrder: Urgency[] = ["now", "today", "this_week", "whenever"];
 const urgencyHeading: Record<Urgency, string> = { now: "Now", today: "Today", this_week: "This week", whenever: "Whenever" };
@@ -264,8 +265,11 @@ export function QueueRow({ item, agent, selected, onSelect, onAct, compact }: {
   const { kind } = useApp();
   const k = kind(item.kind);
   const [menu, setMenu] = useState(false);
+  const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
+  const [showScore, setShowScore] = useState(false);
   return (
-    <div id={compact ? undefined : `row-${item.id}`} role="option" aria-selected={selected} className={cx("row", selected && "selected", menu && "menu-open", compact && "compact")} onClick={onSelect}>
+    <div id={compact ? undefined : `row-${item.id}`} role="option" aria-selected={selected} className={cx("row", selected && "selected", menu && "menu-open", compact && "compact")} onClick={onSelect}
+      onContextMenu={(e) => (e.preventDefault(), setMenu(false), setCtx({ x: e.clientX, y: e.clientY }))}>
       <span className="row-glyph">
         <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={compact ? 24 : 28} />
         {agent && <span className={cx("agent-dot", `agent-${agent.status}`)} title={agentText[agent.status]} />}
@@ -280,7 +284,6 @@ export function QueueRow({ item, agent, selected, onSelect, onAct, compact }: {
         {!compact && item.body && <div className="row-snippet">{item.body}</div>}
       </div>
       <div className="row-side">
-        <ScorePill score={item.ranking?.score} urgency={item.ranking?.urgency} pending={!item.ranking} />
         <span className="row-time">{timeAgo(item.occurred_at)}</span>
         {item.state === "snoozed" && item.snoozed_until && <Badge icon="clock">{timeUntil(item.snoozed_until)}</Badge>}
       </div>
@@ -303,6 +306,61 @@ export function QueueRow({ item, agent, selected, onSelect, onAct, compact }: {
           {menu && <SnoozeMenu onPick={(m) => (setMenu(false), onAct({ snooze: m }))} onClose={() => setMenu(false)} />}
         </div>
       )}
+      {ctx && (
+        <RowContextMenu
+          at={ctx}
+          done={item.state === "done"}
+          canAct={!!onAct}
+          onClose={() => setCtx(null)}
+          onAct={(a) => (setCtx(null), onAct?.(a))}
+          onScore={() => (setCtx(null), setShowScore(true))}
+        />
+      )}
+      {showScore && <ScoreBreakdown item={item} onClose={() => setShowScore(false)} />}
+    </div>
+  );
+}
+
+/** Right-click menu for a queue row: snooze, done, and why it ranks where it does. */
+function RowContextMenu({ at, done, canAct, onClose, onAct, onScore }: {
+  at: { x: number; y: number };
+  done: boolean;
+  canAct: boolean;
+  onClose: () => void;
+  onAct: (a: "done" | "reopen" | { snooze: number }) => void;
+  onScore: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onDown = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && onClose();
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("blur", onClose);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("blur", onClose);
+    };
+  }, [onClose]);
+  // Keep the menu on screen near the window's right and bottom edges.
+  const left = Math.min(at.x, window.innerWidth - 200);
+  const top = Math.min(at.y, window.innerHeight - 260);
+  return (
+    <div className="menu context-menu" ref={ref} role="menu" style={{ left, top }} onClick={(e) => e.stopPropagation()}>
+      {canAct && !done && (
+        <>
+          <div className="menu-label">Snooze</div>
+          {snoozeOptions.map((o) => (
+            <button key={o.key} role="menuitem" onClick={() => onAct({ snooze: o.minutes() })}>{o.label}</button>
+          ))}
+          <div className="menu-sep" />
+          <button role="menuitem" onClick={() => onAct("done")}>Mark done</button>
+        </>
+      )}
+      {canAct && done && <button role="menuitem" onClick={() => onAct("reopen")}>Reopen</button>}
+      {canAct && <div className="menu-sep" />}
+      <button role="menuitem" onClick={onScore}>View score</button>
     </div>
   );
 }
