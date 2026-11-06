@@ -3,7 +3,8 @@
 // until we need a real renderer.
 
 import { createContext, useContext, type MouseEvent, type ReactNode } from "react";
-import { openLink } from "../lib/links";
+import { openLink, parseLink } from "../lib/links";
+import { LinkPill } from "./LinkPill";
 import { isImagePath, isLocalPath, openImages, useImageSrc } from "../lib/images";
 
 /**
@@ -66,8 +67,10 @@ function inline(text: string, key: string): ReactNode[] {
     } else if (t.startsWith("`")) out.push(<code key={k}>{t.slice(1, -1)}</code>);
     else if (t.startsWith("**")) out.push(<strong key={k}>{t.slice(2, -2)}</strong>);
     else if (/^https?:\/\//.test(t)) {
-      // A bare link reads as a pill: owner/repo#12 for a PR, host/path for anything else.
-      out.push(<a key={k} href={t} className="pr-pill" target="_blank" rel="noreferrer" title={t} onClick={(e) => { e.preventDefault(); void openLink(t, e); }}>{linkLabel(t)}</a>);
+      // A bare link reads as a pill. One tab can summarise (a GitHub PR) shows its title and
+      // status; anything else shows owner/repo#12 or host/path.
+      if (parseLink(t)?.preview) out.push(<LinkPill key={k} href={t} />);
+      else out.push(<a key={k} href={t} className="pr-pill" target="_blank" rel="noreferrer" title={t} onClick={(e) => { e.preventDefault(); void openLink(t, e); }}>{linkLabel(t)}</a>);
     } else if (t.startsWith("[")) {
       const [, label, href] = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(t)!;
       out.push(/^https?:\/\//.test(href) ? <a key={k} href={href} target="_blank" rel="noreferrer" title={href} onClick={(e) => { e.preventDefault(); void openLink(href, e); }}>{label}</a> : <LocalLink key={k} href={href}>{inline(label, k)}</LocalLink>);

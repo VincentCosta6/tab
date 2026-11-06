@@ -5,6 +5,24 @@
 
 import { api, openUrl } from "./api";
 
+/**
+ * What a connector says about a link it recognises (a GitHub PR, a Slack
+ * thread, a Jira ticket, a Confluence or Google doc). The connector decides
+ * every part, tab only draws it: a chip or pill with the title and `status`,
+ * and a hover card with the author, age and `facts`.
+ */
+export interface LinkPreview {
+  title: string;
+  /** The one badge that matters most, in the connector's own words. */
+  status?: { label: string; tone: import("./types").Tone } | null;
+  author?: string | null;
+  updated_at?: string | null;
+  /** Labelled rows for the hover card: ["Checks", "Passing"]. */
+  facts?: Array<[string, string]>;
+  /** True while the answer is still being worked out; tab asks again shortly. */
+  settling?: boolean;
+}
+
 /** What a module makes of a URL it recognises. */
 export interface LinkKind {
   /** Item-style kind, for the brand mark (e.g. "github.pull_request"). */
@@ -17,8 +35,8 @@ export interface LinkKind {
   title: string;
   /** The address without query or fragment, used to find a queue item. */
   canonical: string;
-  /** Fetches the title and state, for a richer card. */
-  summary?: () => Promise<import("./types").LinkSummary>;
+  /** Fetches the preview. Leave it out and the link shows as a plain pill. Cache on the backend; tab shares one result per link. */
+  preview?: () => Promise<LinkPreview>;
   /** Opens the module's own view. Returns false when it can't right now. */
   open?: () => boolean;
 }

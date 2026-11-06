@@ -333,7 +333,13 @@ export const mockApi = {
         case "set_agent_mode": config = { ...config, agent: { ...config.agent, permission_mode: args.mode } }; return config;
         case "chat_stop": return null;
         case "approval_resolve": return true;
-        case "agent_health": return { kind: "claude_code", found: true, path: "/Users/you/.local/bin/claude", version: "2.1.91 (Claude Code)", error: null, install: "native", upgrade: "claude update", latest: "2.1.318" };
+        case "agent_health": return { kind: "claude_code", found: true, path: "/Users/you/.local/bin/claude", version: mockUpgraded ? "2.1.318 (Claude Code)" : "2.1.91 (Claude Code)", error: null, install: "native", upgrade: "claude update", latest: "2.1.318" };
+        case "agent_upgrade": {
+          const steps = ["Checking for updates…", "Downloading 2.1.318 (38%)", "Downloading 2.1.318 (100%)", "Installing…", "Updated to 2.1.318"];
+          for (const s of steps) { await new Promise((r) => setTimeout(r, 700)); upgradeListeners.forEach((l) => l(s)); }
+          mockUpgraded = true;
+          return undefined;
+        }
         case "detect_agents": return [
           { kind: "opencode", found: false, path: null, version: null, error: "`opencode` was not found on PATH." },
           { kind: "claude_code", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\claude.cmd", version: "2.1.318 (Claude Code)", error: null },
@@ -382,6 +388,10 @@ export const mockApi = {
   onWorkspace(_cb: (p: WorkspaceProgress) => void) {
     return () => {};
   },
+  onAgentUpgrade(cb: (line: string) => void) {
+    upgradeListeners.add(cb);
+    return () => void upgradeListeners.delete(cb);
+  },
   onGhCode(cb: (c: GhLoginCode) => void) {
     ghCodeListeners.add(cb);
     return () => void ghCodeListeners.delete(cb);
@@ -397,6 +407,8 @@ let lspServers: LspServer[] = [
 
 let gh: GhStatus = { installed: false, path: null, version: null, logged_in: false, user: null, install_command: "brew install gh", error: null };
 const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
+const upgradeListeners = new Set<(line: string) => void>();
+let mockUpgraded = false;
 
 // A link an agent attached, to show links rendered by what they point at.
 let contexts: ContextEntry[] = items.slice(0, 4).map((i) => ({ id: `ctx-seed-${i.id}`, item_id: i.id, section: "context", pinned: false, ref_item: null, url: "https://github.com/acme/payments/pull/491", title: "https://github.com/acme/payments/pull/491", summary: null, added_by: "agent", created_at: new Date().toISOString() }));
