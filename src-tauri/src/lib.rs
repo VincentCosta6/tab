@@ -708,6 +708,12 @@ async fn detect_agents(state: State<'_, AppState>) -> CmdResult<Vec<AgentProbe>>
     Ok(state.hub.detect().await)
 }
 
+/// The configured agent's version, the newest release and how to update it.
+#[tauri::command]
+async fn agent_health(state: State<'_, AppState>) -> CmdResult<Option<AgentProbe>> {
+    Ok(state.hub.health().await)
+}
+
 #[derive(Serialize)]
 struct McpInfo {
     url: Option<String>,
@@ -774,10 +780,21 @@ async fn graph_node(state: State<'_, AppState>, id: i64) -> CmdResult<serde_json
 /// Remove nodes from the graph (and keep them out), optionally with the
 /// nodes that only exist because of them.
 #[tauri::command]
-async fn graph_delete(state: State<'_, AppState>, id: i64, with_exclusive: bool) -> CmdResult<usize> {
+async fn graph_delete(
+    state: State<'_, AppState>,
+    id: i64,
+    with_exclusive: bool,
+) -> CmdResult<usize> {
     let mut ids = vec![id];
     if with_exclusive {
-        ids.extend(state.store.exclusive_entities(id).map_err(err)?.into_iter().map(|e| e.id));
+        ids.extend(
+            state
+                .store
+                .exclusive_entities(id)
+                .map_err(err)?
+                .into_iter()
+                .map(|e| e.id),
+        );
     }
     state.store.entities_delete(&ids, Utc::now()).map_err(err)
 }
@@ -1719,6 +1736,7 @@ pub fn run() {
             search_index_status,
             agent_activity,
             agent_slash_commands,
+            agent_health,
             graph_view,
             graph_node,
             graph_delete,

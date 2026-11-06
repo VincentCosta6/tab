@@ -636,3 +636,15 @@ body.resizing iframe { pointer-events: none; }
 .slash-menu button.active { background: var(--bg-hover); }
 .slash-name { font-family: var(--font-mono, ui-monospace, monospace); flex: none; }
 .slash-desc { color: var(--fg-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* Above the composer: sign the agent back in, or update it. */
+.agent-notice { display: flex; align-items: flex-start; gap: 8px; margin: 8px 8px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); font-size: var(--text-sm); color: var(--fg-muted); }
+.agent-notice > svg { flex: none; margin-top: 2px; color: var(--tone-info-fg); }
+.agent-notice.danger > svg { color: var(--tone-danger-fg); }
+.agent-notice > div { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.agent-notice strong { color: var(--fg); font-weight: 600; }
+.agent-notice code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; }
+.agent-notice-cmd { display: inline-flex; align-items: center; gap: 6px; padding: 1px 6px; margin: 0 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-raised); color: var(--fg); font: inherit; cursor: pointer; vertical-align: baseline; }
+.agent-notice-cmd:hover { border-color: var(--border-strong); }
+.agent-notice-x { flex: none; border: 0; background: transparent; color: var(--fg-subtle); cursor: pointer; padding: 2px; }
+.agent-notice-x:hover { color: var(--fg); }

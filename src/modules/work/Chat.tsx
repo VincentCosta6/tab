@@ -6,6 +6,7 @@ import { Icon } from "../../design/icons";
 import { Markdown } from "../../design/markdown";
 import { Thumbs } from "../../design/ImageViewer";
 import { imageTypes, saveAttachment } from "../../lib/images";
+import { AgentNotice } from "./AgentNotice";
 import { Dictation } from "./Dictation";
 import { api } from "../../lib/api";
 import { useChat, useConfig, useStream } from "../../lib/hooks";
@@ -721,6 +722,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
       }}
     >
       {armed && <div className="composer-drop"><Icon name="plus" size={14} /> Drop images to attach</div>}
+      <AgentNotice messages={chat?.messages} />
       {(images.length > 0 || uploading > 0) && (
         <div className="composer-images">
           <Thumbs srcs={images} size={56} onRemove={(i) => setImages((xs) => xs.filter((_, j) => j !== i))} />

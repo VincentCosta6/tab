@@ -58,6 +58,70 @@ pub struct AgentProbe {
     pub path: Option<String>,
     pub version: Option<String>,
     pub error: Option<String>,
+    /// How it was installed (winget, brew, npm, native), when tab can tell.
+    pub install: Option<String>,
+    /// The command that updates it, for that install.
+    pub upgrade: Option<String>,
+    /// The newest release, when tab could look it up.
+    pub latest: Option<String>,
+}
+
+/// How an agent CLI at `path` was installed, and the command that updates it.
+pub fn install_method(kind: AgentKind, path: &str) -> (&'static str, &'static str) {
+    // Resolve links: Homebrew's and npm's global bins can be the same folder,
+    // but the real files live in Caskroom or node_modules.
+    let real = std::fs::canonicalize(path)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.to_string());
+    let p = real.replace('\\', "/").to_lowercase();
+    let npm = p.contains("node_modules") || p.contains("/npm/") || p.contains("/.nvm/");
+    let brew = p.contains("/homebrew/") || p.contains("/cellar/") || p.contains("/caskroom/");
+    match kind {
+        AgentKind::ClaudeCode if p.contains("/winget/") => {
+            ("winget", "winget upgrade Anthropic.ClaudeCode")
+        }
+        AgentKind::ClaudeCode if npm => ("npm", "npm install -g @anthropic-ai/claude-code@latest"),
+        AgentKind::ClaudeCode if brew => ("brew", "brew upgrade --cask claude-code"),
+        AgentKind::ClaudeCode => ("native", "claude update"),
+        AgentKind::OpenCode if npm => ("npm", "npm install -g opencode-ai@latest"),
+        AgentKind::OpenCode if brew => ("brew", "brew upgrade opencode"),
+        AgentKind::OpenCode => ("native", "opencode upgrade"),
+    }
+}
+
+/// The newest published version of an agent CLI, from npm. Cached for six
+/// hours; `None` when offline.
+pub async fn latest_version(kind: AgentKind) -> Option<String> {
+    use std::sync::{LazyLock, Mutex};
+    use std::time::Instant;
+    static CACHE: LazyLock<Mutex<std::collections::HashMap<AgentKind, (Instant, String)>>> =
+        LazyLock::new(Default::default);
+    if let Some((at, v)) = CACHE.lock().unwrap().get(&kind)
+        && at.elapsed() < Duration::from_secs(6 * 3600)
+    {
+        return Some(v.clone());
+    }
+    let package = match kind {
+        AgentKind::ClaudeCode => "@anthropic-ai/claude-code",
+        AgentKind::OpenCode => "opencode-ai",
+    };
+    let v: serde_json::Value = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?
+        .get(format!("https://registry.npmjs.org/{package}/latest"))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let version = v["version"].as_str()?.to_string();
+    CACHE
+        .lock()
+        .unwrap()
+        .insert(kind, (Instant::now(), version.clone()));
+    Some(version)
 }
 
 pub struct AgentHub {
@@ -680,6 +744,18 @@ impl AgentHub {
         }
     }
 
+    /// The configured agent: where it is, its version, the newest release
+    /// and how to update it.
+    pub async fn health(&self) -> Option<AgentProbe> {
+        let cfg = self.config();
+        let kind = cfg.kind?;
+        let mut p = probe(kind, cfg.command.as_deref()).await;
+        if p.found {
+            p.latest = latest_version(kind).await;
+        }
+        Some(p)
+    }
+
     /// Looks for both supported agents, for onboarding.
     pub async fn detect(&self) -> Vec<AgentProbe> {
         let cfg = self.config();
@@ -733,6 +809,9 @@ async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
         path: None,
         version: None,
         error: None,
+        install: None,
+        upgrade: None,
+        latest: None,
     };
     let exe = match resolve(name) {
         Ok(e) => e,
@@ -742,6 +821,9 @@ async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
         }
     };
     p.path = Some(exe.display().to_string());
+    let (install, upgrade) = install_method(kind, &exe.display().to_string());
+    p.install = Some(install.into());
+    p.upgrade = Some(upgrade.into());
     let out = tokio::time::timeout(
         Duration::from_secs(15),
         command(&exe).arg("--version").output(),
@@ -836,5 +918,30 @@ mod keyed_tests {
                 .iter()
                 .any(|m| m.content.contains("tab quit"))
         );
+    }
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+
+    #[test]
+    fn update_command_follows_how_claude_code_was_installed() {
+        let cmd = |p| install_method(AgentKind::ClaudeCode, p).1;
+        assert_eq!(
+            cmd(
+                r"C:\Users\c\AppData\Local\Microsoft\WinGet\Packages\Anthropic.ClaudeCode_x\claude.exe"
+            ),
+            "winget upgrade Anthropic.ClaudeCode"
+        );
+        assert_eq!(
+            cmd("/opt/homebrew/bin/claude"),
+            "brew upgrade --cask claude-code"
+        );
+        assert_eq!(
+            cmd("/Users/v/.nvm/versions/node/v22/bin/claude"),
+            "npm install -g @anthropic-ai/claude-code@latest"
+        );
+        assert_eq!(cmd("/Users/v/.local/bin/claude"), "claude update");
     }
 }

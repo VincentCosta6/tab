@@ -437,12 +437,28 @@ mod tests {
         s.upsert(&ev("a", vec![dana(), one(), pr()]), now).unwrap();
         s.upsert(&ev("b", vec![dana(), web()]), now).unwrap();
 
-        let one_id = s.search_entities("onejs", 5).unwrap().iter().find(|e| e.kind == "repo").unwrap().id;
-        let only: Vec<_> = s.exclusive_entities(one_id).unwrap().into_iter().map(|e| e.label).collect();
+        let one_id = s
+            .search_entities("onejs", 5)
+            .unwrap()
+            .iter()
+            .find(|e| e.kind == "repo")
+            .unwrap()
+            .id;
+        let only: Vec<_> = s
+            .exclusive_entities(one_id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.label)
+            .collect();
         assert_eq!(only, ["onejs #1"], "Dana is also on b");
 
         let mut ids = vec![one_id];
-        ids.extend(s.exclusive_entities(one_id).unwrap().into_iter().map(|e| e.id));
+        ids.extend(
+            s.exclusive_entities(one_id)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.id),
+        );
         assert_eq!(s.entities_delete(&ids, now).unwrap(), 2);
         assert!(s.entity(one_id).unwrap().is_none());
 

@@ -78,6 +78,7 @@ export const api = {
   approvalResolve: (id: string, decision: "allow" | "always" | "deny" | "answer", message?: string, answers?: Record<string, string>) =>
     call<boolean>("approval_resolve", { id, decision, message: message ?? null, answers: answers ?? null }),
   detectAgents: () => call<AgentProbe[]>("detect_agents"),
+  agentHealth: () => call<AgentProbe | null>("agent_health"),
   usageSummary: () => call<UsageSummary>("usage_summary"),
   ghStatus: () => call<GhStatus>("gh_status"),
   ghLogin: () => call<GhStatus>("gh_login"),

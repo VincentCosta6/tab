@@ -243,7 +243,7 @@ export interface GhStatus {
 
 export interface GhLoginCode { code: string; url: string }
 
-export interface AgentProbe { kind: AgentKind; found: boolean; path: string | null; version: string | null; error: string | null }
+export interface AgentProbe { kind: AgentKind; found: boolean; path: string | null; version: string | null; error: string | null; install?: string | null; upgrade?: string | null; latest?: string | null }
 
 export interface Pressure {
   provider: string;

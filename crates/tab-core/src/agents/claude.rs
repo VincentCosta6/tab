@@ -103,7 +103,11 @@ pub(super) async fn run_turn(
     tokio::spawn(async move {
         while let Some(text) = steer_rx.recv().await {
             let line = json!({ "type": "user", "message": { "role": "user", "content": text } });
-            if stdin.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+            if stdin
+                .write_all(format!("{line}\n").as_bytes())
+                .await
+                .is_err()
+            {
                 break;
             }
         }

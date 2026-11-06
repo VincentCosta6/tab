@@ -498,7 +498,12 @@ pub(super) async fn complete(
         "system": system,
         "tools": {},
     });
-    if let Some((provider, model)) = hub.config().model.as_deref().and_then(|m| m.split_once('/')) {
+    if let Some((provider, model)) = hub
+        .config()
+        .model
+        .as_deref()
+        .and_then(|m| m.split_once('/'))
+    {
         body["model"] = json!({ "providerID": provider, "modelID": model });
     }
     let out = tokio::time::timeout(Duration::from_secs(60), async {
@@ -513,7 +518,12 @@ pub(super) async fn complete(
             .await
     })
     .await;
-    let _ = s.client.delete(s.url(&format!("/session/{id}"))).query(&s.q()).send().await;
+    let _ = s
+        .client
+        .delete(s.url(&format!("/session/{id}")))
+        .query(&s.q())
+        .send()
+        .await;
     let v = out.map_err(|_| anyhow::anyhow!("OpenCode took too long to suggest"))??;
     Ok(v["parts"]
         .as_array()

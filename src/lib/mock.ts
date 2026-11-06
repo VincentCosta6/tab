@@ -333,6 +333,7 @@ export const mockApi = {
         case "set_agent_mode": config = { ...config, agent: { ...config.agent, permission_mode: args.mode } }; return config;
         case "chat_stop": return null;
         case "approval_resolve": return true;
+        case "agent_health": return { kind: "claude_code", found: true, path: "/Users/you/.local/bin/claude", version: "2.1.91 (Claude Code)", error: null, install: "native", upgrade: "claude update", latest: "2.1.318" };
         case "detect_agents": return [
           { kind: "opencode", found: false, path: null, version: null, error: "`opencode` was not found on PATH." },
           { kind: "claude_code", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\claude.cmd", version: "2.1.318 (Claude Code)", error: null },

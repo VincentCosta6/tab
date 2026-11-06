@@ -22,8 +22,22 @@ to choose, pick the most sensible option and tell the agent to do it (e.g. \"go 
 If no obvious next instruction exists, reply with exactly NONE. Output only the message.";
 
 const BAD_START: &[&str] = &[
-    "i'll", "i will", "i'm", "i am", "i can", "let me", "looks good", "thanks", "thank", "great", "nice",
-    "perfect", "awesome", "would you", "do you", "sounds good",
+    "i'll",
+    "i will",
+    "i'm",
+    "i am",
+    "i can",
+    "let me",
+    "looks good",
+    "thanks",
+    "thank",
+    "great",
+    "nice",
+    "perfect",
+    "awesome",
+    "would you",
+    "do you",
+    "sounds good",
 ];
 
 pub(super) fn spawn(hub: Arc<AgentHub>, session_id: String) {
@@ -78,7 +92,8 @@ async fn run(hub: &Arc<AgentHub>, session_id: &str) -> anyhow::Result<()> {
     }
     // The person may have moved on while this ran.
     if hub.is_running(session_id)
-        || hub.store.messages(session_id)?.last().map(|m| m.id) != Some(messages.last().map_or(0, |m| m.id))
+        || hub.store.messages(session_id)?.last().map(|m| m.id)
+            != Some(messages.last().map_or(0, |m| m.id))
     {
         return Ok(());
     }
@@ -124,11 +139,8 @@ async fn via_claude(
         let mut stdin = child.stdin.take().expect("piped");
         stdin.write_all(prompt.as_bytes()).await?;
     }
-    let out = tokio::time::timeout(
-        std::time::Duration::from_secs(45),
-        child.wait_with_output(),
-    )
-    .await??;
+    let out = tokio::time::timeout(std::time::Duration::from_secs(45), child.wait_with_output())
+        .await??;
     let v: Value = serde_json::from_slice(&out.stdout)?;
     if v["is_error"].as_bool().unwrap_or(false) {
         return Ok(String::new());
