@@ -12,6 +12,7 @@ import { QueryProvider } from "./lib/query";
 import { Onboarding } from "./modules/onboarding/Onboarding";
 import { tabs } from "./modules/registry";
 import { UsageMeter } from "./modules/usage/UsageMeter";
+import { Updater } from "./modules/updates/Updater";
 
 export default function App() {
   return (
@@ -86,6 +87,7 @@ function Shell() {
       <nav className="nav">
         <div className="nav-group">{visible.filter((t) => !t.footer).map(navButton)}</div>
         <div className="nav-group nav-footer">
+          <Updater />
           <UsageMeter onSettings={() => setActive("settings")} />
           {visible.filter((t) => t.footer).map(navButton)}
         </div>

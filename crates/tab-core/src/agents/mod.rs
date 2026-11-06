@@ -125,6 +125,100 @@ pub async fn latest_version(kind: AgentKind) -> Option<String> {
     Some(version)
 }
 
+/// Drops ANSI escape sequences from installer output.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.next_if_eq(&'[').is_some() {
+                for n in chars.by_ref() {
+                    if n.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Runs the update command for the agent CLI at `path`, the same one tab shows
+/// in [`AgentProbe::upgrade`], and passes each line it prints to `on_line`.
+/// Installers redraw spinners with `\r`, so `\r` ends a line too.
+pub async fn run_upgrade(
+    kind: AgentKind,
+    path: &str,
+    on_line: impl Fn(String) + Send + Sync + 'static,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncReadExt;
+    use tokio::sync::mpsc;
+    let (_, cmdline) = install_method(kind, path);
+    let mut words = cmdline.split_whitespace();
+    let program = words.next().unwrap_or_default();
+    // The agent updating itself runs the binary we found, not whatever PATH has first.
+    let exe = if program == default_command(kind) {
+        PathBuf::from(path)
+    } else {
+        which::which(program).map_err(|_| {
+            anyhow::anyhow!("`{program}` isn't on PATH, so tab can't run `{cmdline}` for you.")
+        })?
+    };
+    let mut cmd = command(&exe);
+    cmd.args(words);
+    if program == "winget" {
+        cmd.args(["--accept-source-agreements", "--accept-package-agreements"]);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    for stream in [
+        child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
+        child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let (mut stream, mut buf, mut pending) = (stream, [0u8; 2048], String::new());
+            while let Ok(n) = stream.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                pending.push_str(&String::from_utf8_lossy(&buf[..n]));
+                while let Some(i) = pending.find(['\r', '\n']) {
+                    let line = strip_ansi(&pending[..i]).trim().to_string();
+                    pending.drain(..=i);
+                    if !line.is_empty() {
+                        let _ = tx.send(line);
+                    }
+                }
+            }
+            let line = strip_ansi(&pending).trim().to_string();
+            if !line.is_empty() {
+                let _ = tx.send(line);
+            }
+        });
+    }
+    drop(tx);
+    let run = async {
+        while let Some(line) = rx.recv().await {
+            on_line(line);
+        }
+        child.wait().await
+    };
+    let status = tokio::time::timeout(Duration::from_secs(600), run)
+        .await
+        .map_err(|_| anyhow::anyhow!("`{cmdline}` is taking too long; stopped waiting."))??;
+    anyhow::ensure!(status.success(), "`{cmdline}` failed ({status})");
+    Ok(())
+}
+
 pub struct AgentHub {
     pub(crate) store: Arc<Store>,
     events: broadcast::Sender<EngineEvent>,
@@ -814,6 +908,21 @@ impl AgentHub {
         Some(p)
     }
 
+    /// Updates the configured agent the way it was installed.
+    pub async fn upgrade(&self, on_line: impl Fn(String) + Send + Sync + 'static) -> anyhow::Result<()> {
+        let p = self
+            .health_probe()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("No agent is set up."))?;
+        let path = p.path.filter(|_| p.found).ok_or_else(|| anyhow::anyhow!("The agent wasn't found."))?;
+        run_upgrade(p.kind, &path, on_line).await
+    }
+
+    async fn health_probe(&self) -> Option<AgentProbe> {
+        let cfg = self.config();
+        Some(probe(cfg.kind?, cfg.command.as_deref()).await)
+    }
+
     /// Looks for both supported agents, for onboarding.
     pub async fn detect(&self) -> Vec<AgentProbe> {
         let cfg = self.config();
@@ -1001,5 +1110,10 @@ mod install_tests {
             "npm install -g @anthropic-ai/claude-code@latest"
         );
         assert_eq!(cmd("/Users/v/.local/bin/claude"), "claude update");
+    }
+
+    #[test]
+    fn installer_colour_codes_are_dropped() {
+        assert_eq!(strip_ansi("\u{1b}[32mDone\u{1b}[0m in 3s"), "Done in 3s");
     }
 }

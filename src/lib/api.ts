@@ -80,6 +80,8 @@ export const api = {
     call<boolean>("approval_resolve", { id, decision, message: message ?? null, answers: answers ?? null }),
   detectAgents: () => call<AgentProbe[]>("detect_agents"),
   agentHealth: () => call<AgentProbe | null>("agent_health"),
+  /** Runs the agent's own update command; its output arrives through `onAgentUpgrade`. */
+  agentUpgrade: () => call<void>("agent_upgrade"),
   usageSummary: () => call<UsageSummary>("usage_summary"),
   ghStatus: () => call<GhStatus>("gh_status"),
   ghLogin: () => call<GhStatus>("gh_login"),
@@ -146,6 +148,13 @@ export async function onGhCode(cb: (c: GhLoginCode) => void): Promise<() => void
   if (!inTauri) return mockApi.onGhCode(cb);
   const { listen } = await import("@tauri-apps/api/event");
   return listen<GhLoginCode>("tab://gh-code", (e) => cb(e.payload));
+}
+
+/** Lines the agent's updater prints while `agentUpgrade` runs. */
+export async function onAgentUpgrade(cb: (line: string) => void): Promise<() => void> {
+  if (!inTauri) return mockApi.onAgentUpgrade(cb);
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<string>("tab://agent-upgrade", (e) => cb(e.payload));
 }
 
 export async function onEngineEvent(cb: (e: EngineEvent) => void): Promise<() => void> {
