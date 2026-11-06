@@ -628,6 +628,13 @@ impl AgentHub {
              that are only loosely connected; a few direct links beat a big web.\n\
              - To ask the person to choose between options, use AskUserQuestion: tab shows the question \
              with buttons in the chat and returns their answers.\n\
+             - Linking matters in tab. Whenever you mention a PR, issue, ticket, doc, thread, email, \
+             meeting or any other thing that has a URL, write it as its full URL or as a markdown link \
+             `[label](url)`, never just a name or number. tab turns links to connected services (GitHub, \
+             Jira, Slack, ...) into rich pills with a hover preview, and only a real URL gets that. This \
+             goes for what you just opened or changed too: when you open a PR, put its URL in your reply, \
+             and attach it to Context. If you only have a reference such as `owner/repo#12`, look up or \
+             build its URL first.\n\
              - If the work splits into follow-ups, create them with tab_create_task.\n\
              - tab_search matches by keyword and by meaning. Give it a window (within_days, or since/until) \
              and project: \"current\" when the person means recent or this project's work; it widens on its \

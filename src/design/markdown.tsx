@@ -4,6 +4,7 @@
 
 import { createContext, useContext, type MouseEvent, type ReactNode } from "react";
 import { openLink } from "../lib/links";
+import { LinkPill, isDeepLink } from "./LinkPill";
 import { isImagePath, isLocalPath, openImages, useImageSrc } from "../lib/images";
 
 /**
@@ -35,7 +36,7 @@ function InlineImage({ src, alt }: { src: string; alt: string }) {
 
 function inline(text: string, key: string): ReactNode[] {
   const out: ReactNode[] = [];
-  const re = /(!\[[^\]]*\]\([^)\s]+\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)\s]+\))/g;
+  const re = /(!\[[^\]]*\]\([^)\s]+\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s<>"'`]+)/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let i = 0;
@@ -51,9 +52,15 @@ function inline(text: string, key: string): ReactNode[] {
       out.push(<InlineImage key={k} src={t.slice(1, -1)} alt={t.slice(1, -1)} />);
     } else if (t.startsWith("`")) out.push(<code key={k}>{t.slice(1, -1)}</code>);
     else if (t.startsWith("**")) out.push(<strong key={k}>{t.slice(2, -2)}</strong>);
-    else if (t.startsWith("[")) {
+    else if (/^https?:\/\//.test(t)) {
+      // A bare URL. Trailing punctuation belongs to the sentence, not the link.
+      const url = t.replace(/[.,;:!?)\]]+$/, "");
+      const rest = t.slice(url.length);
+      out.push(isDeepLink(url) ? <LinkPill key={k} url={url} /> : <a key={k} href={url} target="_blank" rel="noreferrer" title={url} onClick={(e) => { e.preventDefault(); void openLink(url, e); }}>{url}</a>);
+      if (rest) out.push(rest);
+    } else if (t.startsWith("[")) {
       const [, label, href] = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(t)!;
-      out.push(/^https?:\/\//.test(href) ? <a key={k} href={href} target="_blank" rel="noreferrer" title={href} onClick={(e) => { e.preventDefault(); void openLink(href, e); }}>{label}</a> : <LocalLink key={k} href={href}>{inline(label, k)}</LocalLink>);
+      out.push(isDeepLink(href) ? <LinkPill key={k} url={href} label={label} /> : /^https?:\/\//.test(href) ? <a key={k} href={href} target="_blank" rel="noreferrer" title={href} onClick={(e) => { e.preventDefault(); void openLink(href, e); }}>{label}</a> : <LocalLink key={k} href={href}>{inline(label, k)}</LocalLink>);
     } else out.push(<em key={k}>{t.slice(1, -1)}</em>);
     last = m.index + t.length;
   }

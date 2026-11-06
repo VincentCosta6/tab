@@ -648,3 +648,15 @@ body.resizing iframe { pointer-events: none; }
 .agent-notice-cmd:hover { border-color: var(--border-strong); }
 .agent-notice-x { flex: none; border: 0; background: transparent; color: var(--fg-subtle); cursor: pointer; padding: 2px; }
 .agent-notice-x:hover { color: var(--fg); }
+
+/* Link pills: deeplinks tab understands, in chat and comments */
+.lp { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; height: 22px; padding: 0 6px 0 4px; vertical-align: middle; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); color: var(--fg); font-size: 0.92em; text-decoration: none; cursor: pointer; }
+.lp:hover { border-color: var(--border-strong); background: var(--bg-hover); text-decoration: none; }
+.lp-mark { display: inline-flex; flex: none; }
+.lp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; max-width: 360px; }
+.lp-pop { position: fixed; z-index: 1000; display: grid; gap: 6px; padding: var(--space-3); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--bg-raised); color: var(--fg); box-shadow: var(--shadow-lg, 0 8px 24px rgba(0,0,0,.25)); font-size: var(--text-sm); pointer-events: none; }
+.lp-pop-type { display: flex; align-items: center; gap: 6px; color: var(--fg-muted); font-size: var(--text-xs); }
+.lp-pop-ref { margin-left: auto; font-family: var(--font-mono); }
+.lp-pop-title { font-weight: 600; line-height: 1.3; }
+.lp-pop-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.lp-pop-url { font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
