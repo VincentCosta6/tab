@@ -170,6 +170,8 @@ struct Parser {
     hub: Arc<AgentHub>,
     session_id: String,
     seen: HashSet<String>,
+    /// Ids of calls that create something linkable, so their output can be attached as Context.
+    create_calls: HashSet<String>,
     finished: bool,
     billing: &'static str,
     /// Usage of the first and latest model call this turn, for the context meter.
@@ -196,6 +198,7 @@ impl Parser {
             hub,
             session_id,
             seen: HashSet::new(),
+            create_calls: HashSet::new(),
             finished: false,
             billing: "unknown",
             first_call: None,
@@ -288,6 +291,9 @@ impl Parser {
                             let id = block["id"].as_str().unwrap_or_default().to_string();
                             if self.once(format!("tool:{id}")) {
                                 let name = block["name"].as_str().unwrap_or("tool");
+                                if crate::links::is_creator(name, &block["input"]) {
+                                    self.create_calls.insert(id.clone());
+                                }
                                 hub.post(
                                     &sid,
                                     "assistant",
@@ -313,6 +319,12 @@ impl Parser {
                                 .join("\n"),
                             _ => String::new(),
                         };
+                        if block["tool_use_id"]
+                            .as_str()
+                            .is_some_and(|i| self.create_calls.remove(i))
+                        {
+                            hub.attach_created_links(&sid, &text);
+                        }
                         hub.post(
                             &sid,
                             "tool",

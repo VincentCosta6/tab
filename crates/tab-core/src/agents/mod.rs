@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::AgentConfig;
 use crate::engine::EngineEvent;
 use crate::model::{AgentKind, Approval, ContextSection, Session, SessionStatus};
+use crate::NewContext;
 use crate::store::Store;
 
 /// How long an approval waits for the person before it is denied.
@@ -624,6 +625,40 @@ impl AgentHub {
             .lock()
             .unwrap()
             .retain(|_, (a, _)| a.session_id != session_id);
+    }
+
+    /// Attaches the links in a creating call's result (a PR, an issue, a ticket) to the session's task
+    /// as Context, so something the agent creates never depends on it remembering to.
+    pub(crate) fn attach_created_links(&self, session_id: &str, output: &str) {
+        let Some(item_id) = self
+            .store
+            .session_get(session_id)
+            .ok()
+            .flatten()
+            .and_then(|s| s.item_id)
+        else {
+            return;
+        };
+        for (url, label) in crate::links::found(output) {
+            let linked = self.store.item_by_url(&url).ok().flatten();
+            if linked.as_ref().is_some_and(|i| i.id == item_id) {
+                continue;
+            }
+            let new = NewContext {
+                section: ContextSection::Context,
+                title: linked
+                    .as_ref()
+                    .map(|i| i.event.title.clone())
+                    .unwrap_or(label),
+                ref_item_id: linked.map(|i| i.id),
+                url: Some(url),
+                summary: None,
+                added_by: "agent".into(),
+            };
+            if let Err(e) = self.store.context_add(&item_id, &new, Utc::now()) {
+                tracing::warn!(error = %e, "couldn't attach the created link");
+            }
+        }
     }
 
     /// Instructions appended to the agent's system prompt on every turn, so

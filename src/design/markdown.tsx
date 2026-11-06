@@ -33,9 +33,23 @@ function InlineImage({ src, alt }: { src: string; alt: string }) {
   );
 }
 
+/** Short label for a bare link. Add a rule per service, as in crates/tab-core/src/links.rs. */
+const LINK_LABELS: Array<(u: URL) => string | null> = [
+  (u) => (u.hostname === "github.com" ? /^\/([^/]+\/[^/]+)\/(?:pull|issues)\/(\d+)\/?$/.exec(u.pathname)?.slice(1).join("#") ?? null : null),
+];
+export function linkLabel(href: string): string {
+  try {
+    const u = new URL(href);
+    for (const rule of LINK_LABELS) { const l = rule(u); if (l) return l; }
+    const path = u.pathname.replace(/\/$/, "");
+    const text = u.hostname.replace(/^www\./, "") + path;
+    return text.length > 48 ? text.slice(0, 47) + "…" : text;
+  } catch { return href; }
+}
+
 function inline(text: string, key: string): ReactNode[] {
   const out: ReactNode[] = [];
-  const re = /(!\[[^\]]*\]\([^)\s]+\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)\s]+\))/g;
+  const re = /(!\[[^\]]*\]\([^)\s]+\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s<>()\[\]`]*[^\s<>()\[\]`.,;:!?'"])/g;
   let last = 0;
   let m: RegExpExecArray | null;
   let i = 0;
@@ -51,7 +65,10 @@ function inline(text: string, key: string): ReactNode[] {
       out.push(<InlineImage key={k} src={t.slice(1, -1)} alt={t.slice(1, -1)} />);
     } else if (t.startsWith("`")) out.push(<code key={k}>{t.slice(1, -1)}</code>);
     else if (t.startsWith("**")) out.push(<strong key={k}>{t.slice(2, -2)}</strong>);
-    else if (t.startsWith("[")) {
+    else if (/^https?:\/\//.test(t)) {
+      // A bare link reads as a pill: owner/repo#12 for a PR, host/path for anything else.
+      out.push(<a key={k} href={t} className="pr-pill" target="_blank" rel="noreferrer" title={t} onClick={(e) => { e.preventDefault(); void openLink(t, e); }}>{linkLabel(t)}</a>);
+    } else if (t.startsWith("[")) {
       const [, label, href] = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(t)!;
       out.push(/^https?:\/\//.test(href) ? <a key={k} href={href} target="_blank" rel="noreferrer" title={href} onClick={(e) => { e.preventDefault(); void openLink(href, e); }}>{label}</a> : <LocalLink key={k} href={href}>{inline(label, k)}</LocalLink>);
     } else out.push(<em key={k}>{t.slice(1, -1)}</em>);

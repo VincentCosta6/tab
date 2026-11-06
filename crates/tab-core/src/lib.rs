@@ -22,6 +22,7 @@ pub mod embed;
 pub mod engine;
 pub mod gateway;
 pub mod gh;
+pub mod links;
 pub mod lsp;
 pub mod mcp;
 pub mod model;
