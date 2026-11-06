@@ -150,7 +150,19 @@
 .rv-tabs-tools { align-self: center; margin: 0 var(--space-2); flex: none; }
 .rv-editor { position: relative; min-height: 0; overflow: hidden; }
 
+.rv-primary-wrap { display: inline-flex; }
 .rv-primary-wrap button:disabled { pointer-events: none; }
+.rv-split { position: relative; display: inline-flex; }
+.rv-split-main { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.rv-split-more { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid rgb(255 255 255 / 0.3); padding-inline: 6px; min-width: 0; }
+.rv-hovercard { position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; width: 320px; display: grid; gap: var(--space-2); padding: var(--space-3); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-md); font-size: var(--text-sm); pointer-events: none; }
+.rv-hovercard p { margin: 0; }
+.rv-hovercard ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
+.rv-hovercard li { display: flex; gap: 6px; align-items: flex-start; }
+.rv-hovercard li svg, .rv-hovercard strong svg { flex: none; margin-top: 2px; }
+.rv-hovercard .bad svg { color: var(--danger, #cf222e); }
+.rv-hovercard .warn svg { color: var(--warning, #9a6700); }
+.rv-hovercard .good { display: flex; gap: 6px; align-items: center; color: var(--success, #1a7f37); }
 .rv-btn-merge:not(:disabled) { background: var(--tone-accent-fg, #8250df); border-color: transparent; }
 
 /* Combined changes */
