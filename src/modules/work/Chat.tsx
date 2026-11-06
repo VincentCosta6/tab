@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, cx } from "../../design/components";
 import { Brand } from "../../design/brands";
@@ -6,6 +6,7 @@ import { Icon } from "../../design/icons";
 import { Markdown } from "../../design/markdown";
 import { Thumbs } from "../../design/ImageViewer";
 import { imageTypes, saveAttachment } from "../../lib/images";
+import { fileRefs, setThreadFiles, toViewerFile, type ViewerFile } from "../../lib/viewer";
 import { AgentNotice } from "./AgentNotice";
 import { Dictation } from "./Dictation";
 import { api } from "../../lib/api";
@@ -55,6 +56,21 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
   const { data: chat } = useChat(item.id);
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
+
+  // The viewer steps through whatever files this thread names, in order.
+  const messages = chat?.messages;
+  const threadFiles = useMemo(() => {
+    const seen = new Set<string>();
+    const out: ViewerFile[] = [];
+    for (const m of messages ?? []) {
+      const found = m.role === "assistant" && m.kind === "text" ? fileRefs(m.content)
+        : m.role === "user" && Array.isArray(m.meta?.attachments) ? (m.meta.attachments as string[]).flatMap((a) => toViewerFile(a) ?? []) : [];
+      for (const f of found) if (!seen.has(f.src)) (seen.add(f.src), out.push(f));
+    }
+    return out;
+  }, [messages]);
+  useEffect(() => { setThreadFiles(threadFiles); }, [threadFiles]);
+  useEffect(() => () => setThreadFiles([]), []);
 
   const send = async (text: string, attachments: string[] = []) => {
     setError(null);

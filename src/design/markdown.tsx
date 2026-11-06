@@ -5,7 +5,9 @@
 import { createContext, useContext, type MouseEvent, type ReactNode } from "react";
 import { openLink, parseLink } from "../lib/links";
 import { LinkPill } from "./LinkPill";
-import { isImagePath, isLocalPath, openImages, useImageSrc } from "../lib/images";
+import { isImagePath, isLocalPath, useImageSrc } from "../lib/images";
+import { openFile, toViewerFile } from "../lib/viewer";
+import { Icon } from "./icons";
 
 /**
  * Handles links that aren't http(s), such as `src/a.ts#L12` in an agent's
@@ -28,8 +30,20 @@ function InlineImage({ src, alt }: { src: string; alt: string }) {
   const url = useImageSrc(/^(https?:|data:|blob:)/.test(src) || isLocalPath(src) ? src : null);
   if (!url) return <code>{alt || src}</code>;
   return (
-    <button className="md-image" onClick={() => openImages([{ src, name: alt || undefined }])} title={alt || src}>
+    <button className="md-image" onClick={() => { const f = toViewerFile(src, alt || undefined); if (f) openFile(f); }} title={alt || src}>
       <img src={url} alt={alt} />
+    </button>
+  );
+}
+
+/** A file the agent left (video, page, PDF, notes): a chip that opens it in the viewer. */
+function FileChip({ src, label }: { src: string; label?: string }) {
+  const f = toViewerFile(src, label);
+  if (!f) return <code>{src}</code>;
+  return (
+    <button className="file-chip" onClick={() => openFile(f)} title={src}>
+      <Icon name={f.kind === "video" ? "video" : f.kind === "html" ? "code" : "file"} size={13} />
+      <span>{f.name}</span>
     </button>
   );
 }
@@ -64,8 +78,11 @@ function inline(text: string, key: string): ReactNode[] {
     } else if (t.startsWith("`") && isImagePath(t.slice(1, -1)) && isLocalPath(t.slice(1, -1))) {
       // A screenshot the agent saved, named by path: show it.
       out.push(<InlineImage key={k} src={t.slice(1, -1)} alt={t.slice(1, -1)} />);
+    } else if (t.startsWith("`") && isLocalPath(t.slice(1, -1)) && toViewerFile(t.slice(1, -1))) {
+      out.push(<FileChip key={k} src={t.slice(1, -1)} />);
     } else if (t.startsWith("`")) out.push(<code key={k}>{t.slice(1, -1)}</code>);
     else if (t.startsWith("**")) out.push(<strong key={k}>{t.slice(2, -2)}</strong>);
+    else if (/^https?:\/\//.test(t) && toViewerFile(t) && toViewerFile(t)!.kind !== "html") out.push(<FileChip key={k} src={t} />);
     else if (/^https?:\/\//.test(t)) {
       // A bare link reads as a pill. One tab can summarise (a GitHub PR) shows its title and
       // status; anything else shows owner/repo#12 or host/path.
@@ -73,6 +90,7 @@ function inline(text: string, key: string): ReactNode[] {
       else out.push(<a key={k} href={t} className="pr-pill" target="_blank" rel="noreferrer" title={t} onClick={(e) => { e.preventDefault(); void openLink(t, e); }}>{linkLabel(t)}</a>);
     } else if (t.startsWith("[")) {
       const [, label, href] = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(t)!;
+      if (toViewerFile(href) && (isLocalPath(href) || /^https?:/.test(href))) { out.push(<FileChip key={k} src={href} label={label} />); last = m.index + t.length; continue; }
       out.push(/^https?:\/\//.test(href) ? <a key={k} href={href} target="_blank" rel="noreferrer" title={href} onClick={(e) => { e.preventDefault(); void openLink(href, e); }}>{label}</a> : <LocalLink key={k} href={href}>{inline(label, k)}</LocalLink>);
     } else out.push(<em key={k}>{t.slice(1, -1)}</em>);
     last = m.index + t.length;

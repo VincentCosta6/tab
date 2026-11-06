@@ -269,6 +269,32 @@ async fn image_read(path: String) -> CmdResult<tauri::ipc::Response> {
     ))
 }
 
+const MAX_FILE: u64 = 200 * 1024 * 1024;
+
+/// Files an agent leaves in a chat that tab can show in its viewer. Only
+/// these types are served, so a path in a reply can't read anything else.
+fn viewable_ext(name: &str) -> bool {
+    let ext = name.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+    [
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "mp4", "m4v", "webm", "mov", "ogv", "html", "htm",
+        "pdf", "md", "markdown", "txt", "log", "json", "csv",
+    ]
+    .contains(&ext.as_str())
+}
+
+/// A viewable file's bytes, for the center viewer.
+#[tauri::command]
+async fn file_read(path: String) -> CmdResult<tauri::ipc::Response> {
+    if !viewable_ext(&path) {
+        return Err("tab can't show that kind of file".into());
+    }
+    let meta = std::fs::metadata(&path).map_err(err)?;
+    if !meta.is_file() || meta.len() > MAX_FILE {
+        return Err("that file is missing or over 200 MB".into());
+    }
+    Ok(tauri::ipc::Response::new(std::fs::read(&path).map_err(err)?))
+}
+
 /// Starts the system's own dictation in the focused text box (macOS: the
 /// same as Edit → Start Dictation). Elsewhere, says how to start it.
 #[tauri::command]
@@ -1859,6 +1885,7 @@ pub fn run() {
             item_by_url,
             attachment_save,
             image_read,
+            file_read,
             start_dictation,
             github_link_summary,
             item_preview,

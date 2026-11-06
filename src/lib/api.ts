@@ -49,6 +49,7 @@ export const api = {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<string>("attachment_save", bytes, { headers: { "x-name": encodeURIComponent(name) } });
   },
+  fileRead: (path: string) => call<ArrayBuffer>("file_read", { path }),
   imageRead: (path: string) => call<ArrayBuffer>("image_read", { path }),
   startDictation: () => call<void>("start_dictation"),
   agentActivity: () => call<AgentActivity[]>("agent_activity"),
