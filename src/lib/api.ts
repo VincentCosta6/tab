@@ -112,8 +112,22 @@ export const api = {
   workflowRun: (workflow: Workflow, itemId: string | null, dryRun: boolean) => call<WorkflowRun>("workflow_run", { workflow, itemId, dryRun }),
   workflowChatOpen: () => call<Chat>("workflow_chat_open"),
   workflowChatSend: (text: string, open: Workflow | null) => call<Session>("workflow_chat_send", { text, open }),
+  browserOpen: (id: string, url: string, bounds: Bounds) => call<void>("browser_open", { id, url, bounds }),
+  browserBounds: (id: string, bounds: Bounds) => call<void>("browser_bounds", { id, bounds }),
+  browserVisible: (id: string, visible: boolean) => call<void>("browser_visible", { id, visible }),
+  browserNav: (id: string, action: "back" | "forward" | "reload" | "go", url?: string) => call<void>("browser_nav", { id, action, url: url ?? null }),
+  browserClose: (id: string) => call<void>("browser_close", { id }),
   itemActivity: (id: string) => call<Activity[]>("item_activity", { id }),
 };
+
+export interface Bounds { x: number; y: number; w: number; h: number }
+
+/** Page loads, address and title changes from the in-app browser's webviews. */
+export async function onBrowserEvent(cb: (e: { id: string; kind: "url" | "title" | "loading" | "loaded"; value: string }) => void): Promise<() => void> {
+  if (!inTauri) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<{ id: string; kind: "url" | "title" | "loading" | "loaded"; value: string }>("tab://browser", (e) => cb(e.payload));
+}
 
 export async function openUrl(url: string) {
   // A bare host ("mail.example.com/webmail") from a settings field.

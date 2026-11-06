@@ -1647,6 +1647,100 @@ async fn connection_set_secrets(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// The in-app browser: one native child webview per browser tab, laid over the
+/// page's placeholder. A real webview (not an iframe) so sites that refuse
+/// framing, GitHub among them, still load.
+#[derive(Deserialize, Clone, Copy)]
+struct Bounds {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+#[derive(Serialize, Clone)]
+struct BrowserEvent {
+    id: String,
+    kind: &'static str,
+    value: String,
+}
+
+fn browser_label(id: &str) -> String {
+    format!("browser-{id}")
+}
+
+fn browser_view(app: &tauri::AppHandle, id: &str) -> Result<tauri::Webview, String> {
+    app.get_webview(&browser_label(id)).ok_or_else(|| "browser tab is closed".to_string())
+}
+
+#[tauri::command]
+fn browser_open(app: tauri::AppHandle, id: String, url: String, bounds: Bounds) -> Result<(), String> {
+    use tauri::webview::{PageLoadEvent, WebviewBuilder};
+    use tauri::{LogicalPosition, LogicalSize, WebviewUrl};
+    let parsed: tauri::Url = url.parse().map_err(|e| format!("not a web address: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("only web addresses open in the browser".into());
+    }
+    let window = app.get_window("main").ok_or("no main window")?;
+    let (a, b) = (app.clone(), app.clone());
+    let (tab_a, tab_b) = (id.clone(), id.clone());
+    let builder = WebviewBuilder::new(browser_label(&id), WebviewUrl::External(parsed))
+        .on_page_load(move |wv, payload| {
+            let kind = if matches!(payload.event(), PageLoadEvent::Started) { "loading" } else { "loaded" };
+            let _ = a.emit("tab://browser", BrowserEvent { id: tab_a.clone(), kind: "url", value: wv.url().map(|u| u.to_string()).unwrap_or_default() });
+            let _ = a.emit("tab://browser", BrowserEvent { id: tab_a.clone(), kind, value: String::new() });
+        })
+        .on_document_title_changed(move |_, title| {
+            let _ = b.emit("tab://browser", BrowserEvent { id: tab_b.clone(), kind: "title", value: title });
+        });
+    window
+        .add_child(builder, LogicalPosition::new(bounds.x, bounds.y), LogicalSize::new(bounds.w.max(1.0), bounds.h.max(1.0)))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn browser_bounds(app: tauri::AppHandle, id: String, bounds: Bounds) -> Result<(), String> {
+    use tauri::{LogicalPosition, LogicalSize};
+    let wv = browser_view(&app, &id)?;
+    wv.set_position(LogicalPosition::new(bounds.x, bounds.y)).map_err(|e| e.to_string())?;
+    wv.set_size(LogicalSize::new(bounds.w.max(1.0), bounds.h.max(1.0))).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn browser_visible(app: tauri::AppHandle, id: String, visible: bool) -> Result<(), String> {
+    let wv = browser_view(&app, &id)?;
+    if visible { wv.show() } else { wv.hide() }.map_err(|e| e.to_string())
+}
+
+/// `action`: back, forward, reload, or `go` with a url.
+#[tauri::command]
+fn browser_nav(app: tauri::AppHandle, id: String, action: String, url: Option<String>) -> Result<(), String> {
+    let wv = browser_view(&app, &id)?;
+    match action.as_str() {
+        "back" => wv.eval("history.back()"),
+        "forward" => wv.eval("history.forward()"),
+        "reload" => wv.eval("location.reload()"),
+        "go" => {
+            let u: tauri::Url = url.ok_or("no address")?.parse().map_err(|e| format!("not a web address: {e}"))?;
+            if !matches!(u.scheme(), "http" | "https") {
+                return Err("only web addresses open in the browser".into());
+            }
+            wv.navigate(u)
+        }
+        _ => return Err("unknown action".into()),
+    }
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn browser_close(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    match app.get_webview(&browser_label(&id)) {
+        Some(wv) => wv.close().map_err(|e| e.to_string()),
+        None => Ok(()),
+    }
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1741,6 +1835,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            browser_open,
+            browser_bounds,
+            browser_visible,
+            browser_nav,
+            browser_close,
             list_items,
             search_items,
             item_detail,

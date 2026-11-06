@@ -1,6 +1,6 @@
 /* Layout of the shell and the built-in modules. */
 
-.shell { display: grid; grid-template-columns: 84px 1fr; height: 100%; }
+.shell { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; height: 100%; }
 .nav { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-2); padding: var(--space-3) var(--space-2); background: var(--bg-sunken); border-right: 1px solid var(--border); }
 .nav-brand { display: grid; place-items: center; padding: var(--space-2) 0 var(--space-3); }
 .nav-group { display: grid; gap: 2px; }
@@ -664,3 +664,25 @@ body.resizing iframe { pointer-events: none; }
 
 .markdown a.pr-pill { display: inline-block; font-size: var(--text-xs); border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; text-decoration: none; font-variant-numeric: tabular-nums; }
 .markdown a.pr-pill:hover { background: var(--bg-hover, transparent); }
+
+/* In-app browser dock */
+.bdock { position: relative; display: flex; flex-direction: column; min-width: 0; background: var(--bg-raised); border-left: 1px solid var(--border); }
+.bdock.expanded { grid-column: 2 / 4; width: auto !important; }
+.shell:has(.bdock.expanded) > .main { display: none; }
+.bdock-grip { position: absolute; left: -3px; top: 0; bottom: 0; width: 6px; cursor: col-resize; z-index: 3; }
+.bdock-grip:hover, .bdock-grip.drag { background: var(--border); }
+.bdock.expanded .bdock-grip { display: none; }
+.btabs { display: flex; align-items: center; gap: 2px; padding: var(--space-1) var(--space-2) 0; background: var(--bg-sunken); border-bottom: 1px solid var(--border); overflow-x: auto; }
+.btab { display: flex; align-items: center; gap: var(--space-1); max-width: 180px; min-width: 90px; padding: 6px var(--space-2); border: 0; border-radius: var(--radius-sm) var(--radius-sm) 0 0; background: transparent; color: var(--fg-muted); font-size: var(--text-sm); cursor: pointer; }
+.btab:hover { background: var(--bg-hover); }
+.btab.active { background: var(--bg-raised); color: var(--fg); }
+.btab-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.btab-x { display: grid; place-items: center; width: 18px; height: 18px; border-radius: var(--radius-sm); color: var(--fg-subtle); }
+.btab-x:hover { background: var(--bg-hover); color: var(--fg); }
+.btabs-end { margin-left: auto; display: flex; gap: 2px; padding-bottom: 2px; }
+.bbar { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--border); }
+.bbar input { flex: 1; min-width: 0; height: 28px; padding: 0 var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font-size: var(--text-sm); }
+.bview { position: relative; flex: 1; min-height: 0; }
+.bview iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+.open-menu { right: 0; left: auto; min-width: 230px; }
+.open-menu button .sub { color: var(--fg-subtle); font-size: var(--text-xs); }
