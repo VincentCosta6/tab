@@ -21,6 +21,8 @@ export interface LinkPreview {
   facts?: Array<[string, string]>;
   /** True while the answer is still being worked out; tab asks again shortly. */
   settling?: boolean;
+  /** True once nothing about it can change (merged, closed): no need to keep checking. */
+  final?: boolean;
 }
 
 /** What a module makes of a URL it recognises. */
