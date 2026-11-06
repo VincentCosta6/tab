@@ -129,7 +129,7 @@ fn default_true() -> bool {
 }
 
 fn default_permission_mode() -> String {
-    "default".into()
+    "auto".into()
 }
 
 /// tab's local MCP server, which agents use to search the queue and add context.
