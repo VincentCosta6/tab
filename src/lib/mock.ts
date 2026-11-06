@@ -577,7 +577,7 @@ function samplePull(repo: string, number: number): PullReview {
     mergeable: "mergeable", merge_state: "unstable", merge_method: "squash", review_decision: "review_required",
     checks: { state: "failure", runs: [
       { name: "lint", status: "completed", conclusion: "success", url: null },
-      { name: "unit-tests (node 22)", status: "completed", conclusion: "failure", url: null },
+      { name: "unit-tests (node 22)", status: "completed", conclusion: "failure", url: null, required: true },
       { name: "build", status: "completed", conclusion: "success", url: null },
     ] },
     labels: [{ name: "payments", color: "0e8a16" }], reviewers: ["you"], viewer: "you", viewer_can_update: true,
