@@ -293,14 +293,56 @@ fn start_dictation(app: tauri::AppHandle) -> CmdResult<()> {
         .map_err(err)?;
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        // Windows voice typing is the Win + H shortcut; press it for the person.
+        let _ = app;
+        press_win_h().map_err(err)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = app;
-        Err(if cfg!(windows) {
-            "Press Windows + H to dictate.".into()
-        } else {
-            "Use your desktop's dictation to talk into the box.".into()
-        })
+        Err("Use your desktop's dictation to talk into the box.".into())
+    }
+}
+
+/// Synthesizes Win + H so Windows opens its voice typing for the focused box.
+#[cfg(windows)]
+fn press_win_h() -> Result<(), String> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_LWIN,
+    };
+    const VK_H: u16 = 0x48;
+    let key = |vk: u16, up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let inputs = [
+        key(VK_LWIN, false),
+        key(VK_H, false),
+        key(VK_H, true),
+        key(VK_LWIN, true),
+    ];
+    // SAFETY: `inputs` is a valid array of INPUT structs and the size matches.
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            std::mem::size_of::<INPUT>() as i32,
+        )
+    };
+    if sent as usize == inputs.len() {
+        Ok(())
+    } else {
+        Err("Couldn't open Windows voice typing. Press Windows + H instead.".into())
     }
 }
 
