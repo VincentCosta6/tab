@@ -1,16 +1,17 @@
 import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { Badge, ScorePill, cx } from "../../design/components";
 import { Blocks } from "../../design/blocks";
 import { Brand, SourceGlyph, brandFor } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
 import { openLink, parseLink } from "../../lib/links";
+import { useLinkPreview } from "../../lib/linkPreview";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useItemContext, usePreview } from "../../lib/hooks";
 import { keys } from "../../lib/query";
-import type { ContextEntry, LinkSummary, QueueItem, Tone } from "../../lib/types";
+import type { ContextEntry, QueueItem, Tone } from "../../lib/types";
 
 /**
  * Everything around an item, rolled up into one bar above the chat. Open it
@@ -123,53 +124,6 @@ const urgencyLabel: Record<string, { label: string; tone: Tone }> = {
   whenever: { label: "Whenever", tone: "neutral" },
 };
 
-/** The one status that says most about an item: PR state, done/snoozed, or urgency. */
-const checkStatus: Record<string, { label: string; tone: Tone }> = {
-  failing: { label: "CI failing", tone: "danger" },
-  pending: { label: "CI running", tone: "warning" },
-  passing: { label: "CI passing", tone: "success" },
-};
-
-/**
- * One badge for a linked PR or issue: the thing that most decides what
- * happens next, like GitHub's merge box. Merged or closed, then conflicts,
- * failing CI, changes requested, unresolved threads, CI running, review
- * needed, and finally ready to merge.
- */
-function linkStatus(s: LinkSummary): { label: string; tone: Tone } | null {
-  if (s.state === "merged") return { label: "Merged", tone: "accent" };
-  if (s.state === "closed") return { label: "Closed", tone: "neutral" };
-  if (s.merge_state === "dirty") return { label: "Conflicts", tone: "danger" };
-  if (s.checks === "failing") return checkStatus.failing;
-  if (s.review_decision === "changes_requested") return { label: "Changes requested", tone: "danger" };
-  if (s.open_threads) return { label: `${s.open_threads} open thread${s.open_threads === 1 ? "" : "s"}`, tone: "warning" };
-  if (s.state === "draft") return { label: "Draft", tone: "neutral" };
-  if (s.checks === "pending") return checkStatus.pending;
-  if (s.review_decision === "review_required") return { label: "Needs review", tone: "info" };
-  if (s.merge_state === "behind") return { label: "Behind base", tone: "warning" };
-  if (s.merge_state === "blocked") return { label: "Blocked", tone: "warning" };
-  if (s.merge_state === "clean" || s.merge_state === "has_hooks") return { label: "Ready to merge", tone: "success" };
-  if (s.merge_state === "unstable" || s.merge_state === "mergeable") return { label: "Mergeable", tone: "success" };
-  if (s.state === "open" && (!s.merge_state || s.merge_state === "unknown") && s.review_decision !== undefined) return { label: "Checking…", tone: "neutral" };
-  if (s.checks === "passing") return checkStatus.passing;
-  return s.state === "open" ? { label: "Open", tone: "success" } : null;
-}
-
-function useLinkSummary(url: string | null | undefined) {
-  const link = parseLink(url);
-  const { data } = useQuery({
-    queryKey: ["link-summary", link?.canonical ?? ""],
-    queryFn: () => link!.summary!(),
-    enabled: !!link?.summary,
-    staleTime: 120_000,
-    retry: false,
-    // GitHub works out mergeability lazily: the first look often says
-    // "unknown". Ask again shortly so the badge settles on the real answer.
-    refetchInterval: (q) => (q.state.data?.state === "open" && (!q.state.data.merge_state || q.state.data.merge_state === "unknown") ? 5_000 : false),
-  });
-  return { link, sum: data };
-}
-
 /**
  * A direct context entry, in the bar above the chat so it's one click away:
  * what it is, a short name and one status badge.
@@ -183,12 +137,12 @@ function brandOf(link: { kind: string; source: string } | null, item: QueueItem 
 function ContextChip({ entry: e, onSelect }: { entry: ContextEntry; onSelect: (id: string) => void }) {
   const { kind } = useApp();
   const url = e.url ?? e.ref_item?.url;
-  const { link, sum } = useLinkSummary(url);
+  const { link, sum } = useLinkPreview(url);
   const item = e.ref_item;
   const k = item ? kind(item.kind) : null;
   const ref = link?.title.split(" ").pop() ?? "";
   const name = sum?.title ? `${ref.startsWith("#") ? `${ref} ` : ""}${sum.title}` : item?.title ?? (link && (!e.title || e.title === e.url) ? link.title : e.title);
-  const status = sum ? linkStatus(sum) : item ? statusOf(item) : null;
+  const status = sum ? sum.status ?? null : item ? statusOf(item) : null;
   const open = () => {
     if (link?.open?.()) return;
     if (item) return onSelect(item.id);
@@ -304,7 +258,7 @@ export function EntryCard({ entry: e, onSelect, children }: { entry: ContextEntr
     host = e.url ?? "";
   }
   // A link a module understands shows as what it is: a GitHub PR, not "Link".
-  const { link, sum } = useLinkSummary(e.url);
+  const { link, sum } = useLinkPreview(e.url);
   const bare = !e.title || e.title === e.url;
   // "#968 · Retry webhooks" from GitHub, else the link's own title.
   const ref = link?.title.split(" ").pop() ?? "";
@@ -318,7 +272,7 @@ export function EntryCard({ entry: e, onSelect, children }: { entry: ContextEntr
       type={link?.label ?? "Link"}
       title={title}
       subtitle={subtitle}
-      status={sum ? linkStatus(sum) : null}
+      status={sum?.status ?? null}
       note={e.summary}
       pinned={e.pinned}
       onOpen={e.url ? () => openLink(e.url!) : undefined}

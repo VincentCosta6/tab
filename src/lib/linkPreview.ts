@@ -1,0 +1,23 @@
+import { useQuery } from "@tanstack/react-query";
+import { parseLink } from "./links";
+
+/**
+ * One cache entry per link, shared by every card, chip and pill that shows it
+ * (a connector's backend keeps its own cache behind this). Pass `enabled:
+ * false` to hold off, e.g. until a pill scrolls into view. What the preview
+ * says is the connector's to decide; this only fetches and refreshes it.
+ */
+export function useLinkPreview(url: string | null | undefined, enabled = true) {
+  const link = parseLink(url);
+  const { data } = useQuery({
+    queryKey: ["link-preview", link?.canonical ?? ""],
+    queryFn: () => link!.preview!(),
+    enabled: enabled && !!link?.preview,
+    staleTime: 120_000,
+    retry: false,
+    // A connector can say its answer isn't settled (GitHub works out
+    // mergeability lazily); ask again shortly so the badge ends up right.
+    refetchInterval: (q) => (q.state.data?.settling ? 5_000 : false),
+  });
+  return { link, sum: data };
+}

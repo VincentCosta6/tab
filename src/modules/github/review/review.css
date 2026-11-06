@@ -194,7 +194,9 @@
 .rv-diff-host { position: absolute; inset: 0; }
 /* Stacked: the host is pinned while the page scrolls past; no scroll area of its own. */
 .rv-diff-stacked { overflow: clip; }
-.rv-diff-stacked > .rv-diff-host { position: sticky; top: 0; inset: auto; }
+/* `inset: auto` has to come first: written after `top` it resets it, and a sticky host with top: auto never sticks. */
+/* Pinned under the sticky file header (--rv-head, set by FileDiff); the stack's top padding offsets sticky, hence the subtraction. */
+.rv-diff-stacked > .rv-diff-host { position: sticky; inset: auto; top: calc(var(--rv-head, 0px) - var(--space-3)); }
 .rv-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; overflow: hidden; }
 .rv-overlay-item { position: absolute; top: 0; left: 0; pointer-events: auto; will-change: transform; }
 .rv-zone { pointer-events: none; }

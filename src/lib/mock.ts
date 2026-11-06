@@ -333,7 +333,13 @@ export const mockApi = {
         case "set_agent_mode": config = { ...config, agent: { ...config.agent, permission_mode: args.mode } }; return config;
         case "chat_stop": return null;
         case "approval_resolve": return true;
-        case "agent_health": return { kind: "claude_code", found: true, path: "/Users/you/.local/bin/claude", version: "2.1.91 (Claude Code)", error: null, install: "native", upgrade: "claude update", latest: "2.1.318" };
+        case "agent_health": return { kind: "claude_code", found: true, path: "/Users/you/.local/bin/claude", version: mockUpgraded ? "2.1.318 (Claude Code)" : "2.1.91 (Claude Code)", error: null, install: "native", upgrade: "claude update", latest: "2.1.318" };
+        case "agent_upgrade": {
+          const steps = ["Checking for updates…", "Downloading 2.1.318 (38%)", "Downloading 2.1.318 (100%)", "Installing…", "Updated to 2.1.318"];
+          for (const s of steps) { await new Promise((r) => setTimeout(r, 700)); upgradeListeners.forEach((l) => l(s)); }
+          mockUpgraded = true;
+          return undefined;
+        }
         case "detect_agents": return [
           { kind: "opencode", found: false, path: null, version: null, error: "`opencode` was not found on PATH." },
           { kind: "claude_code", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\claude.cmd", version: "2.1.318 (Claude Code)", error: null },
@@ -382,6 +388,10 @@ export const mockApi = {
   onWorkspace(_cb: (p: WorkspaceProgress) => void) {
     return () => {};
   },
+  onAgentUpgrade(cb: (line: string) => void) {
+    upgradeListeners.add(cb);
+    return () => void upgradeListeners.delete(cb);
+  },
   onGhCode(cb: (c: GhLoginCode) => void) {
     ghCodeListeners.add(cb);
     return () => void ghCodeListeners.delete(cb);
@@ -397,6 +407,8 @@ let lspServers: LspServer[] = [
 
 let gh: GhStatus = { installed: false, path: null, version: null, logged_in: false, user: null, install_command: "brew install gh", error: null };
 const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
+const upgradeListeners = new Set<(line: string) => void>();
+let mockUpgraded = false;
 
 // A link an agent attached, to show links rendered by what they point at.
 let contexts: ContextEntry[] = items.slice(0, 4).map((i) => ({ id: `ctx-seed-${i.id}`, item_id: i.id, section: "context", pinned: false, ref_item: null, url: "https://github.com/acme/payments/pull/491", title: "https://github.com/acme/payments/pull/491", summary: null, added_by: "agent", created_at: new Date().toISOString() }));
@@ -568,6 +580,10 @@ function samplePull(repo: string, number: number): PullReview {
   const testAfter = testBefore + `\ntest("retries timeouts with the same idempotency key", async () => {\n  const calls = mockStripe(["timeout", "timeout", "succeeded"]);\n  await capture(fixture("ch_flaky"));\n  expect(calls.map((c) => c.idempotencyKey)).toEqual(Array(3).fill("capture-ch_flaky"));\n});\n`;
   const f = (filename: string, status: string, additions: number, deletions: number, original: string, modified: string) =>
     ({ filename, status, additions, deletions, previous_filename: null, viewed: "unviewed", original, modified });
+  // A long file with scattered edits, to exercise big stacked diffs.
+  const bigLines = Array.from({ length: 3000 }, (_, i) => `export const entry${i} = { id: ${i}, label: "ledger entry ${i}", amount: ${(i * 37) % 1000} };`);
+  const bigAfter = bigLines.map((l, i) => (i % 150 === 75 ? l.replace("ledger entry", "settled entry") : l));
+  bigAfter.splice(1500, 0, "// settled entries are archived monthly", "export const ARCHIVE_AFTER_DAYS = 30;");
   return {
     repo, number, node_id: "sample", title: "Retry payment capture with idempotency keys",
     body: "Captures sometimes time out on Stripe's side and we drop the charge.\n\nThis retries timeouts and connection resets up to four times with jittered backoff, and sends an idempotency key so a retry can't double-capture.\n\n- `capture()` retries transient errors\n- new `backoff()` helper\n- test for the retry path",
@@ -585,6 +601,7 @@ function samplePull(repo: string, number: number): PullReview {
       f("src/capture.ts", "modified", 18, 4, before, after),
       f("src/backoff.ts", "added", 5, 0, "", backoff),
       f("test/capture.test.ts", "modified", 6, 0, testBefore, testAfter),
+      f("src/ledger.ts", "modified", 22, 20, bigLines.join("\n") + "\n", bigAfter.join("\n") + "\n"),
     ],
     threads: [{
       id: "sample-thread-1", path: "src/capture.ts", line: 19, start_line: null, original_line: 19, side: "RIGHT",

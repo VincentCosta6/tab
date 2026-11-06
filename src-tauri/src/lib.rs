@@ -756,6 +756,19 @@ async fn agent_health(state: State<'_, AppState>) -> CmdResult<Option<AgentProbe
     Ok(state.hub.health().await)
 }
 
+/// Updates the agent CLI the way it was installed. Output lines arrive as
+/// `tab://agent-upgrade` events while it runs.
+#[tauri::command]
+async fn agent_upgrade(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    state
+        .hub
+        .upgrade(move |line| {
+            let _ = app.emit("tab://agent-upgrade", &line);
+        })
+        .await
+        .map_err(err)
+}
+
 #[derive(Serialize)]
 struct McpInfo {
     url: Option<String>,
@@ -1878,6 +1891,7 @@ pub fn run() {
             agent_activity,
             agent_slash_commands,
             agent_health,
+            agent_upgrade,
             graph_view,
             graph_node,
             graph_delete,
