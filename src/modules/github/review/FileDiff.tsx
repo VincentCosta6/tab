@@ -12,7 +12,6 @@ import { useReview, type Side } from "./context";
 import { useFileText } from "./data";
 import { NewThread, ThreadCard } from "./Thread";
 
-const MAX_AUTO_HEIGHT = 2400;
 const ZONE_PAD = 10;
 
 interface Zone { key: string; side: Side; after: number; thread?: ReviewThread }
@@ -44,7 +43,7 @@ const GUTTER = new Set([
 ]);
 const LINE_TARGETS = new Set([...GUTTER, monaco.editor.MouseTargetType.CONTENT_TEXT, monaco.editor.MouseTargetType.CONTENT_EMPTY]);
 
-export function FileDiff({ file, fill, reveal }: { file: PrFile; fill?: boolean; reveal?: { line: number; nonce: number } }) {
+export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file: PrFile; fill?: boolean; reveal?: { line: number; nonce: number }; initialHeight?: number; onHeight?: (h: number) => void }) {
   const { pr, src, mode, dark, composer, setComposer, searchFor } = useReview();
   const path = file.filename;
   const basePath = file.previous_filename ?? file.filename;
@@ -56,7 +55,13 @@ export function FileDiff({ file, fill, reveal }: { file: PrFile; fill?: boolean;
   const host = useRef<HTMLDivElement>(null);
   const wrap = useRef<HTMLDivElement>(null);
   const editor = useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
-  const [height, setHeight] = useState(fill ? 0 : 120);
+  // Stacked mode: the page scrolls, never the editor. `height` is the whole
+  // diff's height (so the page scrollbar is honest); the editor itself is only
+  // as tall as the scroll area (`viewH`), pinned in view, and fed the page's
+  // scroll offset so Monaco renders just the visible lines however big the file.
+  const [height, setHeight] = useState(fill ? 0 : (initialHeight ?? 120));
+  const [viewH, setViewH] = useState(fill ? 0 : Math.min(initialHeight ?? 120, 900));
+  const expectedTop = useRef(0);
   const [ready, setReady] = useState(0);
 
   // Threads and the composer for this file become zones.
@@ -95,7 +100,7 @@ export function FileDiff({ file, fill, reveal }: { file: PrFile; fill?: boolean;
       theme: themeName(dark),
       scrollbar: fill
         ? { alwaysConsumeMouseWheel: false }
-        : { vertical: "hidden", handleMouseWheel: true, alwaysConsumeMouseWheel: false, verticalScrollbarSize: 0 },
+        : { vertical: "hidden", handleMouseWheel: true, alwaysConsumeMouseWheel: false, verticalScrollbarSize: 0, useShadows: false },
     });
     editor.current = ed;
     setReady((n) => n + 1);
@@ -125,24 +130,65 @@ export function FileDiff({ file, fill, reveal }: { file: PrFile; fill?: boolean;
     setReady((n) => n + 1);
   }, [loaded, base.data, head.data, basePath, path, file.status]);
 
-  // Auto height: the page scrolls, not the editor (very long files scroll inside).
+  // Total height follows the content.
   useEffect(() => {
     const ed = editor.current;
     if (!ed || fill) return;
     const update = () => {
       const h = Math.max(ed.getOriginalEditor().getContentHeight(), ed.getModifiedEditor().getContentHeight());
-      setHeight(Math.min(h, MAX_AUTO_HEIGHT));
+      setHeight(h);
+      onHeight?.(h);
     };
     const subs = [ed.getOriginalEditor().onDidContentSizeChange(update), ed.getModifiedEditor().onDidContentSizeChange(update), ed.onDidUpdateDiff(update)];
     update();
     return () => subs.forEach((s) => s.dispose());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, fill]);
+
+  // The editor is as tall as the scroll area, no taller, and follows the page.
   useEffect(() => {
-    if (fill) return;
     const ed = editor.current;
-    ed?.getModifiedEditor().updateOptions({ scrollbar: { vertical: height >= MAX_AUTO_HEIGHT ? "auto" : "hidden", handleMouseWheel: height >= MAX_AUTO_HEIGHT } });
-    ed?.getOriginalEditor().updateOptions({ scrollbar: { vertical: "hidden", handleMouseWheel: height >= MAX_AUTO_HEIGHT } });
-  }, [height, fill]);
+    const root = wrap.current?.closest<HTMLElement>(".rv-stack");
+    if (fill || !ed || !root) return;
+    const modified = ed.getModifiedEditor();
+    const size = () => setViewH(Math.max(120, Math.min(height, root.clientHeight)));
+    const follow = () => {
+      const w = wrap.current;
+      if (!w) return;
+      const hostH = Math.min(height, root.clientHeight);
+      const off = Math.max(0, Math.min(height - hostH, root.getBoundingClientRect().top - w.getBoundingClientRect().top));
+      if (Math.abs(modified.getScrollTop() - off) > 0.5) {
+        expectedTop.current = off;
+        modified.setScrollTop(off);
+      }
+    };
+    size();
+    follow();
+    root.addEventListener("scroll", follow, { passive: true });
+    const ro = new ResizeObserver(() => { size(); follow(); });
+    ro.observe(root);
+    // Scrolls the editor does on its own (keyboard, find, go to definition) move the page instead.
+    const sub = modified.onDidScrollChange((e) => {
+      if (!e.scrollTopChanged || Math.abs(e.scrollTop - expectedTop.current) <= 1) return;
+      root.scrollTop += e.scrollTop - expectedTop.current;
+      expectedTop.current = e.scrollTop;
+    });
+    // Vertical wheel over the editor scrolls the page; sideways still scrolls long lines.
+    const host_ = host.current;
+    const wheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+      root.scrollTop += e.deltaY * (e.deltaMode === 1 ? 19 : e.deltaMode === 2 ? root.clientHeight : 1);
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    host_?.addEventListener("wheel", wheel, { capture: true, passive: false });
+    return () => {
+      root.removeEventListener("scroll", follow);
+      ro.disconnect();
+      sub.dispose();
+      host_?.removeEventListener("wheel", wheel, { capture: true });
+    };
+  }, [ready, fill, height]);
 
   // Reveal a line (from search, the explorer, or go to definition).
   useEffect(() => {
@@ -387,8 +433,8 @@ export function FileDiff({ file, fill, reveal }: { file: PrFile; fill?: boolean;
     <div className={fill ? "rv-diff rv-diff-fill" : "rv-diff"}>
       {loadError && <p className="rv-error rv-pad">Couldn't load this file: {String(loadError)}</p>}
       {!loaded && !loadError && <div className="rv-diff-loading skeleton" style={{ height: fill ? "100%" : 120 }} />}
-      <div ref={wrap} className="rv-diff-wrap" style={fill ? undefined : { height }}>
-        <div ref={host} className="rv-diff-host" />
+      <div ref={wrap} className={fill ? "rv-diff-wrap" : "rv-diff-wrap rv-diff-stacked"} style={fill ? undefined : { height }}>
+        <div ref={host} className="rv-diff-host" style={fill ? undefined : { height: Math.min(height, viewH) }} />
         <div className="rv-overlay">
           {zones.map((z) => (
             <div key={z.key} ref={measure(z.key)} className="rv-overlay-item" style={{ visibility: "hidden" }}>

@@ -274,7 +274,7 @@ export interface ReviewThread {
   side: "LEFT" | "RIGHT"; resolved: boolean; outdated: boolean; can_resolve: boolean; can_reply: boolean; diff_hunk: string | null;
   comments: ThreadComment[];
 }
-export interface CheckRun { name: string; status: string; conclusion: string | null; url: string | null }
+export interface CheckRun { name: string; status: string; conclusion: string | null; url: string | null; required?: boolean }
 export interface PullReview {
   repo: string; number: number; node_id: string; title: string; body: string; author: string; author_avatar: string | null; url: string;
   state: "open" | "closed" | "merged"; draft: boolean; base_ref: string; head_ref: string; head_repo: string | null;

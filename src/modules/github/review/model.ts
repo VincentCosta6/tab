@@ -100,6 +100,52 @@ export function statusPills(pr: PullReview): Pill[] {
   return out;
 }
 
+/** GitHub's button label for the repo's merge method. */
+export const mergeLabel: Record<string, string> = { squash: "Squash and merge", merge: "Merge pull request", rebase: "Rebase and merge" };
+
+/**
+ * Everything standing between this PR and a merge, like GitHub's merge box:
+ * conflicts, branch rules (reviews, required checks), a stale branch.
+ * `warnings` don't block (e.g. failing checks that aren't required).
+ */
+export function mergeReasons(pr: PullReview): { blockers: string[]; warnings: string[] } {
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  const names = (rs: { name: string }[]) => rs.map((r) => r.name).join(", ");
+  const required = pr.checks.runs.filter((r) => r.required);
+  const failingReq = required.filter((r) => ["failing", "cancelled", "action"].includes(runState(r)));
+  const pendingReq = required.filter((r) => runState(r) === "pending");
+  const failingOpt = pr.checks.runs.filter((r) => !r.required && runState(r) === "failing");
+
+  if (pr.mergeable === "conflicting" || pr.merge_state === "dirty") blockers.push("Merge conflicts must be resolved");
+  if (pr.review_decision === "changes_requested") blockers.push("Changes requested");
+  else if (pr.review_decision === "review_required") blockers.push("Review required: no approving review yet");
+  if (failingReq.length) blockers.push(`${failingReq.length} required check${failingReq.length === 1 ? "" : "s"} failing: ${names(failingReq)}`);
+  if (pendingReq.length) blockers.push(`${pendingReq.length} required check${pendingReq.length === 1 ? "" : "s"} still running: ${names(pendingReq)}`);
+  if (pr.merge_state === "behind") blockers.push(`Branch is out of date with ${pr.base_ref}`);
+  if (pr.merge_state === "unknown" || pr.mergeable === "unknown") blockers.push("GitHub is still checking mergeability");
+  // GitHub says "blocked" but we found no reason above (e.g. a rule we can't see).
+  if (pr.merge_state === "blocked" && !blockers.length) blockers.push("Blocked by branch rules (required checks or reviews)");
+  if (failingOpt.length) warnings.push(`${failingOpt.length} check${failingOpt.length === 1 ? "" : "s"} failing, but not required: ${names(failingOpt)}`);
+  return { blockers, warnings };
+}
+
+/** What the header's main button does for this viewer. `null` means the usual "Submit review". */
+export type PrimaryAction =
+  | { kind: "ready"; label: string }
+  | { kind: "reopen"; label: string }
+  | { kind: "merge"; label: string; blockers: string[]; warnings: string[] };
+
+export function primaryAction(pr: PullReview): PrimaryAction | null {
+  if (pr.state === "merged") return null;
+  // Reviewers still review; the contextual button is for the PR's author.
+  if (!pr.viewer || pr.author !== pr.viewer) return null;
+  if (pr.state === "closed") return { kind: "reopen", label: "Reopen pull request" };
+  if (pr.draft) return { kind: "ready", label: "Open for review" };
+  const { blockers, warnings } = mergeReasons(pr);
+  return { kind: "merge", label: mergeLabel[pr.merge_method] ?? "Merge pull request", blockers, warnings };
+}
+
 let tempId = 0;
 const temp = (p: string) => `local-${p}-${Date.now()}-${tempId++}`;
 

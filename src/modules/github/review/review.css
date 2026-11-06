@@ -150,6 +150,9 @@
 .rv-tabs-tools { align-self: center; margin: 0 var(--space-2); flex: none; }
 .rv-editor { position: relative; min-height: 0; overflow: hidden; }
 
+.rv-primary-wrap button:disabled { pointer-events: none; }
+.rv-btn-merge:not(:disabled) { background: var(--tone-accent-fg, #8250df); border-color: transparent; }
+
 /* Combined changes */
 .rv-stack { position: relative; height: 100%; overflow: auto; padding: var(--space-3) var(--space-4) 40vh; background: var(--bg); }
 .rv-stack-item { margin-bottom: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-raised); }
@@ -177,6 +180,9 @@
 .rv-diff-loading { margin: var(--space-3); }
 .rv-diff-wrap { position: relative; overflow: hidden; border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
 .rv-diff-host { position: absolute; inset: 0; }
+/* Stacked: the host is pinned while the page scrolls past; no scroll area of its own. */
+.rv-diff-stacked { overflow: clip; }
+.rv-diff-stacked > .rv-diff-host { position: sticky; top: 0; inset: auto; }
 .rv-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; overflow: hidden; }
 .rv-overlay-item { position: absolute; top: 0; left: 0; pointer-events: auto; will-change: transform; }
 .rv-zone { pointer-events: none; }

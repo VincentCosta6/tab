@@ -7,7 +7,7 @@ import { Brand } from "../../../design/brands";
 import { Icon } from "../../../design/icons";
 import { api, openUrl } from "../../../lib/api";
 import { useReview } from "./context";
-import { checkCounts, checkSummary, pendingComments, runLook, runState, sortedRuns, statePill, statusPills, type Pill } from "./model";
+import { checkCounts, checkSummary, mergeLabel, mergeReasons, pendingComments, primaryAction, runLook, runState, sortedRuns, statePill, statusPills, type Pill } from "./model";
 import { Avatar, Composer } from "./Thread";
 
 function useOutside(open: boolean, close: () => void) {
@@ -150,24 +150,11 @@ function SubmitReview({ onClose }: { onClose: () => void }) {
   );
 }
 
-/** GitHub's button label for the repo's merge method. */
-const mergeLabel: Record<string, string> = { squash: "Squash and merge", merge: "Merge pull request", rebase: "Rebase and merge" };
-
-/**
- * Why GitHub wouldn't merge this right now, like its greyed-out merge button:
- * conflicts, or branch rules (required reviews or checks) not met.
- */
-function mergeBlock(pr: { mergeable: string; merge_state: string; review_decision: string | null }): { blocked: string | null; warn: string | null } {
-  if (pr.mergeable === "conflicting" || pr.merge_state === "dirty") return { blocked: "Merge conflicts must be resolved first", warn: null };
-  if (pr.merge_state === "blocked") {
-    if (pr.review_decision === "changes_requested") return { blocked: "Changes requested", warn: null };
-    if (pr.review_decision === "review_required") return { blocked: "Review required by branch rules", warn: null };
-    return { blocked: "Required checks haven't passed", warn: null };
-  }
-  if (pr.merge_state === "behind") return { blocked: "Branch is out of date with its base", warn: null };
-  if (pr.merge_state === "unknown" || pr.mergeable === "unknown") return { blocked: "GitHub is still checking mergeability", warn: null };
-  if (pr.merge_state === "unstable") return { blocked: null, warn: "Some checks are failing, but none are required" };
-  return { blocked: null, warn: null };
+/** Hover text for the main button: why it's disabled, or what to know before merging. */
+function primaryTitle(a: NonNullable<ReturnType<typeof primaryAction>>) {
+  if (a.kind !== "merge") return undefined;
+  if (a.blockers.length) return ["Can't merge yet:", ...a.blockers.map((b) => `• ${b}`), ...a.warnings.map((w) => `• ${w}`)].join("\n");
+  return a.warnings.length ? a.warnings.join("\n") : "All requirements met";
 }
 
 function copy(text: string) {
@@ -186,7 +173,10 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
   const pills = statusPills(pr);
   const state = statePill(pr);
   const open = pr.state === "open";
-  const { blocked, warn } = mergeBlock(pr);
+  const reasons = mergeReasons(pr);
+  const blocked = reasons.blockers.length ? reasons.blockers.join("\n") : null;
+  const warn = reasons.warnings[0] ?? null;
+  const primary = primaryAction(pr);
 
   useEffect(() => {
     if (!pr.sample) api.vscodeAvailable().then(setVscode).catch(() => setVscode(false));
@@ -232,9 +222,9 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
             <div className="rv-menu rv-menu-right">
               {open && !pr.draft && (
                 <>
-                  {blocked && <div className="rv-menu-note"><Icon name="x-circle" size={13} /> {blocked}</div>}
+                  {blocked && <div className="rv-menu-note"><Icon name="x-circle" size={13} /> {reasons.blockers[0]}{reasons.blockers.length > 1 ? ` (+${reasons.blockers.length - 1} more)` : ""}</div>}
                   {!blocked && warn && <div className="rv-menu-note warn"><Icon name="dot" size={13} /> {warn}</div>}
-                  {item("git-merge", mergeLabel[pr.merge_method] ?? "Merge pull request", merge(pr.merge_method, mergeLabel[pr.merge_method] ?? "Merge pull request"), { tone: "merge", disabled: !!blocked, hint: blocked ?? undefined })}
+                  {item("git-merge", mergeLabel[pr.merge_method] ?? "Merge pull request", merge(pr.merge_method, mergeLabel[pr.merge_method] ?? "Merge pull request"), { tone: "merge", disabled: !!blocked, hint: reasons.blockers[0] })}
                   {pr.merge_state === "behind" && item("arrow-down", `Update branch from ${pr.base_ref}`, run(() => act({ type: "update_branch" }), "Branch update started"))}
                   <div className="rv-menu-sep" />
                 </>
@@ -259,12 +249,31 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
             </div>
           )}
         </div>
-        <div className="rv-menu-wrap">
-          <Button size="sm" variant="primary" icon="send" onClick={() => setSubmit((s) => !s)} disabled={pr.state === "merged"}>
-            Submit review{pending > 0 ? ` (${pending})` : ""}
-          </Button>
-          {submit && <SubmitReview onClose={() => setSubmit(false)} />}
-        </div>
+        {primary ? (
+          <span className="rv-menu-wrap rv-primary-wrap" title={primaryTitle(primary)}>
+            <Button
+              size="sm"
+              variant="primary"
+              icon={primary.kind === "merge" ? "git-merge" : "git-pull-request"}
+              className={primary.kind === "merge" ? "rv-btn-merge" : undefined}
+              disabled={primary.kind === "merge" && primary.blockers.length > 0}
+              onClick={() => {
+                if (primary.kind === "ready") run(() => act({ type: "set_draft", draft: false }), "Ready for review")();
+                else if (primary.kind === "reopen") run(() => act({ type: "set_state", state: "open" }), "Reopened")();
+                else merge(pr.merge_method, primary.label)();
+              }}
+            >
+              {primary.label}
+            </Button>
+          </span>
+        ) : (
+          <div className="rv-menu-wrap">
+            <Button size="sm" variant="primary" icon="send" onClick={() => setSubmit((s) => !s)} disabled={pr.state === "merged"}>
+              Submit review{pending > 0 ? ` (${pending})` : ""}
+            </Button>
+            {submit && <SubmitReview onClose={() => setSubmit(false)} />}
+          </div>
+        )}
       </div>
       <div className="rv-header-row rv-header-meta">
         <StatusPill p={state} />

@@ -83,6 +83,9 @@ pub struct CheckRun {
     /// `success`, `failure`, `neutral`, `skipped`, `cancelled`, ... when completed.
     pub conclusion: Option<String>,
     pub url: Option<String>,
+    /// Branch protection requires this check to pass before merging.
+    #[serde(default)]
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -223,8 +226,8 @@ query($owner: String!, $name: String!, $number: Int!) {
               contexts(first: 100) {
                 nodes {
                   __typename
-                  ... on CheckRun { name status conclusion detailsUrl }
-                  ... on StatusContext { context state targetUrl }
+                  ... on CheckRun { name status conclusion detailsUrl isRequired(pullRequestNumber: $number) }
+                  ... on StatusContext { context state targetUrl isRequired(pullRequestNumber: $number) }
                 }
               }
             }
@@ -402,6 +405,7 @@ pub async fn pull(
                     status: status.into(),
                     conclusion: conclusion.map(Into::into),
                     url: opt(c, "targetUrl"),
+                    required: c["isRequired"].as_bool().unwrap_or(false),
                 }
             } else {
                 CheckRun {
@@ -409,6 +413,7 @@ pub async fn pull(
                     status: lower(c, "status"),
                     conclusion: opt(c, "conclusion").map(|c| c.to_ascii_lowercase()),
                     url: opt(c, "detailsUrl"),
+                    required: c["isRequired"].as_bool().unwrap_or(false),
                 }
             }
         })
@@ -980,18 +985,21 @@ test("retries timeouts with the same idempotency key", async () => {
                     status: "completed".into(),
                     conclusion: Some("success".into()),
                     url: None,
+                    required: false,
                 },
                 CheckRun {
                     name: "unit-tests (node 22)".into(),
                     status: "completed".into(),
                     conclusion: Some("failure".into()),
                     url: None,
+                    required: true,
                 },
                 CheckRun {
                     name: "build".into(),
                     status: "completed".into(),
                     conclusion: Some("success".into()),
                     url: None,
+                    required: false,
                 },
             ],
         },

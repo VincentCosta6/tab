@@ -57,6 +57,7 @@ function StackItem({ file, scrollRoot, register, autoMarked }: { file: PrFile; s
   const el = useRef<HTMLElement>(null);
   const end = useRef<HTMLDivElement>(null);
   const prevViewed = useRef(viewed);
+  const lastHeight = useRef<number | undefined>(undefined);
 
   // Marking a file viewed by hand collapses it, like github.com. Auto-read
   // leaves it open: it's above the view, and collapsing it would jump the page.
@@ -70,7 +71,9 @@ function StackItem({ file, scrollRoot, register, autoMarked }: { file: PrFile; s
   useEffect(() => {
     const root = scrollRoot.current;
     if (!el.current || !root) return;
-    const io = new IntersectionObserver(([e]) => e.isIntersecting && setNear(true), { root, rootMargin: "1200px 0px" });
+    // Mount diffs as they near the view and let go of them once far away, so
+    // a PR with hundreds of files only ever keeps a few editors alive.
+    const io = new IntersectionObserver((es) => setNear(es[es.length - 1].isIntersecting), { root, rootMargin: "1500px 0px" });
     io.observe(el.current);
     return () => io.disconnect();
   }, [scrollRoot]);
@@ -85,7 +88,7 @@ function StackItem({ file, scrollRoot, register, autoMarked }: { file: PrFile; s
       data-path={file.filename}
     >
       <FileHeader file={file} collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} onOpen={() => openFile(file.filename)} />
-      {!collapsed && (near ? <FileDiff file={file} /> : <div className="rv-diff-placeholder" style={{ height: Math.min(1200, 40 + (file.additions + file.deletions) * 19) }} />)}
+      {!collapsed && (near ? <FileDiff file={file} initialHeight={lastHeight.current} onHeight={(h) => { lastHeight.current = h; }} /> : <div className="rv-diff-placeholder" style={{ height: lastHeight.current ?? Math.min(1200, 40 + (file.additions + file.deletions) * 19) }} />)}
       {!collapsed && file.additions + file.deletions === 0 && <p className="subtle rv-pad">No text changes (binary file, mode change, or rename).</p>}
       <div ref={end} className="rv-stack-end" />
     </section>
