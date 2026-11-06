@@ -106,9 +106,16 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
     setReady((n) => n + 1);
     return () => {
       // The models are shared with the project and other editors; keep them.
-      ed.setModel(null);
-      ed.dispose();
       editor.current = null;
+      // Monaco throws an AggregateError when any child (a view zone, a model
+      // another editor already released) fails to dispose. Teardown must never
+      // crash the tab, so swallow it and log what actually failed.
+      try { ed.setModel(null); } catch (e) { console.warn("[tab] diff editor detach", e); }
+      try {
+        ed.dispose();
+      } catch (e) {
+        console.warn("[tab] diff editor dispose", e, (e as { errors?: unknown }).errors);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
