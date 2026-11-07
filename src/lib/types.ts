@@ -69,6 +69,9 @@ export interface QueueItem {
 }
 
 /** What a github.com link points at, for a link card. */
+/** One of your open pull requests, straight from GitHub. */
+export interface MyPull { repo: string; number: number; url: string; summary: LinkSummary }
+
 export interface LinkSummary { title: string; state: "open" | "draft" | "merged" | "closed" | ""; author: string | null; checks: "passing" | "failing" | "pending" | null; updated_at: string | null; merge_state?: string | null; review_decision?: string | null; open_threads?: number | null }
 
 /** An item whose agent isn't idle. */

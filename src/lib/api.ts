@@ -4,7 +4,7 @@
 
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  AgentActivity, GraphNode, GraphView, LinkSummary, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
+  AgentActivity, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, Session, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun,
 } from "./types";
@@ -24,6 +24,7 @@ export const api = {
   itemDetail: (id: string) => call<ItemDetail | null>("item_detail", { id }),
   itemByUrl: (url: string) => call<QueueItem | null>("item_by_url", { url }),
   githubLinkSummary: (repo: string, what: string, id: string) => call<LinkSummary>("github_link_summary", { repo, what, id }),
+  githubMyPulls: () => call<MyPull[]>("github_my_pulls"),
   itemPreview: (id: string) => call<Preview>("item_preview", { id }),
   markDone: (id: string) => call<QueueItem | null>("mark_done", { id }),
   snooze: (id: string, minutes: number) => call<QueueItem | null>("snooze", { id, minutes }),

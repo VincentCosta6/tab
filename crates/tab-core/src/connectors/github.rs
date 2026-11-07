@@ -42,6 +42,8 @@ impl ConnectorFactory for GithubFactory {
             kinds: vec![
                 KindInfo::new("github.review_requested", "Review requested", "git-pull-request", Tone::Accent),
                 KindInfo::new("github.ci_failed", "CI failed", "x-circle", Tone::Danger),
+                KindInfo::new("github.ci_passed", "CI passed", "check-circle", Tone::Success),
+                KindInfo::new("github.ci", "CI", "circle-dot", Tone::Neutral),
                 KindInfo::new("github.mention", "Mention", "at-sign", Tone::Info),
                 KindInfo::new("github.comment", "Comment", "message", Tone::Neutral),
                 KindInfo::new("github.assign", "Assigned", "user", Tone::Info),
@@ -383,16 +385,29 @@ fn pr_is_yours(subject_type: &str, reason: &str) -> bool {
     subject_type != "PullRequest" || matches!(reason, "review_requested" | "author")
 }
 
-/// Maps GitHub's notification `reason` to a tab kind.
-pub fn kind_for(reason: &str, subject_type: &str) -> &'static str {
+/// Maps GitHub's notification `reason` to a tab kind. CI runs are told
+/// apart by the subject title, like "CI workflow run succeeded for main
+/// branch", since GitHub notifies about passing runs too.
+pub fn kind_for(reason: &str, subject_type: &str, title: &str) -> &'static str {
     match (reason, subject_type) {
         ("review_requested", _) => "github.review_requested",
         ("mention" | "team_mention", _) => "github.mention",
-        ("ci_activity", _) | (_, "CheckSuite") => "github.ci_failed",
+        ("ci_activity", _) | (_, "CheckSuite") => ci_kind(title),
         ("assign", _) => "github.assign",
         ("security_alert", _) => "github.security",
         ("comment" | "author" | "state_change" | "subscribed" | "manual", _) => "github.comment",
         _ => "github.activity",
+    }
+}
+
+fn ci_kind(title: &str) -> &'static str {
+    let t = title.to_ascii_lowercase();
+    if t.contains("failed") || t.contains("failure") || t.contains("timed out") {
+        "github.ci_failed"
+    } else if t.contains("succeeded") || t.contains("success") || t.contains("passed") {
+        "github.ci_passed"
+    } else {
+        "github.ci"
     }
 }
 
@@ -529,7 +544,7 @@ impl GithubConnector {
         IncomingEvent {
             source: "github".into(),
             external_id: n.id.clone(),
-            kind: kind_for(&n.reason, &n.subject.kind).into(),
+            kind: kind_for(&n.reason, &n.subject.kind, &n.subject.title).into(),
             title: n.subject.title.clone(),
             body,
             url: Some(html_url(n.subject.url.as_deref(), &n.repository.html_url)),
@@ -886,11 +901,22 @@ mod tests {
     #[test]
     fn maps_reasons_and_urls() {
         assert_eq!(
-            kind_for("review_requested", "PullRequest"),
+            kind_for("review_requested", "PullRequest", "Fix login"),
             "github.review_requested"
         );
-        assert_eq!(kind_for("ci_activity", "CheckSuite"), "github.ci_failed");
-        assert_eq!(kind_for("team_mention", "Issue"), "github.mention");
+        assert_eq!(
+            kind_for("ci_activity", "CheckSuite", "CI workflow run failed for main branch"),
+            "github.ci_failed"
+        );
+        assert_eq!(
+            kind_for("ci_activity", "CheckSuite", "CI workflow run succeeded for fix branch"),
+            "github.ci_passed"
+        );
+        assert_eq!(
+            kind_for("ci_activity", "CheckSuite", "CI workflow run cancelled for main branch"),
+            "github.ci"
+        );
+        assert_eq!(kind_for("team_mention", "Issue", "Bug"), "github.mention");
         assert_eq!(
             html_url(
                 Some("https://api.github.com/repos/acme/api/pulls/12"),
