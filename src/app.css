@@ -804,3 +804,5 @@ body.resizing iframe { pointer-events: none; }
 .file-chip-open span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-chip.error .file-chip-open { border-color: var(--tone-danger-fg); }
 .msg-user .file-chips { margin-bottom: 6px; }
+.msg-tool-list { display: grid; gap: 4px; margin-top: var(--space-1); padding-left: 2px; }
+.msg-tool-list .msg-tool { border-left-color: transparent; }

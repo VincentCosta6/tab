@@ -182,6 +182,16 @@ fn note_json(n: &ProjectNote) -> Value {
 pub fn tools() -> Value {
     json!([
         {
+            "name": "tab_steps",
+            "description": "Show the person your plan as a step list pinned to the bottom of the chat, each with its status. Call it before starting work that takes more than a couple of tool calls, then again whenever a step starts or finishes; each call replaces the whole list. Keep one step in_progress at a time and steps short (a few words, in the person's terms).",
+            "inputSchema": { "type": "object", "properties": {
+                "steps": { "type": "array", "items": { "type": "object", "properties": {
+                    "title": { "type": "string", "description": "What the step does, e.g. \"Find where the chat scrolls\"." },
+                    "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"] }
+                }, "required": ["title", "status"] } }
+            }, "required": ["steps"] }
+        },
+        {
             "name": "tab_search",
             "description": "Search the person's work (Slack, GitHub, email, meetings, Jira, tab tasks) by keyword and by meaning, so both exact names and paraphrases match. Narrow it to a time window and/or a project for more relevant results; if a window finds too little it widens automatically (say so if you rely on older results). Also returns project notes that match. Returns items with ids you can attach or read.",
             "inputSchema": { "type": "object", "properties": {
@@ -510,6 +520,16 @@ impl McpServer {
                 .map(str::to_string)
         };
         match name {
+            "tab_steps" => {
+                let steps = args["steps"]
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("steps must be a list"))?;
+                let done = steps.iter().filter(|t| t["status"] == "completed").count();
+                Ok(text(format!(
+                    "Shown to the person: {done} of {} steps done.",
+                    steps.len()
+                )))
+            }
             "tab_search" => {
                 let q = s("query").unwrap_or_default();
                 let states = if args["include_done"].as_bool().unwrap_or(false) {
@@ -1272,7 +1292,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 20);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 21);
 
         // Create a task, a ticket to find, then file it under Found on the task.
         let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}});
