@@ -1,0 +1,19 @@
+[package]
+name = "tab-protocol"
+description = "The messages tab's apps and hubs exchange: Protobuf (prost), no gRPC, builds for Wasm."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Same rule as tab-domain: no I/O, builds for wasm32-unknown-unknown.
+[dependencies]
+prost = "0.14"
+prost-types = "0.14"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+serde_json.workspace = true
+tab-domain = { path = "../tab-domain" }
+
+[build-dependencies]
+prost-build = "0.14"
+# A protobuf compiler in Rust, so building needs no `protoc` install.
+protox = "0.10"

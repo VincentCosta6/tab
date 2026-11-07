@@ -1,0 +1,11 @@
+# Protobuf module for tab's hub protocol. `buf lint` and `buf breaking`
+# run in CI; see crates/tab-protocol.
+version: v2
+modules:
+  - path: crates/tab-protocol/proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - WIRE_JSON

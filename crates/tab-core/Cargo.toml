@@ -18,6 +18,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+tab-domain = { path = "../tab-domain" }
 sha2.workspace = true
 axum.workspace = true
 futures-util.workspace = true

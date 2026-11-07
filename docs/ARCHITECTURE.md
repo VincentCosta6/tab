@@ -15,22 +15,71 @@ This document describes what exists today and the design for what comes next. Se
 
 ## Layout (built)
 
+One repo holds the app and the hub. The hub is the part of tab that owns work state (records, the knowledge graph, leases, the change log every device syncs from). The same hub code runs inside the desktop app on local SQLite, and later in the cloud inside a Cloudflare Durable Object, one per person or team. Only the storage backend and a thin host differ.
+
 ```
-crates/tab-core/        UI-agnostic core. No Tauri dependency, fully unit tested.
-  model.rs              Domain types: IncomingEvent, QueueItem, Block, EntityRef, Ranking, descriptors
+crates/tab-domain/      Pure logic. No I/O, no clock, no threads; builds for wasm32.
+  model.rs              Domain types: IncomingEvent, QueueItem, Block, EntityRef, Ranking, descriptors, Change
+  rules.rs              Deterministic ranking rules
+  lease.rs              Lease rules: grant / renew / refuse, fencing tokens
+  ops.rs                The change vocabulary (Put, Delete, Link, Unlink), validation, search text
+  workflow/             Workflow definitions, validation, templates, run records
+  links.rs              Recognizing links agents create or mention
+crates/tab-protocol/    The shared API layer. Protobuf (proto/tab/hub/v1/hub.proto), no gRPC; builds for wasm32.
+crates/tab-store/       HubStore trait + backends (in-memory reference, SQLite), sea-query statements,
+                        and the conformance suite every backend must pass.
+crates/tab-hub/         The hub: answers protocol requests on any HubStore; migration between stores.
+                        Builds for wasm32 so the Worker can host it.
+crates/tab-core/        The desktop engine. No Tauri dependency, fully unit tested. Re-exports tab-domain
+                        under its old paths (tab_core::model, tab_core::links, ...).
   connector.rs          Connector + ConnectorFactory traits, ConnectorContext
-  connectors/           github.rs, demo.rs, planned.rs (Slack, Gmail, Zoom, Jira, Agents described)
+  connectors/           github.rs, demo.rs, email.rs, ...
   engine.rs             Wires connectors → store → ranker → events
   gateway.rs            Cache, rate limits, audit for every API call
-  ranker/               rules.rs (deterministic), ai.rs (Haiku layer)
+  ranker/               ai.rs (Haiku layer) over tab-domain's rules
   store/                SQLite: items, graph, http cache, audit; migrations/
+  workflow/runtime.rs   Runs workflows off the engine's event stream
   config.rs             TabConfig (profile, ranking, connectors map)
 src-tauri/              Desktop shell: Tauri commands + event forwarding
 src/                    React UI
   design/               Design system: tokens.css, components, icons, blocks, markdown
   modules/              registry.ts + built-in modules (work, connections, settings)
-  lib/                  api.ts (Tauri or browser mock), types.ts (mirrors model.rs)
+  lib/                  api.ts (Tauri or browser mock), types.ts (mirrors model.rs),
+                        protocol/ (hub messages generated from hub.proto by protobuf-es)
+buf.yaml, buf.gen.yaml  Protobuf lint/breaking rules and TypeScript generation (`pnpm proto`)
+scripts/storage-tests.sh  The full storage suite, outside CI (see Storage tests)
 ```
+
+Coming next (designed): `apps/mobile/`, `cloud/worker/` (workers-rs host for tab-hub on Durable Objects), `crates/tab-hub-org/` (org features).
+
+**Where things run today.** The desktop app still runs entirely on tab-core's engine and its own SQLite file, exactly as before this split. tab-hub is built and tested but not wired into the desktop yet; moving the engine's writes onto the hub's change log is the next step.
+
+### Hub protocol (built)
+
+Clients and hubs exchange Protobuf messages from `crates/tab-protocol/proto/tab/hub/v1/hub.proto`: a `ClientEnvelope` or `ServerEnvelope` per binary WebSocket frame (or passed in-process on the desktop), each carrying `protocol_version`, `request_id` and a `oneof` body. Rust types come from prost (compiled with protox, so no `protoc` install), TypeScript types from protobuf-es. Record bodies travel as JSON bytes so connectors can describe items without protocol changes.
+
+We use Protobuf messages but **not gRPC**: browsers and the webview can only reach gRPC through a gRPC-Web proxy, Workers can't host a gRPC server (tonic needs tokio and raw HTTP/2), and the hub's channel is a long-lived WebSocket on a Durable Object. Protobuf over Rust-only formats like postcard because the protocol crosses Rust and TypeScript and old and new app versions.
+
+Compatibility: fields and messages are only added, removed ones are `reserved`, `buf lint` runs in CI and `buf breaking` will once the proto is on `main`. A hub answers every version from `MIN_PROTOCOL_VERSION` to `PROTOCOL_VERSION`; unknown fields are skipped and unknown requests get an `UNSUPPORTED` error rather than being dropped.
+
+### Storage layer (built)
+
+`tab-store`'s `HubStore` trait is shaped around tab's operations (apply a batch, changes since a cursor, get, claim/release/expire leases, search, graph neighbors), not around SQL. The rules that decide what an operation means (lease outcomes, op validation, search matching) are in tab-domain, so backends only store and fetch. The trait is synchronous: rusqlite and the Durable Object SQL API both are, and it keeps the hub building for Wasm.
+
+SQL backends share their tables and queries through `tab_store::sql`, built with sea-query, which renders for SQLite and Postgres. That's the "ORM" seam: no Rust ORM can drive the Durable Object's SQLite (only reachable as `storage.sql` inside the Worker), but a query builder works everywhere. Each backend runs the rendered SQL on its own driver (rusqlite, `storage.sql`, sqlx for Postgres later). Full-text search is the per-database part (FTS5 trigrams in SQLite, `pg_trgm` in Postgres).
+
+**Migration between local and cloud** (`tab_hub::migrate::copy`) replays one store's change log into an empty one. Each change keeps its author, time and sequence number, so devices synced to the old hub carry on against the new one. Leases aren't copied. Tests move data SQLite → in-memory → SQLite and compare everything.
+
+### Storage tests (built)
+
+**Rule: every behavior of the storage layer has a test, and every backend passes all of them.** That's what lets us add or swap a backend (Durable Object SQLite, Postgres) with confidence.
+
+- **Conformance suite** (`crates/tab-store/src/conformance.rs`): one function per behavior (80 today: log ordering and paging, validation and all-or-nothing batches, record round-trips, graph edges and ordering, search matching and FTS edge cases, lease grant/renew/refuse/expire/release and fencing tokens). `conformance_tests!` turns each into its own `#[test]` for a backend; it runs against the in-memory store, SQLite in memory, and SQLite on disk. A test fails if a check isn't registered in the macro.
+- **Property tests** (`tests/properties.rs`, proptest): random workloads run on two backends at once must agree on everything observable; replaying any log rebuilds the same state; a lease key never has two live holders and tokens only go up.
+- **Volume and timing** (`tests/perf.rs`, ignored by default): 100k items plus edges, paging the log, gets, searches, neighbors and 10k lease claims, each with a time budget. It already caught one problem: without WAL every lease claim waited on an fsync.
+- **New behavior lands with its check. A storage bug gets a failing check before the fix.** A new backend runs `conformance_tests!` and joins the property tests.
+
+These are too slow to run on every CI build, so they run with `scripts/storage-tests.sh` (add `--perf` for volume, `--cov` for coverage with a 95% line target) whenever tab-store changes, and on a cadence. CI only builds the hub crates for Wasm, lints the proto, and runs the fast domain, protocol and hub tests.
 
 ## Data flow (built)
 
@@ -222,7 +271,7 @@ Opening a PR (Reviews tab, or Review on a PR item) boots an editor-style workspa
 
 ## Server (later)
 
-Sync across devices, team-shared automations and graph, and a webhook receiver so GitHub and Slack push instead of being polled (which also removes most rate-limit pressure). The local app stays the source of truth for a single user and works offline.
+Sync across devices, team-shared automations and graph, and a webhook receiver so GitHub and Slack push instead of being polled (which also removes most rate-limit pressure). The local app stays the source of truth for a single user and works offline. The pieces it builds on (tab-domain, tab-protocol, tab-store, tab-hub) are in the repo; see Layout.
 
 ## Phased plan
 

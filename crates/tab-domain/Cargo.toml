@@ -1,0 +1,15 @@
+[package]
+name = "tab-domain"
+description = "tab's pure logic: item model, ranking rules, leases, workflow definitions. No I/O; builds for Wasm."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Keep this crate free of I/O, threads, clocks and native code: it has to
+# build for wasm32-unknown-unknown so the cloud hub (Cloudflare Workers and
+# Durable Objects via workers-rs) can share it. CI checks that build.
+# Callers pass `now` in; nothing here reads the clock.
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
+serde.workspace = true
+serde_json.workspace = true

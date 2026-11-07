@@ -55,7 +55,10 @@ For day-to-day use, run a built copy (`pnpm tauri build`, then install the bundl
 
 ```sh
 cargo test -p tab-core   # core: store, search, graph, gateway, ranking, engine
+cargo test -p tab-domain -p tab-protocol -p tab-hub   # shared logic, protocol, hub
+scripts/storage-tests.sh # full storage suite (conformance, property tests); --perf, --cov
 pnpm typecheck           # UI
+pnpm proto               # regenerate TypeScript from the .proto after changing it
 ```
 
 Config and data live in the OS app config/data directories (`config.json`, `tab.db`).
@@ -63,8 +66,16 @@ Config and data live in the OS app config/data directories (`config.json`, `tab.
 ## Layout
 
 ```
-crates/tab-core   connectors, engine, gateway, ranking, SQLite store (no Tauri dependency)
+crates/tab-domain    pure logic shared by every place a hub runs (builds for Wasm)
+crates/tab-protocol  hub messages: Protobuf, no gRPC (builds for Wasm)
+crates/tab-store     hub storage trait, SQLite and in-memory backends, conformance suite
+crates/tab-hub       the hub: answers clients on any store; local <-> cloud migration
+crates/tab-core      desktop engine: connectors, gateway, ranking, SQLite store (no Tauri dependency)
 src-tauri         desktop shell: commands + event forwarding
 src               React UI: design system (src/design) and modules (src/modules)
 docs              architecture and plan
 ```
+
+## License
+
+[FSL-1.1-MIT](LICENSE.md), the Functional Source License. You can read, run, modify and redistribute tab for anything except offering a competing commercial product or service. Each version becomes MIT two years after it's released.
