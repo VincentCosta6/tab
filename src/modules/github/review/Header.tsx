@@ -35,7 +35,7 @@ function StatusPill({ p, onClick }: { p: Pill; onClick?: () => void }) {
   );
 }
 
-function Confirm({ title, body, confirm, danger, onConfirm, onClose }: { title: string; body: ReactNode; confirm: string; danger?: boolean; onConfirm: () => Promise<void>; onClose: () => void }) {
+function Confirm({ title, body, confirm, danger, merge, onConfirm, onClose }: { title: string; body: ReactNode; confirm: string; danger?: boolean; merge?: boolean; onConfirm: () => Promise<void>; onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   return (
@@ -48,7 +48,7 @@ function Confirm({ title, body, confirm, danger, onConfirm, onClose }: { title: 
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button
             variant="primary"
-            className={danger ? "rv-btn-danger" : undefined}
+            className={danger ? "rv-btn-danger" : merge ? "rv-btn-merge" : undefined}
             disabled={busy}
             onClick={async () => {
               setBusy(true);
@@ -159,7 +159,7 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
   const [menu, setMenu] = useState(false);
   const [submit, setSubmit] = useState(false);
   const [checks, setChecks] = useState(false);
-  const [confirm, setConfirm] = useState<null | { title: string; body: ReactNode; confirm: string; danger?: boolean; run: () => Promise<void> }>(null);
+  const [confirm, setConfirm] = useState<null | { title: string; body: ReactNode; confirm: string; danger?: boolean; merge?: boolean; run: () => Promise<void> }>(null);
   const [vscode, setVscode] = useState(false);
   const [split, setSplit] = useState(false);
   const [hover, setHover] = useState(false);
@@ -195,6 +195,7 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
       title: `${label}?`,
       body: <>This merges <code>{pr.head_ref}</code> into <code>{pr.base_ref}</code> on GitHub. It can't be undone from here.</>,
       confirm: label,
+      merge: true,
       run: () => act({ type: "merge", method }).then(() => notify("Merged", "success")),
     });
   };
