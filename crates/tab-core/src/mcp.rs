@@ -11,8 +11,9 @@
 //! * `tab_create_task`: create a tab task, optionally scheduled.
 //! * `tab_graph_search`, `tab_graph_expand`: the knowledge graph (repos,
 //!   people, tickets, projects) and the items around each node.
-//! * `tab_project`, `tab_project_note`: a project's overview, and durable
-//!   notes agents leave for the next chat.
+//! * `tab_project`, `tab_project_note`, `tab_project_update`,
+//!   `tab_project_repo`: a project's overview (what it is, its rules, repos,
+//!   notes and recent work), and what agents keep current for the next chat.
 //! * `tab_list_connections`, `tab_find_email_server`, `tab_configure_connection`,
 //!   `tab_ask_for_secret`, `tab_test_connection`: the setup assistant. Agents
 //!   fill in everything but secrets; secrets go through a card in the chat
@@ -39,7 +40,7 @@ use crate::engine::EngineEvent;
 use crate::model::Session;
 use crate::model::{
     ConnectorInfo, ContextSection, Entity, ItemState, NewContext, NewTask, Preview, Project,
-    ProjectNote, QueueItem, SettingKind,
+    ProjectNote, ProjectRepo, QueueItem, SettingKind,
 };
 use crate::sandbox::broker;
 use crate::store::{AuditEntry, Store};
@@ -530,6 +531,10 @@ fn note_json(n: &ProjectNote) -> Value {
     })
 }
 
+fn repo_json(r: &ProjectRepo) -> Value {
+    json!({ "repo": r.repo, "path": r.path, "note": r.note, "by": r.added_by })
+}
+
 /// The tools an agent needs in most chats. Claude Code keeps MCP tools
 /// behind ToolSearch, where the model only sees their names and rarely
 /// loads them; these are marked to load up front so it reaches for them.
@@ -540,6 +545,13 @@ const ALWAYS_LOAD: &[&str] = &[
     "tab_get_item",
     "tab_attach_context",
     "tab_add_found",
+    // Projects: agents read a project's context and keep it current.
+    "tab_project",
+    "tab_project_note",
+    "tab_project_update",
+    "tab_project_repo",
+    "tab_set_project",
+    "tab_graph_search",
 ];
 
 /// Marks each tool for Claude Code: `anthropic/alwaysLoad` for the ones in
@@ -641,11 +653,31 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_project",
-            "description": "A project's overview: its notes, the repos, people and tickets its work is about, and its recent items. Defaults to this chat's project; with no project, lists them all.",
+            "description": "A project's overview: what it is, its rules, the repos its work happens in (and where they're checked out), its notes, the repos, people and tickets its items are about, and its recent items. Read it at the start of work in a project and whenever you need to know where to work or how. Defaults to this chat's project; with no project, lists them all.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "Project name or id." },
                 "within_days": { "type": "integer", "minimum": 1, "description": "Only count activity from the last N days, so what is connected now shows first. Leave out for all time." }
             } }
+        },
+        {
+            "name": "tab_project_update",
+            "description": "Write what a project is about or its rules, for every future chat in it. `about`: what the project is and does, in a few sentences. `rules`: how to work in it (conventions, branches, what not to touch, who to ask), as short lines. Each replaces the whole field, so read tab_project first and keep what's still true. Record rules the person states or the repo documents; don't invent them.",
+            "inputSchema": { "type": "object", "properties": {
+                "about": { "type": "string" },
+                "rules": { "type": "string" },
+                "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." }
+            } }
+        },
+        {
+            "name": "tab_project_repo",
+            "description": "Add a repo the project's work happens in, update it, or remove it, so future chats know where to work. Add one when you work in a repo for this project that isn't listed yet. Saving the same repo again updates its path or note.",
+            "inputSchema": { "type": "object", "properties": {
+                "repo": { "type": "string", "description": "owner/name, a GitHub URL, or another repo URL." },
+                "path": { "type": "string", "description": "Where it's checked out on this machine, if you know." },
+                "note": { "type": "string", "description": "What the repo is for in this project, in one line." },
+                "remove": { "type": "boolean", "description": "Remove it from the project instead." },
+                "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." }
+            }, "required": ["repo"] }
         },
         {
             "name": "tab_set_project",
@@ -1333,8 +1365,11 @@ impl McpServer {
                 };
                 Ok(text(serde_json::to_string_pretty(&json!({
                     "project": { "id": p.id, "name": p.name },
+                    "about": p.about,
+                    "rules": p.rules,
+                    "repos": self.store.project_repos(&p.id)?.iter().map(repo_json).collect::<Vec<_>>(),
                     "notes": self.store.project_notes(&p.id)?.iter().map(note_json).collect::<Vec<_>>(),
-                    "about": self.store.project_entities(&p.id, since, 15)?.iter()
+                    "items_are_about": self.store.project_entities(&p.id, since, 15)?.iter()
                         .map(|(e, n)| json!({ "entity_id": e.id, "kind": e.kind, "label": e.label, "items_in_project": n }))
                         .collect::<Vec<_>>(),
                     "recent_items": self.store.project_items(&p.id, since, 15)?.iter().map(brief).collect::<Vec<_>>(),
@@ -1368,6 +1403,57 @@ impl McpServer {
                     Some(p) => format!("Moved \"{}\" into {}.", item.event.title, p.name),
                     None => format!("Took \"{}\" out of its project.", item.event.title),
                 }))
+            }
+            "tab_project_update" => {
+                let p = self.project_arg(session, &args)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "this chat isn't in a project; pass project (a name from tab_project)"
+                    )
+                })?;
+                let (about, rules) = (args["about"].as_str(), args["rules"].as_str());
+                anyhow::ensure!(
+                    about.is_some() || rules.is_some(),
+                    "pass about, rules or both"
+                );
+                self.store
+                    .project_set_profile(&p.id, about, rules, Utc::now())?;
+                let _ = self.events.send(EngineEvent::ProjectChanged {
+                    project_id: p.id.clone(),
+                });
+                let what = match (about.is_some(), rules.is_some()) {
+                    (true, true) => "about and rules",
+                    (true, false) => "about",
+                    _ => "rules",
+                };
+                Ok(text(format!("Saved {}'s {what}.", p.name)))
+            }
+            "tab_project_repo" => {
+                let repo = s("repo").ok_or_else(|| anyhow::anyhow!("repo is required"))?;
+                let p = self.project_arg(session, &args)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "this chat isn't in a project; pass project (a name from tab_project)"
+                    )
+                })?;
+                let msg = if args["remove"].as_bool().unwrap_or(false) {
+                    if !self.store.repo_delete(&p.id, &repo)? {
+                        return Ok(text(format!("{} doesn't list {repo}.", p.name)));
+                    }
+                    format!("Removed {repo} from {}.", p.name)
+                } else {
+                    let r = self.store.repo_save(
+                        &p.id,
+                        &repo,
+                        args["path"].as_str(),
+                        args["note"].as_str(),
+                        "agent",
+                        Utc::now(),
+                    )?;
+                    format!("{} lists {}.", p.name, r.repo)
+                };
+                let _ = self.events.send(EngineEvent::ProjectChanged {
+                    project_id: p.id.clone(),
+                });
+                Ok(text(msg))
             }
             "tab_project_note" => {
                 let topic = s("topic").ok_or_else(|| anyhow::anyhow!("topic is required"))?;
@@ -1805,7 +1891,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 21);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 23);
         let always: Vec<&str> = list["result"]["tools"]
             .as_array()
             .unwrap()
@@ -2099,6 +2185,36 @@ mod tests {
         );
         // The next chat in the project starts with the notes.
         assert!(server.hub.system_prompt(&session).contains("Fridays"));
+
+        // About, rules and repos: written by agents, read back by tab_project.
+        out(server
+            .call(
+                Some(&session.id),
+                "tab_project_update",
+                json!({"about":"The billing site.","rules":"- PRs against main."}),
+            )
+            .await);
+        out(server
+            .call(Some(&session.id), "tab_project_repo", json!({"repo":"https://github.com/acme/billing","path":"/src/billing","note":"The site"}))
+            .await);
+        let overview = out(server
+            .call(Some(&session.id), "tab_project", json!({}))
+            .await);
+        assert!(
+            overview.contains("The billing site.")
+                && overview.contains("PRs against main")
+                && overview.contains("\"acme/billing\"")
+                && overview.contains("/src/billing"),
+            "{overview}"
+        );
+        out(server
+            .call(
+                Some(&session.id),
+                "tab_project_repo",
+                json!({"repo":"acme/billing","remove":true}),
+            )
+            .await);
+        assert!(store.project_repos(&p.id).unwrap().is_empty());
         out(server
             .call(
                 Some(&session.id),

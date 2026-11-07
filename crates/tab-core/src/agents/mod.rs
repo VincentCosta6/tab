@@ -1143,10 +1143,17 @@ impl AgentHub {
              own if the window is too narrow.\n\
              - When the person mentions something you don't recognise (a project, a codename, a person, a \
              repo), call tab_graph_search before asking them: it searches everything tab knows and shows \
-             what's connected to it. tab_graph_expand follows one connection further. tab_project shows a \
-             whole project: its notes, what it's about and its recent work.\n\
-             - When you learn a durable fact about the project (how it deploys, who owns what, where things \
-             live, a decision and why), save it with tab_project_note under a short topic, citing the items \
+             what's connected to it. tab_graph_expand follows one connection further.\n\
+             - Projects: when this chat is in a project, call tab_project before starting work, and again \
+             whenever you need to know where to work or how. It returns what the project is, its rules (follow \
+             them), the repos its work happens in and where they're checked out, its notes and its recent work. \
+             Work in the listed repos rather than guessing. Any project can be read by name with tab_project.\n\
+             - Keep the project's context current for the next chat. When you work in a repo for the project \
+             that isn't listed, add it with tab_project_repo (with its local path if you know it). If the \
+             project has no description, or the person tells you what it is or how to work in it, write it with \
+             tab_project_update (about, rules); each replaces the whole field, so keep what's still true. \
+             When you learn a durable fact (how it deploys, who owns what, where things live, a decision \
+             and why), save it with tab_project_note under a short topic, citing the items \
              it came from. Writing the same topic again replaces the note, so keep it current rather than \
              adding new ones. Skip anything that's only true for this one task, and never note one-off \
              events (sign-ins, verifications, receipts, codes), credentials or personal account details: \
@@ -1228,7 +1235,7 @@ impl AgentHub {
             .and_then(|p| self.store.project_find(p).ok().flatten())
         {
             out.push_str(&format!(
-                "Project: {} (call tab_project for its recent work)\n",
+                "Project: {} (call tab_project for what it is, its rules, repos and recent work)\n",
                 p.name
             ));
             let notes = self.store.project_notes(&p.id).unwrap_or_default();

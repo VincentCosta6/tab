@@ -290,7 +290,30 @@ pub struct Project {
     pub color: String,
     /// Icon name from the design system.
     pub icon: String,
+    /// What the project is and does, in a few sentences.
+    #[serde(default)]
+    pub about: String,
+    /// How to work in it: conventions, do's and don'ts, who to ask.
+    #[serde(default)]
+    pub rules: String,
     pub created_at: DateTime<Utc>,
+}
+
+/// A repo a project's work happens in, so agents know where to work.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectRepo {
+    pub id: String,
+    pub project_id: String,
+    /// `owner/name`, or a URL for repos that aren't on GitHub.
+    pub repo: String,
+    /// Where it's checked out, if known.
+    pub path: Option<String>,
+    /// What the repo is for in this project.
+    pub note: String,
+    /// `agent` or `user`.
+    pub added_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// A durable fact about a project, left by an agent or the person, so the
