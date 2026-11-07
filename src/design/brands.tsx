@@ -3,7 +3,7 @@
 // Very dark marks (GitHub, OpenCode, Notion) follow the text color so they
 // stay visible in dark mode.
 
-import { siClaude, siFigma, siGithub, siGmail, siGooglecalendar, siJira, siLinear, siNotion, siOpencode, siZoom } from "simple-icons";
+import { siApple, siClaude, siFigma, siGithub, siGmail, siGoogle, siGooglecalendar, siJira, siLinear, siNotion, siOpencode, siZoom } from "simple-icons";
 import type { Tone } from "../lib/types";
 import { Icon } from "./icons";
 
@@ -20,9 +20,11 @@ const simple: Record<string, SimpleIcon> = {
   notion: siNotion,
   figma: siFigma,
   calendar: siGooglecalendar,
+  apple: siApple,
+  google: siGoogle,
 };
 
-const dark = new Set(["github", "opencode", "notion"]);
+const dark = new Set(["github", "opencode", "notion", "apple"]);
 
 function SlackMark({ size }: { size: number }) {
   return (

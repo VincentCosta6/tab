@@ -1,17 +1,18 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Button, Kbd, TextInput, Toggle, cx } from "../../design/components";
 import { Brand, TabMark } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { api, onAgentUpgrade } from "../../lib/api";
 import { GhConnect } from "../connections/GhConnect";
 import { useConfig, useFolderProblem, useHarnesses, useSaveConfig } from "../../lib/hooks";
-import type { AgentKind, AgentProbe, Harness, TabConfig } from "../../lib/types";
+import type { AgentKind, AgentProbe, Harness, HubMode, TabConfig } from "../../lib/types";
 import { HarnessIcon, ModelMenu, modelFor } from "../work/ModelMenu";
+import { AccountBadge, SignInButtons, cloudPerks, localDrawbacks, useAccount } from "../account/Account";
 
-const steps = ["Welcome", "Agent", "Connections", "Ready"];
+const steps = ["Welcome", "Agent", "Hub", "Connections", "Ready"];
 
-/** First launch: pick and check an agent, connect a source or two, then go. */
+/** First launch: pick and check an agent, choose where the hub runs, connect a source or two, then go. */
 export function Onboarding({ onClose }: { onClose: () => void }) {
   const { data: config } = useConfig();
   const save = useSaveConfig();
@@ -40,6 +41,11 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
   }, [config, draft]);
   const workdirProblem = useFolderProblem(draft?.agent.workdir);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Onboarding starts on the cloud hub; Settings keeps whatever was saved.
+  const [hubMode, setHubMode] = useState<HubMode>("cloud");
+  const { data: account } = useAccount();
+  const signedIn = !!account?.account;
+  const hubBlocked = step === 2 && hubMode === "cloud" && !signedIn;
 
   if (!draft) return null;
   const set = (fn: (c: TabConfig) => void) => {
@@ -53,7 +59,7 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
   const finish = async () => {
     setSaveError(null);
     try {
-      await save.mutateAsync({ ...draft, onboarded: true });
+      await save.mutateAsync({ ...draft, hub: { mode: hubMode }, onboarded: true });
       onClose();
     } catch (e) {
       setSaveError(`Couldn't save: ${e}`);
@@ -137,6 +143,46 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
 
         {step === 2 && (
           <div className="onboarding-body">
+            <h2>Choose where your work syncs</h2>
+            <p className="subtle">Your queue, chats, projects and workflows live in a hub. You can move it later in Settings.</p>
+            <div className="hub-choices">
+              <HubChoice mode="cloud" chosen={hubMode === "cloud"} onChoose={setHubMode}>
+                <div className="agent-choice-head">
+                  <Icon name="cloud" size={20} />
+                  <strong>tab cloud</strong>
+                  <span className="onboarding-recommended">Recommended</span>
+                  {hubMode === "cloud" && <Icon name="check" size={16} className="agent-chosen" />}
+                </div>
+                <ul className="hub-perks">
+                  {cloudPerks.map((p) => (
+                    <li key={p.title}><Icon name={p.icon} size={14} /> <span><strong>{p.title}.</strong> {p.text}</span></li>
+                  ))}
+                </ul>
+                {hubMode === "cloud" && (
+                  <div className="hub-sign-in" onClick={(e) => e.stopPropagation()}>
+                    {account?.account ? <AccountBadge account={account.account} /> : <SignInButtons />}
+                  </div>
+                )}
+              </HubChoice>
+              <HubChoice mode="local" chosen={hubMode === "local"} onChoose={setHubMode}>
+                <div className="agent-choice-head">
+                  <Icon name="folder" size={20} />
+                  <strong>This computer only</strong>
+                  {hubMode === "local" && <Icon name="check" size={16} className="agent-chosen" />}
+                </div>
+                <p>The hub runs inside tab on this computer, with no account. What you give up:</p>
+                <ul className="hub-drawbacks">
+                  {localDrawbacks.map((d) => (
+                    <li key={d}><Icon name="alert" size={13} /> <span>{d}</span></li>
+                  ))}
+                </ul>
+              </HubChoice>
+            </div>
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="onboarding-body">
             <h2>Connect your work</h2>
             <p className="subtle">Start with a source or two. Slack, Gmail, Zoom and Jira are in the marketplace under Connections.</p>
             <div className="onboarding-connector">
@@ -154,7 +200,7 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
-        {step === 3 && (
+        {step === 4 && (
           <div className="onboarding-body welcome">
             <Icon name="check-square" size={40} />
             <h2>You're set</h2>
@@ -170,8 +216,9 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
         <footer className="onboarding-foot">
           {step > 0 ? <Button variant="ghost" onClick={() => setStep(step - 1)}>Back</Button> : <span />}
           {step === 1 && !draft.agent.kind && <span className="subtle">Pick one to chat with agents, or skip for now.</span>}
+          {hubBlocked && <span className="subtle">Sign in to use tab cloud, or choose This computer only.</span>}
           {step < steps.length - 1 ? (
-            <Button variant="primary" onClick={() => setStep(step + 1)}>{step === 1 && !draft.agent.kind ? "Skip" : "Continue"}</Button>
+            <Button variant="primary" disabled={hubBlocked} onClick={() => setStep(step + 1)}>{step === 1 && !draft.agent.kind ? "Skip" : "Continue"}</Button>
           ) : (
             <>
               {saveError && <small className="text-danger" role="alert">{saveError}</small>}
@@ -180,6 +227,15 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
           )}
         </footer>
       </div>
+    </div>
+  );
+}
+
+/** One place the hub can run, as a card to pick. */
+function HubChoice({ mode, chosen, onChoose, children }: { mode: HubMode; chosen: boolean; onChoose: (m: HubMode) => void; children: ReactNode }) {
+  return (
+    <div role="radio" aria-checked={chosen} tabIndex={0} className={cx("agent-choice", "hub-choice", mode, chosen && "chosen")} onClick={() => onChoose(mode)} onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onChoose(mode)}>
+      {children}
     </div>
   );
 }

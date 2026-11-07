@@ -20,6 +20,7 @@
 //! under their old paths (`tab_core::model`, `tab_core::links`, ...), so code
 //! that used them doesn't change. See `docs/ARCHITECTURE.md` for the crate map.
 
+pub mod account;
 pub mod agents;
 pub mod config;
 pub mod connector;

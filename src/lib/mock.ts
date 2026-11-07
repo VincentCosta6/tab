@@ -5,7 +5,7 @@ import { NOT_HANDLED, withActions, workflowMock } from "./mock-workflows";
 // The same harness metadata the app ships.
 import harnessData from "../../crates/tab-core/src/agents/harnesses.json";
 import type {
-  AgentKind, GhLoginCode, GhStatus, Harness, LspServer, ModelOption,
+  Account, AgentKind, GhLoginCode, GhStatus, Harness, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
@@ -146,8 +146,13 @@ let config: TabConfig = {
     enabled: true, protected: [], hidden: [], container_runtime: "", ssh_in_chats: true,
     lsp_domains: ["crates.io", "*.crates.io", "proxy.golang.org", "sum.golang.org", "pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com", "*.githubusercontent.com"],
   },
+  hub: { mode: "local" },
   onboarded: true,
 };
+// `?account=1` starts the browser mock signed in.
+let mockAccount: Account | null = typeof location !== "undefined" && new URLSearchParams(location.search).has("account")
+  ? { user_id: "mock-google", email: "you@gmail.com", name: "You", avatar_url: null, provider: "google" }
+  : null;
 
 const listeners = new Set<(e: EngineEvent) => void>();
 const emit = (e: EngineEvent) => listeners.forEach((l) => l(e));
@@ -418,6 +423,16 @@ export const mockApi = {
           fix: "Workflow commands that name a container image run isolated in Docker or Podman.",
         };
         case "storage_clean": return { removed: 3, bytes: 2_200_000 };
+        case "account_status": return { configured: true, account: mockAccount };
+        case "account_sign_in": {
+          await new Promise((r) => setTimeout(r, 1200));
+          mockAccount = args.provider === "apple"
+            ? { user_id: "mock-apple", email: null, name: null, avatar_url: null, provider: "apple" }
+            : { user_id: "mock-google", email: "you@gmail.com", name: "You", avatar_url: null, provider: "google" };
+          return mockAccount;
+        }
+        case "account_cancel_sign_in": return null;
+        case "account_sign_out": mockAccount = null; return null;
         case "hub_status": {
           const started = new Date(Date.now() - 3 * 3600_000).toISOString();
           return {

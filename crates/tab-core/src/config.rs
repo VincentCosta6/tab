@@ -28,6 +28,9 @@ pub struct TabConfig {
     /// What agents, language servers and workflow commands may touch.
     #[serde(default)]
     pub sandbox: crate::sandbox::SandboxConfig,
+    /// Where this person's hub runs.
+    #[serde(default)]
+    pub hub: HubConfig,
     /// Set once the first-launch onboarding is finished.
     #[serde(default)]
     pub onboarded: bool,
@@ -317,9 +320,29 @@ impl Default for TabConfig {
             mcp: McpConfig::default(),
             storage: StorageConfig::default(),
             sandbox: Default::default(),
+            hub: HubConfig::default(),
             onboarded: false,
         }
     }
+}
+
+/// Where the hub that syncs this person's work runs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct HubConfig {
+    #[serde(default)]
+    pub mode: HubMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HubMode {
+    /// tab's cloud hub, reached by signing in to a tab account. Until the
+    /// cloud hub is live the app keeps running its own hub as well.
+    Cloud,
+    /// The hub inside the desktop app, on this computer only. Installs from
+    /// before the choice existed stay here.
+    #[default]
+    Local,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
