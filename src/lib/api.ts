@@ -6,7 +6,7 @@ import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
-  Activity, Issue, Workflow, WorkflowRun,
+  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress,
 } from "./types";
 import { mockApi } from "./mock";
 
@@ -95,6 +95,11 @@ export const api = {
   agentHealth: () => call<AgentProbe | null>("agent_health"),
   /** Runs the agent's own update command; its output arrives through `onAgentUpgrade`. */
   agentUpgrade: () => call<void>("agent_upgrade"),
+  appVersion: () => call<AppVersion>("app_version"),
+  /** A newer release of tab, or null when this is the newest. */
+  appUpdateCheck: () => call<AppUpdate | null>("app_update_check"),
+  /** Installs what the last check found, then restarts the app. */
+  appUpdateInstall: () => call<void>("app_update_install"),
   usageSummary: () => call<UsageSummary>("usage_summary"),
   ghStatus: () => call<GhStatus>("gh_status"),
   ghLogin: () => call<GhStatus>("gh_login"),
@@ -170,6 +175,13 @@ export async function onGhCode(cb: (c: GhLoginCode) => void): Promise<() => void
   if (!inTauri) return mockApi.onGhCode(cb);
   const { listen } = await import("@tauri-apps/api/event");
   return listen<GhLoginCode>("tab://gh-code", (e) => cb(e.payload));
+}
+
+/** Download progress while `appUpdateInstall` runs. */
+export async function onAppUpdateProgress(cb: (p: AppUpdateProgress) => void): Promise<() => void> {
+  if (!inTauri) return mockApi.onAppUpdate(cb);
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<AppUpdateProgress>("tab://app-update", (e) => cb(e.payload));
 }
 
 /** Lines the agent's updater prints while `agentUpgrade` runs. */

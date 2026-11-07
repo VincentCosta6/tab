@@ -257,6 +257,8 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.version.outputs.version }}
+          # The updater's public key; the app embeds it to verify updates.
+          TAURI_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
         run: |
           dir="$RUNNER_TEMP"
           # Forward slashes, so the path survives being passed as an argument.

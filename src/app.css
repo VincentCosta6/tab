@@ -335,6 +335,7 @@
 .updater-go:hover { filter: brightness(1.1); }
 .updater-bar { height: 4px; border-radius: var(--radius-pill); background: var(--bg-sunken); overflow: hidden; }
 .updater-bar > span { display: block; height: 100%; width: 40%; border-radius: inherit; background: var(--tone-info-fg); animation: updater-slide 1.1s ease-in-out infinite; }
+.updater-bar.fixed > span { animation: none; transition: width 0.2s ease; }
 @keyframes updater-slide { from { transform: translateX(-100%); } to { transform: translateX(260%); } }
 .updater-pop { position: absolute; left: calc(100% + 12px); bottom: 0; z-index: 40; width: 340px; display: grid; gap: var(--space-2); padding: var(--space-3); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg, var(--shadow-sm)); }
 .updater-pop code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; }
@@ -913,3 +914,31 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
 /* Steps made from tool calls when the agent gave no plan: one line each, cut to fit. */
 .progress-list.activity li > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; font-family: var(--font-mono); font-size: 11.5px; }
 .progress-list li.progress-earlier { color: var(--fg-subtle); font-size: var(--text-xs); padding-left: 23px; }
+
+/* Settings: a page list on the left, one page at a time on the right. */
+.settings { display: grid; grid-template-columns: 210px minmax(0, 1fr); height: 100%; min-height: 0; }
+.settings-nav { display: flex; flex-direction: column; gap: 2px; padding: var(--space-8) var(--space-3) var(--space-4); border-right: 1px solid var(--border); overflow: auto; }
+.settings-title { font-size: var(--text-xl, var(--text-lg)); font-weight: 600; margin: 0 var(--space-2) var(--space-4); letter-spacing: -0.01em; }
+.settings-nav-item { display: flex; align-items: center; gap: var(--space-2); padding: 7px var(--space-2); border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg-muted); font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer; }
+.settings-nav-item > span:first-of-type { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-nav-item:hover { background: var(--bg-hover); color: var(--fg); }
+.settings-nav-item.active { background: var(--bg-raised); color: var(--fg); box-shadow: var(--shadow-sm); }
+.settings-nav-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--tone-warning-fg); flex: none; }
+.settings-nav-badge { min-width: 16px; height: 16px; padding: 0 4px; border-radius: var(--radius-pill); background: var(--tone-info-fg); color: var(--accent-fg, #fff); font-size: 10px; font-weight: 600; line-height: 16px; text-align: center; flex: none; }
+.settings-body { position: relative; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+.settings-page { flex: 1; width: 100%; max-width: 900px; padding: var(--space-8); }
+.settings-savebar { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin: 0 var(--space-8) var(--space-4); max-width: calc(900px - 2 * var(--space-8)); padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-raised); box-shadow: var(--shadow-lg, var(--shadow-sm)); font-size: var(--text-sm); }
+.settings-savebar.quiet { color: var(--fg-muted); }
+.settings-savebar-actions { display: flex; gap: var(--space-2); flex: none; }
+.settings-version { display: grid; gap: var(--space-2); min-width: 0; }
+.settings-version-line { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.settings-error { margin: 0; color: var(--tone-danger-fg); font-size: var(--text-xs); }
+.settings-notes { font-size: var(--text-sm); }
+.settings-notes > :first-child { margin-top: 0; }
+@media (max-width: 760px) {
+  .settings { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .settings-nav { flex-direction: row; flex-wrap: wrap; padding: var(--space-4); border-right: 0; border-bottom: 1px solid var(--border); }
+  .settings-title { width: 100%; margin-bottom: var(--space-2); }
+  .settings-page { padding: var(--space-4); }
+  .settings-savebar { margin: 0 var(--space-4) var(--space-4); }
+}

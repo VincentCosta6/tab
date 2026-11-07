@@ -10,6 +10,9 @@
 //                                  signature, so Gatekeeper says "unidentified
 //                                  developer" instead of "damaged".
 //   TAURI_SIGNING_PRIVATE_KEY      set: also build signed updater bundles
+//   TAURI_UPDATER_PUBKEY           set: the app checks for updates, verifying
+//                                  them with this key (the private key's
+//                                  public half). Unset: it can't update itself.
 //   AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE
 //                                  all set: sign Windows binaries with Azure
 //                                  Artifact Signing (needs artifact-signing-cli
@@ -36,6 +39,20 @@ if (env("TAURI_SIGNING_PRIVATE_KEY")) {
   notes.push("updater bundles: signed");
 } else {
   notes.push("updater bundles: off (no TAURI_SIGNING_PRIVATE_KEY)");
+}
+
+const pubkey = env("TAURI_UPDATER_PUBKEY");
+if (pubkey) {
+  config.plugins = { updater: { pubkey } };
+  notes.push("in-app updates: on");
+  if (!env("TAURI_SIGNING_PRIVATE_KEY")) {
+    console.log("::warning::TAURI_UPDATER_PUBKEY is set but TAURI_SIGNING_PRIVATE_KEY isn't, so this release has no update bundles to offer.");
+  }
+} else {
+  notes.push("in-app updates: off (no TAURI_UPDATER_PUBKEY)");
+  if (env("TAURI_SIGNING_PRIVATE_KEY")) {
+    console.log("::warning::TAURI_SIGNING_PRIVATE_KEY is set but TAURI_UPDATER_PUBKEY isn't, so this build can't check for updates.");
+  }
 }
 
 if (process.platform === "darwin") {
