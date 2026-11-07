@@ -154,12 +154,9 @@
 .subtle { color: var(--fg-subtle); }
 
 /* FlapTitle: split-flap title changes. */
-.flap-word { display: inline-block; white-space: nowrap; }
-.flap-leave { transition: transform 220ms ease-in, opacity 220ms ease-in; }
-.flap-leave-go { transform: translateY(-0.5em); opacity: 0; }
-.flap-slot { position: relative; display: inline-block; overflow: hidden; vertical-align: top; }
-.flap-size { visibility: hidden; white-space: pre; }
-.flap-reel { position: absolute; top: 0; left: 50%; display: flex; flex-direction: column; align-items: center; transform: translateX(-50%); transition-property: transform; transition-timing-function: cubic-bezier(0.2, 0.9, 0.25, 1.05); }
+.flap { white-space: nowrap; }
+.flap-slot { position: relative; display: inline-block; height: 1lh; overflow: hidden; vertical-align: top; transition-property: width; transition-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1); }
+.flap-reel { position: absolute; top: 0; left: 50%; display: flex; flex-direction: column; align-items: center; transform: translateX(-50%); transition-property: transform; transition-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1); }
 .flap-reel > span { height: 1lh; white-space: pre; }
 .flap-go .flap-reel { transform: translateX(-50%) translateY(calc(var(--k) * -1lh)); }
 
