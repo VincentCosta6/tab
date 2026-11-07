@@ -1253,7 +1253,10 @@ pub async fn my_pulls(gw: &Gateway) -> anyhow::Result<Vec<MyPull>> {
         .flatten()
         .filter_map(|pr| {
             Some(MyPull {
-                repo: pr.pointer("/repository/nameWithOwner")?.as_str()?.to_string(),
+                repo: pr
+                    .pointer("/repository/nameWithOwner")?
+                    .as_str()?
+                    .to_string(),
                 number: pr["number"].as_u64()?,
                 url: pr["url"].as_str()?.to_string(),
                 summary: pull_summary(pr),

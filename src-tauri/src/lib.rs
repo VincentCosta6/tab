@@ -267,7 +267,11 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
-        match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+        match (
+            b[i],
+            b.get(i + 1).copied().and_then(hex),
+            b.get(i + 2).copied().and_then(hex),
+        ) {
             (b'%', Some(h), Some(l)) => {
                 out.push(h * 16 + l);
                 i += 3;
@@ -286,7 +290,13 @@ fn safe_file_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
     let clean: String = base
         .chars()
-        .map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_control() || "<>:\"|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let clean = clean.trim().trim_matches('.').to_string();
     if clean.is_empty() {
@@ -306,9 +316,9 @@ async fn file_open(path: String, reveal: Option<bool>) -> CmdResult<()> {
         return Err("that file isn't there any more".into());
     }
     const SAFE: &[&str] = &[
-        "png", "jpg", "jpeg", "gif", "webp", "svg", "pdf", "txt", "md", "csv", "tsv", "json", "log",
-        "docx", "xlsx", "pptx", "doc", "xls", "ppt", "odt", "ods", "rtf", "zip", "mp4", "mov",
-        "webm", "mp3", "wav",
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "pdf", "txt", "md", "csv", "tsv", "json",
+        "log", "docx", "xlsx", "pptx", "doc", "xls", "ppt", "odt", "ods", "rtf", "zip", "mp4",
+        "mov", "webm", "mp3", "wav",
     ];
     let ext = p
         .extension()
@@ -339,10 +349,11 @@ async fn image_read(path: String) -> CmdResult<tauri::ipc::Response> {
 /// Extensions the file stage can show inside tab: PDFs, and text it shows as
 /// text. Other files open in their default app instead.
 const VIEWABLE: &[&str] = &[
-    "pdf", "svg", "txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "log", "yaml", "yml", "toml", "xml",
-    "html", "htm", "css", "js", "jsx", "ts", "tsx", "mjs", "cjs", "rs", "py", "rb", "go", "java", "kt", "swift", "c",
-    "h", "cc", "cpp", "hpp", "cs", "sh", "zsh", "bash", "sql", "ini", "env", "conf", "diff", "patch", "lua",
-    "php", "vue", "svelte", "dart", "scala", "ex", "exs", "r", "tex",
+    "pdf", "svg", "txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "log", "yaml", "yml",
+    "toml", "xml", "html", "htm", "css", "js", "jsx", "ts", "tsx", "mjs", "cjs", "rs", "py", "rb",
+    "go", "java", "kt", "swift", "c", "h", "cc", "cpp", "hpp", "cs", "sh", "zsh", "bash", "sql",
+    "ini", "env", "conf", "diff", "patch", "lua", "php", "vue", "svelte", "dart", "scala", "ex",
+    "exs", "r", "tex",
 ];
 const MAX_VIEWABLE: u64 = 30 * 1024 * 1024;
 
@@ -407,7 +418,7 @@ fn start_dictation(app: tauri::AppHandle) -> CmdResult<()> {
 #[cfg(windows)]
 fn press_win_h() -> Result<(), String> {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_LWIN,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_LWIN,
     };
     const VK_H: u16 = 0x48;
     let key = |vk: u16, up: bool| INPUT {
@@ -1047,8 +1058,9 @@ fn agent_slash_commands(state: State<'_, AppState>) -> Vec<String> {
     state.hub.slash_commands()
 }
 
-/// Items whose agent is busy, waiting on the person, or failed, for the
-/// queue rows and the nav.
+/// The state of each item's latest chat (working, needs you, monitoring,
+/// failed or idle), for the queue rows and the nav. Items with no chat are
+/// left out.
 #[tauri::command]
 async fn agent_activity(state: State<'_, AppState>) -> CmdResult<Vec<serde_json::Value>> {
     let sessions = state.store.sessions_recent(300).map_err(err)?;
@@ -1071,9 +1083,6 @@ async fn agent_activity(state: State<'_, AppState>) -> CmdResult<Vec<serde_json:
                 .and_then(|v| v.as_str().map(str::to_string))
                 .unwrap_or_default()
         };
-        if status == "idle" {
-            continue;
-        }
         out.push(serde_json::json!({ "item_id": item, "agent": s.agent, "status": status, "updated_at": s.updated_at }));
     }
     Ok(out)
@@ -1792,11 +1801,17 @@ fn browser_label(id: &str) -> String {
 }
 
 fn browser_view(app: &tauri::AppHandle, id: &str) -> Result<tauri::Webview, String> {
-    app.get_webview(&browser_label(id)).ok_or_else(|| "browser tab is closed".to_string())
+    app.get_webview(&browser_label(id))
+        .ok_or_else(|| "browser tab is closed".to_string())
 }
 
 #[tauri::command]
-fn browser_open(app: tauri::AppHandle, id: String, url: String, bounds: Bounds) -> Result<(), String> {
+fn browser_open(
+    app: tauri::AppHandle,
+    id: String,
+    url: String,
+    bounds: Bounds,
+) -> Result<(), String> {
     use tauri::webview::{PageLoadEvent, WebviewBuilder};
     use tauri::{LogicalPosition, LogicalSize, WebviewUrl};
     let parsed: tauri::Url = url.parse().map_err(|e| format!("not a web address: {e}"))?;
@@ -1808,15 +1823,44 @@ fn browser_open(app: tauri::AppHandle, id: String, url: String, bounds: Bounds) 
     let (tab_a, tab_b) = (id.clone(), id.clone());
     let builder = WebviewBuilder::new(browser_label(&id), WebviewUrl::External(parsed))
         .on_page_load(move |wv, payload| {
-            let kind = if matches!(payload.event(), PageLoadEvent::Started) { "loading" } else { "loaded" };
-            let _ = a.emit("tab://browser", BrowserEvent { id: tab_a.clone(), kind: "url", value: wv.url().map(|u| u.to_string()).unwrap_or_default() });
-            let _ = a.emit("tab://browser", BrowserEvent { id: tab_a.clone(), kind, value: String::new() });
+            let kind = if matches!(payload.event(), PageLoadEvent::Started) {
+                "loading"
+            } else {
+                "loaded"
+            };
+            let _ = a.emit(
+                "tab://browser",
+                BrowserEvent {
+                    id: tab_a.clone(),
+                    kind: "url",
+                    value: wv.url().map(|u| u.to_string()).unwrap_or_default(),
+                },
+            );
+            let _ = a.emit(
+                "tab://browser",
+                BrowserEvent {
+                    id: tab_a.clone(),
+                    kind,
+                    value: String::new(),
+                },
+            );
         })
         .on_document_title_changed(move |_, title| {
-            let _ = b.emit("tab://browser", BrowserEvent { id: tab_b.clone(), kind: "title", value: title });
+            let _ = b.emit(
+                "tab://browser",
+                BrowserEvent {
+                    id: tab_b.clone(),
+                    kind: "title",
+                    value: title,
+                },
+            );
         });
     window
-        .add_child(builder, LogicalPosition::new(bounds.x, bounds.y), LogicalSize::new(bounds.w.max(1.0), bounds.h.max(1.0)))
+        .add_child(
+            builder,
+            LogicalPosition::new(bounds.x, bounds.y),
+            LogicalSize::new(bounds.w.max(1.0), bounds.h.max(1.0)),
+        )
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1825,8 +1869,10 @@ fn browser_open(app: tauri::AppHandle, id: String, url: String, bounds: Bounds) 
 fn browser_bounds(app: tauri::AppHandle, id: String, bounds: Bounds) -> Result<(), String> {
     use tauri::{LogicalPosition, LogicalSize};
     let wv = browser_view(&app, &id)?;
-    wv.set_position(LogicalPosition::new(bounds.x, bounds.y)).map_err(|e| e.to_string())?;
-    wv.set_size(LogicalSize::new(bounds.w.max(1.0), bounds.h.max(1.0))).map_err(|e| e.to_string())
+    wv.set_position(LogicalPosition::new(bounds.x, bounds.y))
+        .map_err(|e| e.to_string())?;
+    wv.set_size(LogicalSize::new(bounds.w.max(1.0), bounds.h.max(1.0)))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1837,14 +1883,22 @@ fn browser_visible(app: tauri::AppHandle, id: String, visible: bool) -> Result<(
 
 /// `action`: back, forward, reload, or `go` with a url.
 #[tauri::command]
-fn browser_nav(app: tauri::AppHandle, id: String, action: String, url: Option<String>) -> Result<(), String> {
+fn browser_nav(
+    app: tauri::AppHandle,
+    id: String,
+    action: String,
+    url: Option<String>,
+) -> Result<(), String> {
     let wv = browser_view(&app, &id)?;
     match action.as_str() {
         "back" => wv.eval("history.back()"),
         "forward" => wv.eval("history.forward()"),
         "reload" => wv.eval("location.reload()"),
         "go" => {
-            let u: tauri::Url = url.ok_or("no address")?.parse().map_err(|e| format!("not a web address: {e}"))?;
+            let u: tauri::Url = url
+                .ok_or("no address")?
+                .parse()
+                .map_err(|e| format!("not a web address: {e}"))?;
             if !matches!(u.scheme(), "http" | "https") {
                 return Err("only web addresses open in the browser".into());
             }

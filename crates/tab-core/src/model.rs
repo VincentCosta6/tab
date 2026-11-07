@@ -649,6 +649,9 @@ pub enum SessionStatus {
     Working,
     /// Waiting on the person (an approval or a question).
     NeedsInput,
+    /// The reply is in but the agent is still running background work
+    /// (a background command or watcher) and may pick back up on its own.
+    Monitoring,
     Failed,
 }
 
@@ -658,6 +661,7 @@ impl SessionStatus {
             SessionStatus::Idle => "idle",
             SessionStatus::Working => "working",
             SessionStatus::NeedsInput => "needs_input",
+            SessionStatus::Monitoring => "monitoring",
             SessionStatus::Failed => "failed",
         }
     }
@@ -665,6 +669,7 @@ impl SessionStatus {
         match s {
             "working" => SessionStatus::Working,
             "needs_input" => SessionStatus::NeedsInput,
+            "monitoring" => SessionStatus::Monitoring,
             "failed" => SessionStatus::Failed,
             _ => SessionStatus::Idle,
         }

@@ -214,7 +214,7 @@ export interface NewContext { section: ContextSection; ref_item_id?: string | nu
 export interface ItemContext { item: QueueItem; entries: ContextEntry[]; related: QueueItem[] }
 
 export type AgentKind = "claude_code" | "opencode";
-export type SessionStatus = "idle" | "working" | "needs_input" | "failed";
+export type SessionStatus = "idle" | "working" | "needs_input" | "monitoring" | "failed";
 export interface Session {
   id: string;
   item_id: string | null;

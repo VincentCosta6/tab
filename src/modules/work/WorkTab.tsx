@@ -8,6 +8,7 @@ import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useAgentActivity, useItems } from "../../lib/hooks";
+import { SessionPill, sessionLook } from "./SessionPill";
 import { keys } from "../../lib/query";
 import type { AgentActivity, ItemState, QueueItem, Urgency } from "../../lib/types";
 import { takePendingOpen } from "./Chat";
@@ -261,7 +262,13 @@ export function WorkTab() {
  * One queue row. Hover actions sit in an overlay on the right edge, on top
  * of the score and time, so showing them never moves or wraps any content.
  */
-const agentText: Record<string, string> = { working: "Agent working", needs_input: "Agent needs you", failed: "Agent failed" };
+/** Byline parts worth showing: the source icon already says where it's
+ *  from, so "tab" (and "you" on your own tasks) would only repeat it. */
+function byline(item: QueueItem): string {
+  const same = (v: string | null) => !!v && v.toLowerCase() === item.source.toLowerCase();
+  const actor = item.source === "tab" && item.actor === "you" ? null : item.actor;
+  return [actor, same(item.context) ? null : item.context].filter(Boolean).join(" · ");
+}
 
 export function QueueRow({ item, agent, selected, onSelect, onAct, compact }: {
   item: QueueItem;
@@ -281,14 +288,13 @@ export function QueueRow({ item, agent, selected, onSelect, onAct, compact }: {
       onContextMenu={(e) => (e.preventDefault(), setMenu(false), setCtx({ x: e.clientX, y: e.clientY }))}>
       <span className="row-glyph">
         <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={compact ? 24 : 28} />
-        {agent && <span className={cx("agent-dot", `agent-${agent.status}`)} title={agentText[agent.status]} />}
       </span>
       <div className="row-main">
         <div className="row-title">{item.title}</div>
         <div className="row-meta">
           <ProjectChip id={item.project_id} />
-          {agent && <span className={cx("row-agent", `agent-${agent.status}`)}>{agentText[agent.status]}</span>}
-          {[item.actor, item.context].filter(Boolean).join(" · ")}
+          {agent && <SessionPill status={agent.status} title={`Chat ${sessionLook[agent.status].label.toLowerCase()} · updated ${timeAgo(agent.updated_at)}`} />}
+          {byline(item)}
         </div>
         {!compact && item.body && <div className="row-snippet">{item.body}</div>}
       </div>

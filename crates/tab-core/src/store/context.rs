@@ -186,7 +186,10 @@ impl Store {
         url: &str,
     ) -> anyhow::Result<Vec<crate::model::QueueItem>> {
         fn bare(u: &str) -> &str {
-            u.split(['?', '#']).next().unwrap_or("").trim_end_matches('/')
+            u.split(['?', '#'])
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('/')
         }
         let url = bare(url);
         if !url.starts_with("http") {

@@ -147,13 +147,13 @@ function LiveEvents() {
           if (!s.item_id) {
             // Keyed sessions (a PR's review chat) are found by id.
             const key = chatKeyForSession(qc, s.id);
-            if (key) qc.setQueryData<Chat>(key, (c) => (c ? { ...c, session: s, running: s.status === "working" || s.status === "needs_input" } : c));
+            if (key) qc.setQueryData<Chat>(key, (c) => (c ? { ...c, session: s, running: s.status !== "idle" && s.status !== "failed" } : c));
           } else
             qc.setQueryData<Chat>(keys.chat(s.item_id), (c) => ({
               session: s,
               messages: c?.session?.id === s.id ? c.messages : [],
               approvals: c?.session?.id === s.id ? c.approvals : [],
-              running: s.status === "working" || s.status === "needs_input",
+              running: s.status !== "idle" && s.status !== "failed",
             }));
           break;
         }
