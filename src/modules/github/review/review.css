@@ -392,7 +392,8 @@
 .rv-linked-label { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-xs); color: var(--fg-muted); text-transform: uppercase; letter-spacing: .04em; }
 .rv-linked-task { display: inline-flex; align-items: center; gap: 6px; max-width: 360px; height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg); color: var(--fg); font-size: var(--text-xs); cursor: pointer; }
 .rv-linked-task:hover { border-color: var(--border-strong); }
-.rv-linked-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rv-linked-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rv-linked-task > .badge { flex: none; white-space: nowrap; }
 .rv-linked-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); }
 .rv-linked-dot.agent-working { background: var(--tone-info-fg); animation: agent-pulse 1.4s ease-in-out infinite; }
 .rv-linked-dot.agent-needs_input { background: var(--tone-warning-fg); }
