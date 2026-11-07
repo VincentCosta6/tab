@@ -34,6 +34,7 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState<TabConfig | null>(null);
   const probes = useQuery({ queryKey: ["probes"], queryFn: api.detectAgents, staleTime: 0, gcTime: 0, enabled: step === 1 });
+  const sandbox = useQuery({ queryKey: ["sandbox"], queryFn: api.sandboxStatus, staleTime: 60_000, enabled: step === 1 });
 
   useEffect(() => {
     if (config && !draft) setDraft(structuredClone(config));
@@ -106,14 +107,20 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
                 <TextInput placeholder="Agent default" value={draft.agent.model ?? ""} onChange={(e) => set((c) => void (c.agent.model = e.target.value || null))} />
               </label>
             </div>
-            <div className={cx("onboarding-strict", draft.agent.strict !== false && "on")}>
-              <Icon name="plug" size={18} />
-              <div>
-                <strong>Strict mode</strong> <span className="onboarding-recommended">Recommended</span>
-                <p className="subtle">Chats use only the connections you add to tab. Your personal agent setup stays out: MCP servers and connectors from your own account, plugins, hooks and user settings. Turn it off any time in Settings.</p>
-              </div>
-              <Toggle label="Strict mode" checked={draft.agent.strict !== false} onChange={(v) => set((c) => void (c.agent.strict = v))} />
-            </div>
+            <SafetyOption
+              icon="shield"
+              title="Sandbox"
+              text={`Agents can't change tab, your shell startup files or SSH keys, can't read stored credentials, and start without tab's tokens.${sandbox.data && !sandbox.data.enforced ? " On this computer the OS can't enforce file limits yet, so these protections are partly limited." : ""}`}
+              checked={draft.sandbox.enabled}
+              onChange={(v) => set((c) => void (c.sandbox.enabled = v))}
+            />
+            <SafetyOption
+              icon="plug"
+              title="Strict mode"
+              text="Chats use only the connections you add to tab. Your personal agent setup stays out: MCP servers and connectors from your own account, plugins, hooks and user settings."
+              checked={draft.agent.strict !== false}
+              onChange={(v) => set((c) => void (c.agent.strict = v))}
+            />
             <Button size="sm" variant="ghost" icon="undo" onClick={() => probes.refetch()}>Check again</Button>
           </div>
         )}
@@ -160,6 +167,20 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
           )}
         </footer>
       </div>
+    </div>
+  );
+}
+
+/** A protection that's on unless the person turns it off. Both can be changed later in Settings. */
+function SafetyOption({ icon, title, text, checked, onChange }: { icon: "shield" | "plug"; title: string; text: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div className={cx("onboarding-safety", icon, checked && "on")}>
+      <Icon name={icon} size={18} />
+      <div>
+        <strong>{title}</strong> <span className="onboarding-recommended">Recommended</span>
+        <p className="subtle">{text} You can change this in Settings.</p>
+      </div>
+      <Toggle label={title} checked={checked} onChange={onChange} />
     </div>
   );
 }

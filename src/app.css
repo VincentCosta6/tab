@@ -284,12 +284,14 @@
 .agent-chosen { margin-left: auto; color: var(--focus); }
 .agent-probe { display: flex; align-items: center; gap: 5px; font-size: var(--text-sm); flex-wrap: wrap; }
 .agent-probe code { font-family: var(--font-mono); font-size: 11px; padding: 1px 5px; border-radius: var(--radius-sm); background: var(--bg-sunken); color: var(--fg); }
-.onboarding-strict { display: grid; grid-template-columns: auto 1fr auto; gap: var(--space-3); align-items: start; padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-raised); }
-.onboarding-strict > svg { margin-top: 2px; color: var(--fg-subtle); }
-.onboarding-strict.on { border-color: color-mix(in srgb, var(--tone-accent-fg) 45%, var(--border)); }
-.onboarding-strict.on > svg { color: var(--tone-accent-fg); }
-.onboarding-strict p { margin: 2px 0 0; font-size: var(--text-sm); }
-.onboarding-recommended { font-size: var(--text-xs); color: var(--tone-accent-fg); }
+.onboarding-safety { display: grid; grid-template-columns: auto 1fr auto; gap: var(--space-3); align-items: start; padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-raised); --tone: var(--tone-accent-fg); }
+/* Same colours as the chat pills: green for the sandbox, blue for strict. */
+.onboarding-safety.shield { --tone: var(--tone-success-fg); }
+.onboarding-safety > svg { margin-top: 2px; color: var(--fg-subtle); }
+.onboarding-safety.on { border-color: color-mix(in srgb, var(--tone) 45%, var(--border)); }
+.onboarding-safety.on > svg, .onboarding-safety .onboarding-recommended { color: var(--tone); }
+.onboarding-safety p { margin: 2px 0 0; font-size: var(--text-sm); }
+.onboarding-recommended { font-size: var(--text-xs); }
 .onboarding-fields { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
 .onboarding-fields > label { display: grid; gap: 4px; font-size: var(--text-sm); font-weight: 500; }
 .onboarding-fields small { color: var(--fg-subtle); font-weight: 400; }
