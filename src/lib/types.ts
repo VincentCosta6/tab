@@ -74,6 +74,9 @@ export interface MyPull { repo: string; number: number; url: string; summary: Li
 
 export interface LinkSummary { title: string; state: "open" | "draft" | "merged" | "closed" | ""; author: string | null; checks: "passing" | "failing" | "pending" | null; updated_at: string | null; merge_state?: string | null; review_decision?: string | null; open_threads?: number | null }
 
+/** A reason not to mark an item done yet, raised by a connector or by tab (`agent`). */
+export interface DoneGuard { source: string; level: "confirm" | "block"; title: string; detail: string | null; url: string | null }
+
 /** An item whose agent isn't idle. */
 export interface AgentActivity { item_id: string; agent: AgentKind; status: SessionStatus; updated_at: string }
 

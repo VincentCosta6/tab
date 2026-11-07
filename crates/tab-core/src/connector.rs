@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use crate::config::ConnectorConfig;
 use crate::gateway::Gateway;
-use crate::model::{Block, ConnectorDescriptor, ConnectorStatus, IncomingEvent, QueueItem};
+use crate::model::{
+    Block, ConnectorDescriptor, ConnectorStatus, DoneGuard, IncomingEvent, ItemContext, QueueItem,
+};
 
 /// Describes a connector type and builds instances of it from settings.
 ///
@@ -43,6 +45,16 @@ pub trait Connector: Send + Sync + 'static {
     /// Called after the person marks one of this connector's items done.
     async fn on_done(&self, _item: &QueueItem) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// Reasons the person shouldn't mark an item done yet. Asked of every
+    /// connector, not just the item's own, so a connector can speak for its
+    /// links in another item's Context (GitHub: "the PR for this task is
+    /// still open"). `ctx` is the item with its Context.
+    ///
+    /// Keep it quick and cached; the engine gives up on slow answers.
+    async fn done_guards(&self, _ctx: &ItemContext) -> anyhow::Result<Vec<DoneGuard>> {
+        Ok(Vec::new())
     }
 
     /// True when the thing behind an item is finished upstream, e.g. its pull

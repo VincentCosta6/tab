@@ -15,6 +15,7 @@ import { parsePullUrl } from "../github/pulls";
 import { ChatView } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
 import { ContextRail } from "./ContextRail";
+import { confirmDone } from "./doneGuard";
 import { ReadModeSwitch, Reader, useHasRich, useReadMode } from "./Reader";
 import { ProjectPicker, useProjectTint } from "./Projects";
 import { SnoozeMenu } from "./SnoozeMenu";
@@ -47,7 +48,11 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
     onActed(id, done);
     qc.invalidateQueries({ queryKey: keys.allItems });
   };
-  const done = async (i: QueueItem) => (settle(i.id, true), await api.markDone(i.id));
+  const done = async (i: QueueItem) => {
+    if (!(await confirmDone(i))) return;
+    settle(i.id, true);
+    await api.markDone(i.id);
+  };
   const snooze = async (i: QueueItem, minutes: number) => (setSnoozeOpen(false), settle(i.id), await api.snooze(i.id, minutes));
   const move = async (i: QueueItem, projectId: string | null) => {
     const next = await api.itemSetProject(i.id, projectId);

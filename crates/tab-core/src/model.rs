@@ -610,6 +610,30 @@ pub struct NewContext {
     pub added_by: String,
 }
 
+/// How firmly a [`DoneGuard`] holds back "Done".
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardLevel {
+    /// The person is asked first and can go ahead anyway.
+    Confirm,
+    /// Done is refused until the thing behind it changes.
+    Block,
+}
+
+/// A reason not to mark an item done yet, raised by a connector (an open PR
+/// in its Context) or by tab itself (its agent is still working).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DoneGuard {
+    /// Who raised it: a connector id, or `agent`.
+    pub source: String,
+    pub level: GuardLevel,
+    /// One line, in the connector's words: "acme/api#12 is still open".
+    pub title: String,
+    /// What's left, if anything: "2 unresolved threads, checks failing".
+    pub detail: Option<String>,
+    pub url: Option<String>,
+}
+
 /// Everything known around an item, rolled up for the chat view.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ItemContext {

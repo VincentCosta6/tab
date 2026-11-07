@@ -18,6 +18,7 @@ import { NewChat } from "./NewChat";
 import { ProjectChip, ProjectPicker, useRememberedProject } from "./Projects";
 import { SnoozeMenu, snoozeOptions } from "./SnoozeMenu";
 import { ScoreBreakdown } from "./ScoreBreakdown";
+import { confirmDone } from "./doneGuard";
 
 const urgencyOrder: Urgency[] = ["now", "today", "this_week", "whenever"];
 const urgencyHeading: Record<Urgency, string> = { now: "Now", today: "Today", this_week: "This week", whenever: "Whenever" };
@@ -153,6 +154,7 @@ export function WorkTab() {
   // Optimistic: the row leaves the list right away; the engine event confirms.
   const act = useCallback(
     async (item: QueueItem, action: "done" | "reopen" | { snooze: number }) => {
+      if (action === "done" && !(await confirmDone(item))) return;
       advance(item.id, action === "done");
       qc.setQueriesData<QueueItem[]>({ queryKey: keys.allItems }, (xs) => xs?.filter((x) => x.id !== item.id));
       if (action === "done") await api.markDone(item.id);
