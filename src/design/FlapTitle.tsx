@@ -21,12 +21,18 @@ export function FlapTitle({
 }: { text: string; id?: string; as?: ElementType; still?: boolean } & HTMLAttributes<HTMLElement>) {
   const [anim, setAnim] = useState<Anim | null>(null);
   const shown = useRef({ text, id });
+  const el = useRef<HTMLElement>(null);
+  /** The element's height before the new text went in, to ease between the two. */
+  const fromHeight = useRef<number | null>(null);
+  const settle = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Read before React swaps the text in; by any effect it's already the new height.
+  if (el.current && text !== shown.current.text) fromHeight.current = el.current.getBoundingClientRect().height;
 
   useLayoutEffect(() => {
     const prev = shown.current;
     shown.current = { text, id };
     if (prev.text === text) return;
-    if (prev.id !== id || still || reducedMotion()) return setAnim(null);
+    if (prev.id !== id || still || reducedMotion()) return (fromHeight.current = null), setAnim(null);
     setAnim(plan(anim?.next ?? prev.text, text));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, id, still]);
@@ -43,8 +49,29 @@ export function FlapTitle({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anim?.key]);
 
+  // When the new title takes more or fewer lines (a wrapping header), ease
+  // the height instead of jumping what's below it.
+  useLayoutEffect(() => {
+    const node = el.current;
+    const from = fromHeight.current;
+    if (anim?.phase !== "roll" || !node || from == null) return;
+    fromHeight.current = null;
+    clearTimeout(settle.current);
+    node.style.transition = "";
+    node.style.height = "";
+    const to = node.getBoundingClientRect().height;
+    if (Math.abs(to - from) < 1) return;
+    node.style.height = `${from}px`;
+    void node.offsetHeight;
+    node.style.transition = "height 360ms cubic-bezier(0.2, 0.9, 0.25, 1)";
+    node.style.height = `${to}px`;
+    settle.current = setTimeout(() => ((node.style.transition = ""), (node.style.height = "")), 400);
+  }, [anim?.phase]);
+
+  useEffect(() => () => clearTimeout(settle.current), []);
+
   return (
-    <Tag {...rest} aria-label={anim ? text : rest["aria-label"]}>
+    <Tag {...rest} ref={el} aria-label={anim ? text : rest["aria-label"]}>
       {!anim ? text : anim.phase === "start" || anim.phase === "out" ? (
         <span className={anim.phase === "out" ? "flap flap-go" : "flap"} aria-hidden>
           {words(anim.prev).map((w, wi) =>
