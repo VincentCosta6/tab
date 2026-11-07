@@ -128,6 +128,7 @@ let config: TabConfig = {
   agent: {
     budget: { daily_usd: 10, monthly_usd: null, per_turn_usd: null, ranker_plan_cap: 0.8 }, kind: "claude_code", command: null, model: null, workdir: "C:\\Users\\vince\\code", permission_mode: "auto", opencode_url: null },
   mcp: { port: 47821, token: "mock-token" },
+  storage: { keep_days: 7, max_gb: 5 },
   onboarded: true,
 };
 
@@ -213,6 +214,15 @@ export const mockApi = {
           emit({ type: "item_changed", change: "updated", item: i });
           return i;
         }
+        case "rename_item": {
+          const i = items.find((x) => x.id === args.id);
+          if (!i) return null;
+          i.title = args.title;
+          i.metadata = { ...(i.metadata as object), title_source: "user" };
+          emit({ type: "item_changed", change: "updated", item: { ...i } });
+          return i;
+        }
+        case "titler_default_rules": return "Name the thread the way a good engineer names a ticket: 3 to 7 words, at most 60 characters.";
         case "project_notes": return notes.filter((n) => n.project_id === args.projectId);
         case "project_note_save": {
           const now = new Date().toISOString();
@@ -349,6 +359,18 @@ export const mockApi = {
         ];
         case "mcp_info": return { url: "http://127.0.0.1:47821/mcp", token: "mock-token" };
         case "github_pull": return samplePull(args.repo, args.number);
+        case "storage_usage": return {
+          attachments: { bytes: 1_048_576, files: 15 },
+          sessions: { bytes: 311_296, files: 64 },
+          workspaces: { bytes: mockCheckouts.reduce((n, c) => n + c.bytes, 10_485_760), files: 900 },
+          checkouts: mockCheckouts,
+        };
+        case "storage_clean": return { removed: 3, bytes: 2_200_000 };
+        case "storage_remove_checkouts": {
+          const gone = mockCheckouts.filter((c) => !args.repo || (c.repo === args.repo && c.number === args.number));
+          mockCheckouts = mockCheckouts.filter((c) => !gone.includes(c));
+          return { removed: gone.length, bytes: gone.reduce((n, c) => n + c.bytes, 0) };
+        }
         case "lsp_servers": return lspServers;
         case "lsp_install": {
           await new Promise((r) => setTimeout(r, 1800));
@@ -400,6 +422,11 @@ export const mockApi = {
     return () => void ghCodeListeners.delete(cb);
   },
 };
+
+let mockCheckouts = [
+  { repo: "acme/web", number: 412, last_used: new Date(Date.now() - 3600_000).toISOString(), bytes: 2_500_000 },
+  { repo: "acme/api", number: 88, last_used: new Date(Date.now() - 9 * 86400_000).toISOString(), bytes: 1_700_000_000 },
+];
 
 let lspServers: LspServer[] = [
   { id: "gopls", name: "Go (gopls)", languages: ["go"], command: "gopls", note: "Hover, go to definition, references and errors across the module.", installed: false, path: null, install_command: "go install golang.org/x/tools/gopls@latest", needs: null, needs_url: null },

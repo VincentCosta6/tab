@@ -5,7 +5,7 @@
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
-  RateLimitState, ReviewAction, Session, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
+  RateLimitState, ReviewAction, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun,
 } from "./types";
 import { mockApi } from "./mock";
@@ -30,6 +30,8 @@ export const api = {
   markDone: (id: string) => call<QueueItem | null>("mark_done", { id }),
   snooze: (id: string, minutes: number) => call<QueueItem | null>("snooze", { id, minutes }),
   reopen: (id: string) => call<QueueItem | null>("reopen", { id }),
+  renameItem: (id: string, title: string) => call<QueueItem | null>("rename_item", { id, title }),
+  titlerDefaultRules: () => call<string>("titler_default_rules"),
   listConnectors: () => call<ConnectorInfo[]>("list_connectors"),
   rateLimits: () => call<RateLimitState[]>("rate_limits"),
   auditLog: (query: { provider?: string; connector?: string; outcome?: string; limit?: number }) =>
@@ -102,6 +104,11 @@ export const api = {
   workspaceOpen: (repo: string, number: number, target: "vscode" | "folder", path?: string, line?: number) =>
     call<void>("review_workspace_open", { repo, number, target, path: path ?? null, line: line ?? null }),
   vscodeAvailable: () => call<boolean>("review_vscode_available"),
+  storageUsage: () => call<StorageUsage>("storage_usage"),
+  storageClean: () => call<Swept>("storage_clean"),
+  /** One checkout, or every one when no repo is given. */
+  storageRemoveCheckouts: (repo?: string, number?: number) =>
+    call<Swept>("storage_remove_checkouts", { repo: repo ?? null, number: number ?? null }),
   lspServers: () => call<LspServer[]>("lsp_servers"),
   lspInstall: (id: string) => call<LspServer>("lsp_install", { id }),
   lspStart: (server: string, repo: string, number: number) => call<LspStarted>("lsp_start", { server, repo, number }),

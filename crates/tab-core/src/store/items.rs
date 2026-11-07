@@ -303,6 +303,27 @@ impl Store {
         get_item(&conn, id)
     }
 
+    /// Renames an item (and its chat sessions) and replaces its metadata,
+    /// which records who named it.
+    pub fn item_set_title(
+        &self,
+        id: &str,
+        title: &str,
+        metadata: &serde_json::Value,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<QueueItem>> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE items SET title = ?2, metadata = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, title, metadata.to_string(), ts(now)],
+        )?;
+        conn.execute(
+            "UPDATE sessions SET title = ?2 WHERE item_id = ?1",
+            params![id, title],
+        )?;
+        get_item(&conn, id)
+    }
+
     /// Reopens snoozed items whose time has come and returns them.
     pub fn wake_due(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<QueueItem>> {
         let conn = self.conn();

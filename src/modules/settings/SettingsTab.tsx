@@ -5,6 +5,7 @@ import { keys } from "../../lib/query";
 import { Button, Card, FormRow, PageHeader, Section, TextArea, TextInput, Toggle } from "../../design/components";
 import { api } from "../../lib/api";
 import type { TabConfig } from "../../lib/types";
+import { bytes, timeAgo } from "../../lib/format";
 
 const lines = (s: string) => s.split("\n").map((l) => l.trim()).filter(Boolean);
 
@@ -15,6 +16,7 @@ export function SettingsTab() {
   const [note, setNote] = useState<string | null>(null);
   const qc = useQueryClient();
   const mcp = useQuery({ queryKey: ["mcp"], queryFn: api.mcpInfo });
+  const titlerRules = useQuery({ queryKey: ["titler-rules"], queryFn: api.titlerDefaultRules, staleTime: Infinity });
 
   useEffect(() => {
     api.getConfig().then((c) => (setSaved(c), setDraft(c)));
@@ -30,6 +32,8 @@ export function SettingsTab() {
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
   const rules = draft.ranking.rules;
   const ai = draft.ranking.ai;
+  const titler = draft.agent.titler ?? { enabled: true, model: null, instructions: "" };
+  const setTitler = (patch: Partial<typeof titler>) => set((c) => void (c.agent.titler = { ...titler, ...patch }));
 
   const save = async () => {
     setBusy(true);
@@ -131,6 +135,28 @@ export function SettingsTab() {
         </Card>
       </Section>
 
+      <Section title="Chat titles" description="After the first few turns of a chat, a small model names it for what the thread is actually doing. It stops once it's confident, and never touches a title you've set yourself.">
+        <Card>
+          <FormRow label="Enabled">
+            <Toggle label="Title chats" checked={titler.enabled} onChange={(v) => setTitler({ enabled: v })} />
+          </FormRow>
+          <FormRow label="Model" help={draft.agent.kind === "opencode" ? "OpenCode uses its own configured model." : "Runs through your agent. Defaults to claude-haiku-5-5."}>
+            <TextInput placeholder="claude-haiku-5-5" disabled={draft.agent.kind === "opencode"} value={titler.model ?? ""} onChange={(e) => setTitler({ model: e.target.value || null })} />
+          </FormRow>
+          <FormRow label="Your rules" help="Plain language. Added after the built-in rules, and yours win.">
+            <div className="titler-rules">
+              <TextArea
+                rows={4}
+                placeholder={"Start with the repo name, e.g. \"tab: Fix badge overflow\".\nUse the ticket id when there is one."}
+                value={titler.instructions}
+                onChange={(e) => setTitler({ instructions: e.target.value })}
+              />
+              {titlerRules.data && <p className="titler-defaults"><strong>Built in:</strong> {titlerRules.data}</p>}
+            </div>
+          </FormRow>
+        </Card>
+      </Section>
+
       <Section title="Spend limits" description="Costs come from what the agent reports: real spend on an API key, or the API-equivalent figure on a Claude plan. Leave a limit empty for none.">
         <Card>
           <FormRow label="Daily limit" help="New chat turns are refused once today's spend reaches this.">
@@ -160,6 +186,8 @@ export function SettingsTab() {
           </FormRow>
         </Card>
       </Section>
+
+      <StorageSection config={draft.storage} onChange={(v) => set((c) => void (c.storage = v))} />
 
       <Section title="AI layer" description={`Claude Haiku reads each item with your instructions and nudges the rules score by up to ±25, with a one-line reason. Verdicts are cached by their inputs, so re-ranking is repeatable.`}>
         <Card>
@@ -206,4 +234,84 @@ function DollarInput({ value, onChange }: { value: number | null; onChange: (v: 
       style={{ maxWidth: 160 }}
     />
   );
+}
+
+/** What tab keeps on disk, and clearing it out. */
+function StorageSection({ config, onChange }: { config: TabConfig["storage"]; onChange: (v: TabConfig["storage"]) => void }) {
+  const qc = useQueryClient();
+  const usage = useQuery({ queryKey: ["storage"], queryFn: api.storageUsage });
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const run = async (key: string, fn: () => Promise<{ removed: number; bytes: number }>) => {
+    setBusy(key);
+    setNote(null);
+    try {
+      const s = await fn();
+      setNote(s.removed ? `Freed ${bytes(s.bytes)}.` : "Nothing to clear.");
+    } catch (e) {
+      setNote(`Couldn't clear: ${e}`);
+    } finally {
+      setBusy(null);
+      qc.invalidateQueries({ queryKey: ["storage"] });
+    }
+  };
+  const u = usage.data;
+  const size = (s?: { bytes: number; files: number }) => (s ? `${bytes(s.bytes)} · ${s.files.toLocaleString()} files` : "…");
+
+  return (
+    <Section
+      title="Storage"
+      description="Cleared automatically every few hours. Review checkouts also go as soon as their PR closes or merges."
+      actions={<Button size="sm" disabled={busy !== null} onClick={() => run("clean", api.storageClean)}>{busy === "clean" ? "Cleaning…" : "Clean up now"}</Button>}
+    >
+      <Card>
+        <FormRow label="Keep for" help="Attachments of chats idle this long, and review checkouts not opened this long, are removed.">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <TextInput type="number" min={1} step={1} value={config.keep_days} style={{ maxWidth: 100 }}
+              onChange={(e) => onChange({ ...config, keep_days: Math.max(1, Math.round(Number(e.target.value) || 1)) })} />
+            <span>days</span>
+          </div>
+        </FormRow>
+        <FormRow label="Size limit" help="Past this, the least recently used attachments and checkouts are removed until it fits. Anything used in the last hour stays.">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <TextInput type="number" min={0} step={0.5} placeholder="No limit" value={config.max_gb ?? ""} style={{ maxWidth: 100 }}
+              onChange={(e) => onChange({ ...config, max_gb: e.target.value === "" || Number(e.target.value) <= 0 ? null : Number(e.target.value) })} />
+            <span>GB</span>
+          </div>
+        </FormRow>
+        <FormRow label="Chat attachments" help="Files you attach to chats.">
+          <span className="mono">{size(u?.attachments)}</span>
+        </FormRow>
+        <FormRow label="Chat folders" help="Each chat's prompt and settings for its agent.">
+          <span className="mono">{size(u?.sessions)}</span>
+        </FormRow>
+        <FormRow label="Review checkouts" help="Local copies of repositories for PR reviews. Opening a PR again brings its copy back.">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="mono">{u ? bytes(u.workspaces.bytes) : "…"}</span>
+            {!!u?.checkouts.length && (
+              <Button size="sm" disabled={busy !== null} onClick={() => run("all", () => api.storageRemoveCheckouts())}>
+                {busy === "all" ? "Removing…" : "Remove all"}
+              </Button>
+            )}
+          </div>
+        </FormRow>
+        {u?.checkouts.map((c) => (
+          <FormRow key={`${c.repo}#${c.number}`} label={`${c.repo} #${c.number}`} help={opened(c.last_used)}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span className="mono">{bytes(c.bytes)}</span>
+              <Button size="sm" variant="ghost" icon="trash" aria-label={`Remove ${c.repo} #${c.number}`} disabled={busy !== null}
+                onClick={() => run(`${c.repo}#${c.number}`, () => api.storageRemoveCheckouts(c.repo, c.number))} />
+            </div>
+          </FormRow>
+        ))}
+        {note && <FormRow label=""><span>{note}</span></FormRow>}
+      </Card>
+    </Section>
+  );
+}
+
+/** "Opened 3h ago", "Opened just now", or "Opened 10/28/2026" once it's old. */
+function opened(iso: string) {
+  const ago = timeAgo(iso);
+  return /^\d+[mhd]$/.test(ago) ? `Opened ${ago} ago` : `Opened ${ago}`;
 }

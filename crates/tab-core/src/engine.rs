@@ -341,6 +341,9 @@ impl Core {
         if let Some(w) = workflow {
             metadata["workflow"] = w.into();
         }
+        if task.auto_title {
+            metadata["title_source"] = "auto".into();
+        }
         let event = IncomingEvent {
             source: crate::connectors::tab::SOURCE.into(),
             external_id: uuid::Uuid::new_v4().to_string(),
@@ -678,6 +681,7 @@ impl Host for WorkflowHost {
                     url: str_arg(input, "url"),
                     created_by: "workflow".into(),
                     project_id: project(str_arg(input, "project"))?,
+                    auto_title: false,
                 };
                 let item = core.create_task(task, chain, Some(workflow))?;
                 Ok((serde_json::json!({ "item_id": item.id }), Some(item.id)))
@@ -978,6 +982,40 @@ impl EngineHandle {
 
     pub fn snooze(&self, id: &str, until: DateTime<Utc>) -> anyhow::Result<Option<QueueItem>> {
         self.core.snooze(id, until, "you")
+    }
+
+    /// The person names an item. From then on the titler leaves it alone.
+    pub fn rename(&self, id: &str, title: &str) -> anyhow::Result<Option<QueueItem>> {
+        let title: String = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        anyhow::ensure!(!title.is_empty(), "a title can't be empty");
+        let title: String = title.chars().take(200).collect();
+        let Some(item) = self.core.store.get(id)? else {
+            return Ok(None);
+        };
+        if item.event.title == title {
+            return Ok(Some(item));
+        }
+        let mut meta = item.event.metadata.clone();
+        if !meta.is_object() {
+            meta = serde_json::json!({});
+        }
+        meta["title_source"] = "user".into();
+        let now = Utc::now();
+        let updated = self.core.store.item_set_title(id, &title, &meta, now)?;
+        self.core.note(
+            id,
+            "retitled",
+            &format!("Renamed “{title}”"),
+            Some("you"),
+            serde_json::json!({ "from": item.event.title, "to": title }),
+        );
+        if let Some(i) = &updated {
+            self.emit(EngineEvent::ItemChanged {
+                change: Change::Updated,
+                item: i.clone(),
+            });
+        }
+        Ok(updated)
     }
 
     pub fn reopen(&self, id: &str) -> anyhow::Result<Option<QueueItem>> {

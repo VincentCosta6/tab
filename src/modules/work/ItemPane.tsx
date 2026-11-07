@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, UrgencyLabel, cx } from "../../design/components";
+import { FlapTitle } from "../../design/FlapTitle";
 import { OpenMenu } from "../../design/OpenMenu";
 import { StageHost } from "../../design/FileStage";
 import { SourceGlyph } from "../../design/brands";
@@ -92,7 +93,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         <div className="item-head-main">
           <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={34} />
           <div className="item-head-text">
-            <h2 className="item-title" title={item.title}>{item.title}</h2>
+            <ItemTitle item={item} />
             <div className="item-meta">
               <Badge tone={k.tone}>{k.label}</Badge>
               {r && <UrgencyLabel urgency={r.urgency} />}
@@ -147,4 +148,50 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
 
 function RichSwitch({ item, mode, onChange }: { item: QueueItem; mode: "rich" | "plain"; onChange: (m: "rich" | "plain") => void }) {
   return useHasRich(item) ? <ReadModeSwitch mode={mode} onChange={onChange} /> : null;
+}
+
+/**
+ * The item's title. Chats started in tab can be renamed by clicking it; a
+ * name you give it is yours, and the titler leaves it alone from then on.
+ */
+function ItemTitle({ item }: { item: QueueItem }) {
+  const [editing, setEditing] = useState<string | null>(null);
+  const [mine, setMine] = useState<string | null>(null);
+  const renamable = item.source === "tab";
+  const save = async () => {
+    const next = editing?.trim();
+    setEditing(null);
+    if (!next || next === item.title) return;
+    setMine(next);
+    // The queue and this pane update from the item_changed event.
+    await api.renameItem(item.id, next).catch(() => setMine(null));
+  };
+  if (editing !== null)
+    return (
+      <input
+        className="item-title item-title-edit"
+        autoFocus
+        value={editing}
+        maxLength={200}
+        aria-label="Title"
+        onChange={(e) => setEditing(e.target.value)}
+        onFocus={(e) => e.target.select()}
+        onBlur={save}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+          if (e.key === "Escape") setEditing(null);
+        }}
+      />
+    );
+  return (
+    <FlapTitle
+      as="h2"
+      className={cx("item-title", renamable && "item-title-renamable")}
+      id={item.id}
+      text={item.title}
+      still={item.title === mine}
+      title={renamable ? `${item.title}\nClick to rename` : item.title}
+      onClick={renamable ? () => setEditing(item.title) : undefined}
+    />
+  );
 }

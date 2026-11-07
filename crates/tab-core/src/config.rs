@@ -23,6 +23,8 @@ pub struct TabConfig {
     pub agent: AgentConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
     /// Set once the first-launch onboarding is finished.
     #[serde(default)]
     pub onboarded: bool,
@@ -55,6 +57,35 @@ pub struct AgentConfig {
     /// Offer a likely next reply after each turn (Tab fills it, Enter sends).
     #[serde(default = "default_true")]
     pub suggest_replies: bool,
+    /// Names chats started in tab with a small model as the work comes into focus.
+    #[serde(default)]
+    pub titler: TitlerConfig,
+}
+
+/// The titler: after the first few turns of a chat, a small model renames
+/// its task so the queue says what the thread is actually doing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TitlerConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Claude Code model alias or id. Empty means `claude-haiku-5-5`.
+    /// OpenCode uses its own configured model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The person's own rules, added after the default ones, e.g.
+    /// "Start with the repo name" or "Use ticket ids when there is one".
+    #[serde(default)]
+    pub instructions: String,
+}
+
+impl Default for TitlerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: None,
+            instructions: String::new(),
+        }
+    }
 }
 
 /// Spend limits for agents and the ranker. Costs are what the agent reports:
@@ -120,6 +151,7 @@ impl Default for AgentConfig {
             opencode_url: None,
             budget: BudgetConfig::default(),
             suggest_replies: true,
+            titler: TitlerConfig::default(),
         }
     }
 }
@@ -155,6 +187,51 @@ fn default_mcp_port() -> u16 {
     47821
 }
 
+/// How long tab keeps chat attachments and review checkouts, and how much
+/// space they may take.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StorageConfig {
+    /// Attachments of chats idle this long, and review checkouts unopened
+    /// this long, are removed.
+    #[serde(default = "default_keep_days")]
+    pub keep_days: u32,
+    /// Past this many GB, the least recently used attachments and checkouts
+    /// are removed until it fits. `None` for no limit.
+    #[serde(default = "default_max_gb")]
+    pub max_gb: Option<f64>,
+}
+
+fn default_keep_days() -> u32 {
+    7
+}
+
+fn default_max_gb() -> Option<f64> {
+    Some(5.0)
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            keep_days: default_keep_days(),
+            max_gb: default_max_gb(),
+        }
+    }
+}
+
+impl StorageConfig {
+    /// How long unused things are kept; at least a day.
+    pub fn keep(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.keep_days.max(1)) * 86_400)
+    }
+
+    /// The size limit in bytes, if any.
+    pub fn max_bytes(&self) -> Option<u64> {
+        self.max_gb
+            .filter(|g| g.is_finite() && *g > 0.0)
+            .map(|g| (g * 1024.0 * 1024.0 * 1024.0) as u64)
+    }
+}
+
 impl Default for TabConfig {
     fn default() -> Self {
         Self {
@@ -163,6 +240,7 @@ impl Default for TabConfig {
             connectors: default_connectors(),
             agent: AgentConfig::default(),
             mcp: McpConfig::default(),
+            storage: StorageConfig::default(),
             onboarded: false,
         }
     }
@@ -309,6 +387,17 @@ impl TabConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn storage_limit_defaults_to_5_gb_but_can_be_off() {
+        let old: StorageConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.keep_days, 7);
+        assert_eq!(old.max_bytes(), Some(5 * 1024 * 1024 * 1024));
+        let off: StorageConfig = serde_json::from_str(r#"{"max_gb": null}"#).unwrap();
+        assert_eq!(off.max_bytes(), None);
+        let cfg: TabConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.storage, StorageConfig::default());
+    }
+
     use super::*;
 
     #[test]

@@ -391,6 +391,7 @@ export interface TabConfig {
   connectors: Record<string, { enabled: boolean; settings: Record<string, unknown> }>;
   agent: AgentConfig;
   mcp: { port: number; token: string };
+  storage: { keep_days: number; max_gb: number | null };
   onboarded: boolean;
 }
 
@@ -401,8 +402,16 @@ export interface AgentConfig {
   workdir: string | null;
   permission_mode: string;
   suggest_replies?: boolean;
+  titler?: TitlerConfig;
   opencode_url: string | null;
   budget: BudgetConfig;
+}
+
+/** Names chats started in tab with a small model as the work comes into focus. */
+export interface TitlerConfig {
+  enabled: boolean;
+  model: string | null;
+  instructions: string;
 }
 
 export interface BudgetConfig {
@@ -431,3 +440,8 @@ export interface UsageSummary {
   billing: "subscription" | "api" | "unknown" | null;
   windows: PlanWindow[];
 }
+
+export interface DirSize { bytes: number; files: number }
+export interface CheckoutUsage { repo: string; number: number; last_used: string; bytes: number }
+export interface StorageUsage { attachments: DirSize; sessions: DirSize; workspaces: DirSize; checkouts: CheckoutUsage[] }
+export interface Swept { removed: number; bytes: number }

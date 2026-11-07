@@ -789,4 +789,7 @@ pub struct NewTask {
     /// Project to put the task in.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// The title is a stand-in (a chat's first line) for the titler to replace.
+    #[serde(default)]
+    pub auto_title: bool,
 }
