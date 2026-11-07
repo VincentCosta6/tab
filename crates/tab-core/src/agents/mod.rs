@@ -869,6 +869,9 @@ impl AgentHub {
              that are only loosely connected; a few direct links beat a big web.\n\
              - To ask the person to choose between options, use AskUserQuestion: tab shows the question \
              with buttons in the chat and returns their answers.\n\
+             - When the work takes several steps, keep a step list with your todo tool (TodoWrite or \
+             TaskCreate/TaskUpdate; todowrite in opencode) and update each step's status as you go: tab \
+             pins it to the bottom of the chat so the person can follow along.\n\
              - If the work splits into follow-ups, create them with tab_create_task.\n\
              - tab_search matches by keyword and by meaning. Give it a window (within_days, or since/until) \
              and project: \"current\" when the person means recent or this project's work; it widens on its \

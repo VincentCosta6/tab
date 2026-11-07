@@ -270,29 +270,69 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
       )}
       {chat?.approvals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
       <div ref={end} />
-      <ProgressBar messages={messages} running={!!chat?.running} />
+      <ProgressBar messages={messages} results={results} running={!!chat?.running} />
     </div>
   );
 }
 
-interface Todo { content: string; status: "pending" | "in_progress" | "completed"; activeForm?: string }
+interface Todo { content: string; status: string; activeForm?: string }
+
+const TODO_TOOLS = new Set(["TodoWrite", "todowrite"]);
+const TASK_TOOLS = new Set(["TaskCreate", "TaskUpdate"]);
 
 /**
- * Pinned to the bottom of the chat while the agent works: its todo list
- * (from TodoWrite) with progress, and the step it's on right now.
+ * The agent's step list, from whichever todo tool it uses: TodoWrite
+ * (Claude Code, and opencode's todowrite) sends the whole list each time;
+ * TaskCreate/TaskUpdate (newer Claude Code) builds it up one step at a time.
+ * Only shown when this turn touched it, so an old list doesn't linger.
  */
-function ProgressBar({ messages, running }: { messages: SessionMessage[]; running: boolean }) {
+function agentSteps(messages: SessionMessage[], results: Map<number, SessionMessage>): Todo[] {
+  let turn = 0;
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { turn = i + 1; break; }
+  for (let i = messages.length - 1; i >= turn; i--) {
+    const m = messages[i];
+    if (m.kind === "tool" && TODO_TOOLS.has(m.meta?.tool)) {
+      const todos = m.meta?.input?.todos;
+      return Array.isArray(todos) ? todos.filter((t) => t && typeof t.content === "string") : [];
+    }
+  }
+  if (!messages.slice(turn).some((m) => m.kind === "tool" && TASK_TOOLS.has(m.meta?.tool))) return [];
+  const tasks = new Map<string, Todo>();
+  let next = 1;
+  for (const m of messages) {
+    if (m.kind !== "tool") continue;
+    const input = m.meta?.input ?? {};
+    if (m.meta?.tool === "TaskCreate") {
+      const id = /#(\d+)/.exec(results.get(m.id)?.content ?? "")?.[1] ?? String(next);
+      next = Math.max(next, Number(id) || 0) + 1;
+      tasks.set(id, { content: String(input.subject ?? input.description ?? "Step"), activeForm: input.activeForm, status: "pending" });
+    } else if (m.meta?.tool === "TaskUpdate") {
+      const id = String(input.taskId ?? "");
+      const t = tasks.get(id);
+      if (!t) continue;
+      if (input.status === "deleted") tasks.delete(id);
+      else tasks.set(id, { ...t, status: input.status ?? t.status, content: input.subject ?? t.content, activeForm: input.activeForm ?? t.activeForm });
+    }
+  }
+  return [...tasks.values()];
+}
+
+/**
+ * Pinned to the bottom of the chat while the agent works: its step list
+ * with each step's status, and the tool it's running right now.
+ */
+function ProgressBar({ messages, results, running }: { messages: SessionMessage[]; results: Map<number, SessionMessage>; running: boolean }) {
   const [collapsed, setCollapsed] = useState(false); // steps are shown by default
-  let todos: Todo[] = [];
+  const todos = agentSteps(messages, results);
   let step = "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.role === "user") break; // only this turn's work
     if (m.kind !== "tool") continue;
-    if (m.meta?.tool === "TodoWrite") {
-      if (!todos.length) todos = (m.meta?.input?.todos as Todo[]) ?? [];
-    } else if (!step && m.meta?.tool !== "AskUserQuestion") step = m.content.replace(/^mcp__tab__/, "tab: ");
-    if (todos.length && step) break;
+    const tool = m.meta?.tool;
+    if (TODO_TOOLS.has(tool) || TASK_TOOLS.has(tool) || tool === "TaskList" || tool === "TaskGet" || tool === "AskUserQuestion") continue;
+    step = m.content.replace(/^mcp__tab__/, "tab: ");
+    break;
   }
   if (!running && !todos.length) return null;
   const done = todos.filter((t) => t.status === "completed").length;
@@ -302,21 +342,20 @@ function ProgressBar({ messages, running }: { messages: SessionMessage[]; runnin
     <div className={cx("progress-bar", running && "running")}>
       <button className="progress-head" onClick={() => todos.length && setCollapsed(!collapsed)} aria-expanded={!collapsed}>
         {running ? <span className="dots"><i /><i /><i /></span> : <Icon name="check" size={12} />}
-        <span className="progress-label">{running ? label : "Done"}</span>
-        {todos.length > 0 && <span className="progress-count">{done}/{todos.length}</span>}
+        <span className="progress-label">{running ? (collapsed || !todos.length ? label : "Working") : "Done"}</span>
+        {todos.length > 0 && <span className="progress-count">{done} of {todos.length}</span>}
       </button>
-      {todos.length > 0 && <div className="progress-track"><i style={{ width: `${(done / todos.length) * 100}%` }} /></div>}
       {todos.length > 0 && !collapsed && (
         <ul className="progress-list">
           {todos.map((t, i) => (
             <li key={i} className={t.status}>
-              <Icon name={t.status === "completed" ? "check" : "circle-dot"} size={11} />
-              <span>{t.status === "in_progress" ? t.activeForm || t.content : t.content}</span>
+              <span className={cx("step-mark", t.status, !running && "still")}>{t.status === "completed" && <Icon name="check" size={9} />}</span>
+              <span>{t.status === "in_progress" && running ? t.activeForm || t.content : t.content}</span>
             </li>
           ))}
         </ul>
       )}
-      {running && step && active && <div className="progress-step">{step}</div>}
+      {running && step && <div className="progress-step">{step}</div>}
     </div>
   );
 }
