@@ -175,6 +175,8 @@ export function DiffStack({ files, autoRead, scrollTo }: { files: PrFile[]; auto
 
   // The one scroll listener. Reads first (pinned editors, auto-read), then writes.
   // Auto-read: once a file's end scrolls up past the top of the view, it's read.
+  // The last few files can never scroll that far, so once you reach the bottom
+  // of the stack, every file whose end is on screen counts as read too.
   const filesRef = useRef(files);
   filesRef.current = files;
   useEffect(() => {
@@ -183,11 +185,13 @@ export function DiffStack({ files, autoRead, scrollTo }: { files: PrFile[]; auto
     const on = () => {
       for (const f of followers) f.read();
       if (autoRead) {
-        const top = r.getBoundingClientRect().top;
+        const box = r.getBoundingClientRect();
+        const atBottom = r.scrollTop > 0 && r.scrollTop + r.clientHeight >= r.scrollHeight - 4;
+        const line = atBottom ? box.bottom : box.top;
         for (const f of filesRef.current) {
           if (isViewed(f) || autoMarked.has(f.filename)) continue;
           const end = ends.current.get(f.filename);
-          if (end && end.getBoundingClientRect().bottom < top) {
+          if (end && end.getBoundingClientRect().bottom <= line) {
             autoMarked.add(f.filename);
             act({ type: "mark_viewed", path: f.filename, viewed: true }).catch(() => autoMarked.delete(f.filename));
           }
