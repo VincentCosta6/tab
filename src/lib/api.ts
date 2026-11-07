@@ -4,7 +4,7 @@
 
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  AgentActivity, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
+  AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, Session, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun,
 } from "./types";
@@ -26,6 +26,7 @@ export const api = {
   githubLinkSummary: (repo: string, what: string, id: string) => call<LinkSummary>("github_link_summary", { repo, what, id }),
   githubMyPulls: () => call<MyPull[]>("github_my_pulls"),
   itemPreview: (id: string) => call<Preview>("item_preview", { id }),
+  doneGuards: (id: string) => call<DoneGuard[]>("done_guards", { id }),
   markDone: (id: string) => call<QueueItem | null>("mark_done", { id }),
   snooze: (id: string, minutes: number) => call<QueueItem | null>("snooze", { id, minutes }),
   reopen: (id: string) => call<QueueItem | null>("reopen", { id }),

@@ -48,7 +48,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
     qc.invalidateQueries({ queryKey: keys.allItems });
   };
   const done = async (i: QueueItem) => {
-    if (!(await confirmDone(i, qc))) return;
+    if (!(await confirmDone(i))) return;
     settle(i.id, true);
     await api.markDone(i.id);
   };

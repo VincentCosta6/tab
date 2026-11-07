@@ -21,8 +21,9 @@ use crate::config::ConnectorConfig;
 use crate::connector::{Connector, ConnectorContext, ConnectorFactory};
 use crate::gateway::{Call, Gateway, GatewayError};
 use crate::model::{
-    ActionField, ActionInfo, Block, ConnectorDescriptor, ConnectorStatus, Effect, EntityRef, Field,
-    FieldType, IncomingEvent, KindInfo, Link, QueueItem, SettingField, SettingKind, Tone,
+    ActionField, ActionInfo, Block, ConnectorDescriptor, ConnectorStatus, ContextSection,
+    DoneGuard, Effect, EntityRef, Field, FieldType, GuardLevel, IncomingEvent, ItemContext,
+    KindInfo, Link, QueueItem, SettingField, SettingKind, Tone,
 };
 use crate::ratelimit::RateLimitSpec;
 
@@ -816,6 +817,69 @@ impl Connector for GithubConnector {
         }
     }
 
+    /// An open PR in the item's Context means the work it tracks isn't
+    /// finished. The item's own PR doesn't count: finishing it is what Done is for.
+    async fn done_guards(&self, ctx: &ItemContext) -> anyhow::Result<Vec<DoneGuard>> {
+        let own = ctx.item.event.url.as_deref().and_then(pull_ref);
+        let mut pulls: Vec<(String, u64)> = Vec::new();
+        for e in &ctx.entries {
+            if e.section != ContextSection::Context
+                || e.ref_item.as_ref().is_some_and(|r| r.id == ctx.item.id)
+            {
+                continue;
+            }
+            let url = e
+                .url
+                .as_deref()
+                .or(e.ref_item.as_ref().and_then(|r| r.event.url.as_deref()));
+            if let Some(p) = url.and_then(pull_ref)
+                && Some(&p) != own.as_ref()
+                && !pulls.contains(&p)
+            {
+                pulls.push(p);
+            }
+        }
+        let gw = &self.gateway;
+        let sums = futures_util::future::join_all(pulls.iter().map(|(repo, n)| async move {
+            crate::connectors::github_review::link_summary(gw, repo, "pull", &n.to_string()).await
+        }))
+        .await;
+        let mut out = Vec::new();
+        for ((repo, n), s) in pulls.iter().zip(sums) {
+            let Ok(s) = s else { continue };
+            if s.state != "open" && s.state != "draft" {
+                continue;
+            }
+            let mut left = Vec::new();
+            if s.state == "draft" {
+                left.push("draft".to_string());
+            }
+            if let Some(t) = s.open_threads.filter(|t| *t > 0) {
+                left.push(format!(
+                    "{t} unresolved thread{}",
+                    if t == 1 { "" } else { "s" }
+                ));
+            }
+            if s.review_decision
+                .as_deref()
+                .is_some_and(|d| d.eq_ignore_ascii_case("changes_requested"))
+            {
+                left.push("changes requested".into());
+            }
+            if s.checks.as_deref() == Some("failing") {
+                left.push("checks failing".into());
+            }
+            out.push(DoneGuard {
+                source: "github".into(),
+                level: GuardLevel::Confirm,
+                title: format!("{repo}#{n} is still open"),
+                detail: (!left.is_empty()).then(|| left.join(", ")),
+                url: Some(format!("https://github.com/{repo}/pull/{n}")),
+            });
+        }
+        Ok(out)
+    }
+
     async fn is_resolved(&self, item: &QueueItem) -> anyhow::Result<bool> {
         let m = &item.event.metadata;
         if m["subject_type"].as_str() != Some("PullRequest") {
@@ -885,9 +949,34 @@ impl Connector for GithubConnector {
     }
 }
 
+/// `https://github.com/o/r/pull/12[/files…]` → `("o/r", 12)`.
+fn pull_ref(url: &str) -> Option<(String, u64)> {
+    let path = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("https://www.github.com/"))?;
+    let mut it = path.split(['/', '?', '#']);
+    let (owner, repo, what, n) = (it.next()?, it.next()?, it.next()?, it.next()?);
+    (what == "pull" && !owner.is_empty() && !repo.is_empty()).then_some(())?;
+    Some((format!("{owner}/{repo}"), n.parse().ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_refs() {
+        assert_eq!(
+            pull_ref("https://github.com/o/r/pull/12/files"),
+            Some(("o/r".into(), 12))
+        );
+        assert_eq!(
+            pull_ref("https://github.com/o/r/pull/12#top"),
+            Some(("o/r".into(), 12))
+        );
+        assert_eq!(pull_ref("https://github.com/o/r/issues/12"), None);
+        assert_eq!(pull_ref("https://github.com/o/r/pull/new/branch"), None);
+    }
 
     #[test]
     fn keeps_only_your_prs() {
@@ -905,15 +994,27 @@ mod tests {
             "github.review_requested"
         );
         assert_eq!(
-            kind_for("ci_activity", "CheckSuite", "CI workflow run failed for main branch"),
+            kind_for(
+                "ci_activity",
+                "CheckSuite",
+                "CI workflow run failed for main branch"
+            ),
             "github.ci_failed"
         );
         assert_eq!(
-            kind_for("ci_activity", "CheckSuite", "CI workflow run succeeded for fix branch"),
+            kind_for(
+                "ci_activity",
+                "CheckSuite",
+                "CI workflow run succeeded for fix branch"
+            ),
             "github.ci_passed"
         );
         assert_eq!(
-            kind_for("ci_activity", "CheckSuite", "CI workflow run cancelled for main branch"),
+            kind_for(
+                "ci_activity",
+                "CheckSuite",
+                "CI workflow run cancelled for main branch"
+            ),
             "github.ci"
         );
         assert_eq!(kind_for("team_mention", "Issue", "Bug"), "github.mention");

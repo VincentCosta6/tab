@@ -257,6 +257,7 @@ export const mockApi = {
             { type: "text", markdown: true, text: "Adds an `Idempotency-Key` header to all webhook deliveries and stores processed keys for 24h.\n\n- Dedupes retries from the queue worker\n- Backfills keys for in-flight deliveries" },
           ] satisfies Block[]);
         }
+        case "done_guards": return [];
         case "mark_done": return setState(args.id, "done");
         case "snooze": return setState(args.id, "snoozed", new Date(Date.now() + args.minutes * 60_000).toISOString());
         case "reopen": return setState(args.id, "open");

@@ -21,8 +21,8 @@ use crate::connectors;
 use crate::gateway::Gateway;
 use crate::gateway::GatewayError;
 use crate::model::{
-    Approval, ConnectorInfo, ConnectorStatus, IncomingEvent, ItemState, NewTask, Preview,
-    QueueItem, Session, SessionMessage,
+    Approval, ConnectorInfo, ConnectorStatus, DoneGuard, GuardLevel, IncomingEvent, ItemState,
+    NewTask, Preview, QueueItem, Session, SessionMessage, SessionStatus,
 };
 use crate::ranker::{Pipeline, Ranker};
 use crate::ratelimit;
@@ -202,7 +202,65 @@ impl Core {
         }
     }
 
+    /// Why an item shouldn't be marked done yet: its agent still busy, and
+    /// whatever each connector raises about it or its Context. A connector
+    /// that errors or takes over 3s is skipped, so Done never hangs on it.
+    async fn done_guards(&self, id: &str) -> anyhow::Result<Vec<DoneGuard>> {
+        let Some(ctx) = self.store.item_context(id)? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        if let Some(s) = self.store.session_for_item(id)? {
+            let why = match s.status {
+                SessionStatus::Working => Some("The agent is still working"),
+                SessionStatus::NeedsInput => Some("The agent is waiting on you"),
+                SessionStatus::Monitoring => Some("The agent is still monitoring background work"),
+                SessionStatus::Idle | SessionStatus::Failed => None,
+            };
+            if let Some(why) = why {
+                out.push(DoneGuard {
+                    source: "agent".into(),
+                    level: GuardLevel::Confirm,
+                    title: why.into(),
+                    detail: None,
+                    url: None,
+                });
+            }
+        }
+        let asks = self.connectors.values().map(|c| {
+            let ctx = &ctx;
+            async move {
+                match tokio::time::timeout(Duration::from_secs(3), c.done_guards(ctx)).await {
+                    Ok(Ok(g)) => g,
+                    Ok(Err(e)) => {
+                        tracing::warn!(connector = c.id(), error = %e, "done_guards failed");
+                        Vec::new()
+                    }
+                    Err(_) => {
+                        tracing::warn!(connector = c.id(), "done_guards timed out");
+                        Vec::new()
+                    }
+                }
+            }
+        });
+        out.extend(
+            futures_util::future::join_all(asks)
+                .await
+                .into_iter()
+                .flatten(),
+        );
+        Ok(out)
+    }
+
     async fn mark_done(&self, id: &str, by: &str) -> anyhow::Result<Option<QueueItem>> {
+        if let Some(g) = self
+            .done_guards(id)
+            .await?
+            .into_iter()
+            .find(|g| g.level == GuardLevel::Block)
+        {
+            anyhow::bail!("can't mark done yet: {}", g.title);
+        }
         let item = changed(
             self,
             Change::Done,
@@ -905,6 +963,12 @@ impl EngineHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Why an item shouldn't be marked done yet. `Confirm` guards are for the
+    /// UI to ask about; `Block` guards also make [`Self::mark_done`] refuse.
+    pub async fn done_guards(&self, id: &str) -> anyhow::Result<Vec<DoneGuard>> {
+        self.core.done_guards(id).await
     }
 
     /// Marks an item done and lets its connector react (e.g. mark the GitHub thread read).

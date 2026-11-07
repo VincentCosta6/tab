@@ -1597,6 +1597,34 @@ async fn mark_done(state: State<'_, AppState>, id: String) -> CmdResult<Option<Q
     with_engine!(state, e => e.mark_done(&id).await.map_err(err))
 }
 
+/// Why an item shouldn't be marked done yet, from tab and every connector.
+/// Adds the one thing only the app knows: an approval still waiting in chat.
+#[tauri::command]
+async fn done_guards(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<tab_core::model::DoneGuard>> {
+    let mut guards = with_engine!(state, e => e.done_guards(&id).await.map_err(err))?;
+    let waiting = state
+        .store
+        .session_for_item(&id)
+        .map_err(err)?
+        .is_some_and(|s| !state.hub.pending_approvals(&s.id).is_empty());
+    if waiting && !guards.iter().any(|g| g.source == "agent") {
+        guards.insert(
+            0,
+            tab_core::model::DoneGuard {
+                source: "agent".into(),
+                level: tab_core::model::GuardLevel::Confirm,
+                title: "The agent is waiting on you".into(),
+                detail: None,
+                url: None,
+            },
+        );
+    }
+    Ok(guards)
+}
+
 #[tauri::command]
 async fn snooze(
     state: State<'_, AppState>,
@@ -2029,6 +2057,7 @@ pub fn run() {
             github_my_pulls,
             item_preview,
             mark_done,
+            done_guards,
             snooze,
             reopen,
             list_connectors,
