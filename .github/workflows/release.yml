@@ -148,6 +148,10 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    # Signing secrets live in the "release" environment, which only main and
+    # v* tags may use. A dry run from another branch builds without it, so
+    # unsigned. (An empty name means no environment.)
+    environment: ${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/v')) && 'release' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

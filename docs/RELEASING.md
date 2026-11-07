@@ -23,13 +23,21 @@ Signing is optional. With no secrets set, the workflow still builds and publishe
 
 If a build fails, fix it and use **Re-run failed jobs**, which reuses the same draft. To start over instead, delete the draft first, or the version check will refuse the version as taken.
 
-Tick **dry run** to do everything except create the release, from any branch. The installers are attached to the run as artifacts. This is the way to test signing.
+Tick **dry run** to do everything except create the release. The installers are attached to the run as artifacts. Run it from `main` to test signing; from any other branch it builds unsigned.
 
 **From the GitHub UI:** publishing a release with a new `vX.Y.Z` tag also starts the workflow, and the installers are attached to that release when the builds finish. The release is public while it builds, and a failed check leaves it without installers, so the Run workflow way is safer.
 
 ## Secrets and variables
 
-Set these in Settings → Secrets and variables → Actions. Everything is optional. Each group only takes effect once all of its required entries are set.
+Put them in a GitHub **environment** named `release`, so only `main` and release tags can use them:
+
+1. Go to Settings → **Environments** → **New environment**, and name it `release`.
+2. Under **Deployment branches and tags**, choose **Selected branches and tags**. Add the branch `main` and the tag pattern `v*`.
+3. Add the entries below under **Environment secrets** and **Environment variables**.
+
+A workflow run from any other branch, including a dry run, then can't read them and builds unsigned. Plain repository secrets (Settings → Secrets and variables → Actions) work too, but any branch could read those.
+
+Everything is optional. Each group only takes effect once all of its required entries are set.
 
 | Name | Kind | What it is |
 |---|---|---|
