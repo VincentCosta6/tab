@@ -349,7 +349,7 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
     if (m.kind !== "tool") continue;
     const tool = m.meta?.tool;
     if (TODO_TOOLS.has(tool) || TASK_TOOLS.has(tool) || tool === "TaskList" || tool === "TaskGet" || tool === "AskUserQuestion") continue;
-    step = m.content.replace(/^mcp__tab__/, "tab: ");
+    step = m.content.replace(/^mcp__tab__/, "tab: ").split("\n")[0];
     break;
   }
   if (!running && !todos.length) return null;
@@ -373,7 +373,7 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
           ))}
         </ul>
       )}
-      {running && step && <div className="progress-step">{step}</div>}
+      {running && step && active && <div className="progress-step">{step}</div>}
     </div>
   );
 }
