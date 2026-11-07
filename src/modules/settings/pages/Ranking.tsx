@@ -26,6 +26,8 @@ export function RankingPage() {
   const reusable = harnessName(current?.reusable_from[0]);
   const ownKey = !!(current && decision.api_keys[current.id]);
   const reusing = !!(current && decision.key_from[current.id]);
+  /** Answers through a harness the person already has: no key, no decision API. */
+  const viaAgent = current?.dialect === "llm";
   return (
     <>
       <Section title="Rules" description="Deterministic: the same item always gets the same base score. Changes re-rank the queue.">
@@ -64,8 +66,10 @@ export function RankingPage() {
             label="Ranks with"
             help={
               current && model
-                ? `${model.label} answers typed questions instead of writing text, for about $${model.input_per_mtok.toFixed(3)} per million input tokens and nothing for output. If a call fails, Claude Haiku ranks the item, or the rules score stands.`
-                : "Claude Haiku reads each item and writes the reason. Decision models (Jev, Luna) are faster and cheaper, and give a confidence instead of a sentence."
+                ? viaAgent
+                  ? `${model.label} answers the same questions a decision model would, with the plan or login you already have. It's slower and uses more of your plan or tokens than Jev or Luna, and its confidence is its own guess, so rankings can be less accurate. If a call fails, Claude Haiku ranks the item, or the rules score stands.`
+                  : `${model.label} answers typed questions instead of writing text, for about $${model.input_per_mtok.toFixed(3)} per million input tokens and nothing for output. If a call fails, Claude Haiku ranks the item, or the rules score stands.`
+                : "Claude Haiku reads each item and writes the reason. Decision models (Jev, Luna) are faster and cheaper, and give a confidence instead of a sentence. No decision API? Pick a model under Your agent."
             }
           >
             <select
@@ -87,17 +91,17 @@ export function RankingPage() {
             >
               <option value="haiku">Claude Haiku</option>
               {providers.data?.map((p) => (
-                <optgroup key={p.id} label={p.name}>
+                <optgroup key={p.id} label={p.dialect === "llm" ? `${p.name} (slower, may be less accurate)` : p.name}>
                   {p.models.map((m) => (
                     <option key={m.id} value={`${p.id}:${m.id}`}>
-                      {m.label} via {p.name}
+                      {p.dialect === "llm" ? m.label : `${m.label} via ${p.name}`}
                     </option>
                   ))}
                 </optgroup>
               ))}
             </select>
           </FormRow>
-          {current ? (
+          {viaAgent ? null : current ? (
             <>
               {reusable && !ownKey && (
                 <FormRow

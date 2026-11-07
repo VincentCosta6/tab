@@ -197,11 +197,12 @@ impl Core {
             Err(e) => tracing::warn!(error = %e, "couldn't list sources"),
         }
         *engine = Some(
-            Engine::from_config(
+            Engine::with_agents(
                 cfg,
                 self.store.clone(),
                 self.gateway.clone(),
                 self.events.clone(),
+                Some(self.hub.clone()),
             )
             .start(),
         );

@@ -76,6 +76,19 @@ impl DecisionLayer {
         if let Some(why) = self.budget.blocked(&self.store.usage_summary(Utc::now())?) {
             anyhow::bail!(why);
         }
+        // Through Claude Code it spends the Claude plan; keep the same headroom
+        // the Haiku layer keeps for the person's own work.
+        if self.decider.provider().via_agent()
+            && self.decider.model().id == crate::model::AgentKind::ClaudeCode.as_str()
+            && let Some(peak) = crate::usage::plan_peak(&self.store)
+            && peak >= self.budget.ranker_plan_cap
+        {
+            anyhow::bail!(
+                "Claude plan at {:.0}%, past the {:.0}% set for reading the queue",
+                peak * 100.0,
+                self.budget.ranker_plan_cap * 100.0
+            );
+        }
         let answers = self
             .decider
             .decide(&state, &ranking::questions(), "ranker")
@@ -112,7 +125,7 @@ mod tests {
             base_url: Some(base.into()),
             ..Default::default()
         };
-        let d = Decider::from_config(&cfg, gw, store.clone()).unwrap();
+        let d = Decider::from_config(&cfg, gw, store.clone(), None).unwrap();
         Pipeline {
             rules: RankingRules::default(),
             profile: Default::default(),

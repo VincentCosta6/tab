@@ -392,7 +392,7 @@ export const mockApi = {
         case "agent_harnesses": return harnesses;
         case "decision_providers": return (decisionData as unknown as DecisionProvider[]).map((p) => ({
           ...p,
-          has_key: !!config.ranking.decision?.api_keys[p.id],
+          has_key: p.dialect === "llm" || !!config.ranking.decision?.api_keys[p.id],
           reusable_from: p.id === "openrouter" && mockOpenCode ? ["opencode"] : [],
         }));
         case "agent_models": return mockModels();

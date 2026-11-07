@@ -8,10 +8,13 @@
 //! ([`tab_domain::decision::Question`]) and get tab's own answers back, so
 //! the ranker never sees a provider's format.
 //!
-//! Every call goes through the gateway, is priced into the usage counters,
-//! and is refused once the configured budget is spent.
+//! Every API call goes through the gateway, is priced into the usage
+//! counters, and is refused once the configured budget is spent. The
+//! `llm` dialect is the exception: it asks a general model through a harness
+//! the person already has (see [`llm`]), which records its own usage.
 
 mod keys;
+mod llm;
 mod openai;
 mod system_one;
 
@@ -23,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use tab_domain::decision::{Answer, Capabilities, Opt, Question, QuestionKind};
 
+use crate::agents::AgentHub;
 use crate::config::DecisionConfig;
 use crate::gateway::{Call, Gateway};
 use crate::store::Store;
@@ -81,13 +85,23 @@ pub fn provider(id: &str) -> Option<&'static Provider> {
 enum Dialect {
     SystemOne,
     OpenAi,
+    /// A general model through a harness; the model id is the harness id.
+    Llm,
 }
 
 fn dialect(name: &str) -> Option<Dialect> {
     match name {
         "system_one" => Some(Dialect::SystemOne),
         "openai_decisions" => Some(Dialect::OpenAi),
+        "llm" => Some(Dialect::Llm),
         _ => None,
+    }
+}
+
+impl Provider {
+    /// Answers through a harness, with no key and no decision API.
+    pub fn via_agent(&self) -> bool {
+        dialect(&self.dialect) == Some(Dialect::Llm)
     }
 }
 
@@ -101,7 +115,8 @@ pub(crate) struct Usage {
 }
 
 /// Asks one provider's model questions. Built from config; `None` when no
-/// provider is set or no key can be found.
+/// provider is set, no key can be found, or (for the `llm` dialect) there
+/// are no agents to ask through.
 pub struct Decider {
     gateway: Arc<Gateway>,
     store: Arc<Store>,
@@ -109,6 +124,7 @@ pub struct Decider {
     model: &'static Model,
     dialect: Dialect,
     url: String,
+    agents: Option<Arc<AgentHub>>,
 }
 
 impl Decider {
@@ -116,12 +132,25 @@ impl Decider {
         cfg: &DecisionConfig,
         gateway: Arc<Gateway>,
         store: Arc<Store>,
+        agents: Option<Arc<AgentHub>>,
     ) -> Option<Self> {
         let provider = provider(cfg.provider.trim())?;
         let model = match cfg.model.as_deref().filter(|m| !m.trim().is_empty()) {
             Some(id) => provider.models.iter().find(|m| m.id == id)?,
             None => provider.models.first()?,
         };
+        let dialect = dialect(&provider.dialect)?;
+        if dialect == Dialect::Llm {
+            return Some(Self {
+                gateway,
+                store,
+                provider,
+                model,
+                dialect,
+                url: String::new(),
+                agents: Some(agents?),
+            });
+        }
         let key = keys::resolve(cfg, provider)?;
         let mut h = HeaderMap::new();
         let mut v = HeaderValue::from_str(&format!("Bearer {key}")).ok()?;
@@ -138,8 +167,9 @@ impl Decider {
             store,
             provider,
             model,
-            dialect: dialect(&provider.dialect)?,
+            dialect,
             url: format!("{}{}", base.trim_end_matches('/'), provider.path),
+            agents,
         })
     }
 
@@ -163,9 +193,12 @@ impl Decider {
         if let Some(first) = issues.first() {
             anyhow::bail!("{first}");
         }
+        if self.dialect == Dialect::Llm {
+            return self.via_agent(state, questions, purpose).await;
+        }
         let body = match self.dialect {
             Dialect::SystemOne => system_one::request(&self.model.id, state, questions),
-            Dialect::OpenAi => openai::request(&self.model.id, state, questions),
+            _ => openai::request(&self.model.id, state, questions),
         };
         let resp = self
             .gateway
@@ -181,10 +214,42 @@ impl Decider {
         }
         let (answers, usage) = match self.dialect {
             Dialect::SystemOne => system_one::response(&v, questions)?,
-            Dialect::OpenAi => openai::response(&v, questions)?,
+            _ => openai::response(&v, questions)?,
         };
         self.record(purpose, &usage);
         Ok(answers)
+    }
+
+    /// The harness records the call's usage itself.
+    async fn via_agent(
+        &self,
+        state: &Value,
+        questions: &[Question],
+        purpose: &'static str,
+    ) -> anyhow::Result<Vec<(String, Answer)>> {
+        let hub = self
+            .agents
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no agents to ask"))?;
+        let kind = crate::agents::catalog::harnesses()
+            .iter()
+            .filter_map(|h| h.kind())
+            .find(|k| k.as_str() == self.model.id)
+            .ok_or_else(|| anyhow::anyhow!("tab can't drive {}", self.model.id))?;
+        let reply = hub
+            .ask_structured(
+                kind,
+                None,
+                llm::SYSTEM,
+                &llm::prompt(state, questions),
+                llm::schema(questions),
+                purpose,
+            )
+            .await?;
+        if reply.is_null() {
+            anyhow::bail!("{} returned no answer", self.model.label);
+        }
+        Ok(llm::answers(&reply, questions))
     }
 
     fn record(&self, purpose: &'static str, u: &Usage) {
@@ -224,11 +289,12 @@ pub fn status(cfg: &DecisionConfig) -> Vec<ProviderStatus> {
         .iter()
         .map(|p| ProviderStatus {
             provider: p.clone(),
-            has_key: cfg
-                .api_keys
-                .get(&p.id)
-                .is_some_and(|k| !k.trim().is_empty())
-                || std::env::var(&p.env).is_ok_and(|k| !k.trim().is_empty()),
+            has_key: p.via_agent()
+                || cfg
+                    .api_keys
+                    .get(&p.id)
+                    .is_some_and(|k| !k.trim().is_empty())
+                || (!p.env.is_empty() && std::env::var(&p.env).is_ok_and(|k| !k.trim().is_empty())),
             reusable_from: p
                 .key_from
                 .iter()

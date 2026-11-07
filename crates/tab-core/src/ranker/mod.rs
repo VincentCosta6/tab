@@ -44,7 +44,14 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    pub fn from_config(cfg: &TabConfig, gateway: Arc<Gateway>, store: Arc<Store>) -> Self {
+    /// `agents` lets a decision-model provider that answers through a
+    /// harness (`dialect: llm`) ask it; without them that provider is off.
+    pub fn from_config(
+        cfg: &TabConfig,
+        gateway: Arc<Gateway>,
+        store: Arc<Store>,
+        agents: Option<Arc<crate::agents::AgentHub>>,
+    ) -> Self {
         let decision = cfg
             .ranking
             .ai
@@ -54,6 +61,7 @@ impl Pipeline {
                     &cfg.ranking.decision,
                     gateway.clone(),
                     store.clone(),
+                    agents,
                 )
             })
             .flatten()

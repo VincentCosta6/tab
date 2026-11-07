@@ -61,5 +61,34 @@
         "capabilities": { "question_types": ["choice", "score", "yes_no"], "max_questions": 400, "confidence": true }
       }
     ]
+  },
+  {
+    "id": "agent",
+    "name": "Your agent",
+    "pitch": "Answers with a model you already pay for, through a harness you've set up: Claude Code on your Claude plan, or OpenCode with a ChatGPT or other login. Nothing new to sign up for, but it's slower and uses more of your plan or tokens than a decision model, and its confidence is the model's own guess, so it can rank less accurately.",
+    "dialect": "llm",
+    "base_url": "",
+    "path": "",
+    "env": "",
+    "key_url": "",
+    "key_from": [],
+    "models": [
+      {
+        "id": "claude_code",
+        "label": "Claude Code (Haiku)",
+        "family": "LLM",
+        "input_per_mtok": 0.0,
+        "output_per_mtok": 0.0,
+        "capabilities": { "question_types": ["choice", "score", "yes_no"], "max_options": 50, "max_questions": 10, "confidence": false }
+      },
+      {
+        "id": "opencode",
+        "label": "OpenCode (your chat model)",
+        "family": "LLM",
+        "input_per_mtok": 0.0,
+        "output_per_mtok": 0.0,
+        "capabilities": { "question_types": ["choice", "score", "yes_no"], "max_options": 50, "max_questions": 10, "confidence": false }
+      }
+    ]
   }
 ]
