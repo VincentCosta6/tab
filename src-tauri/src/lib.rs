@@ -211,6 +211,13 @@ impl Core {
     /// Saves settings, restarts the engine with them and tells the UI.
     async fn apply(&self, next: TabConfig) -> anyhow::Result<TabConfig> {
         let mut current = self.config.lock().await;
+        // Only when it changed, so a folder that went away later doesn't
+        // block saving everything else.
+        if next.agent.workdir != current.agent.workdir
+            && let Some(why) = next.agent.workdir_problem()
+        {
+            anyhow::bail!("Work folder: {why}");
+        }
         next.save(&self.config_path)?;
         let ranking_changed = next.ranking != current.ranking || next.profile != current.profile;
         *current = next.clone();
@@ -2256,6 +2263,12 @@ async fn sandbox_status() -> CmdResult<tab_core::sandbox::Status> {
     Ok(tab_core::sandbox::current().status().await)
 }
 
+/// Why a folder can't be where sessions start, for the settings forms.
+#[tauri::command]
+fn folder_problem(path: String) -> Option<String> {
+    tab_core::config::folder_problem(&path)
+}
+
 #[tauri::command]
 async fn save_config(state: State<'_, AppState>, config: TabConfig) -> CmdResult<TabConfig> {
     let next = unmask(config, &*state.config.lock().await);
@@ -2674,6 +2687,7 @@ pub fn run() {
             api_usage,
             get_config,
             save_config,
+            folder_problem,
             connection_set_secrets,
             set_agent_model,
             set_agent_mode,

@@ -281,6 +281,18 @@ fn policies_protect_tab_and_hide_credentials() {
     assert!(iso.writable.contains(&data.join("run")));
 }
 
+#[tokio::test]
+async fn a_missing_start_folder_is_named() {
+    let s = Sandbox::new(SandboxConfig::default(), None, None);
+    let gone = std::env::temp_dir().join(format!("tab-gone-{}", uuid::Uuid::new_v4()));
+    let p = s.chat_policy();
+    let exe = std::env::current_exe().unwrap();
+    let Err(e) = s.command(&exe, &[], &gone, &p).await.unwrap().spawn() else {
+        panic!("spawned in a missing folder");
+    };
+    assert!(e.to_string().contains(&gone.display().to_string()), "{e}");
+}
+
 #[test]
 fn a_dev_build_guards_the_installed_app_too() {
     let (data, config, prod) = (tmp("data"), tmp("config"), tmp("prod"));

@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { openOnboarding } from "../../work/Chat";
 import { Button, Card, FormRow, Section, TextArea, TextInput, Toggle } from "../../../design/components";
 import { api } from "../../../lib/api";
-import { useHarnesses, useModels } from "../../../lib/hooks";
+import { useFolderProblem, useHarnesses, useModels } from "../../../lib/hooks";
 import { ModelMenu, modelFor } from "../../work/ModelMenu";
 import { useDraft } from "../draft";
 import { AgentVersionRow } from "./AgentVersion";
@@ -13,6 +13,7 @@ export function AgentsPage() {
   const titler = draft.agent.titler ?? { enabled: true, model: null, instructions: "" };
   const { data: harnesses = [] } = useHarnesses();
   const { data: models = [] } = useModels();
+  const workdirProblem = useFolderProblem(draft.agent.workdir);
   const titlerAgent = titler.agent ?? draft.agent.kind;
   const harness = harnesses.find((h) => h.id === draft.agent.kind);
   const setTitler = (patch: Partial<typeof titler>) => set((c) => void (c.agent.titler = { ...titler, ...patch }));
@@ -32,6 +33,7 @@ export function AgentsPage() {
           </FormRow>
           <FormRow label="Work folder" help="Where sessions start.">
             <TextInput value={draft.agent.workdir ?? ""} onChange={(e) => set((c) => void (c.agent.workdir = e.target.value || null))} />
+            {workdirProblem && <small className="text-danger" role="alert">{workdirProblem}</small>}
           </FormRow>
           {draft.agent.kind && (
             <FormRow label="Model" help="For new chats on this agent. Each chat can switch too.">

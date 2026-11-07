@@ -161,7 +161,33 @@ impl BudgetConfig {
     }
 }
 
+/// Why `path` can't be a folder sessions start in, or `None` when it can.
+pub fn folder_problem(path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    if path.starts_with('~') {
+        return Some(format!(
+            "{path} starts with ~, which tab doesn't expand. Use the full path."
+        ));
+    }
+    let p = Path::new(path);
+    if p.is_dir() {
+        None
+    } else if p.exists() {
+        Some(format!("{path} is a file, not a folder."))
+    } else {
+        Some(format!("{path} doesn't exist."))
+    }
+}
+
 impl AgentConfig {
+    /// Why the work folder can't be used, or `None` when it can (or isn't set).
+    pub fn workdir_problem(&self) -> Option<String> {
+        self.workdir.as_deref().and_then(folder_problem)
+    }
+
     /// The model `kind`'s chats run on, `None` for the harness's default.
     pub fn model_for(&self, kind: AgentKind) -> Option<&str> {
         let own = self.models.get(kind.as_str()).map(String::as_str);
@@ -485,6 +511,25 @@ mod tests {
         assert_eq!(off.max_bytes(), None);
         let cfg: TabConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.storage, StorageConfig::default());
+    }
+
+    #[test]
+    fn work_folders_must_exist() {
+        let dir = std::env::temp_dir();
+        assert_eq!(folder_problem(&dir.display().to_string()), None);
+        assert_eq!(folder_problem("  "), None);
+        let gone = dir.join(format!("tab-gone-{}", uuid::Uuid::new_v4()));
+        assert!(
+            folder_problem(&gone.display().to_string())
+                .unwrap()
+                .contains("doesn't exist")
+        );
+        assert!(folder_problem("~/code").unwrap().contains("full path"));
+        let file = dir.join(format!("tab-file-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&file, "").unwrap();
+        let problem = folder_problem(&file.display().to_string());
+        let _ = std::fs::remove_file(&file);
+        assert!(problem.unwrap().contains("not a folder"));
     }
 
     #[test]

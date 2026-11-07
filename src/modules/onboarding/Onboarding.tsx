@@ -5,7 +5,7 @@ import { Brand, TabMark } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { api, onAgentUpgrade } from "../../lib/api";
 import { GhConnect } from "../connections/GhConnect";
-import { useConfig, useHarnesses, useSaveConfig } from "../../lib/hooks";
+import { useConfig, useFolderProblem, useHarnesses, useSaveConfig } from "../../lib/hooks";
 import type { AgentKind, AgentProbe, Harness, TabConfig } from "../../lib/types";
 import { HarnessIcon, ModelMenu, modelFor } from "../work/ModelMenu";
 
@@ -38,6 +38,8 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (config && !draft) setDraft(structuredClone(config));
   }, [config, draft]);
+  const workdirProblem = useFolderProblem(draft?.agent.workdir);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   if (!draft) return null;
   const set = (fn: (c: TabConfig) => void) => {
@@ -49,8 +51,13 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
   const github = draft.connectors.github ?? { enabled: false, settings: {} };
 
   const finish = async () => {
-    await save.mutateAsync({ ...draft, onboarded: true });
-    onClose();
+    setSaveError(null);
+    try {
+      await save.mutateAsync({ ...draft, onboarded: true });
+      onClose();
+    } catch (e) {
+      setSaveError(`Couldn't save: ${e}`);
+    }
   };
 
   return (
@@ -94,6 +101,7 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
               <label>
                 Work folder <small>Sessions start here, usually where your repos live.</small>
                 <TextInput icon="folder" placeholder="C:\\Users\\you\\code" value={draft.agent.workdir ?? ""} onChange={(e) => set((c) => void (c.agent.workdir = e.target.value || null))} />
+                {workdirProblem && <small className="text-danger" role="alert">{workdirProblem}</small>}
               </label>
               <div className="onboarding-field">
                 Model <small>Optional. You can switch in any chat.</small>
@@ -165,7 +173,10 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
           {step < steps.length - 1 ? (
             <Button variant="primary" onClick={() => setStep(step + 1)}>{step === 1 && !draft.agent.kind ? "Skip" : "Continue"}</Button>
           ) : (
-            <Button variant="primary" onClick={finish} disabled={save.isPending}>{save.isPending ? "Saving…" : "Open tab"}</Button>
+            <>
+              {saveError && <small className="text-danger" role="alert">{saveError}</small>}
+              <Button variant="primary" onClick={finish} disabled={save.isPending}>{save.isPending ? "Saving…" : "Open tab"}</Button>
+            </>
           )}
         </footer>
       </div>
