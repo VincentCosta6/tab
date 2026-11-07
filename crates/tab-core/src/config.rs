@@ -167,7 +167,7 @@ pub struct StorageConfig {
     pub keep_days: u32,
     /// Past this many GB, the least recently used attachments and checkouts
     /// are removed until it fits. `None` for no limit.
-    #[serde(default)]
+    #[serde(default = "default_max_gb")]
     pub max_gb: Option<f64>,
 }
 
@@ -175,11 +175,15 @@ fn default_keep_days() -> u32 {
     7
 }
 
+fn default_max_gb() -> Option<f64> {
+    Some(5.0)
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             keep_days: default_keep_days(),
-            max_gb: None,
+            max_gb: default_max_gb(),
         }
     }
 }
@@ -353,6 +357,17 @@ impl TabConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn storage_limit_defaults_to_5_gb_but_can_be_off() {
+        let old: StorageConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.keep_days, 7);
+        assert_eq!(old.max_bytes(), Some(5 * 1024 * 1024 * 1024));
+        let off: StorageConfig = serde_json::from_str(r#"{"max_gb": null}"#).unwrap();
+        assert_eq!(off.max_bytes(), None);
+        let cfg: TabConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.storage, StorageConfig::default());
+    }
+
     use super::*;
 
     #[test]
