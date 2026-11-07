@@ -1472,6 +1472,13 @@ async fn sweep_storage(core: &Core, ws: Arc<Workspaces>, data_dir: PathBuf) -> s
             storage::Swept::default()
         });
     swept.add(sweep_checkouts(&ws, &core.gateway, keep).await);
+    // Shared dependency installs no checkout links to any more.
+    let live: Vec<PathBuf> = ws
+        .checkouts()
+        .iter()
+        .filter_map(|c| ws.worktree(&c.repo, c.number).ok())
+        .collect();
+    swept.add(ws.deps().sweep(&live, keep).await);
     if let Some(limit) = cfg.max_bytes() {
         swept.add(enforce_limit(hub, ws, data_dir, limit).await);
     }
@@ -1748,6 +1755,40 @@ async fn lsp_start(
         root_uri: s.root_uri.clone(),
         capabilities: s.capabilities(),
     })
+}
+
+/// Installs (or reuses) the checkout's dependencies, shared between
+/// checkouts by lockfile, and links them in. See `tab_core::deps`.
+#[tauri::command]
+async fn deps_prepare(
+    state: State<'_, AppState>,
+    repo: String,
+    number: u64,
+    ecosystem: String,
+) -> CmdResult<tab_core::deps::DepsStatus> {
+    let dir = state.workspaces.worktree(&repo, number).map_err(err)?;
+    if !dir.exists() {
+        return Err("This pull request hasn't been checked out on this computer yet.".into());
+    }
+    match ecosystem.as_str() {
+        "js" => state.workspaces.deps().prepare_js(&dir).await.map_err(err),
+        other => Err(format!("No dependency support for {other}")),
+    }
+}
+
+/// Type declarations from the checkout's node_modules, for the editor's
+/// built-in TypeScript service: `[path, text]` with paths under `node_modules/`.
+#[tauri::command]
+async fn deps_types(
+    state: State<'_, AppState>,
+    repo: String,
+    number: u64,
+) -> CmdResult<Vec<(String, String)>> {
+    let dir = state.workspaces.worktree(&repo, number).map_err(err)?;
+    let ws = state.workspaces.clone();
+    tauri::async_runtime::spawn_blocking(move || ws.deps().types(&dir, 24 * 1024 * 1024))
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -2419,6 +2460,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+            lsp::set_tools_dir(data_dir.join("tools"));
             let config_path = app.path().app_config_dir()?.join("config.json");
             let config = TabConfig::load(&config_path)?;
             // Before anything starts a process: agents, language servers
@@ -2635,6 +2677,8 @@ pub fn run() {
             lsp_servers,
             lsp_install,
             lsp_start,
+            deps_prepare,
+            deps_types,
             lsp_request,
             lsp_notify,
             lsp_stop,

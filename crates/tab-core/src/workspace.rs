@@ -101,6 +101,7 @@ const MAX_BULK_TOTAL: usize = 8 * 1024 * 1024;
 
 pub struct Workspaces {
     root: PathBuf,
+    deps: crate::deps::DepStore,
 }
 
 fn git_exe() -> anyhow::Result<PathBuf> {
@@ -317,7 +318,15 @@ fn parse_percent(line: &str) -> Option<u8> {
 
 impl Workspaces {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            deps: crate::deps::DepStore::new(root.join(".shared")),
+            root,
+        }
+    }
+
+    /// Dependencies shared between checkouts (`<root>/.shared`).
+    pub fn deps(&self) -> &crate::deps::DepStore {
+        &self.deps
     }
 
     fn repo_dir(&self, repo: &str) -> anyhow::Result<PathBuf> {
@@ -391,6 +400,9 @@ impl Workspaces {
         let dir = self.repo_dir(repo)?;
         let clone = dir.join("repo");
         let wt = self.worktree(repo, number)?;
+        // Shared dependencies are linked in; drop the links first so nothing
+        // below can follow them into the shared install.
+        crate::deps::unlink(&wt);
         if let Ok(git) = self.git(None)
             && clone.join(".git").exists()
         {

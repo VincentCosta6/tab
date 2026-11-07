@@ -4,7 +4,7 @@
 
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
+  AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun,
 } from "./types";
@@ -119,6 +119,8 @@ export const api = {
   lspRequest: <T = unknown>(session: string, method: string, params: unknown) => call<T>("lsp_request", { session, method, params }),
   lspNotify: (session: string, method: string, params: unknown) => call<void>("lsp_notify", { session, method, params }),
   lspStop: (session: string) => call<void>("lsp_stop", { session }),
+  depsPrepare: (repo: string, number: number, ecosystem: string) => call<DepsStatus>("deps_prepare", { repo, number, ecosystem }),
+  depsTypes: (repo: string, number: number) => call<[string, string][]>("deps_types", { repo, number }),
   workflowsList: () => call<Workflow[]>("workflows_list"),
   workflowTemplates: () => call<Workflow[]>("workflow_templates"),
   workflowValidate: (workflow: Workflow) => call<Issue[]>("workflow_validate", { workflow }),

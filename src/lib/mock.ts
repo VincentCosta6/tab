@@ -401,6 +401,8 @@ export const mockApi = {
           return lspServers.find((s) => s.id === args.id);
         }
         case "lsp_start": throw new Error("Language servers run in the desktop app.");
+        case "deps_prepare": return { state: "none", lockfile: null, manager: null, key: null, reused: false, message: "Dependencies install in the desktop app." };
+        case "deps_types": return [];
         case "gh_status": return gh;
         case "usage_summary": {
           const in3h = new Date(Date.now() + 3 * 3600_000).toISOString();
@@ -452,10 +454,11 @@ let mockCheckouts = [
 ];
 
 let lspServers: LspServer[] = [
-  { id: "gopls", name: "Go (gopls)", languages: ["go"], command: "gopls", note: "Hover, go to definition, references and errors across the module.", installed: false, path: null, install_command: "go install golang.org/x/tools/gopls@latest", needs: null, needs_url: null },
-  { id: "sqls", name: "SQL (sqls)", languages: ["sql"], command: "sqls", note: "Syntax errors and outline. Table and column info needs a database connection in sqls's own config.", installed: false, path: null, install_command: "go install github.com/sqls-server/sqls@latest", needs: null, needs_url: null },
-  { id: "rust-analyzer", name: "Rust (rust-analyzer)", languages: ["rust"], command: "rust-analyzer", note: "Hover, go to definition and references. Indexing a large workspace takes a minute.", installed: true, path: "/Users/you/.cargo/bin/rust-analyzer", install_command: "rustup component add rust-analyzer", needs: null, needs_url: null },
-  { id: "pyright", name: "Python (pyright)", languages: ["python"], command: "pyright-langserver", note: "Hover, go to definition, references and type errors.", installed: false, path: null, install_command: null, needs: "npm", needs_url: "https://nodejs.org" },
+  { id: "vtsls", name: "TypeScript (vtsls)", languages: ["typescript", "javascript"], command: "vtsls", note: "Full types from the project's dependencies, installed once per lockfile and shared between pull requests.", installed: false, path: null, install_command: "npm install --ignore-scripts @vtsls/language-server@0.3.0", needs: null, needs_url: null, managed: "@vtsls/language-server@0.3.0", deps: "js" },
+  { id: "gopls", name: "Go (gopls)", languages: ["go"], command: "gopls", note: "Hover, go to definition, references and errors across the module.", installed: false, path: null, install_command: "go install golang.org/x/tools/gopls@latest", needs: null, needs_url: null, managed: null, deps: null },
+  { id: "sqls", name: "SQL (sqls)", languages: ["sql"], command: "sqls", note: "Syntax errors and outline. Table and column info needs a database connection in sqls's own config.", installed: false, path: null, install_command: "go install github.com/sqls-server/sqls@latest", needs: null, needs_url: null, managed: null, deps: null },
+  { id: "rust-analyzer", name: "Rust (rust-analyzer)", languages: ["rust"], command: "rust-analyzer", note: "Hover, go to definition and references. Indexing a large workspace takes a minute.", installed: true, path: "/Users/you/.cargo/bin/rust-analyzer", install_command: "rustup component add rust-analyzer", needs: null, needs_url: null, managed: null, deps: null },
+  { id: "pyright", name: "Python (pyright)", languages: ["python"], command: "pyright-langserver", note: "Hover, go to definition, references and type errors.", installed: false, path: null, install_command: null, needs: "npm", needs_url: "https://nodejs.org", managed: null, deps: null },
 ];
 
 let gh: GhStatus = { installed: false, path: null, version: null, logged_in: false, user: null, install_command: "brew install gh", error: null };

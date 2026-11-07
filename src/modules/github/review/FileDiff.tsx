@@ -8,6 +8,7 @@
 import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PrFile, ReviewThread } from "../../../lib/types";
 import { baseUri, ensureModel, headUri, monaco } from "../monaco";
+import { applyTheme, setupHighlighting, type ThemeName } from "../highlight";
 import { StackCtx, useReview, type Side } from "./context";
 import { useFileText } from "./data";
 import { NewThread, ThreadCard } from "./Thread";
@@ -21,25 +22,32 @@ const PIN_ABOVE = 4000;
 
 interface Zone { key: string; side: Side; after: number; thread?: ReviewThread }
 
-export function themeName(dark: boolean) {
+export function themeName(dark: boolean): ThemeName {
   return dark ? "tab-dark" : "tab-light";
 }
 
 let themed = false;
+/**
+ * Defines tab's editor themes with Monaco's own colors, then starts loading
+ * VS Code's grammars and Dark+/Light+ (see highlight.ts), which take over
+ * once loaded.
+ */
 export function defineThemes() {
   if (themed) return;
   themed = true;
   const css = getComputedStyle(document.documentElement);
   const v = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
-  monaco.editor.defineTheme("tab-light", {
-    base: "vs", inherit: true, rules: [],
-    colors: { "editor.background": "#ffffff", "editorGutter.background": "#ffffff", "diffEditor.insertedLineBackground": "#ecf8ef", "diffEditor.removedLineBackground": "#fdefed", "diffEditor.insertedTextBackground": "#b7e8c488", "diffEditor.removedTextBackground": "#f7c2bd88", "editorLineNumber.foreground": "#a1a1aa", "diffEditor.unchangedRegionBackground": "#f4f4f6" },
-  });
-  monaco.editor.defineTheme("tab-dark", {
-    base: "vs-dark", inherit: true, rules: [],
-    colors: { "editor.background": v("--bg-raised", "#18181b"), "editorGutter.background": v("--bg-raised", "#18181b"), "diffEditor.insertedLineBackground": "#0f2417", "diffEditor.removedLineBackground": "#2a1212", "diffEditor.insertedTextBackground": "#2a6a3d55", "diffEditor.removedTextBackground": "#8a2d2655", "editorLineNumber.foreground": "#5c5c66", "diffEditor.unchangedRegionBackground": "#141417" },
-  });
+  const colors = {
+    "tab-light": { "editor.background": "#ffffff", "editorGutter.background": "#ffffff", "diffEditor.insertedLineBackground": "#ecf8ef", "diffEditor.removedLineBackground": "#fdefed", "diffEditor.insertedTextBackground": "#b7e8c488", "diffEditor.removedTextBackground": "#f7c2bd88", "editorLineNumber.foreground": "#a1a1aa", "diffEditor.unchangedRegionBackground": "#f4f4f6" },
+    "tab-dark": { "editor.background": v("--bg-raised", "#18181b"), "editorGutter.background": v("--bg-raised", "#18181b"), "diffEditor.insertedLineBackground": "#0f2417", "diffEditor.removedLineBackground": "#2a1212", "diffEditor.insertedTextBackground": "#2a6a3d55", "diffEditor.removedTextBackground": "#8a2d2655", "editorLineNumber.foreground": "#5c5c66", "diffEditor.unchangedRegionBackground": "#141417" },
+  };
+  monaco.editor.defineTheme("tab-light", { base: "vs", inherit: true, rules: [], colors: colors["tab-light"] });
+  monaco.editor.defineTheme("tab-dark", { base: "vs-dark", inherit: true, rules: [], colors: colors["tab-dark"] });
+  void setupHighlighting(colors);
 }
+
+/** Editor options every review editor shares. */
+export const SEMANTIC_OPTIONS = { "semanticHighlighting.enabled": true } as const;
 
 const GUTTER = new Set([
   monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN,
@@ -105,6 +113,7 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
       ignoreTrimWhitespace: false,
       contextmenu: true,
       theme: themeName(dark),
+      ...SEMANTIC_OPTIONS,
       scrollbar: fill
         ? { alwaysConsumeMouseWheel: false }
         : { vertical: "hidden", handleMouseWheel: true, alwaysConsumeMouseWheel: false, verticalScrollbarSize: 0, useShadows: false },
@@ -131,7 +140,7 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
     editor.current?.updateOptions({ renderSideBySide: mode === "split" });
   }, [mode]);
   useEffect(() => {
-    monaco.editor.setTheme(themeName(dark));
+    applyTheme(themeName(dark));
   }, [dark]);
 
   // Models.

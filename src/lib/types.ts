@@ -328,6 +328,20 @@ export interface LspServer {
   install_command: string | null;
   /** When nothing here can install it: what to get first. */
   needs: string | null; needs_url: string | null;
+  /** The exact npm package tab installs it from, when it does. */
+  managed: string | null;
+  /** Dependencies it needs installed first (`js`). */
+  deps: string | null;
+}
+/** What preparing a checkout's shared dependencies did. */
+export interface DepsStatus {
+  state: "ready" | "none" | "unsupported" | "error";
+  lockfile: "pnpm" | "npm" | "yarn" | null;
+  manager: string | null;
+  key: string | null;
+  /** Another checkout had already installed the same set. */
+  reused: boolean;
+  message: string;
 }
 export interface LspStarted { session: string; root_uri: string; capabilities: Record<string, unknown> }
 export interface LspEvent { session: string; method: string; params: any }
