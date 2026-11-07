@@ -302,19 +302,21 @@
 
 /* Connector updates (bottom left, above the usage meter) */
 .updater { position: relative; min-width: 0; margin-bottom: var(--space-2); }
-.updater-card { container-type: inline-size; min-width: 0; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); font-size: 10px; color: var(--fg-muted); }
+/* Same three rows in every phase, so the nav doesn't jump as an update runs. */
+.updater-card { position: relative; min-width: 0; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 14px 14px 20px; align-items: center; gap: 3px; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); font-size: 10px; color: var(--fg-muted); }
 .updater-card.failed { border-color: var(--tone-danger-fg); }
 .updater-head { display: flex; align-items: center; gap: 4px; color: var(--tone-info-fg); }
 .updater-card.done .updater-head { color: var(--tone-success-fg); }
 .updater-card.failed .updater-head { color: var(--tone-danger-fg); }
-.updater-name { flex: 1; min-width: 0; overflow-wrap: break-word; font-weight: 600; color: var(--fg); }
-@container (max-width: 80px) { .updater-head > svg { display: none; } }
-.updater-x { border: 0; background: transparent; color: var(--fg-subtle); cursor: pointer; padding: 0; line-height: 0; }
+.updater-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--fg); }
+/* "Not now" floats in the corner on hover, so the name keeps the row. */
+.updater-x { position: absolute; top: 3px; right: 3px; opacity: 0; border: 0; background: var(--bg-raised); color: var(--fg-subtle); cursor: pointer; padding: 0; line-height: 0; }
 .updater-x:hover { color: var(--fg); }
-.updater-sub { overflow-wrap: break-word; text-align: left; }
-.updater-sub.linky { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.updater-card:hover .updater-x, .updater-x:focus-visible { opacity: 1; }
+.updater-sub { min-width: 0; line-height: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.updater-sub.linky { border: 0; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
 .updater-sub.linky:hover { color: var(--fg); }
-.updater-go { width: 100%; padding: 3px 6px; border: 0; border-radius: var(--radius-sm, 6px); background: var(--accent, var(--tone-info-fg)); color: var(--accent-fg, #fff); font: inherit; font-weight: 600; cursor: pointer; }
+.updater-go { width: 100%; height: 20px; padding: 0 4px; border: 0; border-radius: var(--radius-sm, 6px); background: var(--accent, var(--tone-info-fg)); color: var(--accent-fg, #fff); font: inherit; font-weight: 600; cursor: pointer; }
 .updater-go:hover { filter: brightness(1.1); }
 .updater-bar { height: 4px; border-radius: var(--radius-pill); background: var(--bg-sunken); overflow: hidden; }
 .updater-bar > span { display: block; height: 100%; width: 40%; border-radius: inherit; background: var(--tone-info-fg); animation: updater-slide 1.1s ease-in-out infinite; }
@@ -836,7 +838,7 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
 /* Leave the status icon uncovered so its hover card can still open. */
 .ctx-rail .cc-row:has(> .status-icon) .cc-actions { right: calc(var(--space-3) + 24px); }
 .ctx-rail .cc-title { flex: 1 1 100%; }
-.ctx-rail .cc-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.ctx-rail .cc-title { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35; }
 @media (min-width: 1180px) {
   .ctx-rail { display: grid; }
   .item-pane:has(.ctx-rail) .ctx-pills { display: none; }
