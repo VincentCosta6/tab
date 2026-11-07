@@ -29,9 +29,9 @@ Tick **dry run** to do everything except create the release. The installers are 
 
 ## Secrets and variables
 
-Put them in a GitHub **environment** named `release`, so only `main` and release tags can use them:
+Put them in a GitHub **environment** named `macos - dmg`, so only `main` and release tags can use them:
 
-1. Go to Settings → **Environments** → **New environment**, and name it `release`.
+1. Go to Settings → **Environments** → **New environment**, and name it `macos - dmg`.
 2. Under **Deployment branches and tags**, choose **Selected branches and tags**. Add the branch `main` and the tag pattern `v*`.
 3. Add the entries below under **Environment secrets** and **Environment variables**.
 
