@@ -309,7 +309,18 @@
 .hub-sign-in { margin-top: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--border); cursor: default; }
 .sign-in { display: grid; gap: var(--space-2); justify-items: start; }
 .sign-in-buttons { display: grid; gap: var(--space-2); width: 100%; }
-.sign-in-buttons .btn { justify-content: center; width: 100%; }
+.sign-in-buttons .btn { justify-content: center; width: 100%; gap: 8px; font-weight: 500; }
+/* Each provider's own button style: Apple's black (white in dark mode), Google's white with its grey outline. */
+.sign-in-buttons .sign-in-apple { background: #000; color: #fff; border-color: #000; }
+.sign-in-buttons .sign-in-apple:hover:not(:disabled) { background: #1a1a1a; }
+.sign-in-buttons .sign-in-google { background: #fff; color: #1f1f1f; border-color: #747775; }
+.sign-in-buttons .sign-in-google:hover:not(:disabled) { background: #f7f8f8; }
+@media (prefers-color-scheme: dark) {
+  .sign-in-buttons .sign-in-apple { background: #fff; color: #000; border-color: #fff; }
+  .sign-in-buttons .sign-in-apple:hover:not(:disabled) { background: #f0f0f0; }
+  .sign-in-buttons .sign-in-google { background: #131314; color: #e3e3e3; border-color: #8e918f; }
+  .sign-in-buttons .sign-in-google:hover:not(:disabled) { background: #1f1f20; }
+}
 .sign-in-note { margin: 0; font-size: var(--text-sm); }
 .account-badge { display: flex; align-items: center; gap: var(--space-3); font-size: var(--text-sm); }
 .account-badge img, .account-initial { width: 32px; height: 32px; border-radius: 50%; flex: none; }
