@@ -29,6 +29,7 @@ use tab_core::workspace::{self, SearchHit, SearchQuery, Target, Workspace, Works
 use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tauri::{Emitter, Manager, State};
 
+mod dev;
 mod updates;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
@@ -1053,9 +1054,6 @@ struct McpInfo {
     url: Option<String>,
     token: String,
 }
-
-/// Where the hub listens for other devices (the next free port up from here).
-const HUB_PORT: u16 = 47_850;
 
 /// For Settings → Hub.
 #[tauri::command]
@@ -2503,14 +2501,24 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             lsp::set_tools_dir(data_dir.join("tools"));
             let config_path = app.path().app_config_dir()?.join("config.json");
-            let config = TabConfig::load(&config_path)?;
+            let mut config = TabConfig::load(&config_path)?;
+            // A dev build (`pnpm dev:tab`) has its own folders through its
+            // identifier, and its own ports here, so it runs beside the
+            // installed app.
+            let ports = dev::Ports::for_build(&app.config().identifier, config.mcp.port);
+            config.mcp.port = ports.mcp;
             // Before anything starts a process: agents, language servers
             // and workflow commands all go through it.
-            tab_core::sandbox::install(Arc::new(tab_core::sandbox::Sandbox::new(
-                config.sandbox.clone(),
-                Some(data_dir.clone()),
-                config_path.parent().map(Into::into),
-            )));
+            let identifier = &app.config().identifier;
+            let installed = dev::installed_app_dirs(identifier, &data_dir, config_path.parent());
+            tab_core::sandbox::install(Arc::new(
+                tab_core::sandbox::Sandbox::new(
+                    config.sandbox.clone(),
+                    Some(data_dir.clone()),
+                    config_path.parent().map(Into::into),
+                )
+                .guarding(installed),
+            ));
             let store = Arc::new(Store::open(&data_dir.join("tab.db"))?);
             let gateway = Arc::new(Gateway::new(store.clone()));
             // Search by meaning: follows the setting on the tab connection.
@@ -2546,6 +2554,7 @@ pub fn run() {
                 config.agent.clone(),
                 data_dir.clone(),
             );
+            dev::report_status(hub.clone());
             let engine: SharedEngine = Arc::new(RwLock::new(None));
             let core = Arc::new(Core {
                 store: store.clone(),
@@ -2600,7 +2609,7 @@ pub fn run() {
             tauri::async_runtime::block_on(async {
                 if let Some(h) = &work_hub {
                     h.follow(store.clone(), events.clone());
-                    match h.serve(HUB_PORT, config.mcp.token.clone()).await {
+                    match h.serve(ports.hub, config.mcp.token.clone()).await {
                         Ok(url) => tracing::info!(%url, "hub listening"),
                         Err(e) => tracing::error!(error = %e, "hub listener failed to start"),
                     }

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "tab dev",
+  "identifier": "dev.tab.dev",
+  "build": {
+    "beforeDevCommand": "pnpm dev --port 1430",
+    "devUrl": "http://localhost:1430"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "tab (dev)",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600,
+        "dragDropEnabled": false
+      }
+    ]
+  }
+}
