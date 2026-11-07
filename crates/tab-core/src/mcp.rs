@@ -179,6 +179,28 @@ fn note_json(n: &ProjectNote) -> Value {
     })
 }
 
+/// The tools an agent needs in most chats. Claude Code keeps MCP tools
+/// behind ToolSearch, where the model only sees their names and rarely
+/// loads them; these are marked to load up front so it reaches for them.
+/// The rest stay deferred, so they cost no context until needed.
+const ALWAYS_LOAD: &[&str] = &[
+    "tab_steps",
+    "tab_search",
+    "tab_get_item",
+    "tab_attach_context",
+    "tab_add_found",
+];
+
+/// Marks each tool for Claude Code: `anthropic/alwaysLoad` for the ones in
+/// [`ALWAYS_LOAD`], false for the rest. Other agents ignore `_meta`.
+fn with_load_hints(mut tools: Value) -> Value {
+    for t in tools.as_array_mut().into_iter().flatten() {
+        let always = t["name"].as_str().is_some_and(|n| ALWAYS_LOAD.contains(&n));
+        t["_meta"] = json!({ "anthropic/alwaysLoad": always });
+    }
+    tools
+}
+
 pub fn tools() -> Value {
     json!([
         {
@@ -458,7 +480,7 @@ impl McpServer {
                 "instructions": "tab is the person's work queue. Search it, read items, file what you find under Found, attach context and create tasks, and set up connections (email, GitHub, ...) for the person. When the person mentions something you don't recognise, call tab_graph_search before asking them. Leave durable facts about a project with tab_project_note."
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/list" => Ok(json!({ "tools": with_load_hints(tools()) })),
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or_default();
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -1293,6 +1315,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 21);
+        let always: Vec<&str> = list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["_meta"]["anthropic/alwaysLoad"] == true)
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(always.len(), ALWAYS_LOAD.len());
+        assert!(always.contains(&"tab_steps"));
 
         // Create a task, a ticket to find, then file it under Found on the task.
         let call = |name: &str, args: Value| json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":name,"arguments":args}});

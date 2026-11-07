@@ -353,7 +353,20 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
   useEffect(() => setToggled(null), [running]);
   const collapsed = toggled ?? !running;
   const setCollapsed = setToggled;
-  const todos = agentSteps(messages, results);
+  const plan = agentSteps(messages, results);
+  // No plan from the agent: show what it's doing this turn as steps instead,
+  // the last few tool calls with done/doing marks, so there's always something to follow.
+  const activity: Todo[] = [];
+  if (!plan.length && running) {
+    let turn = 0;
+    for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { turn = i + 1; break; }
+    for (const m of messages.slice(turn)) {
+      if (m.kind !== "tool" || isStepTool(m.meta?.tool) || m.meta?.tool === "AskUserQuestion") continue;
+      activity.push({ content: m.content.replace(/^mcp__tab__/, "tab: ").split("\n")[0], status: results.has(m.id) ? "completed" : "in_progress" });
+    }
+  }
+  const earlier = Math.max(0, activity.length - 5);
+  const todos = plan.length ? plan : activity.slice(-5);
   let step = "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -366,17 +379,19 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
   }
   if (!running && !todos.length) return null;
   const done = todos.filter((t) => t.status === "completed").length;
-  const active = todos.find((t) => t.status === "in_progress");
+  const active = plan.find((t) => t.status === "in_progress");
   const label = active ? active.activeForm || active.content : step || "Working";
+  const count = plan.length ? `${done} of ${plan.length}` : activity.length ? `${activity.length} tool call${activity.length > 1 ? "s" : ""}` : "";
   return (
     <div className={cx("progress-bar", running && "running")}>
       <button className="progress-head" onClick={() => todos.length && setCollapsed(!collapsed)} aria-expanded={!collapsed}>
         {running ? <span className="dots"><i /><i /><i /></span> : <Icon name="check" size={12} />}
         <span className="progress-label">{running ? (collapsed || !todos.length ? label : "Working") : "Done"}</span>
-        {todos.length > 0 && <span className="progress-count">{done} of {todos.length}</span>}
+        {count && <span className="progress-count">{count}</span>}
       </button>
       {todos.length > 0 && !collapsed && (
-        <ul className="progress-list">
+        <ul className={cx("progress-list", !plan.length && "activity")}>
+          {earlier > 0 && <li className="progress-earlier">{earlier} earlier</li>}
           {todos.map((t, i) => (
             <li key={i} className={t.status}>
               <span className={cx("step-mark", t.status, !running && "still")}>{t.status === "completed" && <Icon name="check" size={9} />}</span>
