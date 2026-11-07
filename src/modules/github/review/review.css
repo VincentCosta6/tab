@@ -163,7 +163,15 @@
 .rv-hovercard .bad svg { color: var(--danger, #cf222e); }
 .rv-hovercard .warn svg { color: var(--warning, #9a6700); }
 .rv-hovercard .good { display: flex; gap: 6px; align-items: center; color: var(--success, #1a7f37); }
-.rv-btn-merge:not(:disabled) { background: var(--tone-accent-fg, #8250df); border-color: transparent; }
+/* GitHub's green merge button, light and dark. */
+.btn.rv-btn-merge { background: #1f883d; border-color: rgb(31 35 40 / 0.15); color: #fff; }
+.btn.rv-btn-merge:hover:not(:disabled) { background: #1a7f37; }
+.btn.rv-btn-merge:active:not(:disabled) { background: #187733; }
+@media (prefers-color-scheme: dark) {
+  .btn.rv-btn-merge { background: #238636; border-color: rgb(240 246 252 / 0.1); }
+  .btn.rv-btn-merge:hover:not(:disabled) { background: #29903b; }
+  .btn.rv-btn-merge:active:not(:disabled) { background: #2e9a40; }
+}
 
 /* Combined changes */
 .rv-stack { position: relative; height: 100%; overflow: auto; padding: var(--space-3) var(--space-4) 40vh; background: var(--bg); }
