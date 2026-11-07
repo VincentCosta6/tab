@@ -276,7 +276,11 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
     <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null }}>
     <div className="transcript" ref={box} onScroll={(e) => { const el = e.currentTarget; stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}>
       <div className="transcript-head"><AgentStatus chat={chat} /></div>
-      {messages.map((m) => (m.kind === "tool_result" && paired.has(m) ? null : <MessageView key={m.id} m={m} result={results.get(m.id)} onSend={onSend} />))}
+      {groupTools(messages, paired).map((g) =>
+        Array.isArray(g)
+          ? <ToolGroup key={g[0].id} calls={g} results={results} />
+          : <MessageView key={g.id} m={g} result={results.get(g.id)} onSend={onSend} />,
+      )}
       {stream && (
         <div className="msg msg-assistant streaming">
           <Markdown text={stream} />
@@ -293,6 +297,10 @@ interface Todo { content: string; status: string; activeForm?: string }
 
 const TODO_TOOLS = new Set(["TodoWrite", "todowrite"]);
 const TASK_TOOLS = new Set(["TaskCreate", "TaskUpdate"]);
+/** tab's own step tool (mcp__tab__tab_steps in Claude Code, tab_tab_steps in opencode). */
+const isStepsTool = (tool?: string) => !!tool && /(^|_)tab_steps$/.test(tool);
+/** Tools that only update the step list: shown in the step card, not as rows. */
+const isStepTool = (tool?: string) => !!tool && (isStepsTool(tool) || TODO_TOOLS.has(tool) || TASK_TOOLS.has(tool) || tool === "TaskList" || tool === "TaskGet");
 
 /**
  * The agent's step list, from whichever todo tool it uses: TodoWrite
@@ -305,6 +313,10 @@ function agentSteps(messages: SessionMessage[], results: Map<number, SessionMess
   for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { turn = i + 1; break; }
   for (let i = messages.length - 1; i >= turn; i--) {
     const m = messages[i];
+    if (m.kind === "tool" && isStepsTool(m.meta?.tool)) {
+      const steps = m.meta?.input?.steps;
+      return Array.isArray(steps) ? steps.filter((t) => t && typeof t.title === "string").map((t) => ({ content: t.title, status: String(t.status ?? "pending") })) : [];
+    }
     if (m.kind === "tool" && TODO_TOOLS.has(m.meta?.tool)) {
       const todos = m.meta?.input?.todos;
       return Array.isArray(todos) ? todos.filter((t) => t && typeof t.content === "string") : [];
@@ -348,8 +360,8 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
     if (m.role === "user") break; // only this turn's work
     if (m.kind !== "tool") continue;
     const tool = m.meta?.tool;
-    if (TODO_TOOLS.has(tool) || TASK_TOOLS.has(tool) || tool === "TaskList" || tool === "TaskGet" || tool === "AskUserQuestion") continue;
-    step = m.content.replace(/^mcp__tab__/, "tab: ");
+    if (isStepTool(tool) || tool === "AskUserQuestion") continue;
+    step = m.content.replace(/^mcp__tab__/, "tab: ").split("\n")[0];
     break;
   }
   if (!running && !todos.length) return null;
@@ -373,10 +385,59 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
           ))}
         </ul>
       )}
-      {running && step && <div className="progress-step">{step}</div>}
+      {running && step && active && <div className="progress-step">{step}</div>}
     </div>
   );
 }
+
+/** Tool calls the person sees as rows (not step updates or questions, which have their own cards). */
+const isRow = (m: SessionMessage) => m.kind === "tool" && !isStepTool(m.meta?.tool) && m.meta?.tool !== "AskUserQuestion";
+
+/**
+ * The transcript with runs of back-to-back tool calls gathered into one
+ * group each, so a long stretch of work reads as one line, not fifty.
+ * Step updates and paired results inside a run don't break it.
+ */
+function groupTools(messages: SessionMessage[], paired: Set<SessionMessage>): (SessionMessage | SessionMessage[])[] {
+  const out: (SessionMessage | SessionMessage[])[] = [];
+  let run: SessionMessage[] | null = null;
+  for (const m of messages) {
+    if (m.kind === "tool_result" && paired.has(m)) continue;
+    if (m.kind === "tool" && isStepTool(m.meta?.tool)) continue;
+    if (isRow(m)) {
+      if (!run) out.push((run = []));
+      run.push(m);
+      continue;
+    }
+    run = null;
+    out.push(m);
+  }
+  return out;
+}
+
+/** A run of tool calls: one line saying how many and which, opening to each call. */
+function ToolGroup({ calls, results }: { calls: SessionMessage[]; results: Map<number, SessionMessage> }) {
+  if (calls.length === 1) return <ToolRow m={calls[0]} result={results.get(calls[0].id)} />;
+  const names = [...new Set(calls.map((c) => toolName(c.meta?.tool ?? c.content)))];
+  const failed = calls.filter((c) => results.get(c.id)?.meta?.is_error).length;
+  return (
+    <details className={cx("msg-tool msg-tool-group", failed > 0 && "failed")}>
+      <summary>
+        <Icon name="terminal" size={12} />
+        <span className="msg-tool-name">
+          {calls.length} tool calls · {names.slice(0, 4).join(", ")}{names.length > 4 ? ` +${names.length - 4}` : ""}
+        </span>
+        {failed > 0 && <span className="msg-tool-flag">{failed} failed</span>}
+      </summary>
+      <div className="msg-tool-list">
+        {calls.map((c) => <ToolRow key={c.id} m={c} result={results.get(c.id)} />)}
+      </div>
+    </details>
+  );
+}
+
+/** A tool's short name: `mcp__tab__tab_search` reads as tab_search. */
+const toolName = (t: string) => t.replace(/^mcp__[^_]+(?:_[^_]+)*?__/, "").split(":")[0];
 
 /**
  * One tool call: a single line (first line of the command, cut to fit),
@@ -420,7 +481,7 @@ function MessageView({ m, result, onSend }: { m: SessionMessage; result?: Sessio
     return <QuestionCard m={m} answered={false} onSend={onSend} />;
   }
   // Step-list updates show in the pinned step card, not as rows.
-  if (m.kind === "tool" && (TODO_TOOLS.has(m.meta?.tool) || TASK_TOOLS.has(m.meta?.tool) || m.meta?.tool === "TaskList" || m.meta?.tool === "TaskGet")) return null;
+  if (m.kind === "tool" && isStepTool(m.meta?.tool)) return null;
   if (m.kind === "tool")
     return (
       <ToolRow m={m} result={result} />
