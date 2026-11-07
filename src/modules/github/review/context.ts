@@ -28,6 +28,17 @@ export interface ReviewCtx {
 
 export const Ctx = createContext<ReviewCtx | null>(null);
 
+/** A pinned diff editor that follows the page as it scrolls. */
+export interface StackFollower {
+  /** Measures layout. Every follower reads before any of them writes. */
+  read: () => void;
+  /** Applies what `read` measured (scrolls its editor). */
+  write: () => void;
+}
+/** The combined changes view's one scroll listener, which pinned diffs join. */
+export interface StackScroll { add: (f: StackFollower) => () => void }
+export const StackCtx = createContext<StackScroll | null>(null);
+
 export function useReview() {
   const c = useContext(Ctx);
   if (!c) throw new Error("useReview outside the review workspace");

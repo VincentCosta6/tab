@@ -5,14 +5,19 @@
 // Each one reserves space with an empty view zone, and the real card is a
 // normal React element in an overlay positioned over that zone.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { PrFile, ReviewThread } from "../../../lib/types";
 import { baseUri, ensureModel, headUri, monaco } from "../monaco";
-import { useReview, type Side } from "./context";
+import { StackCtx, useReview, type Side } from "./context";
 import { useFileText } from "./data";
 import { NewThread, ThreadCard } from "./Thread";
 
 const ZONE_PAD = 10;
+// Stacked diffs up to this tall (~200 lines) render whole and scroll natively
+// with the page: no JS on scroll, no lag between page and code. Taller ones pin
+// a viewport-sized editor and feed it the page's offset, so Monaco only ever
+// renders the visible lines however big the file is.
+const PIN_ABOVE = 4000;
 
 interface Zone { key: string; side: Side; after: number; thread?: ReviewThread }
 
@@ -56,11 +61,13 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
   const wrap = useRef<HTMLDivElement>(null);
   const editor = useRef<monaco.editor.IStandaloneDiffEditor | null>(null);
   // Stacked mode: the page scrolls, never the editor. `height` is the whole
-  // diff's height (so the page scrollbar is honest); the editor itself is only
-  // as tall as the scroll area (`viewH`), pinned in view, and fed the page's
-  // scroll offset so Monaco renders just the visible lines however big the file.
+  // diff's height (so the page scrollbar is honest). A short diff's editor is
+  // that tall too. A long one's (`pinned`) is only as tall as the scroll area
+  // (`viewH`), pinned in view, and fed the page's scroll offset.
+  const stack = useContext(StackCtx);
   const [height, setHeight] = useState(fill ? 0 : (initialHeight ?? 120));
   const [viewH, setViewH] = useState(fill ? 0 : Math.min(initialHeight ?? 120, 900));
+  const pinned = !fill && !!stack && height > PIN_ABOVE;
   const expectedTop = useRef(0);
   const [ready, setReady] = useState(0);
 
@@ -152,35 +159,41 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready, fill]);
 
-  // The editor is as tall as the scroll area, no taller, and follows the page.
+  // A pinned editor is as tall as the scroll area, no taller, and follows the page.
   useEffect(() => {
     const ed = editor.current;
     const root = wrap.current?.closest<HTMLElement>(".rv-stack");
-    if (fill || !ed || !root) return;
+    if (!pinned || !stack || !ed || !root) return;
     const modified = ed.getModifiedEditor();
     // The file's header is sticky and covers the top of the scroll area; the
-    // editor pins just below it, so it only gets the space that's left.
-    const headH = () => wrap.current?.closest(".rv-stack-item")?.querySelector<HTMLElement>(":scope > .rv-file-head")?.offsetHeight ?? 0;
+    // editor pins just below it, so it only gets the space that's left. Its
+    // height and the scroll area's only change on resize, so measure them then,
+    // never per scroll.
+    let head = 0;
+    let rootH = 0;
+    let off = -1;
     const size = () => {
-      const head = headH();
+      head = wrap.current?.closest(".rv-stack-item")?.querySelector<HTMLElement>(":scope > .rv-file-head")?.offsetHeight ?? 0;
+      rootH = root.clientHeight;
       wrap.current?.style.setProperty("--rv-head", `${head}px`);
-      setViewH(Math.max(120, Math.min(height, root.clientHeight - head)));
+      setViewH(Math.max(120, Math.min(height, rootH - head)));
     };
-    const follow = () => {
+    const read = () => {
       const w = wrap.current;
-      if (!w) return;
-      const head = headH();
-      const hostH = Math.min(height, Math.max(120, root.clientHeight - head));
+      if (!w) return void (off = -1);
+      const hostH = Math.min(height, Math.max(120, rootH - head));
       // Where the pinned editor sits on screen is where its first visible line is.
-      const off = Math.max(0, Math.min(height - hostH, root.getBoundingClientRect().top + head - w.getBoundingClientRect().top));
-      if (Math.abs(modified.getScrollTop() - off) > 0.5) {
-        expectedTop.current = off;
-        modified.setScrollTop(off);
-      }
+      off = Math.max(0, Math.min(height - hostH, root.getBoundingClientRect().top + head - w.getBoundingClientRect().top));
     };
+    const write = () => {
+      if (off < 0 || Math.abs(modified.getScrollTop() - off) <= 0.5) return;
+      expectedTop.current = off;
+      modified.setScrollTop(off);
+    };
+    const follow = () => { read(); write(); };
     size();
     follow();
-    root.addEventListener("scroll", follow, { passive: true });
+    const leave = stack.add({ read, write });
     const ro = new ResizeObserver(() => { size(); follow(); });
     ro.observe(root);
     // Scrolls the editor does on its own (keyboard, find, go to definition) move the page instead.
@@ -199,12 +212,14 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
     };
     host_?.addEventListener("wheel", wheel, { capture: true, passive: false });
     return () => {
-      root.removeEventListener("scroll", follow);
+      leave();
       ro.disconnect();
       sub.dispose();
       host_?.removeEventListener("wheel", wheel, { capture: true });
+      // Back to a whole-height editor if it stops being pinned.
+      if (editor.current === ed) modified.setScrollTop(0);
     };
-  }, [ready, fill, height]);
+  }, [ready, pinned, stack, height]);
 
   // Reveal a line (from search, the explorer, or go to definition).
   useEffect(() => {
@@ -329,6 +344,15 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
   const refs = useRef(new Map<string, (el: HTMLDivElement | null) => (() => void) | void>());
 
   const sync = useRef(() => {});
+  // Scroll, layout and zone events each ask for a re-sync; run it once per frame.
+  const syncFrame = useRef(0);
+  const scheduleSync = useRef(() => {
+    syncFrame.current ||= requestAnimationFrame(() => {
+      syncFrame.current = 0;
+      sync.current();
+    });
+  }).current;
+  useEffect(() => () => cancelAnimationFrame(syncFrame.current), []);
   sync.current = () => {
     const w = wrap.current;
     const ed = editor.current;
@@ -388,20 +412,20 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
         domNode: dom,
         showInHiddenAreas: true,
         suppressMouseDown: true,
-        onDomNodeTop: () => requestAnimationFrame(() => sync.current()),
+        onDomNodeTop: scheduleSync,
       };
       let id = "";
       e.changeViewZones((acc) => (id = acc.addZone(zone)));
       zoneState.current.set(z.key, { id, zone, side: z.side, dom });
     }
-    requestAnimationFrame(() => sync.current());
-  }, [zones, loaded, ready, mode]);
+    scheduleSync();
+  }, [zones, loaded, ready, mode, scheduleSync]);
 
   // Keep the overlay in place as the editor scrolls, lays out, or resizes.
   useEffect(() => {
     const ed = editor.current;
     if (!ed) return;
-    const s = () => requestAnimationFrame(() => sync.current());
+    const s = scheduleSync;
     const subs = [ed.getModifiedEditor().onDidScrollChange(s), ed.getOriginalEditor().onDidScrollChange(s), ed.getModifiedEditor().onDidLayoutChange(s), ed.onDidUpdateDiff(s)];
     const ro = new ResizeObserver(s);
     if (wrap.current) ro.observe(wrap.current);
@@ -409,7 +433,7 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
       subs.forEach((x) => x.dispose());
       ro.disconnect();
     };
-  }, [ready]);
+  }, [ready, scheduleSync]);
 
   // Cards report their height so their zones can match it.
   const measure = (key: string) => {
@@ -436,7 +460,7 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
       z.zone.heightInPx = h;
       const e = z.side === "LEFT" ? ed.getOriginalEditor() : ed.getModifiedEditor();
       e.changeViewZones((acc) => acc.layoutZone(z.id));
-      requestAnimationFrame(() => sync.current());
+      scheduleSync();
     });
     ro.observe(el);
     sync.current();
@@ -449,8 +473,8 @@ export function FileDiff({ file, fill, reveal, initialHeight, onHeight }: { file
     <div className={fill ? "rv-diff rv-diff-fill" : "rv-diff"}>
       {loadError && <p className="rv-error rv-pad">Couldn't load this file: {String(loadError)}</p>}
       {!loaded && !loadError && <div className="rv-diff-loading skeleton" style={{ height: fill ? "100%" : 120 }} />}
-      <div ref={wrap} className={fill ? "rv-diff-wrap" : "rv-diff-wrap rv-diff-stacked"} style={fill ? undefined : { height }}>
-        <div ref={host} className="rv-diff-host" style={fill ? undefined : { height: Math.min(height, viewH) }} />
+      <div ref={wrap} className={fill ? "rv-diff-wrap" : pinned ? "rv-diff-wrap rv-diff-stacked rv-diff-pinned" : "rv-diff-wrap rv-diff-stacked"} style={fill ? undefined : { height }}>
+        <div ref={host} className="rv-diff-host" style={fill ? undefined : { height: pinned ? Math.min(height, viewH) : height }} />
         <div className="rv-overlay">
           {zones.map((z) => (
             <div key={z.key} ref={measure(z.key)} className="rv-overlay-item" style={{ visibility: "hidden" }}>
