@@ -21,7 +21,7 @@ import { Timeline } from "./Timeline";
 const ReviewView = lazy(() => import("../github/review/Workspace"));
 
 /** An item: header and actions, its rolled-up context, and a chat with an agent about it. */
-export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: string) => void; onSelect: (id: string) => void }) {
+export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: string, done?: boolean) => void; onSelect: (id: string) => void }) {
   const { kind } = useApp();
   const qc = useQueryClient();
   const { data: item } = useItem(id);
@@ -41,11 +41,11 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
 
   const pull = item ? parsePullUrl(item.url) : null;
 
-  const settle = (id: string) => {
-    onActed(id);
+  const settle = (id: string, done = false) => {
+    onActed(id, done);
     qc.invalidateQueries({ queryKey: keys.allItems });
   };
-  const done = async (i: QueueItem) => (settle(i.id), await api.markDone(i.id));
+  const done = async (i: QueueItem) => (settle(i.id, true), await api.markDone(i.id));
   const snooze = async (i: QueueItem, minutes: number) => (setSnoozeOpen(false), settle(i.id), await api.snooze(i.id, minutes));
   const move = async (i: QueueItem, projectId: string | null) => {
     const next = await api.itemSetProject(i.id, projectId);
