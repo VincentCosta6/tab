@@ -1120,10 +1120,12 @@ pub async fn link_summary(
             let summary = pull_summary(pr);
             // "unknown" means GitHub is still working out mergeability; don't
             // keep that, so the next look gets the real state.
+            // Likewise while CI is running: the card is waiting for it to finish.
             if summary
                 .merge_state
                 .as_deref()
                 .is_some_and(|m| m != "unknown")
+                && summary.checks.as_deref() != Some("pending")
             {
                 LINK_CACHE
                     .lock()

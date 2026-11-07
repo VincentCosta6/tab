@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, onWorkspaceProgress } from "../../../lib/api";
 import { keys } from "../../../lib/query";
 import type { PrRef, PullReview, ReviewAction, ReviewWorkspace, SearchHit, SearchQuery, WorkspaceProgress } from "../../../lib/types";
-import { applyLocal } from "./model";
+import { applyLocal, runState } from "./model";
 
 export function usePull(repo: string, number: number, sample: boolean) {
   return useQuery({
@@ -15,7 +15,23 @@ export function usePull(repo: string, number: number, sample: boolean) {
     queryFn: () => api.githubPull(repo, number, sample),
     // Show the cached PR at once, then refresh it on every open.
     refetchOnMount: "always",
+    refetchOnWindowFocus: true,
+    // Keep the merge box current while the PR is open in front of you: fast
+    // while CI runs or GitHub is still working out mergeability, slower once
+    // it's settled, and not at all once it's merged or closed. Only while the
+    // window is showing (react-query skips background intervals).
+    refetchInterval: (q) => pullPollMs(q.state.data),
   });
+}
+
+/** How often to re-read an open PR, or false to stop. */
+export function pullPollMs(pr: PullReview | undefined): number | false {
+  if (!pr || pr.sample || pr.state !== "open") return false;
+  const unknown = pr.merge_state === "unknown" || pr.mergeable === "unknown";
+  if (unknown) return 5_000;
+  const ciRunning = pr.checks.state === "pending" || pr.checks.state === "expected" || pr.checks.runs.some((r) => runState(r) === "pending");
+  if (ciRunning) return 15_000;
+  return 60_000;
 }
 
 const prRef = (pr: PullReview): PrRef => ({
@@ -45,7 +61,7 @@ export function useActions(pr: PullReview | undefined) {
         // Viewed marks don't change anything else; skip the refetch.
         if (action.type !== "mark_viewed" && action.type !== "mark_viewed_many") {
           // Context chips and cards show this PR's status too.
-          void qc.invalidateQueries({ queryKey: ["link-summary", `https://github.com/${pr.repo}/pull/${pr.number}`] });
+          void qc.invalidateQueries({ queryKey: ["link-preview", `https://github.com/${pr.repo}/pull/${pr.number}`] });
           await qc.invalidateQueries({ queryKey: key });
         }
       };

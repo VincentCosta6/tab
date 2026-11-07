@@ -13,7 +13,7 @@ export function useLinkPreview(url: string | null | undefined, enabled = true) {
     queryKey: ["link-preview", link?.canonical ?? ""],
     queryFn: () => link!.preview!(),
     enabled: enabled && !!link?.preview,
-    staleTime: 120_000,
+    staleTime: 30_000,
     retry: false,
     // Coming back to the window refreshes anything older than staleTime, so
     // a chip doesn't keep saying "Conflicts" after the branch was fixed.
@@ -22,7 +22,11 @@ export function useLinkPreview(url: string | null | undefined, enabled = true) {
     // mergeability lazily); ask again shortly so the badge ends up right.
     // Otherwise keep checking quietly (only while the window is showing)
     // until the thing is final, since a chat can stay open for hours.
-    refetchInterval: (q) => (q.state.data?.settling ? 5_000 : q.state.data?.final ? false : 60_000),
+    refetchInterval: (q) => {
+      const d = q.state.data;
+      if (d?.final) return false;
+      return d?.settling ? 5_000 : d?.active ? 15_000 : 60_000;
+    },
   });
   return { link, sum: data };
 }
