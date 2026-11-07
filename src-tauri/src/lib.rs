@@ -340,7 +340,7 @@ async fn image_read(path: String) -> CmdResult<tauri::ipc::Response> {
 /// text. Other files open in their default app instead.
 const VIEWABLE: &[&str] = &[
     "pdf", "svg", "txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "log", "yaml", "yml", "toml", "xml",
-    "html", "css", "js", "jsx", "ts", "tsx", "mjs", "cjs", "rs", "py", "rb", "go", "java", "kt", "swift", "c",
+    "html", "htm", "css", "js", "jsx", "ts", "tsx", "mjs", "cjs", "rs", "py", "rb", "go", "java", "kt", "swift", "c",
     "h", "cc", "cpp", "hpp", "cs", "sh", "zsh", "bash", "sql", "ini", "env", "conf", "diff", "patch", "lua",
     "php", "vue", "svelte", "dart", "scala", "ex", "exs", "r", "tex",
 ];
