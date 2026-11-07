@@ -1080,7 +1080,12 @@ async fn agent_activity(state: State<'_, AppState>) -> CmdResult<Vec<serde_json:
         if !seen.insert(item.clone()) {
             continue;
         }
-        let waiting = !state.hub.pending_approvals(&s.id).is_empty();
+        // A chat marked done no longer asks for the person: keep it off the
+        // Work badge and the list's agent dots.
+        if matches!(state.store.get(&item), Ok(Some(i)) if i.state == ItemState::Done) {
+            continue;
+        }
+        let waiting =!state.hub.pending_approvals(&s.id).is_empty();
         let status = if waiting {
             "needs_input".to_string()
         } else {
