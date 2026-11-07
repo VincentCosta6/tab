@@ -128,10 +128,19 @@ export function WorkTab() {
     [visible, selected],
   );
 
-  /** After acting on an item, select the next one so triage keeps flowing. */
+  /**
+   * After acting on an item, select another so triage keeps flowing. Done
+   * jumps to the top of the queue, or a new chat once the queue is empty;
+   * other actions (snooze, reopen) step to the neighbouring row.
+   */
   const advance = useCallback(
-    (id: string) => {
+    (id: string, done = false) => {
       if (id !== selected) return;
+      if (done) {
+        const top = visible.find((i) => i.id !== id);
+        setSelected(top?.id ?? NEW);
+        return;
+      }
       const idx = visible.findIndex((i) => i.id === id);
       const next = visible[idx + 1] ?? visible[idx - 1];
       setSelected(next?.id ?? null);
@@ -142,7 +151,7 @@ export function WorkTab() {
   // Optimistic: the row leaves the list right away; the engine event confirms.
   const act = useCallback(
     async (item: QueueItem, action: "done" | "reopen" | { snooze: number }) => {
-      advance(item.id);
+      advance(item.id, action === "done");
       qc.setQueriesData<QueueItem[]>({ queryKey: keys.allItems }, (xs) => xs?.filter((x) => x.id !== item.id));
       if (action === "done") await api.markDone(item.id);
       else if (action === "reopen") await api.reopen(item.id);
