@@ -5,7 +5,7 @@ import { NOT_HANDLED, withActions, workflowMock } from "./mock-workflows";
 // The same harness metadata the app ships.
 import harnessData from "../../crates/tab-core/src/agents/harnesses.json";
 import type {
-  Account, AgentKind, GhLoginCode, GhStatus, Harness, LspServer, ModelOption,
+  Account, AgentKind, CloudHub, GhLoginCode, GhStatus, Harness, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
@@ -153,6 +153,14 @@ let config: TabConfig = {
 let mockAccount: Account | null = typeof location !== "undefined" && new URLSearchParams(location.search).has("account")
   ? { user_id: "mock-google", email: "you@gmail.com", name: "You", avatar_url: null, provider: "google" }
   : null;
+
+let mockHub: CloudHub | null = null;
+let mockHubFailed = false;
+const mockCloudHub = (state: CloudHub["state"]): CloudHub => ({
+  state, hub_id: state === "none" ? null : "5e7ecedf5a07a215de6ad0cc9d6ca708", region: state === "none" ? null : "wnam",
+  ready_at: state === "ready" ? Math.floor(Date.now() / 1000) : null, error: null,
+  plan: { plan: "trial", ends_at: Math.floor(Date.now() / 1000) + 14 * 86400, active: true },
+});
 
 const listeners = new Set<(e: EngineEvent) => void>();
 const emit = (e: EngineEvent) => listeners.forEach((l) => l(e));
@@ -432,7 +440,22 @@ export const mockApi = {
           return mockAccount;
         }
         case "account_cancel_sign_in": return null;
-        case "account_sign_out": mockAccount = null; return null;
+        case "account_sign_out": mockAccount = null; mockHub = null; return null;
+        case "cloud_hub_status":
+          if (!mockAccount) throw { code: "not_signed_in", message: "sign in to use tab cloud" };
+          return mockHub ?? mockCloudHub("none");
+        case "cloud_hub_set_up": {
+          if (!mockAccount) throw { code: "not_signed_in", message: "sign in to use tab cloud" };
+          // `?hub=fail` fails the first attempt, `?hub=plan` acts as if the trial ended.
+          const q = new URLSearchParams(location.search).get("hub");
+          await new Promise((r) => setTimeout(r, 2500));
+          if (q === "plan") throw { code: "plan_required", message: "Your tab cloud trial has ended. Choose a plan at tabqueue.com to keep using it." };
+          if (q === "fail" && !mockHubFailed) {
+            mockHubFailed = true;
+            return (mockHub = { ...mockCloudHub("failed"), error: "tab couldn't finish setting up your hub. Try again in a moment." });
+          }
+          return (mockHub = mockCloudHub("ready"));
+        }
         case "hub_status": {
           const started = new Date(Date.now() - 3 * 3600_000).toISOString();
           return {

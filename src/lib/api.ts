@@ -6,7 +6,7 @@ import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
-  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus,
+  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, CloudHub,
 } from "./types";
 import { mockApi } from "./mock";
 
@@ -126,6 +126,10 @@ export const api = {
   accountSignIn: (provider: "apple" | "google") => call<Account>("account_sign_in", { provider }),
   accountCancelSignIn: () => call<void>("account_cancel_sign_in"),
   accountSignOut: () => call<void>("account_sign_out"),
+  /** Where the signed-in person's private cloud hub is. Rejects with a CloudFailure. */
+  cloudHubStatus: () => call<CloudHub>("cloud_hub_status"),
+  /** Sets up (or retries) their private hub; resolves once it's ready or failed. Rejects with a CloudFailure. */
+  cloudHubSetUp: () => call<CloudHub>("cloud_hub_set_up"),
   storageClean: () => call<Swept>("storage_clean"),
   /** One checkout, or every one when no repo is given. */
   storageRemoveCheckouts: (repo?: string, number?: number) =>

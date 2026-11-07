@@ -375,6 +375,53 @@ async fn exchange(
     session_from(&body, chrono::Utc::now().timestamp())
 }
 
+/// A token this close to expiring is refreshed before use, in seconds.
+const REFRESH_AHEAD: i64 = 60;
+
+/// Trades the refresh token for a new session. Supabase rotates the refresh
+/// token, so the result must be saved.
+pub async fn refresh(cfg: &SupabaseConfig, session: &Session) -> Result<Session, SignInError> {
+    let res = reqwest::Client::new()
+        .post(format!(
+            "{}/auth/v1/token?grant_type=refresh_token",
+            cfg.url
+        ))
+        .header("apikey", &cfg.anon_key)
+        .json(&serde_json::json!({ "refresh_token": session.refresh_token }))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| SignInError::Network(e.to_string()))?;
+    let status = res.status();
+    let body = res
+        .text()
+        .await
+        .map_err(|e| SignInError::Network(e.to_string()))?;
+    if !status.is_success() {
+        return Err(SignInError::Provider(
+            "your sign-in has expired. Sign in again.".into(),
+        ));
+    }
+    session_from(&body, chrono::Utc::now().timestamp())
+}
+
+/// The saved session's access token, refreshed (and saved) first if it's
+/// about to expire. `None` when nobody's signed in.
+pub async fn access_token(
+    cfg: &SupabaseConfig,
+    path: &Path,
+) -> Result<Option<String>, SignInError> {
+    let Some(session) = load(path) else {
+        return Ok(None);
+    };
+    if session.expires_at - chrono::Utc::now().timestamp() > REFRESH_AHEAD {
+        return Ok(Some(session.access_token));
+    }
+    let fresh = refresh(cfg, &session).await?;
+    save(path, &fresh)?;
+    Ok(Some(fresh.access_token))
+}
+
 /// Ends the session on Supabase too. Best effort: the local session goes
 /// either way.
 pub async fn revoke(cfg: &SupabaseConfig, session: &Session) {

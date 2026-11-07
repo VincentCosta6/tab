@@ -22,6 +22,7 @@
 
 pub mod account;
 pub mod agents;
+pub mod cloud;
 pub mod config;
 pub mod connector;
 pub mod connectors;
