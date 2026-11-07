@@ -4,14 +4,15 @@ import { Badge, ScorePill, cx } from "../../design/components";
 import { Blocks } from "../../design/blocks";
 import { Brand, SourceGlyph, brandFor } from "../../design/brands";
 import { Icon } from "../../design/icons";
+import { StatusIcon } from "../../design/StatusIcon";
 import { api } from "../../lib/api";
-import { openLink, parseLink } from "../../lib/links";
+import { openLink, parseLink, type LinkPreview } from "../../lib/links";
 import { useLinkPreview } from "../../lib/linkPreview";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useItemContext, usePreview } from "../../lib/hooks";
 import { keys } from "../../lib/query";
-import type { ContextEntry, QueueItem, Tone } from "../../lib/types";
+import type { ContextEntry, QueueItem, Status } from "../../lib/types";
 
 /**
  * Everything around an item, rolled up into one bar above the chat. Open it
@@ -117,11 +118,11 @@ export function IconButton({ icon, label, onClick, active }: { icon: string; lab
   );
 }
 
-const urgencyLabel: Record<string, { label: string; tone: Tone }> = {
-  now: { label: "Now", tone: "danger" },
-  today: { label: "Today", tone: "warning" },
-  this_week: { label: "This week", tone: "info" },
-  whenever: { label: "Whenever", tone: "neutral" },
+const urgencyLabel: Record<string, Status> = {
+  now: { label: "Now", tone: "danger", icon: "zap" },
+  today: { label: "Today", tone: "warning", icon: "clock" },
+  this_week: { label: "This week", tone: "info", icon: "clock" },
+  whenever: { label: "Whenever", tone: "neutral", icon: "dot" },
 };
 
 /**
@@ -157,12 +158,12 @@ function ContextChip({ entry: e, onSelect }: { entry: ContextEntry; onSelect: (i
   );
 }
 
-function statusOf(item: QueueItem): { label: string; tone: Tone } | null {
+function statusOf(item: QueueItem): Status | null {
   const pr = (item.metadata as { pr_state?: string } | null)?.pr_state;
-  if (pr === "draft") return { label: "Draft", tone: "neutral" };
-  if (item.state === "done") return { label: "Done", tone: "success" };
-  if (item.state === "snoozed") return { label: item.snoozed_until ? `Snoozed ${timeUntil(item.snoozed_until)}` : "Snoozed", tone: "neutral" };
-  if (pr === "open") return { label: "Open", tone: "success" };
+  if (pr === "draft") return { label: "Draft", tone: "neutral", icon: "git-pull-request-draft" };
+  if (item.state === "done") return { label: "Done", tone: "success", icon: "check-circle" };
+  if (item.state === "snoozed") return { label: item.snoozed_until ? `Snoozed ${timeUntil(item.snoozed_until)}` : "Snoozed", tone: "neutral", icon: "clock" };
+  if (pr === "open") return { label: "Open", tone: "success", icon: "git-pull-request" };
   const u = item.ranking?.urgency;
   return u ? urgencyLabel[u] ?? null : null;
 }
@@ -171,12 +172,25 @@ function statusOf(item: QueueItem): { label: string; tone: Tone } | null {
  * One line of context: what it is, its title, where it's from, its status.
  * Click the title to open it; expand for the rich preview.
  */
-function Card({ glyph, type, title, subtitle, status, note, pinned, onOpen, actions, details }: {
+/** The hover card under a status: who and when, then the connector's facts (checks, review, merge). */
+function previewDetails(sum: LinkPreview | null | undefined) {
+  if (!sum) return null;
+  const meta = [sum.author && `by ${sum.author}`, sum.updated_at && `updated ${timeAgo(sum.updated_at)}`].filter(Boolean).join(" · ");
+  return (
+    <>
+      {meta && <span className="link-card-meta">{meta}</span>}
+      {!!sum.facts?.length && <dl className="link-card-facts">{sum.facts.map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>}
+    </>
+  );
+}
+
+function Card({ glyph, type, title, subtitle, status, statusDetails, note, pinned, onOpen, actions, details }: {
   glyph: React.ReactNode;
   type: string;
   title: string;
   subtitle?: string | null;
-  status?: { label: string; tone: Tone } | null;
+  status?: Status | null;
+  statusDetails?: React.ReactNode;
   note?: string | null;
   pinned?: boolean;
   onOpen?: () => void;
@@ -195,7 +209,7 @@ function Card({ glyph, type, title, subtitle, status, note, pinned, onOpen, acti
           </div>
           {(subtitle || note) && <div className="cc-sub">{[note, subtitle].filter(Boolean).join(" · ")}</div>}
         </div>
-        {status && <Badge tone={status.tone}>{status.label}</Badge>}
+        {status && <StatusIcon status={status} details={statusDetails} />}
         <div className="cc-actions">
           {pinned && <Icon name="pin" size={12} />}
           {details && <IconButton icon="chevron-down" label={open ? "Hide details" : "Details"} active={open} onClick={() => setOpen((v) => !v)} />}
@@ -218,6 +232,7 @@ export function ItemCard({ item, note, onOpen, pinned, summary, noDetails, child
       subtitle={[item.actor, item.context, timeAgo(item.occurred_at)].filter(Boolean).join(" · ")}
       note={summary ?? note}
       status={statusOf(item)}
+      statusDetails={item.ranking?.reason && <span className="link-card-meta">{item.ranking.reason}</span>}
       pinned={pinned}
       onOpen={onOpen}
       actions={children}
@@ -273,6 +288,7 @@ export function EntryCard({ entry: e, onSelect, children }: { entry: ContextEntr
       title={title}
       subtitle={subtitle}
       status={sum?.status ?? null}
+      statusDetails={previewDetails(sum)}
       note={e.summary}
       pinned={e.pinned}
       onOpen={e.url ? () => openLink(e.url!) : undefined}
