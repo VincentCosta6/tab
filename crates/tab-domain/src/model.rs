@@ -651,6 +651,8 @@ pub struct ItemContext {
 #[serde(rename_all = "snake_case")]
 pub enum AgentKind {
     ClaudeCode,
+    /// `opencode`, as the app and the store spell it.
+    #[serde(rename = "opencode", alias = "open_code")]
     OpenCode,
 }
 

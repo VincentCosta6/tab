@@ -16,6 +16,7 @@ use tab_core::live::SteerCommand;
 use tab_core::local_hub::{HubStatusView, LocalHub};
 use tab_core::lsp::{self, LspHub, ServerStatus};
 use tab_core::mcp::{EngineAccess, McpServer};
+use tab_core::model::AgentKind;
 use tab_core::model::{
     Approval, ConnectorInfo, ContextEntry, ContextSection, ItemContext, ItemState, NewContext,
     NewTask, Preview, QueueItem, Session, SessionMessage, SettingKind,
@@ -1001,6 +1002,31 @@ async fn approval_resolve(
 #[tauri::command]
 async fn detect_agents(state: State<'_, AppState>) -> CmdResult<Vec<AgentProbe>> {
     Ok(state.hub.detect().await)
+}
+
+/// Every harness tab can drive: names, icons, capabilities, install and models.
+#[tauri::command]
+fn agent_harnesses() -> Vec<tab_core::agents::catalog::Harness> {
+    tab_core::agents::catalog::harnesses().to_vec()
+}
+
+/// The models of every installed harness, for the pickers.
+#[tauri::command]
+async fn agent_models(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<tab_core::agents::catalog::ModelOption>> {
+    Ok(state.hub.models().await)
+}
+
+/// Installs a harness (npm, or its own installer). Output lines arrive as
+/// `tab://agent-upgrade` events while it runs.
+#[tauri::command]
+async fn agent_install(app: tauri::AppHandle, kind: AgentKind) -> CmdResult<()> {
+    tab_core::agents::run_install(kind, move |line| {
+        let _ = app.emit("tab://agent-upgrade", &line);
+    })
+    .await
+    .map_err(err)
 }
 
 /// The configured agent's version, the newest release and how to update it.
@@ -2244,12 +2270,23 @@ async fn save_config(state: State<'_, AppState>, config: TabConfig) -> CmdResult
 async fn set_agent_model(
     state: State<'_, AppState>,
     model: Option<String>,
+    agent: Option<AgentKind>,
+    for_new_chats: Option<bool>,
 ) -> CmdResult<TabConfig> {
     let mut current = state.config.lock().await;
     let mut next = current.clone();
-    next.agent.model = model
-        .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty());
+    // A model on another harness, picked before a chat starts, makes that
+    // harness the one new chats use.
+    if for_new_chats == Some(true)
+        && let Some(kind) = agent
+    {
+        next.agent.kind = Some(kind);
+        next.agent.model = next.agent.models.get(kind.as_str()).cloned();
+    }
+    let Some(kind) = agent.or(next.agent.kind) else {
+        return Err(err(anyhow::anyhow!("no agent is set up")));
+    };
+    next.agent.set_model(kind, model);
     next.save(&state.config_path).map_err(err)?;
     *current = next.clone();
     drop(current);
@@ -2663,6 +2700,9 @@ pub fn run() {
             review_chat_send,
             approval_resolve,
             detect_agents,
+            agent_harnesses,
+            agent_models,
+            agent_install,
             mcp_info,
             hub_status,
             gh_status,

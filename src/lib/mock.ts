@@ -2,11 +2,24 @@
 // sample data closely enough to design against.
 
 import { NOT_HANDLED, withActions, workflowMock } from "./mock-workflows";
+// The same harness metadata the app ships.
+import harnessData from "../../crates/tab-core/src/agents/harnesses.json";
 import type {
-  GhLoginCode, GhStatus, LspServer,
+  AgentKind, GhLoginCode, GhStatus, Harness, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
+
+const harnesses = harnessData as unknown as Harness[];
+let mockOpenCode = false;
+const mockModels = (): ModelOption[] => {
+  const claude = (harnessData[0].models as { id: string; label: string; common?: boolean }[]).map((m) => ({ agent: "claude_code" as AgentKind, id: m.id, label: m.label, common: !!m.common }));
+  if (!mockOpenCode) return claude;
+  const common = harnessData[1].common_models as string[];
+  const oc = ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-haiku-5-5", "openai/gpt-5.5", "openai/gpt-5.5-mini", "google/gemini-3-pro", "ollama/qwen3:32b", "openrouter/deepseek/deepseek-v4"]
+    .map((id) => ({ agent: "opencode" as AgentKind, id, label: id.slice(id.indexOf("/") + 1), common: common.includes(id) }));
+  return [...claude, ...oc];
+};
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 
@@ -126,7 +139,7 @@ let config: TabConfig = {
   },
   connectors: { demo: { enabled: true, settings: {} }, tab: { enabled: true, settings: {} } },
   agent: {
-    budget: { daily_usd: 10, monthly_usd: null, per_turn_usd: null, ranker_plan_cap: 0.8 }, kind: "claude_code", command: null, model: null, workdir: "C:\\Users\\vince\\code", permission_mode: "auto", opencode_url: null },
+    budget: { daily_usd: 10, monthly_usd: null, per_turn_usd: null, ranker_plan_cap: 0.8 }, kind: "claude_code", command: null, model: null, workdir: "C:\\Users\\vince\\code", permission_mode: "auto", opencode_url: null, strict: true },
   mcp: { port: 47821, token: "mock-token" },
   storage: { keep_days: 7, max_gb: 5 },
   sandbox: {
@@ -281,7 +294,6 @@ export const mockApi = {
         case "api_usage": return usage;
         case "get_config": return config;
         case "save_config": config = args.config; return config;
-        case "set_agent_model": config = { ...config, agent: { ...config.agent, model: args.model } }; return config;
         case "connection_set_secrets": {
           const c = config.connectors[args.id] ?? { enabled: false, settings: {} };
           config = { ...config, connectors: { ...config.connectors, [args.id]: { enabled: true, settings: { ...c.settings, ...Object.fromEntries(Object.keys(args.values).map((k) => [k, "••••••••"])) } } } };
@@ -370,9 +382,27 @@ export const mockApi = {
           return undefined;
         }
         case "detect_agents": return [
-          { kind: "opencode", found: false, path: null, version: null, error: "`opencode` was not found on PATH." },
+          mockOpenCode
+            ? { kind: "opencode", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\opencode.cmd", version: "1.4.2", error: null }
+            : { kind: "opencode", found: false, path: null, version: null, error: "`opencode` was not found on PATH.", install_command: "npm install -g opencode-ai" },
           { kind: "claude_code", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\claude.cmd", version: "2.1.318 (Claude Code)", error: null },
         ];
+        case "agent_harnesses": return harnesses;
+        case "agent_models": return mockModels();
+        case "agent_install": {
+          const steps = ["npm install -g opencode-ai", "added 12 packages in 4s", "Installed OpenCode 1.4.2"];
+          for (const s of steps) { await new Promise((r) => setTimeout(r, 600)); upgradeListeners.forEach((l) => l(s)); }
+          if ((args.kind as AgentKind) === "opencode") mockOpenCode = true;
+          return undefined;
+        }
+        case "set_agent_model": {
+          const agent: AgentKind = args.agent ?? config.agent.kind ?? "claude_code";
+          const models = { ...(config.agent.models ?? {}) };
+          if (args.model) models[agent] = args.model; else delete models[agent];
+          const kind = args.forNewChats && args.agent ? args.agent : config.agent.kind;
+          config = { ...config, agent: { ...config.agent, kind, models, model: kind ? models[kind] ?? null : null } };
+          return config;
+        }
         case "mcp_info": return { url: "http://127.0.0.1:47821/mcp", token: "mock-token" };
         case "github_pull": return samplePull(args.repo, args.number);
         case "storage_usage": return {

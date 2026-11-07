@@ -156,7 +156,8 @@ async fn run(hub: &Arc<AgentHub>, session_id: &str, pass: Pass) -> anyhow::Resul
     if !due(&item, turns, pass) {
         return Ok(());
     }
-    if cfg.kind == Some(AgentKind::ClaudeCode)
+    let agent = cfg.titler.agent.or(cfg.kind);
+    if agent == Some(AgentKind::ClaudeCode)
         && let Some(peak) = crate::usage::plan_peak(&hub.store)
         && peak >= cfg.budget.ranker_plan_cap
     {
@@ -169,12 +170,12 @@ async fn run(hub: &Arc<AgentHub>, session_id: &str, pass: Pass) -> anyhow::Resul
         .model
         .as_deref()
         .map(str::trim)
-        .filter(|m| !m.is_empty())
-        .unwrap_or(small::DEFAULT_MODEL);
+        .filter(|m| !m.is_empty());
     let v = small::complete(
         hub,
         &cfg,
         Ask {
+            agent,
             model,
             system: &system,
             prompt: &prompt,

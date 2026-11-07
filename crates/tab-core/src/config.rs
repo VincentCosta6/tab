@@ -42,9 +42,16 @@ pub struct AgentConfig {
     /// Override for the executable (`claude`, `opencode`, or a full path).
     #[serde(default)]
     pub command: Option<String>,
-    /// e.g. `sonnet` for Claude Code, `anthropic/claude-sonnet-5-5` for OpenCode.
+    /// The model for `kind`'s chats, e.g. `sonnet` for Claude Code,
+    /// `anthropic/claude-sonnet-5-5` for OpenCode. Kept in step with
+    /// `models[kind]`; read through [`AgentConfig::model_for`].
     #[serde(default)]
     pub model: Option<String>,
+    /// The model each harness's chats use, by harness (`claude_code`,
+    /// `opencode`). A chat stays on the harness it started on, so each keeps
+    /// its own. Missing means the harness's own default.
+    #[serde(default)]
+    pub models: BTreeMap<String, String>,
     /// Folder sessions start in. Defaults to the home folder.
     #[serde(default)]
     pub workdir: Option<String>,
@@ -63,6 +70,13 @@ pub struct AgentConfig {
     /// Names chats started in tab with a small model as the work comes into focus.
     #[serde(default)]
     pub titler: TitlerConfig,
+    /// Strict mode: chats load only tab's own MCP server (every tool comes
+    /// through a connection), never the person's personal agent setup: their
+    /// MCP servers and claude.ai connectors, user settings, hooks, plugins
+    /// and personal instructions. The repo's own config still loads. On by
+    /// default; review chats are always strict.
+    #[serde(default = "default_true")]
+    pub strict: bool,
 }
 
 /// The titler: after the first few turns of a chat, a small model renames
@@ -71,6 +85,9 @@ pub struct AgentConfig {
 pub struct TitlerConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// The harness it runs on, any one installed. `None` is the one chats use.
+    #[serde(default)]
+    pub agent: Option<AgentKind>,
     /// Claude Code model alias or id. Empty means `claude-haiku-5-5`.
     /// OpenCode uses its own configured model.
     #[serde(default)]
@@ -85,6 +102,7 @@ impl Default for TitlerConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            agent: None,
             model: None,
             instructions: String::new(),
         }
@@ -143,18 +161,46 @@ impl BudgetConfig {
     }
 }
 
+impl AgentConfig {
+    /// The model `kind`'s chats run on, `None` for the harness's default.
+    pub fn model_for(&self, kind: AgentKind) -> Option<&str> {
+        let own = self.models.get(kind.as_str()).map(String::as_str);
+        let legacy = (self.kind == Some(kind))
+            .then_some(self.model.as_deref())
+            .flatten();
+        own.or(legacy).map(str::trim).filter(|m| !m.is_empty())
+    }
+
+    /// Sets `kind`'s model (`None` for its default), keeping `model` in step
+    /// when `kind` is the harness new chats use.
+    pub fn set_model(&mut self, kind: AgentKind, model: Option<String>) {
+        let model = model
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty());
+        match &model {
+            Some(m) => self.models.insert(kind.as_str().into(), m.clone()),
+            None => self.models.remove(kind.as_str()),
+        };
+        if self.kind == Some(kind) {
+            self.model = model;
+        }
+    }
+}
+
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             kind: None,
             command: None,
             model: None,
+            models: BTreeMap::new(),
             workdir: None,
             permission_mode: default_permission_mode(),
             opencode_url: None,
             budget: BudgetConfig::default(),
             suggest_replies: true,
             titler: TitlerConfig::default(),
+            strict: true,
         }
     }
 }
@@ -339,6 +385,10 @@ impl TabConfig {
             Err(e) => return Err(e.into()),
         };
         cfg.apply_env();
+        // Older configs kept one model, for the harness in use.
+        if let (Some(kind), Some(m)) = (cfg.agent.kind, cfg.agent.model.clone()) {
+            cfg.agent.models.entry(kind.as_str().into()).or_insert(m);
+        }
         // Always enabled, but keep its saved settings (search by meaning, etc.).
         cfg.connectors
             .entry("tab".into())
@@ -391,6 +441,41 @@ impl TabConfig {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn each_harness_keeps_its_own_model() {
+        let mut a = AgentConfig {
+            kind: Some(AgentKind::ClaudeCode),
+            ..Default::default()
+        };
+        a.set_model(AgentKind::ClaudeCode, Some("opus".into()));
+        a.set_model(
+            AgentKind::OpenCode,
+            Some(" anthropic/claude-sonnet-5-5 ".into()),
+        );
+        assert_eq!(a.model_for(AgentKind::ClaudeCode), Some("opus"));
+        assert_eq!(
+            a.model_for(AgentKind::OpenCode),
+            Some("anthropic/claude-sonnet-5-5")
+        );
+        assert_eq!(a.model.as_deref(), Some("opus"));
+        a.set_model(AgentKind::ClaudeCode, None);
+        assert_eq!(a.model_for(AgentKind::ClaudeCode), None);
+        assert_eq!(a.model, None);
+    }
+
+    #[test]
+    fn an_older_single_model_belongs_to_the_harness_in_use() {
+        let a = AgentConfig {
+            kind: Some(AgentKind::OpenCode),
+            model: Some("openai/gpt-5".into()),
+            ..Default::default()
+        };
+        assert_eq!(a.model_for(AgentKind::OpenCode), Some("openai/gpt-5"));
+        assert_eq!(a.model_for(AgentKind::ClaudeCode), None);
+    }
+
     #[test]
     fn storage_limit_defaults_to_5_gb_but_can_be_off() {
         let old: StorageConfig = serde_json::from_str("{}").unwrap();
@@ -401,8 +486,6 @@ mod tests {
         let cfg: TabConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.storage, StorageConfig::default());
     }
-
-    use super::*;
 
     #[test]
     fn load_keeps_saved_tab_settings() {

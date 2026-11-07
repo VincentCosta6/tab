@@ -103,3 +103,13 @@ export function useProjectNotes(projectId: string | null | undefined) {
 export function usePressure() {
   return useQuery({ queryKey: keys.pressure, queryFn: api.ratePressure, refetchInterval: 4000, staleTime: 0 });
 }
+
+/** Every harness tab can drive, from its metadata. */
+export function useHarnesses() {
+  return useQuery({ queryKey: ["harnesses"], queryFn: api.agentHarnesses, staleTime: Infinity });
+}
+
+/** The models of every installed harness. */
+export function useModels() {
+  return useQuery({ queryKey: ["agent-models"], queryFn: api.agentModels, staleTime: 5 * 60_000 });
+}

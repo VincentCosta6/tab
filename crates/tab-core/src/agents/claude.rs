@@ -9,8 +9,9 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-use super::{AgentHub, Steer, default_command, resolve};
+use super::{AgentHub, Steer};
 use crate::model::{AgentKind, Session, SessionStatus};
+use crate::sandbox::Trust;
 
 /// Claude Code permission modes tab passes through. `bypassPermissions` is
 /// deliberately not offered: approvals belong to the person.
@@ -45,12 +46,7 @@ pub(super) async fn run_turn(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let cfg = hub.config();
-    let exe = resolve(
-        cfg.command
-            .as_deref()
-            .filter(|c| !c.trim().is_empty() && cfg.kind == Some(AgentKind::ClaudeCode))
-            .unwrap_or(default_command(AgentKind::ClaudeCode)),
-    )?;
+    let exe = super::agent_exe(&cfg, AgentKind::ClaudeCode)?;
     let dir = hub.session_dir(&session.id)?;
     let system_file = dir.join("system.md");
     std::fs::write(&system_file, system)?;
@@ -61,8 +57,10 @@ pub(super) async fn run_turn(
         &settings_file,
         serde_json::to_vec_pretty(&crate::sandbox::current().claude_settings(&policy))?,
     )?;
+    let strict = strict(cfg.strict, policy.trust);
     let mut cmd = super::Args::default();
     cmd.arg("--settings").arg(&settings_file);
+    cmd.args(isolation_args(cfg.strict, policy.trust));
     cmd.args([
         "-p",
         "--input-format",
@@ -104,7 +102,7 @@ pub(super) async fn run_turn(
         cmd.args(["--permission-prompt-tool", "mcp__tab__approve"]);
         cmd.args(["--allowedTools", "mcp__tab"]);
     }
-    if let Some(m) = cfg.model.as_deref().filter(|m| !m.trim().is_empty()) {
+    if let Some(m) = cfg.model_for(AgentKind::ClaudeCode) {
         cmd.args(["--model", m]);
     }
     if let Some(cap) = cfg.budget.per_turn_usd.filter(|c| *c > 0.0) {
@@ -117,13 +115,18 @@ pub(super) async fn run_turn(
         .command(&exe, &cmd.0, std::path::Path::new(&session.cwd), &policy)
         .await?;
     hub.add_shims(session, &mut prepared.cmd);
+    if strict {
+        // claude.ai connectors too, should a version load them despite
+        // `--strict-mcp-config`.
+        prepared.cmd.env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
+    }
     prepared
         .cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    tracing::debug!(session = %session.id, mode, resume = ?session.agent_session_id, sandboxed = prepared.enforced, "starting Claude Code turn");
+    tracing::debug!(session = %session.id, mode, strict, resume = ?session.agent_session_id, sandboxed = prepared.enforced, "starting Claude Code turn");
     let mut child = prepared
         .spawn()
         .map_err(|e| anyhow::anyhow!("starting Claude Code ({}) failed: {e}", exe.display()))?;
@@ -164,6 +167,7 @@ pub(super) async fn run_turn(
     let mut lines = BufReader::new(stdout).lines();
     let mut parser = Parser::new(hub.clone(), session.id.clone());
     parser.open_tools = open_tools;
+    parser.strict = strict;
     // Rough size of what tab adds to the system prompt (the item and its context).
     parser.tab_context_tokens = (system.len() / 4) as i64;
     // After the result the CLI normally exits right away. If it stays up,
@@ -186,6 +190,13 @@ pub(super) async fn run_turn(
                 Some(l) if !l.trim().is_empty() => match serde_json::from_str::<Value>(&l) {
                     Ok(v) => {
                         parser.handle(&v);
+                        if !parser.leaked.is_empty() {
+                            child.kill_tree();
+                            anyhow::bail!(
+                                "Strict mode stopped this turn: Claude Code loaded {}, which isn't one of tab's connections.",
+                                parser.leaked.join(", ")
+                            );
+                        }
                         // Background work woke the agent up: it's working again.
                         if !parser.finished {
                             monitoring = false;
@@ -249,6 +260,49 @@ struct Parser {
     /// The person pressed "Send now": the next result only closes the
     /// interrupted part, and the turn goes on with their queued message.
     interrupted: bool,
+    /// Strict mode: only tab's MCP server may load.
+    strict: bool,
+    /// What loaded anyway, from the init line. Non-empty stops the turn.
+    leaked: Vec<String>,
+}
+
+/// Whether a chat runs strict: when the person chose it, and always for an
+/// agent working on someone else's code.
+fn strict(chosen: bool, trust: Trust) -> bool {
+    chosen || trust != Trust::Person
+}
+
+/// What keeps the person's own Claude Code setup out of a chat.
+///
+/// Strict: only `--mcp-config` servers (tab's), and only the repo's settings
+/// (`project`, `local`): no user MCP servers, claude.ai connectors, user
+/// hooks, plugins, allow rules or `~/.claude/CLAUDE.md`. Code nobody here
+/// wrote (a pull request's checkout) gets no settings at all, since its
+/// `.claude/settings.json` hooks would run as soon as the chat starts.
+fn isolation_args(chosen: bool, trust: Trust) -> Vec<&'static str> {
+    match (strict(chosen, trust), trust) {
+        (false, _) => Vec::new(),
+        (true, Trust::Person) => vec!["--strict-mcp-config", "--setting-sources", "project,local"],
+        (true, _) => vec!["--strict-mcp-config", "--setting-sources", ""],
+    }
+}
+
+/// MCP servers and account plugins in Claude Code's init line that strict
+/// mode doesn't allow: anything but tab's own server.
+fn unexpected(init: &Value) -> Vec<String> {
+    let servers = init["mcp_servers"].as_array().into_iter().flatten();
+    let plugins = init["plugins"].as_array().into_iter().flatten();
+    servers
+        .filter_map(|s| s["name"].as_str())
+        .filter(|n| *n != "tab")
+        .map(|n| format!("MCP server \"{n}\""))
+        .chain(
+            plugins
+                .filter(|p| p["source"].as_str().is_some_and(|s| s.ends_with("@synced")))
+                .filter_map(|p| p["name"].as_str())
+                .map(|n| format!("plugin \"{n}\"")),
+        )
+        .collect()
 }
 
 /// Everything a model call read: new input plus cache writes and reads.
@@ -278,6 +332,8 @@ impl Parser {
             tab_context_tokens: 0,
             open_tools: OpenTools::default(),
             interrupted: false,
+            strict: false,
+            leaked: Vec::new(),
         }
     }
 
@@ -324,6 +380,9 @@ impl Parser {
         }
         match kind {
             "system" if v["subtype"] == "init" => {
+                if self.strict {
+                    self.leaked = unexpected(v);
+                }
                 self.billing = crate::usage::billing_from_init(v);
                 if let Some(cmds) = v["slash_commands"].as_array() {
                     let names: Vec<String> = cmds
@@ -660,5 +719,67 @@ mod tests {
         );
         assert!(p.finished);
         assert!(!hub.can_steer(&s.id));
+    }
+
+    #[test]
+    fn strict_chats_load_only_the_repos_settings() {
+        assert_eq!(
+            isolation_args(true, Trust::Person),
+            ["--strict-mcp-config", "--setting-sources", "project,local"]
+        );
+        assert!(isolation_args(false, Trust::Person).is_empty());
+    }
+
+    #[test]
+    fn review_chats_are_always_strict_and_load_no_settings() {
+        for chosen in [true, false] {
+            for trust in [Trust::Agent, Trust::Untrusted] {
+                assert_eq!(
+                    isolation_args(chosen, trust),
+                    ["--strict-mcp-config", "--setting-sources", ""]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strict_flags_anything_but_tab_in_the_init_line() {
+        let clean = json!({
+            "mcp_servers": [{ "name": "tab", "status": "connected" }],
+            "plugins": [{ "name": "cc-plugin-telemetry", "source": "cc-plugin-telemetry@builtin" }],
+        });
+        assert!(unexpected(&clean).is_empty());
+        let leaky = json!({
+            "mcp_servers": [{ "name": "tab" }, { "name": "claude.ai Health", "status": "connected" }],
+            "plugins": [{ "name": "cloudflare", "source": "cloudflare@synced" }],
+        });
+        assert_eq!(
+            unexpected(&leaky),
+            ["MCP server \"claude.ai Health\"", "plugin \"cloudflare\""]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_strict_parser_records_what_leaked() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let init =
+            json!({ "type": "system", "subtype": "init", "mcp_servers": [{ "name": "health" }] });
+        let mut loose = Parser::new(hub.clone(), s.id.clone());
+        loose.handle(&init);
+        assert!(loose.leaked.is_empty());
+        let mut p = Parser::new(hub, s.id.clone());
+        p.strict = true;
+        p.handle(&init);
+        assert_eq!(p.leaked, ["MCP server \"health\""]);
     }
 }

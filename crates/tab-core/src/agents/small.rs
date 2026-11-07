@@ -9,14 +9,18 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::{AgentHub, default_command, resolve};
+use super::AgentHub;
 use crate::config::AgentConfig;
 use crate::model::AgentKind;
 
 pub(super) const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 
 pub(super) struct Ask<'a> {
-    pub model: &'a str,
+    /// The harness to ask; `None` is the one chats use.
+    pub agent: Option<AgentKind>,
+    /// `None` is a small Claude model on Claude Code, and the chat model on
+    /// OpenCode.
+    pub model: Option<&'a str>,
     pub system: &'a str,
     pub prompt: &'a str,
     /// Structured output. Without one the reply is plain text.
@@ -34,7 +38,7 @@ pub(super) async fn complete(
     cfg: &AgentConfig,
     ask: Ask<'_>,
 ) -> anyhow::Result<Value> {
-    match cfg.kind {
+    match ask.agent.or(cfg.kind) {
         Some(AgentKind::ClaudeCode) => via_claude(hub, cfg, ask).await,
         Some(AgentKind::OpenCode) => {
             let mut system = ask.system.to_string();
@@ -43,7 +47,8 @@ pub(super) async fn complete(
                     "\n\nReply with only a JSON object matching this schema, no prose:\n{schema}"
                 ));
             }
-            let text = super::opencode::complete(hub, &system, ask.prompt).await?;
+            let model = ask.model.or(cfg.model_for(AgentKind::OpenCode));
+            let text = super::opencode::complete(hub, &system, ask.prompt, model).await?;
             Ok(match ask.schema {
                 Some(_) => parse_json_reply(&text).unwrap_or(Value::Null),
                 None => Value::String(text),
@@ -54,12 +59,7 @@ pub(super) async fn complete(
 }
 
 async fn via_claude(hub: &Arc<AgentHub>, cfg: &AgentConfig, ask: Ask<'_>) -> anyhow::Result<Value> {
-    let exe = resolve(
-        cfg.command
-            .as_deref()
-            .filter(|c| !c.trim().is_empty())
-            .unwrap_or(default_command(AgentKind::ClaudeCode)),
-    )?;
+    let exe = super::agent_exe(cfg, AgentKind::ClaudeCode)?;
     let schema = ask.schema.as_ref().map(Value::to_string);
     let mut cmd = super::command(&exe);
     cmd.args([
@@ -67,7 +67,7 @@ async fn via_claude(hub: &Arc<AgentHub>, cfg: &AgentConfig, ask: Ask<'_>) -> any
         "--output-format",
         "json",
         "--model",
-        ask.model,
+        ask.model.unwrap_or(DEFAULT_MODEL),
         "--tools",
         "",
         "--strict-mcp-config",
