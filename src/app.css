@@ -734,6 +734,8 @@ body.resizing iframe { pointer-events: none; }
 
 /* The composer's / menu, above the box. */
 .composer { position: relative; }
+/* container-type makes the composer its own stacking context, so the slash menu can only rise as high as the composer: lift it over the sticky step list while the menu is open. */
+.composer:has(> .slash-menu) { z-index: 3; }
 .slash-menu { position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px); z-index: 40; display: grid; gap: 1px; padding: 4px; max-height: 300px; overflow-y: auto; background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: 0 8px 24px rgb(0 0 0 / 0.22); }
 .slash-menu button { display: flex; align-items: baseline; gap: 10px; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer; }
 .slash-menu button.active { background: var(--bg-hover); }
