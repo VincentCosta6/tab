@@ -4,6 +4,9 @@
 import { NOT_HANDLED, withActions, workflowMock } from "./mock-workflows";
 // The same harness metadata the app ships.
 import harnessData from "../../crates/tab-core/src/agents/harnesses.json";
+import { create, toBinary } from "@bufbuild/protobuf";
+import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
+import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, type HubStatus } from "./protocol/cloud";
 import type {
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
@@ -153,6 +156,19 @@ let config: TabConfig = {
 let mockAccount: Account | null = typeof location !== "undefined" && new URLSearchParams(location.search).has("account")
   ? { user_id: "mock-google", email: "you@gmail.com", name: "You", avatar_url: null, provider: "google" }
   : null;
+
+let mockHub: HubStatus | null = null;
+let mockHubFailed = false;
+const mockPlan = () => create(PlanSchema, { name: "trial", endsAt: timestampFromDate(new Date(Date.now() + 14 * 86400_000)), active: true });
+const mockCloudHub = (state: HubState): HubStatus =>
+  create(HubStatusSchema, {
+    hub: {
+      hubId: state === HubState.NONE ? "" : "5e7ecedf5a07a215de6ad0cc9d6ca7080b0e32c07931566c24ac88cdf129feee",
+      kind: HubKind.PERSONAL, role: Role.OWNER, state, region: state === HubState.NONE ? "" : "wnam",
+      readyAt: state === HubState.READY ? timestampNow() : undefined,
+    },
+    plan: mockPlan(),
+  });
 
 const listeners = new Set<(e: EngineEvent) => void>();
 const emit = (e: EngineEvent) => listeners.forEach((l) => l(e));
@@ -454,7 +470,31 @@ export const mockApi = {
           return mockAccount;
         }
         case "account_cancel_sign_in": return null;
-        case "account_sign_out": mockAccount = null; return null;
+        case "account_sign_out": mockAccount = null; mockHub = null; return null;
+        case "cloud_hub_status":
+          if (!mockAccount) throw { code: ErrorCode.UNAUTHENTICATED, message: "Sign in to use tab cloud." };
+          return toBinary(HubStatusSchema, mockHub ?? mockCloudHub(HubState.NONE));
+        case "cloud_hubs": {
+          if (!mockAccount) throw { code: ErrorCode.UNAUTHENTICATED, message: "Sign in to use tab cloud." };
+          const personal = (mockHub ?? mockCloudHub(HubState.NONE)).hub!;
+          const team = create(HubSchema, { hubId: "a1".repeat(32), kind: HubKind.TEAM, name: "Design team", role: Role.MEMBER, state: HubState.READY, region: "weur" });
+          return toBinary(HubListSchema, create(HubListSchema, { hubs: [personal, team], plan: mockPlan() }));
+        }
+        case "cloud_hub_set_up": {
+          if (!mockAccount) throw { code: ErrorCode.UNAUTHENTICATED, message: "Sign in to use tab cloud." };
+          // `?hub=fail` fails the first attempt, `?hub=plan` acts as if the trial ended.
+          const q = new URLSearchParams(location.search).get("hub");
+          await new Promise((r) => setTimeout(r, 2500));
+          if (q === "plan") throw { code: ErrorCode.PLAN_REQUIRED, message: "Your tab cloud trial has ended. Choose a plan at tabqueue.com to keep using it." };
+          if (q === "fail" && !mockHubFailed) {
+            mockHubFailed = true;
+            mockHub = mockCloudHub(HubState.FAILED);
+            mockHub.hub!.error = "tab couldn't finish setting up your hub. Try again in a moment.";
+          } else {
+            mockHub = mockCloudHub(HubState.READY);
+          }
+          return toBinary(HubStatusSchema, mockHub);
+        }
         case "hub_status": {
           const started = new Date(Date.now() - 3 * 3600_000).toISOString();
           return {

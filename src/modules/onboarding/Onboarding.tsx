@@ -8,7 +8,7 @@ import { GhConnect } from "../connections/GhConnect";
 import { useConfig, useFolderProblem, useHarnesses, useSaveConfig } from "../../lib/hooks";
 import type { AgentKind, AgentProbe, Harness, HubMode, TabConfig } from "../../lib/types";
 import { HarnessIcon, ModelMenu, modelFor } from "../work/ModelMenu";
-import { AccountBadge, SignInButtons, cloudPerks, localDrawbacks, useAccount } from "../account/Account";
+import { AccountBadge, CloudHubSetup, SignInButtons, cloudPerks, localDrawbacks, useAccount } from "../account/Account";
 
 const steps = ["Welcome", "Agent", "Hub", "Connections", "Ready"];
 
@@ -45,7 +45,10 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
   const [hubMode, setHubMode] = useState<HubMode>("cloud");
   const { data: account } = useAccount();
   const signedIn = !!account?.account;
-  const hubBlocked = step === 2 && hubMode === "cloud" && !signedIn;
+  // Picking tab cloud sets up the person's private hub as soon as they're
+  // signed in; Continue waits until it's ready.
+  const [hubReady, setHubReady] = useState(false);
+  const hubBlocked = step === 2 && hubMode === "cloud" && (!signedIn || !hubReady);
 
   if (!draft) return null;
   const set = (fn: (c: TabConfig) => void) => {
@@ -160,7 +163,14 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
                 </ul>
                 {hubMode === "cloud" && (
                   <div className="hub-sign-in" onClick={(e) => e.stopPropagation()}>
-                    {account?.account ? <AccountBadge account={account.account} /> : <SignInButtons />}
+                    {account?.account ? (
+                      <>
+                        <AccountBadge account={account.account} />
+                        <CloudHubSetup onReady={() => setHubReady(true)} onNotReady={() => setHubReady(false)} />
+                      </>
+                    ) : (
+                      <SignInButtons />
+                    )}
                   </div>
                 )}
               </HubChoice>
@@ -216,7 +226,7 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
         <footer className="onboarding-foot">
           {step > 0 ? <Button variant="ghost" onClick={() => setStep(step - 1)}>Back</Button> : <span />}
           {step === 1 && !draft.agent.kind && <span className="subtle">Pick one to chat with agents, or skip for now.</span>}
-          {hubBlocked && <span className="subtle">Sign in to use tab cloud, or choose This computer only.</span>}
+          {hubBlocked && <span className="subtle">{signedIn ? "Waiting for your private hub. You can also choose This computer only." : "Sign in to use tab cloud, or choose This computer only."}</span>}
           {step < steps.length - 1 ? (
             <Button variant="primary" disabled={hubBlocked} onClick={() => setStep(step + 1)}>{step === 1 && !draft.agent.kind ? "Skip" : "Continue"}</Button>
           ) : (

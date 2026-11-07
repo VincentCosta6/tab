@@ -5,7 +5,7 @@ import { Icon } from "../../../design/icons";
 import { api } from "../../../lib/api";
 import { bytes, timeAgo } from "../../../lib/format";
 import type { HubMode } from "../../../lib/types";
-import { AccountBadge, SignInButtons, accountKey, cloudPerks, localDrawbacks, useAccount } from "../../account/Account";
+import { AccountBadge, CloudHubLine, SignInButtons, accountKey, cloudPerks, localDrawbacks, useAccount } from "../../account/Account";
 import { useDraft } from "../draft";
 
 export function HubPage() {
@@ -80,6 +80,7 @@ function HubsSection() {
                 {signedIn ? `${account!.account!.email ?? account!.account!.name ?? "Your account"}. ` : "Sign in above to use it. "}
                 Until tab cloud launches, your work stays in this computer's hub.
               </div>
+              {signedIn && <CloudHubLine />}
             </div>
             {mode !== "cloud" && <Button size="sm" disabled={!signedIn} onClick={() => use("cloud")}>Use this hub</Button>}
           </div>

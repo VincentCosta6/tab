@@ -30,6 +30,17 @@ pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/tab.hub.v1.rs"));
 }
 
+/// The tab cloud account API (`proto/tab/cloud/v1/account.proto`): what the
+/// apps and the edge Worker in `tab-infra` exchange over HTTPS. Both sides
+/// build against this module, so they can't disagree about a field.
+#[allow(clippy::all, missing_docs)]
+pub mod cloud {
+    include!(concat!(env!("OUT_DIR"), "/tab.cloud.v1.rs"));
+
+    /// The content type of every account API body.
+    pub const CONTENT_TYPE: &str = "application/x-protobuf";
+}
+
 pub use pb::{ClientEnvelope, ServerEnvelope};
 use pb::{client_envelope, server_envelope};
 use prost::Message;

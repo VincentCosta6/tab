@@ -20,6 +20,7 @@ tracing.workspace = true
 uuid.workspace = true
 tab-domain = { path = "../tab-domain" }
 tab-protocol = { path = "../tab-protocol" }
+prost = "0.14"
 prost-types = "0.14"
 tab-store = { path = "../tab-store", features = ["sqlite", "fs"] }
 tab-hub = { path = "../tab-hub" }

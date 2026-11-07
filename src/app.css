@@ -307,6 +307,10 @@
 .hub-perks strong { color: var(--fg); font-weight: 600; }
 .hub-drawbacks li > svg { margin-top: 3px; color: var(--tone-warning-fg); }
 .hub-sign-in { margin-top: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--border); cursor: default; }
+.cloud-setup { display: grid; grid-template-columns: 14px 1fr; gap: var(--space-2); align-items: start; margin-top: var(--space-3); font-size: var(--text-sm); }
+.cloud-setup p { margin: 2px 0 0; }
+.cloud-setup.failed > svg { margin-top: 3px; color: var(--tone-warning-fg); }
+.cloud-setup-actions { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
 .sign-in { display: grid; gap: var(--space-2); justify-items: start; }
 .sign-in-buttons { display: grid; gap: var(--space-2); width: 100%; }
 .sign-in-buttons .btn { justify-content: center; width: 100%; gap: 8px; font-weight: 500; }
@@ -980,4 +984,9 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
   .settings-title { width: 100%; margin-bottom: var(--space-2); }
   .settings-page { padding: var(--space-4); }
   .settings-savebar { margin: 0 var(--space-4) var(--space-4); }
+}
+
+.cloud-hubs ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
 }

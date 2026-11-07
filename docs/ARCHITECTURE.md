@@ -353,6 +353,18 @@ On Windows nothing stops an agent from starting `gh.exe` directly; the shims and
 - Agents, language servers and workflow commands run in the sandbox (see Sandbox): they can't change tab or read its secrets, and code from pull requests can only change its own checkout.
 - Automations and agent actions that change external systems are audited and can require confirmation.
 
+## tab cloud accounts (built: setup; designed: the rest)
+
+Signing in (Settings → Hub, or the Hub step of onboarding) is Supabase OAuth with Apple or Google (`tab_core::account`). Picking tab cloud then sets up the person's **private hub**: their own instance of the hub Durable Object, with its own SQLite and its own data key. The cloud side is in the private `tab-infra` repo (edge Worker, hub Durable Object, accounts in D1); the app only calls its edge Worker (`tab_core::cloud`, `TAB_CLOUD_URL`, default `https://api.tabqueue.com`):
+
+- `POST /v1/hub` creates the account and its one 14-day trial and sets up the hub. Idempotent; it retries a failed setup. `tab_core::cloud::set_up_hub` calls it and waits while another request finishes the setup.
+- `GET /v1/hub` reports `NONE`, `PROVISIONING`, `READY` or `FAILED`, with the region and plan.
+- `GET /v1/hubs` lists every hub the person belongs to: their personal one first, then team hubs, each with their role. `GET /v1/hubs/{hub_id}` reads one. A hub id in a path is only a request: the Worker checks the person's membership and role, and a hub they don't belong to is a 404 like one that doesn't exist.
+
+The API is defined once, in `crates/tab-protocol/proto/tab/cloud/v1/account.proto`. Bodies are binary Protobuf (`application/x-protobuf`), errors are an `Error` with an `ErrorCode`. tab-infra depends on `tab-protocol` by git rev and builds its responses from the same Rust types; the app's `cloud_*` Tauri commands pass the bytes through and the UI decodes them with the generated TypeScript (`src/lib/protocol/cloud.ts`). The same additive-only rule as `hub.proto` applies, and tab-infra bumps its rev to pick up a change.
+
+Onboarding waits on this before Continue, with Try again on failure and See plans when the trial has ended. The access token is refreshed before each call when it's within a minute of expiring. Syncing to the cloud hub, device pairing and moving a hub are next.
+
 ## Server (later)
 
 Sync across devices, team-shared automations and graph, and a webhook receiver so GitHub and Slack push instead of being polled (which also removes most rate-limit pressure). The local app stays the source of truth for a single user and works offline. The pieces it builds on (tab-domain, tab-protocol, tab-store, tab-hub) are in the repo; see Layout.

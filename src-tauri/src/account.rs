@@ -5,14 +5,18 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use prost::Message;
 use tab_core::account::{
     self, AccountStatus, AccountView, CancellationToken, Provider, SupabaseConfig,
 };
+use tab_core::cloud::{self, CloudConfig, CloudError};
 use tauri::State;
+use tauri::ipc::Response;
 
 pub struct AccountState {
     path: PathBuf,
     supabase: Option<SupabaseConfig>,
+    cloud: CloudConfig,
     /// The sign-in waiting on the browser, if any.
     pending: Mutex<Option<CancellationToken>>,
 }
@@ -22,6 +26,7 @@ impl AccountState {
         Self {
             path: account::session_path(config_dir),
             supabase: SupabaseConfig::from_env(),
+            cloud: CloudConfig::from_env(),
             pending: Mutex::new(None),
         }
     }
@@ -86,4 +91,62 @@ pub async fn account_sign_out(state: State<'_, AccountState>) -> Result<(), Stri
         account::revoke(cfg, &session).await;
     }
     account::remove(&state.path).map_err(|e| e.to_string())
+}
+
+/// A cloud error for the UI: `code` is a `tab.cloud.v1.ErrorCode` value
+/// (the UI has the generated enum), `message` is safe to show.
+#[derive(serde::Serialize)]
+pub struct CloudFailure {
+    code: i32,
+    message: String,
+}
+
+impl From<CloudError> for CloudFailure {
+    fn from(e: CloudError) -> Self {
+        Self {
+            code: e.code as i32,
+            message: e.message,
+        }
+    }
+}
+
+async fn cloud_token(state: &AccountState) -> Result<String, CloudFailure> {
+    let cfg = state
+        .supabase
+        .as_ref()
+        .ok_or_else(CloudError::not_signed_in)?;
+    match account::access_token(cfg, &state.path).await {
+        Ok(Some(t)) => Ok(t),
+        Ok(None) => Err(CloudError::not_signed_in().into()),
+        Err(account::SignInError::Network(e)) => Err(CloudError::unreachable(e).into()),
+        Err(_) => Err(CloudError::not_signed_in().into()),
+    }
+}
+
+/// The message as Protobuf bytes, which the UI decodes with the types
+/// generated from the same account.proto.
+fn bytes(m: impl Message) -> Response {
+    Response::new(m.encode_to_vec())
+}
+
+/// The signed-in person's personal cloud hub: a `tab.cloud.v1.HubStatus`.
+#[tauri::command]
+pub async fn cloud_hub_status(state: State<'_, AccountState>) -> Result<Response, CloudFailure> {
+    let token = cloud_token(&state).await?;
+    Ok(bytes(cloud::hub_status(&state.cloud, &token).await?))
+}
+
+/// Every cloud hub they belong to: a `tab.cloud.v1.HubList`.
+#[tauri::command]
+pub async fn cloud_hubs(state: State<'_, AccountState>) -> Result<Response, CloudFailure> {
+    let token = cloud_token(&state).await?;
+    Ok(bytes(cloud::list_hubs(&state.cloud, &token).await?))
+}
+
+/// Sets up their personal hub (or retries a failed setup) and resolves once
+/// it's ready or has failed: a `tab.cloud.v1.HubStatus`.
+#[tauri::command]
+pub async fn cloud_hub_set_up(state: State<'_, AccountState>) -> Result<Response, CloudFailure> {
+    let token = cloud_token(&state).await?;
+    Ok(bytes(cloud::set_up_hub(&state.cloud, &token).await?))
 }

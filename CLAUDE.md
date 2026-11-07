@@ -17,3 +17,12 @@ See `docs/ARCHITECTURE.md` for the crate map. Standing rules:
 ## The desktop app
 
 - Don't edit the live checkout the app runs from; work in a git worktree. Agents editing the running checkout have crashed the app before.
+
+## tab cloud and `tab-infra`
+
+The cloud side (edge Worker, hub Durable Object, accounts in D1) is the private `VincentCosta6/tab-infra` repo. The two repos share one API contract, and it lives here:
+
+- `crates/tab-protocol/proto/tab/cloud/v1/account.proto` is the account API (`/v1/hub`, `/v1/hubs`, …). tab-infra builds its responses from the `tab-protocol` crate, pinned by git `rev` in its `Cargo.toml`. `tab_core::cloud`, the `cloud_*` Tauri commands and `src/lib/protocol/cloud.ts` are the app's side.
+- Additive only, like `hub.proto`: never renumber, reuse or change the type of a field; reserve removed ones. Released apps keep talking to the newest Worker, so a field the app needs must be optional to the old app and the Worker must still answer old apps.
+- A change to the API, or to `tab-protocol`, `tab-hub` or `tab-store` that the cloud runs, is two changes: merge it here first, then bump the `rev` in tab-infra and merge there. Nothing reaches production until tab-infra's `main` deploys it. Say so in the PR, and link the tab-infra PR.
+- Run `pnpm proto` after editing the proto and commit the generated TypeScript.
