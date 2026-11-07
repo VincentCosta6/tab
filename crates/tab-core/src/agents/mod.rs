@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -330,8 +330,26 @@ impl AgentHub {
         }
     }
 
+    /// Each chat's own folder (system prompt, MCP config).
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.dir.join("sessions")
+    }
+
+    /// Clears out attachments and chat folders nothing active needs.
+    pub fn sweep_files(&self, now: DateTime<Utc>) -> anyhow::Result<crate::storage::Swept> {
+        use crate::storage::{IDLE_CHAT, sweep_attachments, sweep_sessions};
+        let mut swept = sweep_attachments(&self.store, &self.attachments_dir(), now, IDLE_CHAT)?;
+        swept.add(sweep_sessions(
+            &self.store,
+            &self.sessions_dir(),
+            now,
+            IDLE_CHAT,
+        )?);
+        Ok(swept)
+    }
+
     pub(crate) fn session_dir(&self, id: &str) -> anyhow::Result<PathBuf> {
-        let d = self.dir.join("sessions").join(id);
+        let d = self.sessions_dir().join(id);
         std::fs::create_dir_all(&d)?;
         Ok(d)
     }

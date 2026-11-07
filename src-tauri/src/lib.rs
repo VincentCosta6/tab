@@ -11,7 +11,7 @@ use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint};
 use tab_core::config::ConnectorConfig;
 use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
 use tab_core::connectors::registry;
-use tab_core::gateway::RateLimitState;
+use tab_core::gateway::{Call, RateLimitState};
 use tab_core::lsp::{self, LspHub, ServerStatus};
 use tab_core::mcp::{EngineAccess, McpServer};
 use tab_core::model::{
@@ -19,6 +19,7 @@ use tab_core::model::{
     NewTask, Preview, QueueItem, Session, SessionMessage, SettingKind,
 };
 use tab_core::ratelimit::Pressure;
+use tab_core::storage;
 use tab_core::store::{AuditEntry, AuditQuery, UsageRow};
 use tab_core::workflow::{self, Issue, Run, SavedBy, Workflow};
 use tab_core::workspace::{self, SearchHit, SearchQuery, Target, Workspace, Workspaces};
@@ -49,6 +50,7 @@ struct AppState {
     mcp_url: std::sync::Mutex<Option<String>>,
     workspaces: Arc<Workspaces>,
     lsp: Arc<LspHub>,
+    data_dir: PathBuf,
 }
 
 impl std::ops::Deref for AppState {
@@ -267,7 +269,11 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
-        match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+        match (
+            b[i],
+            b.get(i + 1).copied().and_then(hex),
+            b.get(i + 2).copied().and_then(hex),
+        ) {
             (b'%', Some(h), Some(l)) => {
                 out.push(h * 16 + l);
                 i += 3;
@@ -286,7 +292,13 @@ fn safe_file_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
     let clean: String = base
         .chars()
-        .map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_control() || "<>:\"|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let clean = clean.trim().trim_matches('.').to_string();
     if clean.is_empty() {
@@ -306,9 +318,9 @@ async fn file_open(path: String, reveal: Option<bool>) -> CmdResult<()> {
         return Err("that file isn't there any more".into());
     }
     const SAFE: &[&str] = &[
-        "png", "jpg", "jpeg", "gif", "webp", "svg", "pdf", "txt", "md", "csv", "tsv", "json", "log",
-        "docx", "xlsx", "pptx", "doc", "xls", "ppt", "odt", "ods", "rtf", "zip", "mp4", "mov",
-        "webm", "mp3", "wav",
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "pdf", "txt", "md", "csv", "tsv", "json",
+        "log", "docx", "xlsx", "pptx", "doc", "xls", "ppt", "odt", "ods", "rtf", "zip", "mp4",
+        "mov", "webm", "mp3", "wav",
     ];
     let ext = p
         .extension()
@@ -339,10 +351,11 @@ async fn image_read(path: String) -> CmdResult<tauri::ipc::Response> {
 /// Extensions the file stage can show inside tab: PDFs, and text it shows as
 /// text. Other files open in their default app instead.
 const VIEWABLE: &[&str] = &[
-    "pdf", "svg", "txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "log", "yaml", "yml", "toml", "xml",
-    "html", "htm", "css", "js", "jsx", "ts", "tsx", "mjs", "cjs", "rs", "py", "rb", "go", "java", "kt", "swift", "c",
-    "h", "cc", "cpp", "hpp", "cs", "sh", "zsh", "bash", "sql", "ini", "env", "conf", "diff", "patch", "lua",
-    "php", "vue", "svelte", "dart", "scala", "ex", "exs", "r", "tex",
+    "pdf", "svg", "txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "log", "yaml", "yml",
+    "toml", "xml", "html", "htm", "css", "js", "jsx", "ts", "tsx", "mjs", "cjs", "rs", "py", "rb",
+    "go", "java", "kt", "swift", "c", "h", "cc", "cpp", "hpp", "cs", "sh", "zsh", "bash", "sql",
+    "ini", "env", "conf", "diff", "patch", "lua", "php", "vue", "svelte", "dart", "scala", "ex",
+    "exs", "r", "tex",
 ];
 const MAX_VIEWABLE: u64 = 30 * 1024 * 1024;
 
@@ -407,7 +420,7 @@ fn start_dictation(app: tauri::AppHandle) -> CmdResult<()> {
 #[cfg(windows)]
 fn press_win_h() -> Result<(), String> {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_LWIN,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_LWIN,
     };
     const VK_H: u16 = 0x48;
     let key = |vk: u16, up: bool| INPUT {
@@ -693,6 +706,9 @@ async fn review_chat_send(
         .worktree(&target.repo, target.number)
         .map_err(err)?;
     let local = dir.exists();
+    if local {
+        state.workspaces.mark_used(&target.repo, target.number);
+    }
     let cwd = if local {
         dir.display().to_string()
     } else {
@@ -1115,6 +1131,159 @@ async fn gh_install() -> CmdResult<tab_core::gh::GhStatus> {
     tab_core::gh::install().await.map_err(err)
 }
 
+// --- Storage -------------------------------------------------------------
+
+/// A review checkout goes once it hasn't been opened for this long.
+const CHECKOUT_IDLE: chrono::Duration = chrono::Duration::days(14);
+/// A closed or merged PR's checkout stays this long after it was last opened,
+/// so one being looked at right as it merges isn't pulled out from under you.
+const CHECKOUT_GRACE: chrono::Duration = chrono::Duration::days(1);
+/// How often the cleanup sweep runs.
+const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+#[derive(Serialize)]
+struct CheckoutUsage {
+    repo: String,
+    number: u64,
+    last_used: chrono::DateTime<Utc>,
+    bytes: u64,
+}
+
+#[derive(Serialize)]
+struct StorageUsage {
+    attachments: storage::Size,
+    sessions: storage::Size,
+    workspaces: storage::Size,
+    checkouts: Vec<CheckoutUsage>,
+}
+
+/// Whether a PR has closed or merged. Errors (no GitHub, offline) say no.
+async fn pr_closed(gateway: &Gateway, repo: &str, number: u64) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Pr {
+        state: String,
+    }
+    let url = format!("https://api.github.com/repos/{repo}/pulls/{number}");
+    let call = Call::get("github", "github", "review checkout cleanup", url)
+        .cache(std::time::Duration::from_secs(3600));
+    let res = tab_core::ratelimit::background(gateway.send(call)).await;
+    match res
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r.json::<Pr>())
+    {
+        Ok(pr) => pr.state != "open",
+        Err(e) => {
+            tracing::debug!(%repo, number, error = %e, "couldn't read PR state");
+            false
+        }
+    }
+}
+
+/// Removes review checkouts whose PR has closed, or that nobody has opened
+/// in [`CHECKOUT_IDLE`].
+async fn sweep_checkouts(ws: &Workspaces, gateway: &Gateway) -> storage::Swept {
+    let now = Utc::now();
+    let mut swept = storage::Swept::default();
+    for c in ws.checkouts() {
+        let idle = now - c.last_used;
+        let gone = idle > CHECKOUT_IDLE
+            || (idle > CHECKOUT_GRACE && pr_closed(gateway, &c.repo, c.number).await);
+        if gone {
+            swept.add(remove_checkout(ws, &c.repo, c.number).await);
+        }
+    }
+    swept
+}
+
+async fn remove_checkout(ws: &Workspaces, repo: &str, number: u64) -> storage::Swept {
+    let Ok(dir) = ws.worktree(repo, number) else {
+        return storage::Swept::default();
+    };
+    let bytes = storage::dir_size(&dir).bytes;
+    match ws.remove(repo, number).await {
+        Ok(()) => {
+            tracing::info!(%repo, number, bytes, "removed review checkout");
+            storage::Swept { removed: 1, bytes }
+        }
+        Err(e) => {
+            tracing::warn!(%repo, number, error = %e, "couldn't remove review checkout");
+            storage::Swept::default()
+        }
+    }
+}
+
+/// Clears out attachments, chat folders and review checkouts nothing needs.
+async fn sweep_storage(hub: Arc<AgentHub>, ws: &Workspaces, gateway: &Gateway) -> storage::Swept {
+    let mut swept = tauri::async_runtime::spawn_blocking(move || hub.sweep_files(Utc::now()))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "sweeping chat files failed");
+            storage::Swept::default()
+        });
+    swept.add(sweep_checkouts(ws, gateway).await);
+    swept
+}
+
+/// How much space tab's files take, for Settings → Storage.
+#[tauri::command]
+async fn storage_usage(state: State<'_, AppState>) -> CmdResult<StorageUsage> {
+    let hub = state.hub.clone();
+    let ws = state.workspaces.clone();
+    let data = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let checkouts = ws
+            .checkouts()
+            .into_iter()
+            .map(|c| CheckoutUsage {
+                bytes: ws
+                    .worktree(&c.repo, c.number)
+                    .map(|d| storage::dir_size(&d).bytes)
+                    .unwrap_or(0),
+                repo: c.repo,
+                number: c.number,
+                last_used: c.last_used,
+            })
+            .collect();
+        StorageUsage {
+            attachments: storage::dir_size(&hub.attachments_dir()),
+            sessions: storage::dir_size(&hub.sessions_dir()),
+            workspaces: storage::dir_size(&data.join("workspaces")),
+            checkouts,
+        }
+    })
+    .await
+    .map_err(err)
+}
+
+/// Runs the cleanup sweep now.
+#[tauri::command]
+async fn storage_clean(state: State<'_, AppState>) -> CmdResult<storage::Swept> {
+    Ok(sweep_storage(state.hub.clone(), &state.workspaces, &state.gateway).await)
+}
+
+/// Removes one review checkout, or every one when `repo` is empty. They come
+/// back the next time their PR is opened.
+#[tauri::command]
+async fn storage_remove_checkouts(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+    number: Option<u64>,
+) -> CmdResult<storage::Swept> {
+    let mut swept = storage::Swept::default();
+    for c in state.workspaces.checkouts() {
+        let pick = match (&repo, number) {
+            (Some(r), Some(n)) => *r == c.repo && n == c.number,
+            _ => true,
+        };
+        if pick {
+            swept.add(remove_checkout(&state.workspaces, &c.repo, c.number).await);
+        }
+    }
+    Ok(swept)
+}
+
 // --- GitHub review -------------------------------------------------------
 
 #[tauri::command]
@@ -1262,6 +1431,7 @@ async fn review_workspace_open(
     if !dir.exists() {
         return Err("This pull request hasn't been checked out on this computer yet.".into());
     }
+    state.workspaces.mark_used(&repo, number);
     match target.as_str() {
         "vscode" => {
             workspace::open_in_vscode(&dir, path.as_deref().map(|p| (p, line.unwrap_or(1))))
@@ -1792,11 +1962,17 @@ fn browser_label(id: &str) -> String {
 }
 
 fn browser_view(app: &tauri::AppHandle, id: &str) -> Result<tauri::Webview, String> {
-    app.get_webview(&browser_label(id)).ok_or_else(|| "browser tab is closed".to_string())
+    app.get_webview(&browser_label(id))
+        .ok_or_else(|| "browser tab is closed".to_string())
 }
 
 #[tauri::command]
-fn browser_open(app: tauri::AppHandle, id: String, url: String, bounds: Bounds) -> Result<(), String> {
+fn browser_open(
+    app: tauri::AppHandle,
+    id: String,
+    url: String,
+    bounds: Bounds,
+) -> Result<(), String> {
     use tauri::webview::{PageLoadEvent, WebviewBuilder};
     use tauri::{LogicalPosition, LogicalSize, WebviewUrl};
     let parsed: tauri::Url = url.parse().map_err(|e| format!("not a web address: {e}"))?;
@@ -1808,15 +1984,44 @@ fn browser_open(app: tauri::AppHandle, id: String, url: String, bounds: Bounds) 
     let (tab_a, tab_b) = (id.clone(), id.clone());
     let builder = WebviewBuilder::new(browser_label(&id), WebviewUrl::External(parsed))
         .on_page_load(move |wv, payload| {
-            let kind = if matches!(payload.event(), PageLoadEvent::Started) { "loading" } else { "loaded" };
-            let _ = a.emit("tab://browser", BrowserEvent { id: tab_a.clone(), kind: "url", value: wv.url().map(|u| u.to_string()).unwrap_or_default() });
-            let _ = a.emit("tab://browser", BrowserEvent { id: tab_a.clone(), kind, value: String::new() });
+            let kind = if matches!(payload.event(), PageLoadEvent::Started) {
+                "loading"
+            } else {
+                "loaded"
+            };
+            let _ = a.emit(
+                "tab://browser",
+                BrowserEvent {
+                    id: tab_a.clone(),
+                    kind: "url",
+                    value: wv.url().map(|u| u.to_string()).unwrap_or_default(),
+                },
+            );
+            let _ = a.emit(
+                "tab://browser",
+                BrowserEvent {
+                    id: tab_a.clone(),
+                    kind,
+                    value: String::new(),
+                },
+            );
         })
         .on_document_title_changed(move |_, title| {
-            let _ = b.emit("tab://browser", BrowserEvent { id: tab_b.clone(), kind: "title", value: title });
+            let _ = b.emit(
+                "tab://browser",
+                BrowserEvent {
+                    id: tab_b.clone(),
+                    kind: "title",
+                    value: title,
+                },
+            );
         });
     window
-        .add_child(builder, LogicalPosition::new(bounds.x, bounds.y), LogicalSize::new(bounds.w.max(1.0), bounds.h.max(1.0)))
+        .add_child(
+            builder,
+            LogicalPosition::new(bounds.x, bounds.y),
+            LogicalSize::new(bounds.w.max(1.0), bounds.h.max(1.0)),
+        )
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1825,8 +2030,10 @@ fn browser_open(app: tauri::AppHandle, id: String, url: String, bounds: Bounds) 
 fn browser_bounds(app: tauri::AppHandle, id: String, bounds: Bounds) -> Result<(), String> {
     use tauri::{LogicalPosition, LogicalSize};
     let wv = browser_view(&app, &id)?;
-    wv.set_position(LogicalPosition::new(bounds.x, bounds.y)).map_err(|e| e.to_string())?;
-    wv.set_size(LogicalSize::new(bounds.w.max(1.0), bounds.h.max(1.0))).map_err(|e| e.to_string())
+    wv.set_position(LogicalPosition::new(bounds.x, bounds.y))
+        .map_err(|e| e.to_string())?;
+    wv.set_size(LogicalSize::new(bounds.w.max(1.0), bounds.h.max(1.0)))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1837,14 +2044,22 @@ fn browser_visible(app: tauri::AppHandle, id: String, visible: bool) -> Result<(
 
 /// `action`: back, forward, reload, or `go` with a url.
 #[tauri::command]
-fn browser_nav(app: tauri::AppHandle, id: String, action: String, url: Option<String>) -> Result<(), String> {
+fn browser_nav(
+    app: tauri::AppHandle,
+    id: String,
+    action: String,
+    url: Option<String>,
+) -> Result<(), String> {
     let wv = browser_view(&app, &id)?;
     match action.as_str() {
         "back" => wv.eval("history.back()"),
         "forward" => wv.eval("history.forward()"),
         "reload" => wv.eval("location.reload()"),
         "go" => {
-            let u: tauri::Url = url.ok_or("no address")?.parse().map_err(|e| format!("not a web address: {e}"))?;
+            let u: tauri::Url = url
+                .ok_or("no address")?
+                .parse()
+                .map_err(|e| format!("not a web address: {e}"))?;
             if !matches!(u.scheme(), "http" | "https") {
                 return Err("only web addresses open in the browser".into());
             }
@@ -1928,7 +2143,27 @@ pub fn run() {
                 mcp_url: std::sync::Mutex::new(None),
                 workspaces: Arc::new(Workspaces::new(data_dir.join("workspaces"))),
                 lsp: Arc::new(LspHub::new()),
+                data_dir: data_dir.clone(),
             };
+            // Clean out old attachments, chat folders and review checkouts:
+            // shortly after launch, then every few hours.
+            {
+                let (hub, ws, gateway) = (
+                    state.hub.clone(),
+                    state.workspaces.clone(),
+                    state.gateway.clone(),
+                );
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    loop {
+                        let s = sweep_storage(hub.clone(), &ws, &gateway).await;
+                        if s.removed > 0 {
+                            tracing::info!(removed = s.removed, bytes = s.bytes, "storage sweep");
+                        }
+                        tokio::time::sleep(SWEEP_EVERY).await;
+                    }
+                });
+            }
             tauri::async_runtime::block_on(async {
                 state.restart(&config).await;
                 // Local MCP server for agents.
@@ -2030,6 +2265,9 @@ pub fn run() {
             review_workspace_files,
             review_workspace_search,
             review_workspace_open,
+            storage_usage,
+            storage_clean,
+            storage_remove_checkouts,
             review_vscode_available,
             lsp_servers,
             lsp_install,

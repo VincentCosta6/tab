@@ -5,6 +5,7 @@ import { keys } from "../../lib/query";
 import { Button, Card, FormRow, PageHeader, Section, TextArea, TextInput, Toggle } from "../../design/components";
 import { api } from "../../lib/api";
 import type { TabConfig } from "../../lib/types";
+import { bytes, timeAgo } from "../../lib/format";
 
 const lines = (s: string) => s.split("\n").map((l) => l.trim()).filter(Boolean);
 
@@ -161,6 +162,8 @@ export function SettingsTab() {
         </Card>
       </Section>
 
+      <StorageSection />
+
       <Section title="AI layer" description={`Claude Haiku reads each item with your instructions and nudges the rules score by up to ±25, with a one-line reason. Verdicts are cached by their inputs, so re-ranking is repeatable.`}>
         <Card>
           <FormRow label="Enabled">
@@ -206,4 +209,70 @@ function DollarInput({ value, onChange }: { value: number | null; onChange: (v: 
       style={{ maxWidth: 160 }}
     />
   );
+}
+
+/** What tab keeps on disk, and clearing it out. */
+function StorageSection() {
+  const qc = useQueryClient();
+  const usage = useQuery({ queryKey: ["storage"], queryFn: api.storageUsage });
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const run = async (key: string, fn: () => Promise<{ removed: number; bytes: number }>) => {
+    setBusy(key);
+    setNote(null);
+    try {
+      const s = await fn();
+      setNote(s.removed ? `Freed ${bytes(s.bytes)}.` : "Nothing to clear.");
+    } catch (e) {
+      setNote(`Couldn't clear: ${e}`);
+    } finally {
+      setBusy(null);
+      qc.invalidateQueries({ queryKey: ["storage"] });
+    }
+  };
+  const u = usage.data;
+  const size = (s?: { bytes: number; files: number }) => (s ? `${bytes(s.bytes)} · ${s.files.toLocaleString()} files` : "…");
+
+  return (
+    <Section
+      title="Storage"
+      description="Cleared automatically every few hours: attachments once their chat has been idle for 30 days, and review checkouts once their PR closes or they go unopened for 14 days."
+      actions={<Button size="sm" disabled={busy !== null} onClick={() => run("clean", api.storageClean)}>{busy === "clean" ? "Cleaning…" : "Clean up now"}</Button>}
+    >
+      <Card>
+        <FormRow label="Chat attachments" help="Files you attach to chats.">
+          <span className="mono">{size(u?.attachments)}</span>
+        </FormRow>
+        <FormRow label="Chat folders" help="Each chat's prompt and settings for its agent.">
+          <span className="mono">{size(u?.sessions)}</span>
+        </FormRow>
+        <FormRow label="Review checkouts" help="Local copies of repositories for PR reviews. Opening a PR again brings its copy back.">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="mono">{u ? bytes(u.workspaces.bytes) : "…"}</span>
+            {!!u?.checkouts.length && (
+              <Button size="sm" disabled={busy !== null} onClick={() => run("all", () => api.storageRemoveCheckouts())}>
+                {busy === "all" ? "Removing…" : "Remove all"}
+              </Button>
+            )}
+          </div>
+        </FormRow>
+        {u?.checkouts.map((c) => (
+          <FormRow key={`${c.repo}#${c.number}`} label={`${c.repo} #${c.number}`} help={opened(c.last_used)}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span className="mono">{bytes(c.bytes)}</span>
+              <Button size="sm" variant="ghost" icon="trash" aria-label={`Remove ${c.repo} #${c.number}`} disabled={busy !== null}
+                onClick={() => run(`${c.repo}#${c.number}`, () => api.storageRemoveCheckouts(c.repo, c.number))} />
+            </div>
+          </FormRow>
+        ))}
+        {note && <FormRow label=""><span>{note}</span></FormRow>}
+      </Card>
+    </Section>
+  );
+}
+
+/** "Opened 3h ago", "Opened just now", or "Opened 10/28/2026" once it's old. */
+function opened(iso: string) {
+  const ago = timeAgo(iso);
+  return /^\d+[mhd]$/.test(ago) ? `Opened ${ago} ago` : `Opened ${ago}`;
 }

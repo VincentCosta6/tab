@@ -348,6 +348,18 @@ export const mockApi = {
         ];
         case "mcp_info": return { url: "http://127.0.0.1:47821/mcp", token: "mock-token" };
         case "github_pull": return samplePull(args.repo, args.number);
+        case "storage_usage": return {
+          attachments: { bytes: 1_048_576, files: 15 },
+          sessions: { bytes: 311_296, files: 64 },
+          workspaces: { bytes: mockCheckouts.reduce((n, c) => n + c.bytes, 10_485_760), files: 900 },
+          checkouts: mockCheckouts,
+        };
+        case "storage_clean": return { removed: 3, bytes: 2_200_000 };
+        case "storage_remove_checkouts": {
+          const gone = mockCheckouts.filter((c) => !args.repo || (c.repo === args.repo && c.number === args.number));
+          mockCheckouts = mockCheckouts.filter((c) => !gone.includes(c));
+          return { removed: gone.length, bytes: gone.reduce((n, c) => n + c.bytes, 0) };
+        }
         case "lsp_servers": return lspServers;
         case "lsp_install": {
           await new Promise((r) => setTimeout(r, 1800));
@@ -399,6 +411,11 @@ export const mockApi = {
     return () => void ghCodeListeners.delete(cb);
   },
 };
+
+let mockCheckouts = [
+  { repo: "acme/web", number: 412, last_used: new Date(Date.now() - 3600_000).toISOString(), bytes: 2_500_000 },
+  { repo: "acme/api", number: 88, last_used: new Date(Date.now() - 9 * 86400_000).toISOString(), bytes: 1_700_000_000 },
+];
 
 let lspServers: LspServer[] = [
   { id: "gopls", name: "Go (gopls)", languages: ["go"], command: "gopls", note: "Hover, go to definition, references and errors across the module.", installed: false, path: null, install_command: "go install golang.org/x/tools/gopls@latest", needs: null, needs_url: null },

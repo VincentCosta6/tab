@@ -189,4 +189,46 @@ impl Store {
             .collect::<Result<_, _>>()?;
         Ok(rows)
     }
+
+    /// Paths of files attached in chats that have been active since `since`.
+    /// The cleanup sweep keeps these; anything else in the attachments folder
+    /// can go once it's old enough.
+    pub fn attachments_in_use(
+        &self,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        let conn = self.conn();
+        let metas: Vec<String> = conn
+            .prepare(
+                "SELECT m.meta FROM session_messages m JOIN sessions s ON s.id = m.session_id
+                 WHERE (s.updated_at >= ?1 OR m.created_at >= ?1 OR s.status = 'working')
+                   AND m.meta LIKE '%\"attachments\"%'",
+            )?
+            .query_map([ts(since)], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(metas
+            .iter()
+            .filter_map(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+            .flat_map(|m| match m.get("attachments") {
+                Some(serde_json::Value::Array(a)) => a
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect())
+    }
+
+    /// Ids of chats that have been active since `since` or are mid-turn.
+    pub fn sessions_active(
+        &self,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        let conn = self.conn();
+        let ids = conn
+            .prepare("SELECT id FROM sessions WHERE updated_at >= ?1 OR status = 'working'")?
+            .query_map([ts(since)], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(ids)
+    }
 }
