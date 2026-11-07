@@ -94,6 +94,25 @@ impl Store {
         Ok(s)
     }
 
+    pub fn session_key(&self, id: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row("SELECT key FROM sessions WHERE id = ?1", [id], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()?
+            .flatten())
+    }
+
+    /// Moves a session to a new key, e.g. when the draft it was about gets saved.
+    pub fn session_set_key(&self, id: &str, key: &str) -> anyhow::Result<()> {
+        self.conn().execute(
+            "UPDATE sessions SET key = ?2 WHERE id = ?1",
+            params![id, key],
+        )?;
+        Ok(())
+    }
+
     /// What the agent should know about the session's subject, refreshed each turn.
     pub fn session_set_brief(&self, id: &str, brief: &str) -> anyhow::Result<()> {
         self.conn().execute(

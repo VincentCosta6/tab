@@ -1046,8 +1046,16 @@ function AllRuns({ runs, workflows, onOpenWorkflow }: { runs: WorkflowRun[]; wor
 
 function AssistantPanel({ workflow }: { workflow: Workflow }) {
   const qc = useQueryClient();
-  const key = ["chat", "workflows"];
-  const { data: chat } = useQuery<Chat>({ queryKey: key, queryFn: api.workflowChatOpen, staleTime: 0, refetchOnMount: "always" });
+  // One conversation per workflow; a new draft has its own until it's saved.
+  const key = ["chat", "workflows", workflow.id || "new"];
+  const { data: chat } = useQuery<Chat>({ queryKey: key, queryFn: () => api.workflowChatOpen(workflow.id || null), staleTime: 0, refetchOnMount: "always" });
+  // Once the assistant saves a new draft its chat moves to the workflow's id;
+  // drop the draft's cached copy so live updates land on the one shown.
+  const prevId = useRef(workflow.id);
+  useEffect(() => {
+    if (!prevId.current && workflow.id) qc.removeQueries({ queryKey: ["chat", "workflows", "new"], exact: true });
+    prevId.current = workflow.id;
+  }, [qc, workflow.id]);
   const send = async (text: string) => {
     qc.setQueryData<Chat>(key, (c) => ({
       session: c?.session ?? null, approvals: c?.approvals ?? [], running: true,

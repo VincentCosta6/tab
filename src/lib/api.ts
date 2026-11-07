@@ -125,7 +125,7 @@ export const api = {
   workflowDelete: (id: string) => call<void>("workflow_delete", { id }),
   workflowRuns: (workflowId: string | null, limit = 50) => call<WorkflowRun[]>("workflow_runs", { workflowId, limit }),
   workflowRun: (workflow: Workflow, itemId: string | null, dryRun: boolean) => call<WorkflowRun>("workflow_run", { workflow, itemId, dryRun }),
-  workflowChatOpen: () => call<Chat>("workflow_chat_open"),
+  workflowChatOpen: (workflowId: string | null) => call<Chat>("workflow_chat_open", { workflowId }),
   workflowChatSend: (text: string, open: Workflow | null) => call<Session>("workflow_chat_send", { text, open }),
   browserOpen: (id: string, url: string, bounds: Bounds) => call<void>("browser_open", { id, url, bounds }),
   browserBounds: (id: string, bounds: Bounds) => call<void>("browser_bounds", { id, bounds }),
