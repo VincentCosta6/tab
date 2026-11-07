@@ -50,6 +50,7 @@ export const api = {
     return invoke<string>("attachment_save", bytes, { headers: { "x-name": encodeURIComponent(name) } });
   },
   imageRead: (path: string) => call<ArrayBuffer>("image_read", { path }),
+  fileOpen: (path: string, reveal = false) => call<void>("file_open", { path, reveal }),
   startDictation: () => call<void>("start_dictation"),
   agentActivity: () => call<AgentActivity[]>("agent_activity"),
   slashCommands: () => call<string[]>("agent_slash_commands"),

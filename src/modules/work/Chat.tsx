@@ -4,8 +4,9 @@ import { Button, cx } from "../../design/components";
 import { Brand } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { Markdown } from "../../design/markdown";
-import { Thumbs } from "../../design/ImageViewer";
-import { imageTypes, saveAttachment } from "../../lib/images";
+import { Attachments } from "../../design/ImageViewer";
+import { MarkdownFiles } from "../../design/markdown";
+import { saveAttachment } from "../../lib/images";
 import { AgentNotice } from "./AgentNotice";
 import { Dictation } from "./Dictation";
 import { api } from "../../lib/api";
@@ -225,13 +226,19 @@ export function AgentStatus({ chat }: { chat: Chat | undefined }) {
 
 export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { chat: Chat | undefined; suggestions?: string[]; onSuggest?: (s: string) => void; onSend?: (text: string) => void; intro?: React.ReactNode }) {
   const stream = useStream(chat?.session?.id);
-  const end = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const stuck = useRef(true); // following the bottom; off once the person scrolls up to read
   const messages = chat?.messages ?? [];
   const results = new Map<number, SessionMessage>();
-  // Pair each tool call with the result that follows it.
+  // Pair each tool call with its result: by id when the agent ran several at once, else the one that follows it.
+  const byUseId = new Map<string, SessionMessage>();
+  messages.forEach((m) => m.kind === "tool_result" && m.meta?.tool_use_id && byUseId.set(m.meta.tool_use_id, m));
   messages.forEach((m, i) => {
-    if (m.kind === "tool" && messages[i + 1]?.kind === "tool_result") results.set(m.id, messages[i + 1]);
+    if (m.kind !== "tool") return;
+    const r = (m.meta?.id && byUseId.get(m.meta.id)) || (messages[i + 1]?.kind === "tool_result" && !messages[i + 1].meta?.tool_use_id ? messages[i + 1] : undefined);
+    if (r) results.set(m.id, r);
   });
+  const paired = new Set(results.values());
   // Several password cards for one connection: show only the newest.
   const newestCard = new Map<string, number>();
   messages.forEach((m) => m.kind === "secret_request" && newestCard.set(m.meta?.connector_id, m.id));
@@ -239,9 +246,15 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
     if (m.kind === "secret_request" && newestCard.get(m.meta?.connector_id) !== m.id) m.meta = { ...m.meta, superseded: true };
   });
 
+  // Follow new output while the person is at the bottom; leave them be once they scroll up.
+  // Their own message always brings them back down.
+  const last = messages[messages.length - 1];
   useLayoutEffect(() => {
-    end.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, stream, chat?.approvals.length]);
+    const el = box.current;
+    if (!el) return;
+    if (last?.role === "user") stuck.current = true;
+    if (stuck.current) el.scrollTop = el.scrollHeight;
+  }, [messages.length, stream, chat?.approvals.length, chat?.running, last?.role]);
 
   if (!messages.length && !stream)
     return (
@@ -260,39 +273,84 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
     );
 
   return (
-    <div className="transcript">
+    <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null }}>
+    <div className="transcript" ref={box} onScroll={(e) => { const el = e.currentTarget; stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}>
       <div className="transcript-head"><AgentStatus chat={chat} /></div>
-      {messages.map((m) => (m.kind === "tool_result" && [...results.values()].includes(m) ? null : <MessageView key={m.id} m={m} result={results.get(m.id)} onSend={onSend} />))}
+      {messages.map((m) => (m.kind === "tool_result" && paired.has(m) ? null : <MessageView key={m.id} m={m} result={results.get(m.id)} onSend={onSend} />))}
       {stream && (
         <div className="msg msg-assistant streaming">
           <Markdown text={stream} />
         </div>
       )}
       {chat?.approvals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
-      <div ref={end} />
-      <ProgressBar messages={messages} running={!!chat?.running} />
+      <ProgressBar messages={messages} results={results} running={!!chat?.running} />
     </div>
+    </MarkdownFiles.Provider>
   );
 }
 
-interface Todo { content: string; status: "pending" | "in_progress" | "completed"; activeForm?: string }
+interface Todo { content: string; status: string; activeForm?: string }
+
+const TODO_TOOLS = new Set(["TodoWrite", "todowrite"]);
+const TASK_TOOLS = new Set(["TaskCreate", "TaskUpdate"]);
 
 /**
- * Pinned to the bottom of the chat while the agent works: its todo list
- * (from TodoWrite) with progress, and the step it's on right now.
+ * The agent's step list, from whichever todo tool it uses: TodoWrite
+ * (Claude Code, and opencode's todowrite) sends the whole list each time;
+ * TaskCreate/TaskUpdate (newer Claude Code) builds it up one step at a time.
+ * Only shown when this turn touched it, so an old list doesn't linger.
  */
-function ProgressBar({ messages, running }: { messages: SessionMessage[]; running: boolean }) {
-  const [collapsed, setCollapsed] = useState(false); // steps are shown by default
-  let todos: Todo[] = [];
+function agentSteps(messages: SessionMessage[], results: Map<number, SessionMessage>): Todo[] {
+  let turn = 0;
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { turn = i + 1; break; }
+  for (let i = messages.length - 1; i >= turn; i--) {
+    const m = messages[i];
+    if (m.kind === "tool" && TODO_TOOLS.has(m.meta?.tool)) {
+      const todos = m.meta?.input?.todos;
+      return Array.isArray(todos) ? todos.filter((t) => t && typeof t.content === "string") : [];
+    }
+  }
+  if (!messages.slice(turn).some((m) => m.kind === "tool" && TASK_TOOLS.has(m.meta?.tool))) return [];
+  const tasks = new Map<string, Todo>();
+  let next = 1;
+  for (const m of messages) {
+    if (m.kind !== "tool") continue;
+    const input = m.meta?.input ?? {};
+    if (m.meta?.tool === "TaskCreate") {
+      const id = /#(\d+)/.exec(results.get(m.id)?.content ?? "")?.[1] ?? String(next);
+      next = Math.max(next, Number(id) || 0) + 1;
+      tasks.set(id, { content: String(input.subject ?? input.description ?? "Step"), activeForm: input.activeForm, status: "pending" });
+    } else if (m.meta?.tool === "TaskUpdate") {
+      const id = String(input.taskId ?? "");
+      const t = tasks.get(id);
+      if (!t) continue;
+      if (input.status === "deleted") tasks.delete(id);
+      else tasks.set(id, { ...t, status: input.status ?? t.status, content: input.subject ?? t.content, activeForm: input.activeForm ?? t.activeForm });
+    }
+  }
+  return [...tasks.values()];
+}
+
+/**
+ * Pinned to the bottom of the chat while the agent works: its step list
+ * with each step's status, and the tool it's running right now.
+ */
+function ProgressBar({ messages, results, running }: { messages: SessionMessage[]; results: Map<number, SessionMessage>; running: boolean }) {
+  // Open while the agent works, folded to one line once it's done (click to open either way).
+  const [toggled, setToggled] = useState<boolean | null>(null);
+  useEffect(() => setToggled(null), [running]);
+  const collapsed = toggled ?? !running;
+  const setCollapsed = setToggled;
+  const todos = agentSteps(messages, results);
   let step = "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.role === "user") break; // only this turn's work
     if (m.kind !== "tool") continue;
-    if (m.meta?.tool === "TodoWrite") {
-      if (!todos.length) todos = (m.meta?.input?.todos as Todo[]) ?? [];
-    } else if (!step && m.meta?.tool !== "AskUserQuestion") step = m.content.replace(/^mcp__tab__/, "tab: ");
-    if (todos.length && step) break;
+    const tool = m.meta?.tool;
+    if (TODO_TOOLS.has(tool) || TASK_TOOLS.has(tool) || tool === "TaskList" || tool === "TaskGet" || tool === "AskUserQuestion") continue;
+    step = m.content.replace(/^mcp__tab__/, "tab: ");
+    break;
   }
   if (!running && !todos.length) return null;
   const done = todos.filter((t) => t.status === "completed").length;
@@ -302,22 +360,44 @@ function ProgressBar({ messages, running }: { messages: SessionMessage[]; runnin
     <div className={cx("progress-bar", running && "running")}>
       <button className="progress-head" onClick={() => todos.length && setCollapsed(!collapsed)} aria-expanded={!collapsed}>
         {running ? <span className="dots"><i /><i /><i /></span> : <Icon name="check" size={12} />}
-        <span className="progress-label">{running ? label : "Done"}</span>
-        {todos.length > 0 && <span className="progress-count">{done}/{todos.length}</span>}
+        <span className="progress-label">{running ? (collapsed || !todos.length ? label : "Working") : "Done"}</span>
+        {todos.length > 0 && <span className="progress-count">{done} of {todos.length}</span>}
       </button>
-      {todos.length > 0 && <div className="progress-track"><i style={{ width: `${(done / todos.length) * 100}%` }} /></div>}
       {todos.length > 0 && !collapsed && (
         <ul className="progress-list">
           {todos.map((t, i) => (
             <li key={i} className={t.status}>
-              <Icon name={t.status === "completed" ? "check" : "circle-dot"} size={11} />
-              <span>{t.status === "in_progress" ? t.activeForm || t.content : t.content}</span>
+              <span className={cx("step-mark", t.status, !running && "still")}>{t.status === "completed" && <Icon name="check" size={9} />}</span>
+              <span>{t.status === "in_progress" && running ? t.activeForm || t.content : t.content}</span>
             </li>
           ))}
         </ul>
       )}
-      {running && step && active && <div className="progress-step">{step}</div>}
+      {running && step && <div className="progress-step">{step}</div>}
     </div>
+  );
+}
+
+/**
+ * One tool call: a single line (first line of the command, cut to fit),
+ * opening to the full command and its output, each scrolling on its own.
+ */
+function ToolRow({ m, result }: { m: SessionMessage; result?: SessionMessage }) {
+  const tool: string = m.meta?.tool ?? "";
+  const label = m.content.replace(/^mcp__tab__/, "tab: ");
+  const [first, ...more] = label.split("\n");
+  const command: string | undefined = typeof m.meta?.input?.command === "string" ? m.meta.input.command : undefined;
+  const long = !!command && (command.includes("\n") || command.length > 120);
+  return (
+    <details className={cx("msg-tool", result?.meta?.is_error && "failed")}>
+      <summary title={label.length > 300 ? label.slice(0, 300) + "…" : label}>
+        <Icon name={tool.startsWith("mcp__tab") || tool.startsWith("tab_") ? "graph" : "terminal"} size={12} />
+        <span className="msg-tool-name">{first}{more.length > 0 && " …"}</span>
+        {result?.meta?.is_error && <span className="msg-tool-flag">failed</span>}
+      </summary>
+      {long && <pre className="msg-tool-cmd">{command}</pre>}
+      {result?.content ? <pre>{result.content}</pre> : !long && <div className="msg-tool-empty">No output</div>}
+    </details>
   );
 }
 
@@ -327,7 +407,7 @@ function MessageView({ m, result, onSend }: { m: SessionMessage; result?: Sessio
     const images: string[] = Array.isArray(m.meta?.attachments) ? m.meta.attachments : [];
     return (
       <div className="msg msg-user">
-        {images.length > 0 && <Thumbs srcs={images} size={96} />}
+        {images.length > 0 && <Attachments paths={images} size={96} />}
         {/```|\]\(/.test(m.content) ? <Markdown text={m.content} /> : m.content}
       </div>
     );
@@ -339,17 +419,13 @@ function MessageView({ m, result, onSend }: { m: SessionMessage; result?: Sessio
     if (!result || !result.meta?.is_error) return null;
     return <QuestionCard m={m} answered={false} onSend={onSend} />;
   }
+  // Step-list updates show in the pinned step card, not as rows.
+  if (m.kind === "tool" && (TODO_TOOLS.has(m.meta?.tool) || TASK_TOOLS.has(m.meta?.tool) || m.meta?.tool === "TaskList" || m.meta?.tool === "TaskGet")) return null;
   if (m.kind === "tool")
     return (
-      <details className={cx("msg-tool", result?.meta?.is_error && "failed")}>
-        <summary>
-          <Icon name={m.meta?.tool?.startsWith("mcp__tab") || m.meta?.tool?.startsWith("tab_") ? "graph" : "terminal"} size={12} />
-          <span>{m.content.replace(/^mcp__tab__/, "tab: ")}</span>
-        </summary>
-        {result?.content && <pre>{result.content}</pre>}
-      </details>
+      <ToolRow m={m} result={result} />
     );
-  if (m.kind === "tool_result") return <details className="msg-tool"><summary><Icon name="terminal" size={12} />Output</summary><pre>{m.content}</pre></details>;
+  if (m.kind === "tool_result") return <details className="msg-tool"><summary><Icon name="terminal" size={12} /><span className="msg-tool-name">Output</span></summary><pre>{m.content}</pre></details>;
   if (m.kind === "error") return <div className="msg-error"><Icon name="x-circle" size={14} /><span>{m.content}</span></div>;
   if (m.kind === "result") {
     const cost = m.meta?.cost_usd;
@@ -736,11 +812,11 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   }, []);
 
   const add = async (files: File[]) => {
-    const imgs = files.filter((f) => imageTypes.includes(f.type));
-    if (files.length && !imgs.length) return setError("tab takes PNG, JPEG, GIF and WebP images.");
-    setError(null);
-    setUploading((n) => n + imgs.length);
-    for (const f of imgs) {
+    const big = files.filter((f) => f.size > 50 * 1024 * 1024);
+    const ok = files.filter((f) => f.size <= 50 * 1024 * 1024);
+    setError(big.length ? `${big.map((f) => f.name).join(", ")} ${big.length > 1 ? "are" : "is"} over 50 MB.` : null);
+    setUploading((n) => n + ok.length);
+    for (const f of ok) {
       try {
         const path = await saveAttachment(f);
         setImages((xs) => [...xs, path]);
@@ -786,11 +862,11 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
         void add([...e.dataTransfer.files]);
       }}
     >
-      {armed && <div className="composer-drop"><Icon name="plus" size={14} /> Drop images to attach</div>}
+      {armed && <div className="composer-drop"><Icon name="plus" size={14} /> Drop files to attach</div>}
       <AgentNotice messages={chat?.messages} />
       {(images.length > 0 || uploading > 0) && (
         <div className="composer-images">
-          <Thumbs srcs={images} size={56} onRemove={(i) => setImages((xs) => xs.filter((_, j) => j !== i))} />
+          <Attachments paths={images} size={56} onRemove={(p) => setImages((xs) => xs.filter((x) => x !== p))} />
           {uploading > 0 && <span className="thumb thumb-busy" style={{ width: 56, height: 56 }}><Icon name="refresh" size={14} /></span>}
         </div>
       )}
@@ -827,8 +903,8 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
       {suggestion && !text && <div className="composer-suggest subtle"><kbd>Tab</kbd> to use the suggested reply, then <kbd>Enter</kbd> to send</div>}
       <div className="composer-foot">
         <span className="subtle composer-agent">
-          <button className="bar-icon" onClick={() => file.current?.click()} title="Attach images (or paste or drop them)" aria-label="Attach images"><Icon name="plus" size={14} /></button>
-          <input ref={file} type="file" accept={imageTypes.join(",")} multiple hidden onChange={(e) => (void add([...(e.target.files ?? [])]), (e.target.value = ""))} />
+          <button className="bar-icon" onClick={() => file.current?.click()} title="Attach files or images (or paste or drop them)" aria-label="Attach files"><Icon name="plus" size={14} /></button>
+          <input ref={file} type="file" multiple hidden onChange={(e) => (void add([...(e.target.files ?? [])]), (e.target.value = ""))} />
           <Dictation onText={(t) => setText((cur) => (cur && !/\s$/.test(cur) ? `${cur} ${t}` : cur + t))} target={ref} />
           {config?.agent.kind && <><span className="composer-brand" title={agentLabel[config.agent.kind]}><Brand name={agentBrand[config.agent.kind]} size={11} /></span><ModelPicker /><ModePicker /></>}
           {extra}
