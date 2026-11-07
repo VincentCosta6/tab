@@ -117,6 +117,9 @@ export function SettingsTab() {
           <FormRow label="Model" help={draft.agent.kind === "opencode" ? "provider/model" : "e.g. sonnet, opus"}>
             <TextInput placeholder="Agent default" value={draft.agent.model ?? ""} onChange={(e) => set((c) => void (c.agent.model = e.target.value || null))} />
           </FormRow>
+          <FormRow label="Strict mode" help="Chats load only tab's connections, never your personal MCP servers, connectors, plugins, hooks or user settings. The repo's own config still loads, and review chats are always strict.">
+            <Toggle label="Strict mode" checked={draft.agent.strict !== false} onChange={(v) => set((c) => void (c.agent.strict = v))} />
+          </FormRow>
           {draft.agent.kind === "claude_code" && (
             <FormRow label="Permission mode" help="Anything that still needs approval is asked in the chat.">
               <select className="select" value={draft.agent.permission_mode} onChange={(e) => set((c) => void (c.agent.permission_mode = e.target.value))}>

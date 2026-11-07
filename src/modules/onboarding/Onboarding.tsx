@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Button, Kbd, TextInput, cx } from "../../design/components";
+import { Button, Kbd, TextInput, Toggle, cx } from "../../design/components";
 import { Brand, TabMark } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
@@ -105,6 +105,14 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
                 Model <small>Optional. {draft.agent.kind === "opencode" ? "provider/model, e.g. anthropic/claude-sonnet-5-5" : "e.g. sonnet or opus"}</small>
                 <TextInput placeholder="Agent default" value={draft.agent.model ?? ""} onChange={(e) => set((c) => void (c.agent.model = e.target.value || null))} />
               </label>
+            </div>
+            <div className={cx("onboarding-strict", draft.agent.strict !== false && "on")}>
+              <Icon name="plug" size={18} />
+              <div>
+                <strong>Strict mode</strong> <span className="onboarding-recommended">Recommended</span>
+                <p className="subtle">Chats use only the connections you add to tab. Your personal agent setup stays out: MCP servers and connectors from your own account, plugins, hooks and user settings. Turn it off any time in Settings.</p>
+              </div>
+              <Toggle label="Strict mode" checked={draft.agent.strict !== false} onChange={(v) => set((c) => void (c.agent.strict = v))} />
             </div>
             <Button size="sm" variant="ghost" icon="undo" onClick={() => probes.refetch()}>Check again</Button>
           </div>

@@ -12,7 +12,7 @@ import { useChat, useItem } from "../../lib/hooks";
 import { keys } from "../../lib/query";
 import type { QueueItem } from "../../lib/types";
 import { parsePullUrl } from "../github/pulls";
-import { ChatView, SandboxPill } from "./Chat";
+import { ChatView, SandboxPill, StrictPill } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
 import { ContextRail } from "./ContextRail";
 import { confirmDone } from "./doneGuard";
@@ -93,10 +93,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         <div className="item-head-main">
           <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={34} />
           <div className="item-head-text">
-            <div className="item-title-row">
-              <SandboxPill />
-              <ItemTitle item={item} />
-            </div>
+            <ItemTitle item={item} />
             <div className="item-meta">
               <Badge tone={k.tone}>{k.label}</Badge>
               {r && <UrgencyLabel urgency={r.urgency} />}
@@ -129,14 +126,20 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         item={item}
         onSelect={onSelect}
         left={
-          <div className="pane-tabs" role="tablist">
-            {(["content", "chat", "timeline"] as const).map((t) => (
-              <button key={t} role="tab" aria-selected={tab === t} className={cx("pane-tab", tab === t && "active")} onClick={() => setTab(t)}>
-                {t === "chat" ? "Chat" : t === "timeline" ? "Timeline" : item.kind.startsWith("email.") ? "Email" : "Details"}
-                {t === "chat" && chatCount > 0 && <span className="pane-tab-count">{chatCount}</span>}
-              </button>
-            ))}
-          </div>
+          <>
+            <div className="pane-tabs" role="tablist">
+              {(["content", "chat", "timeline"] as const).map((t) => (
+                <button key={t} role="tab" aria-selected={tab === t} className={cx("pane-tab", tab === t && "active")} onClick={() => setTab(t)}>
+                  {t === "chat" ? "Chat" : t === "timeline" ? "Timeline" : item.kind.startsWith("email.") ? "Email" : "Details"}
+                  {t === "chat" && chatCount > 0 && <span className="pane-tab-count">{chatCount}</span>}
+                </button>
+              ))}
+            </div>
+            <div className="pane-pills">
+              <SandboxPill />
+              <StrictPill />
+            </div>
+          </>
         }
         right={tab === "content" && <RichSwitch item={item} mode={readMode} onChange={setReadMode} />}
       />

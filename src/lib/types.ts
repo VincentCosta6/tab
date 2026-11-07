@@ -458,6 +458,8 @@ export interface AgentConfig {
   permission_mode: string;
   suggest_replies?: boolean;
   titler?: TitlerConfig;
+  /** Only tab's connections load in chats, never the person's own agent setup. On unless turned off. */
+  strict?: boolean;
   opencode_url: string | null;
   budget: BudgetConfig;
 }

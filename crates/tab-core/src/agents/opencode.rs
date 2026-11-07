@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{AgentHub, Decision, default_command, resolve};
 use crate::model::{AgentKind, Session, SessionStatus};
+use crate::sandbox::Trust;
 
 /// Turn state for one OpenCode session, keyed by OpenCode's session id.
 #[derive(Default)]
@@ -57,6 +58,108 @@ impl Server {
     fn q(&self) -> [(&str, &str); 1] {
         [("directory", self.directory.as_str())]
     }
+}
+
+/// MCP servers in OpenCode config tab doesn't own: the person's global
+/// config, and for code nobody here wrote, the checkout's too.
+fn own_mcp_servers(directory: &Path, trust: Trust) -> Vec<String> {
+    let mut dirs = Vec::new();
+    match std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
+        Some(d) => dirs.push(Path::new(&d).join("opencode")),
+        None => dirs.extend(crate::sandbox::home().map(|h| h.join(".config/opencode"))),
+    }
+    if let Some(d) = std::env::var_os("OPENCODE_CONFIG_DIR") {
+        dirs.push(d.into());
+    }
+    if trust != Trust::Person {
+        dirs.push(directory.to_path_buf());
+        dirs.push(directory.join(".opencode"));
+    }
+    let mut files: Vec<std::path::PathBuf> = dirs
+        .iter()
+        .flat_map(|d| ["opencode.json", "opencode.jsonc", "config.json"].map(|f| d.join(f)))
+        .collect();
+    files.extend(std::env::var_os("OPENCODE_CONFIG").map(Into::into));
+    let mut names: Vec<String> = files
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok())
+        .flat_map(|text| mcp_names(&text))
+        .filter(|n| n != "tab")
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The `mcp` keys of an OpenCode config, which may be JSONC.
+fn mcp_names(text: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(&strip_jsonc(text))
+        .ok()
+        .and_then(|v| v["mcp"].as_object().map(|m| m.keys().cloned().collect()))
+        .unwrap_or_default()
+}
+
+/// JSONC to JSON: drops comments and trailing commas outside strings.
+fn strip_jsonc(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_str = false;
+    while let Some(c) = chars.next() {
+        if in_str {
+            out.push(c);
+            match c {
+                '\\' => out.extend(chars.next()),
+                '"' => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_str = true;
+                out.push(c);
+            }
+            ('/', Some('/')) => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut prev = ' ';
+                for c in chars.by_ref() {
+                    if prev == '*' && c == '/' {
+                        break;
+                    }
+                    prev = c;
+                }
+            }
+            (',', _) => {
+                let next = chars.clone().find(|c| !c.is_whitespace());
+                if !matches!(next, Some('}') | Some(']')) {
+                    out.push(c);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Servers OpenCode's `GET /mcp` reports as connected, other than tab's.
+fn connected_besides_tab(status: &Value) -> Vec<String> {
+    let mut out: Vec<String> = status
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(name, s)| *name != "tab" && s["status"] == "connected")
+        .map(|(name, _)| name.clone())
+        .collect();
+    out.sort();
+    out
 }
 
 fn free_port() -> u16 {
@@ -111,6 +214,8 @@ async fn server(hub: &Arc<AgentHub>, session: Option<&Session>) -> anyhow::Resul
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .build()?;
+    // A server the person runs themselves loads whatever they configured.
+    let mut strict = false;
     let (base, child) = match cfg.opencode_url.as_deref().filter(|u| !u.trim().is_empty()) {
         Some(url) => (url.to_string(), None),
         None => {
@@ -125,6 +230,7 @@ async fn server(hub: &Arc<AgentHub>, session: Option<&Session>) -> anyhow::Resul
                 Some(s) => hub.policy(s),
                 None => crate::sandbox::current().chat_policy(),
             };
+            strict = cfg.strict || policy.trust != Trust::Person;
             let args: Vec<std::ffi::OsString> = ["serve", "--hostname", "127.0.0.1", "--port"]
                 .iter()
                 .map(Into::into)
@@ -150,17 +256,29 @@ async fn server(hub: &Arc<AgentHub>, session: Option<&Session>) -> anyhow::Resul
                     "Authorization": format!("Bearer {}", crate::mcp::chat_token(&mcp.token, id)),
                     "X-Tab-Session": id,
                 });
-                let config = json!({
-                    "mcp": {
-                        "tab": {
-                            "type": "remote",
-                            "url": mcp.url,
-                            "enabled": true,
-                            "headers": headers
-                        }
+                let mut servers = serde_json::Map::new();
+                if strict {
+                    // Turns off every MCP server the person's own config
+                    // (or, for someone else's code, the checkout's) adds.
+                    for name in own_mcp_servers(Path::new(&directory), policy.trust) {
+                        servers.insert(name, json!({ "enabled": false }));
                     }
-                });
+                }
+                servers.insert(
+                    "tab".into(),
+                    json!({
+                        "type": "remote",
+                        "url": mcp.url,
+                        "enabled": true,
+                        "headers": headers
+                    }),
+                );
+                let config = json!({ "mcp": servers });
                 cmd.env("OPENCODE_CONFIG_CONTENT", config.to_string());
+            }
+            if strict {
+                // OpenCode also reads Claude Code's `~/.claude` (CLAUDE.md, skills).
+                cmd.env("OPENCODE_DISABLE_CLAUDE_CODE", "1");
             }
             let child = prepared.spawn().map_err(|e| {
                 anyhow::anyhow!("starting OpenCode ({}) failed: {e}", exe.display())
@@ -185,6 +303,30 @@ async fn server(hub: &Arc<AgentHub>, session: Option<&Session>) -> anyhow::Resul
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     anyhow::ensure!(ok, "OpenCode server at {base} did not come up");
+    if strict {
+        let status = client
+            .get(format!("{}/mcp", base.trim_end_matches('/')))
+            .query(&[("directory", directory.as_str())])
+            .send()
+            .await;
+        match status {
+            Ok(r) if r.status().is_success() => {
+                let leaked = connected_besides_tab(&r.json::<Value>().await.unwrap_or_default());
+                if !leaked.is_empty() {
+                    if let Some(mut c) = child {
+                        c.kill_tree();
+                    }
+                    anyhow::bail!(
+                        "Strict mode stopped this chat: OpenCode connected MCP server {}, which isn't one of tab's connections.",
+                        leaked.join(", ")
+                    );
+                }
+            }
+            _ => tracing::warn!(
+                "strict mode: OpenCode didn't report its MCP servers, so tab couldn't check them"
+            ),
+        }
+    }
 
     let s = Arc::new(Server {
         base,
@@ -594,4 +736,48 @@ pub(super) async fn complete(
         .join("")
         .trim()
         .to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_mcp_server_names_from_jsonc() {
+        let text = r#"{
+            // personal servers
+            "mcp": {
+                "health": { "type": "remote", "url": "https://h.example/mcp?a=1//2" },
+                /* old */ "notes": { "type": "local", "command": ["notes"], },
+            },
+        }"#;
+        assert_eq!(mcp_names(text), ["health", "notes"]);
+        assert!(mcp_names("{}").is_empty());
+        assert!(mcp_names("not json").is_empty());
+    }
+
+    #[test]
+    fn only_connected_servers_besides_tab_count_as_leaks() {
+        let status = json!({
+            "tab": { "status": "connected" },
+            "health": { "status": "connected" },
+            "notes": { "status": "disabled" },
+            "broken": { "status": "failed" },
+        });
+        assert_eq!(connected_besides_tab(&status), ["health"]);
+    }
+
+    #[test]
+    fn review_chats_also_turn_off_the_checkouts_servers() {
+        let dir = std::env::temp_dir().join(format!("tab-oc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("opencode.json"),
+            r#"{"mcp":{"pr-server":{"type":"local"}}}"#,
+        )
+        .unwrap();
+        assert!(own_mcp_servers(&dir, Trust::Agent).contains(&"pr-server".to_string()));
+        assert!(!own_mcp_servers(&dir, Trust::Person).contains(&"pr-server".to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

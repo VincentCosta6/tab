@@ -109,6 +109,26 @@ export function SandboxPill() {
   );
 }
 
+/**
+ * Strict mode: blue "Strict" when chats load only tab's connections, amber
+ * "Not strict" when strict is on but this agent can't be held to it (an
+ * OpenCode server you run yourself), nothing when it's off.
+ */
+export function StrictPill() {
+  const { data: config } = useConfig();
+  const agent = config?.agent;
+  if (!agent?.kind || agent.strict === false) return null;
+  const remote = agent.kind === "opencode" && !!agent.opencode_url?.trim();
+  const title = remote
+    ? "Strict mode is on, but tab connects to an OpenCode server you started, so it can't control what that server loads."
+    : "Strict mode: this chat loads only tab's connections. Your personal MCP servers, connectors, plugins, hooks and user settings stay out; the repo's own config still loads. If anything else loads, tab stops the turn.";
+  return (
+    <span className={cx("strict-pill", remote && "limited")} title={title}>
+      <Icon name="plug" size={11} /> {remote ? "Not strict" : "Strict"}
+    </span>
+  );
+}
+
 const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
 
 /**

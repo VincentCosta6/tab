@@ -63,6 +63,13 @@ pub struct AgentConfig {
     /// Names chats started in tab with a small model as the work comes into focus.
     #[serde(default)]
     pub titler: TitlerConfig,
+    /// Strict mode: chats load only tab's own MCP server (every tool comes
+    /// through a connection), never the person's personal agent setup: their
+    /// MCP servers and claude.ai connectors, user settings, hooks, plugins
+    /// and personal instructions. The repo's own config still loads. On by
+    /// default; review chats are always strict.
+    #[serde(default = "default_true")]
+    pub strict: bool,
 }
 
 /// The titler: after the first few turns of a chat, a small model renames
@@ -155,6 +162,7 @@ impl Default for AgentConfig {
             budget: BudgetConfig::default(),
             suggest_replies: true,
             titler: TitlerConfig::default(),
+            strict: true,
         }
     }
 }
