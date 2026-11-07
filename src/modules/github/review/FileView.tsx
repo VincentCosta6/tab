@@ -5,7 +5,7 @@ import { useEffect, useRef } from "react";
 import { ensureModel, headUri, monaco } from "../monaco";
 import { useReview } from "./context";
 import { useFileText } from "./data";
-import { defineThemes, themeName } from "./FileDiff";
+import { defineThemes, SEMANTIC_OPTIONS, themeName } from "./FileDiff";
 
 export function FileView({ path, reveal }: { path: string; reveal?: { line: number; column?: number; nonce: number } }) {
   const { src, dark, searchFor } = useReview();
@@ -26,6 +26,7 @@ export function FileView({ path, reveal }: { path: string; reveal?: { line: numb
       lineHeight: 19,
       scrollBeyondLastLine: false,
       theme: themeName(dark),
+      ...SEMANTIC_OPTIONS,
       stickyScroll: { enabled: true },
       renderLineHighlight: "all",
     });

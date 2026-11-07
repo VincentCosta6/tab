@@ -5,21 +5,32 @@ import { Badge, Button, cx } from "../../../design/components";
 import { Icon } from "../../../design/icons";
 import { openUrl } from "../../../lib/api";
 import type { LspServer } from "../../../lib/types";
-import { installServer, LANGUAGE_NAMES, lspStore, refreshServers } from "../lsp";
+import { type DepsRun, installServer, LANGUAGE_NAMES, lspStore, refreshServers } from "../lsp";
+
+/** One line on a checkout's shared dependencies, or null when there's nothing to say. */
+export function depsText(d: DepsRun | undefined): string | null {
+  if (!d) return null;
+  if (d.state === "installing") return "Installing dependencies (shared between pull requests with the same lockfile)…";
+  if (d.state === "ready") return d.reused ? `Dependencies shared with another checkout (${d.manager}).` : `Dependencies installed with ${d.manager}, without install scripts.`;
+  return d.message || null;
+}
 
 /** One item per language in the checkout: running, starting, or "Install". */
 export function LanguageStatus({ local, sample }: { local: boolean; sample: boolean }) {
   const s = useSyncExternalStore(lspStore.subscribe, lspStore.get);
   const [open, setOpen] = useState(false);
   if (!s.servers) return null;
+  // One item per server: TypeScript and JavaScript share vtsls.
   const items = s.wanted
     .map((lang) => ({ lang, server: s.servers!.find((x) => x.languages.includes(lang)) }))
-    .filter((x): x is { lang: string; server: LspServer } => !!x.server);
+    .filter((x): x is { lang: string; server: LspServer } => !!x.server)
+    .filter((x, i, all) => all.findIndex((y) => y.server.id === x.server.id) === i);
   return (
     <>
       {items.map(({ lang, server }) => {
         const run = s.running[server.id];
         const name = LANGUAGE_NAMES[lang] ?? lang;
+        const deps = server.deps ? s.deps[server.deps] : undefined;
         let label: string;
         let icon = "code";
         let tone = "";
@@ -29,11 +40,12 @@ export function LanguageStatus({ local, sample }: { local: boolean; sample: bool
           tone = "text-warning";
         } else if (sample) label = `${name}: ${server.command} (desktop app)`;
         else if (!local) label = `${name}: needs a local copy`;
+        else if (deps?.state === "installing" && run?.state === "starting") label = `${name}: installing dependencies`;
         else if (run?.state === "ready") { label = `${name}: ${server.command}`; icon = "check"; }
         else if (run?.state === "error") { label = `${name}: ${server.command} failed`; icon = "x-circle"; tone = "text-danger"; }
         else { label = `${name}: starting ${server.command}`; icon = "clock"; }
         return (
-          <button key={lang} className={cx("rv-status-btn", tone)} onClick={() => setOpen(true)} title={run?.error ?? server.note}>
+          <button key={lang} className={cx("rv-status-btn", tone)} onClick={() => setOpen(true)} title={[run?.error ?? server.note, depsText(deps)].filter(Boolean).join("\n")}>
             <Icon name={icon} size={12} /> {label}
           </button>
         );
@@ -60,7 +72,7 @@ function ServersDialog({ onClose }: { onClose: () => void }) {
       <div className="rv-modal rv-lsp" role="dialog" aria-label="Language servers">
         <h3>Language servers</h3>
         <p className="muted">
-          TypeScript and JavaScript work out of the box. For other languages, tab runs a language server in the pull request's checkout, so hover, go to definition, references and errors work across the whole repository. Servers install with the language's own tools and run on this computer.
+          tab runs a language server in the pull request's checkout, so hover, go to definition, references, errors and semantic colors work across the whole repository. TypeScript and JavaScript also work without one, with fewer types. Dependencies are installed once per lockfile and shared between pull requests, never running install scripts. Servers run on this computer with anything that would run the pull request's code turned off.
         </p>
         <ul className="rv-lsp-list">
           {servers.map((sv) => {
@@ -85,6 +97,7 @@ function ServersDialog({ onClose }: { onClose: () => void }) {
                   )}
                 </div>
                 <div className="subtle">{sv.note}</div>
+                {used && sv.deps && depsText(s.deps[sv.deps]) && <div className="subtle">{depsText(s.deps[sv.deps])}</div>}
                 {sv.installed && sv.path && <code className="rv-lsp-cmd">{sv.path}</code>}
                 {!sv.installed && sv.install_command && <code className="rv-lsp-cmd">$ {sv.install_command}</code>}
                 {!sv.installed && !sv.install_command && sv.needs && <div className="subtle">Installing {sv.command} needs {sv.needs} first. Install it, then reopen this dialog.</div>}

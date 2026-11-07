@@ -44,6 +44,45 @@ for (const d of [monaco.typescript.typescriptDefaults, monaco.typescript.javascr
   d.setEagerModelSync(true);
 }
 
+const TS_DEFAULTS = [monaco.typescript.typescriptDefaults, monaco.typescript.javascriptDefaults];
+const TS_FULL = { ...monaco.typescript.typescriptDefaults.modeConfiguration };
+
+/**
+ * Turns Monaco's built-in TypeScript features on or off. Off while a
+ * TypeScript language server runs, so hovers and definitions don't show
+ * twice. Tokens and folding stay on either way.
+ */
+export function setBuiltinTs(on: boolean) {
+  for (const d of TS_DEFAULTS) {
+    d.setModeConfiguration({
+      ...TS_FULL,
+      hovers: on, definitions: on, references: on, documentHighlights: on, diagnostics: on,
+      completionItems: on, signatureHelp: on, rename: on, codeActions: on, inlayHints: on,
+      documentSymbols: on,
+    });
+  }
+}
+
+let libs: monaco.IDisposable[] = [];
+/**
+ * Gives the built-in TypeScript service the dependencies' type declarations
+ * (paths under node_modules/), so imports from libraries have real types
+ * when no language server runs. Replaces any set before.
+ */
+export function setLibraryTypes(files: [string, string][]) {
+  libs.forEach((d) => d.dispose());
+  libs = [];
+  for (const d of TS_DEFAULTS) for (const [path, text] of files) libs.push(d.addExtraLib(text, `file:///${path}`));
+}
+
+/** The LSP language id: TSX and JSX have their own. */
+export function lspLanguageFor(path: string, monacoId: string): string {
+  const ext = path.split(".").pop()?.toLowerCase();
+  if (ext === "tsx") return "typescriptreact";
+  if (ext === "jsx") return "javascriptreact";
+  return monacoId;
+}
+
 export function languageFor(path: string): string {
   const name = path.split("/").pop()?.toLowerCase() ?? "";
   if (name === "dockerfile") return "dockerfile";
