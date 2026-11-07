@@ -125,11 +125,31 @@ pub(super) async fn run_turn(
     let mut parser = Parser::new(hub.clone(), session.id.clone());
     // Rough size of what tab adds to the system prompt (the item and its context).
     parser.tab_context_tokens = (system.len() / 4) as i64;
+    // After the result the CLI normally exits right away. If it stays up,
+    // it's waiting on background work it started, so the chat is monitoring.
+    let mut monitoring = false;
     loop {
+        let settle = async {
+            if parser.finished && !parser.failed && !monitoring {
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await
+            } else {
+                std::future::pending::<()>().await
+            }
+        };
         tokio::select! {
+            _ = settle => {
+                monitoring = true;
+                hub.update(&session.id, Some(SessionStatus::Monitoring), None);
+            }
             line = lines.next_line() => match line? {
                 Some(l) if !l.trim().is_empty() => match serde_json::from_str::<Value>(&l) {
-                    Ok(v) => parser.handle(&v),
+                    Ok(v) => {
+                        parser.handle(&v);
+                        // Background work woke the agent up: it's working again.
+                        if !parser.finished {
+                            monitoring = false;
+                        }
+                    }
                     Err(_) => tracing::debug!(line = %l, "non-json output from claude"),
                 },
                 Some(_) => {}
@@ -140,6 +160,9 @@ pub(super) async fn run_turn(
                 return Ok(());
             }
         }
+    }
+    if monitoring {
+        hub.update(&session.id, Some(SessionStatus::Idle), None);
     }
     let status = child.wait().await?;
     let stderr = err_task.await.unwrap_or_default();
@@ -173,6 +196,8 @@ struct Parser {
     /// Ids of calls that create something linkable, so their output can be attached as Context.
     create_calls: HashSet<String>,
     finished: bool,
+    /// The last result was an error.
+    failed: bool,
     billing: &'static str,
     /// Usage of the first and latest model call this turn, for the context meter.
     first_call: Option<Value>,
@@ -200,6 +225,7 @@ impl Parser {
             seen: HashSet::new(),
             create_calls: HashSet::new(),
             finished: false,
+            failed: false,
             billing: "unknown",
             first_call: None,
             last_call: None,
@@ -241,7 +267,14 @@ impl Parser {
     fn handle(&mut self, v: &Value) {
         let sid = self.session_id.clone();
         let hub = self.hub.clone();
-        match v["type"].as_str().unwrap_or_default() {
+        let kind = v["type"].as_str().unwrap_or_default();
+        // Output after the result means background work (a finished
+        // background command, a watcher firing) started a new turn.
+        if self.finished && matches!(kind, "assistant" | "stream_event") {
+            self.finished = false;
+            hub.update(&sid, Some(SessionStatus::Working), None);
+        }
+        match kind {
             "system" if v["subtype"] == "init" => {
                 self.billing = crate::usage::billing_from_init(v);
                 if let Some(cmds) = v["slash_commands"].as_array() {
@@ -372,6 +405,7 @@ impl Parser {
                     hub.update(&sid, None, Some(id));
                 }
                 let failed = v["is_error"].as_bool().unwrap_or(false);
+                self.failed = failed;
                 if failed {
                     let msg = v["result"]
                         .as_str()
@@ -457,5 +491,31 @@ mod tests {
             }
         }
         assert_eq!(deltas, 1);
+    }
+
+    #[tokio::test]
+    async fn output_after_the_result_marks_the_session_working_again() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let mut p = Parser::new(hub, s.id.clone());
+        p.handle(
+            &serde_json::from_str(r#"{"type":"result","session_id":"abc","is_error":false}"#)
+                .unwrap(),
+        );
+        assert!(p.finished && !p.failed);
+        // A background command finished and the agent picked back up.
+        p.handle(&serde_json::from_str(r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"text","text":"Build done"}]}}"#).unwrap());
+        assert!(!p.finished);
+        let s = store.session_get(&s.id).unwrap().unwrap();
+        assert_eq!(s.status, SessionStatus::Working);
     }
 }

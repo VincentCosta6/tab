@@ -215,7 +215,7 @@ export function AgentStatus({ chat }: { chat: Chat | undefined }) {
   const s = chat?.session;
   if (!s) return null;
   const status: SessionStatus = chat.approvals.length ? "needs_input" : s.status;
-  const text = { idle: "Idle", working: "Working…", needs_input: "Needs you", failed: "Failed" }[status];
+  const text = { idle: "Idle", working: "Working…", needs_input: "Needs you", monitoring: "Monitoring", failed: "Failed" }[status];
   return (
     <span className={cx("agent-status", `agent-${status}`)}>
       <Brand name={agentBrand[s.agent]} size={12} />
