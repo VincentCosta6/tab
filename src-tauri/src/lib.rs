@@ -220,39 +220,106 @@ async fn item_by_url(state: State<'_, AppState>, url: String) -> CmdResult<Optio
     state.store.item_by_url(&url).map_err(err)
 }
 
-/// Saves an image the person pasted or dropped into a chat. The body is the
-/// raw bytes; the `x-name` header carries the original file name.
+/// Saves a file the person pasted, dropped or picked in a chat. The body is
+/// the raw bytes; the `x-name` header carries the original file name
+/// (URI-encoded). Each file gets its own folder so the agent sees its name.
 #[tauri::command]
 async fn attachment_save(
     state: State<'_, AppState>,
     request: tauri::ipc::Request<'_>,
 ) -> CmdResult<String> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
-        return Err("expected the image's bytes".into());
+        return Err("expected the file's bytes".into());
     };
-    if bytes.len() > MAX_IMAGE {
-        return Err("that image is over 20 MB".into());
+    if bytes.len() > MAX_ATTACHMENT {
+        return Err("that file is over 50 MB".into());
     }
     let name = request
         .headers()
         .get("x-name")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("image.png");
-    let ext = image_ext(name).ok_or("tab takes PNG, JPEG, GIF and WebP images")?;
-    let dir = state.hub.attachments_dir();
+        .map(percent_decode)
+        .unwrap_or_default();
+    let name = safe_file_name(&name);
+    let dir = state
+        .hub
+        .attachments_dir()
+        .join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&dir).map_err(err)?;
-    let path = dir.join(format!("{}.{ext}", uuid::Uuid::new_v4()));
+    let path = dir.join(name);
     std::fs::write(&path, bytes).map_err(err)?;
     Ok(path.display().to_string())
 }
 
 const MAX_IMAGE: usize = 20 * 1024 * 1024;
+const MAX_ATTACHMENT: usize = 50 * 1024 * 1024;
 
 fn image_ext(name: &str) -> Option<&'static str> {
     let ext = name.rsplit('.').next()?.to_ascii_lowercase();
     ["png", "jpg", "jpeg", "gif", "webp"]
         .into_iter()
         .find(|e| *e == ext)
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+        match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+            (b'%', Some(h), Some(l)) => {
+                out.push(h * 16 + l);
+                i += 3;
+            }
+            (c, _, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A file name that is safe on every OS: no folders, no reserved characters.
+fn safe_file_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let clean: String = base
+        .chars()
+        .map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c })
+        .collect();
+    let clean = clean.trim().trim_matches('.').to_string();
+    if clean.is_empty() {
+        "file".into()
+    } else {
+        clean.chars().take(120).collect()
+    }
+}
+
+/// Opens a file the agent shared or the person attached with its default
+/// app. Anything that could run code (scripts, apps, installers) is shown in
+/// its folder instead, so a path in a chat can never launch a program.
+#[tauri::command]
+async fn file_open(path: String, reveal: Option<bool>) -> CmdResult<()> {
+    let p = std::path::Path::new(&path);
+    if !p.is_absolute() || !p.exists() {
+        return Err("that file isn't there any more".into());
+    }
+    const SAFE: &[&str] = &[
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "pdf", "txt", "md", "csv", "tsv", "json", "log",
+        "docx", "xlsx", "pptx", "doc", "xls", "ppt", "odt", "ods", "rtf", "zip", "mp4", "mov",
+        "webm", "mp3", "wav",
+    ];
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if reveal.unwrap_or(false) || !p.is_file() || !SAFE.contains(&ext.as_str()) {
+        tauri_plugin_opener::reveal_item_in_dir(p).map_err(err)
+    } else {
+        tauri_plugin_opener::open_path(p, None::<&str>).map_err(err)
+    }
 }
 
 /// An image file's bytes, for thumbnails and the viewer: attachments, and
@@ -361,6 +428,12 @@ async fn rate_pressure(state: State<'_, AppState>) -> CmdResult<Vec<Pressure>> {
 #[tauri::command]
 async fn item_context(state: State<'_, AppState>, id: String) -> CmdResult<Option<ItemContext>> {
     state.store.item_context(&id).map_err(err)
+}
+
+/// Tasks that have this link (a PR, say) in their Context.
+#[tauri::command]
+async fn items_for_link(state: State<'_, AppState>, url: String) -> CmdResult<Vec<QueueItem>> {
+    state.store.items_with_context_link(&url).map_err(err)
 }
 
 #[tauri::command]
@@ -1037,6 +1110,12 @@ async fn github_link_summary(
     github_review::link_summary(&state.gateway, &repo, &what, &id)
         .await
         .map_err(err)
+}
+
+/// Your open pull requests, from GitHub's search.
+#[tauri::command]
+async fn github_my_pulls(state: State<'_, AppState>) -> CmdResult<Vec<github_review::MyPull>> {
+    github_review::my_pulls(&state.gateway).await.map_err(err)
 }
 
 #[tauri::command]
@@ -1859,8 +1938,10 @@ pub fn run() {
             item_by_url,
             attachment_save,
             image_read,
+            file_open,
             start_dictation,
             github_link_summary,
+            github_my_pulls,
             item_preview,
             mark_done,
             snooze,
@@ -1889,6 +1970,7 @@ pub fn run() {
             item_set_project,
             search_index_status,
             agent_activity,
+            items_for_link,
             agent_slash_commands,
             agent_health,
             agent_upgrade,

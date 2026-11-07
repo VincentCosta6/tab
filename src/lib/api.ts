@@ -4,7 +4,7 @@
 
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  AgentActivity, GraphNode, GraphView, LinkSummary, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
+  AgentActivity, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, Session, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun,
 } from "./types";
@@ -24,6 +24,7 @@ export const api = {
   itemDetail: (id: string) => call<ItemDetail | null>("item_detail", { id }),
   itemByUrl: (url: string) => call<QueueItem | null>("item_by_url", { url }),
   githubLinkSummary: (repo: string, what: string, id: string) => call<LinkSummary>("github_link_summary", { repo, what, id }),
+  githubMyPulls: () => call<MyPull[]>("github_my_pulls"),
   itemPreview: (id: string) => call<Preview>("item_preview", { id }),
   markDone: (id: string) => call<QueueItem | null>("mark_done", { id }),
   snooze: (id: string, minutes: number) => call<QueueItem | null>("snooze", { id, minutes }),
@@ -37,6 +38,7 @@ export const api = {
   saveConfig: (config: TabConfig) => call<TabConfig>("save_config", { config }),
   ratePressure: () => call<Pressure[]>("rate_pressure"),
   itemContext: (id: string) => call<ItemContext | null>("item_context", { id }),
+  itemsForLink: (url: string) => call<QueueItem[]>("items_for_link", { url }),
   contextAdd: (itemId: string, entry: NewContext) => call<ContextEntry>("context_add", { itemId, entry }),
   contextUpdate: (id: string, patch: { section?: ContextSection; pinned?: boolean }) =>
     call<ContextEntry | null>("context_update", { id, section: patch.section ?? null, pinned: patch.pinned ?? null }),
@@ -50,6 +52,7 @@ export const api = {
     return invoke<string>("attachment_save", bytes, { headers: { "x-name": encodeURIComponent(name) } });
   },
   imageRead: (path: string) => call<ArrayBuffer>("image_read", { path }),
+  fileOpen: (path: string, reveal = false) => call<void>("file_open", { path, reveal }),
   startDictation: () => call<void>("start_dictation"),
   agentActivity: () => call<AgentActivity[]>("agent_activity"),
   slashCommands: () => call<string[]>("agent_slash_commands"),

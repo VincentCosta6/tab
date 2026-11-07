@@ -80,6 +80,7 @@ impl Default for RankingRules {
                     "An agent finished work for you to review",
                 ),
                 k("github.ci_failed", 65, "CI failed on your change"),
+                k("github.ci_passed", 15, "CI passed"),
                 k("github.security", 65, "Security alert"),
                 k("github.mention", 60, "You were mentioned"),
                 k("slack.mention", 60, "You were mentioned"),

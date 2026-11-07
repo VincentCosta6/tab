@@ -287,6 +287,10 @@ fn handle_event(hub: &Arc<AgentHub>, s: &Arc<Server>, v: &Value) {
                             .as_str()
                             .or(state["error"].as_str())
                             .unwrap_or_default();
+                        if status == "completed" && crate::links::is_creator(tool, &state["input"])
+                        {
+                            hub.attach_created_links(&sid, output);
+                        }
                         hub.post(
                             &sid,
                             "tool",

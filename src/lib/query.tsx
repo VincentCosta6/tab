@@ -53,6 +53,7 @@ export const keys = {
   item: (id: string) => ["item", id] as const,
   preview: (id: string) => ["preview", id] as const,
   context: (id: string) => ["context", id] as const,
+  linkedTasks: (url: string) => ["linked-tasks", url] as const,
   chat: (itemId: string) => ["chat", itemId] as const,
   stream: (sessionId: string) => ["stream", sessionId] as const,
   connectors: ["connectors"] as const,
@@ -120,6 +121,7 @@ function LiveEvents() {
         case "context_changed":
           qc.invalidateQueries({ queryKey: keys.context(e.item_id) });
           qc.invalidateQueries({ queryKey: ["activity", e.item_id] });
+          qc.invalidateQueries({ queryKey: ["linked-tasks"] });
           break;
         case "project_changed":
           qc.invalidateQueries({ queryKey: keys.notes(e.project_id) });
