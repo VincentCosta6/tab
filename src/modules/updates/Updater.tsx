@@ -5,6 +5,8 @@ import { cx } from "../../design/components";
 import { api, onAgentUpgrade } from "../../lib/api";
 
 const agentName: Record<string, string> = { claude_code: "Claude Code", opencode: "OpenCode" };
+/** What fits in the 84px nav; the full name goes in the tooltip. */
+const shortName: Record<string, string> = { claude_code: "Claude", opencode: "OpenCode" };
 
 /** "2.1.91 (Claude Code)" → [2, 1, 91]. */
 function parts(v: string | null | undefined): number[] | null {
@@ -55,6 +57,8 @@ export function Updater() {
   }, [phase]);
 
   const name = agentName[health?.kind ?? "claude_code"] ?? "Agent";
+  const short = shortName[health?.kind ?? "claude_code"] ?? name;
+  const have = parts(health?.version)?.join(".");
   const available = !!health?.found && !!health.latest && isOlder(health.version, health.latest) && skipped !== health.latest;
   if (phase === "idle" && !available) return null;
 
@@ -77,10 +81,10 @@ export function Updater() {
   const last = lines[lines.length - 1];
   return (
     <div className="updater" ref={ref}>
-      <div className={cx("updater-card", phase)} role="status">
+      <div className={cx("updater-card", phase)} role="status" title={`${name}: you have ${have ?? "?"}, ${health?.latest ?? "?"} is out`}>
         <div className="updater-head">
           <Icon name={phase === "done" ? "check" : phase === "failed" ? "alert" : "arrow-up"} size={13} />
-          <span className="updater-name">{name}</span>
+          <span className="updater-name">{short}</span>
           {phase === "idle" && (
             <button className="updater-x" aria-label="Not now" title="Not now" onClick={() => health?.latest && setSkipped(health.latest)}>
               <Icon name="x" size={11} />
@@ -89,7 +93,7 @@ export function Updater() {
         </div>
         {phase === "idle" && (
           <>
-            <span className="updater-sub" title={`You have ${parts(health?.version)?.join(".")}`}>{health?.latest} is out</span>
+            <span className="updater-sub">{parts(health?.latest)?.join(".") ?? health?.latest}</span>
             <button className="updater-go" onClick={() => void update()} title={health?.upgrade ? `Runs ${health.upgrade}` : "Update"}>Update</button>
           </>
         )}
@@ -99,10 +103,15 @@ export function Updater() {
             <button className="updater-sub linky" onClick={() => setOpen(!open)} title={last ?? "Updating…"}>{last ?? "Starting…"}</button>
           </>
         )}
-        {phase === "done" && <span className="updater-sub">Updated to {parts(health?.version)?.join(".")}</span>}
+        {phase === "done" && (
+          <>
+            <span className="updater-sub">{have}</span>
+            <span className="updater-sub">Updated</span>
+          </>
+        )}
         {phase === "failed" && (
           <>
-            <button className="updater-sub linky" onClick={() => setOpen(!open)}>Update failed</button>
+            <button className="updater-sub linky" onClick={() => setOpen(!open)}>Failed</button>
             <button className="updater-go" onClick={() => void update()}>Retry</button>
           </>
         )}
