@@ -455,7 +455,26 @@ export interface TabConfig {
   mcp: { port: number; token: string };
   storage: { keep_days: number; max_gb: number | null };
   sandbox: SandboxConfig;
+  /** Where the hub runs. Mirrors tab_core::config::HubConfig. */
+  hub?: { mode: HubMode };
   onboarded: boolean;
+}
+
+export type HubMode = "cloud" | "local";
+
+/** The signed-in tab account, without its tokens. Mirrors tab_core::account::AccountView. */
+export interface Account {
+  user_id: string;
+  email: string | null;
+  name: string | null;
+  avatar_url: string | null;
+  provider: "apple" | "google" | string;
+}
+
+/** Whether this build can sign in, and who's signed in. Mirrors tab_core::account::AccountStatus. */
+export interface AccountStatus {
+  configured: boolean;
+  account: Account | null;
 }
 
 export interface SandboxConfig {

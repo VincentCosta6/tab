@@ -32,7 +32,7 @@ const pages: Page[] = [
   { id: "ranking", label: "Ranking", icon: "filter", component: RankingPage, edits: (c) => c.ranking },
   { id: "sandbox", label: "Sandbox", icon: "shield", component: SandboxPage, edits: (c) => c.sandbox },
   { id: "storage", label: "Storage", icon: "folder", component: StoragePage, edits: (c) => c.storage },
-  { id: "hub", label: "Hub", icon: "cloud", component: HubPage },
+  { id: "hub", label: "Hub", icon: "cloud", component: HubPage, edits: (c) => c.hub },
   { id: "mcp", label: "MCP server", icon: "terminal", component: McpPage },
   { id: "updates", label: "Updates", icon: "refresh", component: UpdatesPage },
 ];

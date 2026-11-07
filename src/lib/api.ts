@@ -6,7 +6,7 @@ import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
-  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress,
+  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus,
 } from "./types";
 import { mockApi } from "./mock";
 
@@ -121,6 +121,11 @@ export const api = {
   sandboxStatus: () => call<SandboxStatus>("sandbox_status"),
   storageUsage: () => call<StorageUsage>("storage_usage"),
   hubStatus: () => call<HubStatus | null>("hub_status"),
+  accountStatus: () => call<AccountStatus>("account_status"),
+  /** Opens the browser and resolves once it comes back signed in. */
+  accountSignIn: (provider: "apple" | "google") => call<Account>("account_sign_in", { provider }),
+  accountCancelSignIn: () => call<void>("account_cancel_sign_in"),
+  accountSignOut: () => call<void>("account_sign_out"),
   storageClean: () => call<Swept>("storage_clean"),
   /** One checkout, or every one when no repo is given. */
   storageRemoveCheckouts: (repo?: string, number?: number) =>

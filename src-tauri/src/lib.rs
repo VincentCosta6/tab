@@ -29,6 +29,7 @@ use tab_core::workspace::{self, SearchHit, SearchQuery, Target, Workspace, Works
 use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tauri::{Emitter, Manager, State};
 
+mod account;
 mod dev;
 mod updates;
 use tokio::sync::{Mutex, RwLock, broadcast};
@@ -2515,6 +2516,9 @@ pub fn run() {
             lsp::set_tools_dir(data_dir.join("tools"));
             let config_path = app.path().app_config_dir()?.join("config.json");
             let mut config = TabConfig::load(&config_path)?;
+            if let Some(dir) = config_path.parent() {
+                app.manage(account::AccountState::new(dir));
+            }
             // A dev build (`pnpm dev:tab`) has its own folders through its
             // identifier, and its own ports here, so it runs beside the
             // installed app.
@@ -2728,6 +2732,10 @@ pub fn run() {
             agent_install,
             mcp_info,
             hub_status,
+            account::account_status,
+            account::account_sign_in,
+            account::account_cancel_sign_in,
+            account::account_sign_out,
             gh_status,
             usage_summary,
             gh_login,
