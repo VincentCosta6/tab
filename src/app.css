@@ -766,6 +766,30 @@ body.resizing iframe { pointer-events: none; }
 /* Context rail: beside the chat on wide windows; narrow ones keep the pills. */
 .item-body { flex: 1; min-height: 0; display: flex; }
 .item-body > .chat { flex: 1; min-width: 0; }
+/* File stage: a file opened from a chat takes the middle, the chat docks on the right. */
+.stage-host.staged > .chat { flex: none; width: var(--stage-chat-w, 440px); border-left: 1px solid var(--border); }
+.stage-host.staged > .chat .transcript { padding-inline: var(--space-4); }
+.stage-host.staged > .ctx-rail { display: none !important; }
+.stage-file { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg-sunken); outline: none; }
+.stage-bar { display: flex; align-items: center; gap: 6px; padding: 6px var(--space-3); border-bottom: 1px solid var(--border); background: var(--bg-raised); color: var(--fg-muted); font-size: var(--text-sm); min-height: 40px; }
+.stage-bar button { display: inline-grid; place-items: center; height: 28px; min-width: 28px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--radius-md); background: transparent; color: var(--fg-muted); cursor: pointer; }
+.stage-bar button:hover { background: var(--bg-hover); color: var(--fg); }
+.stage-name { color: var(--fg); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.stage-count { display: inline-flex; align-items: center; gap: 2px; font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.stage-flex { flex: 1; }
+.stage-content { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+.stage-note { margin: auto; color: var(--fg-subtle); font-size: var(--text-sm); padding: var(--space-6); text-align: center; }
+.stage-image { flex: 1; min-height: 0; display: grid; place-items: center; padding: var(--space-4); }
+.stage-image img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; box-shadow: var(--shadow-md, 0 4px 20px rgb(0 0 0 / 0.15)); cursor: zoom-in; }
+.stage-pdf { flex: 1; width: 100%; border: 0; background: #fff; }
+body.resizing .stage-pdf { pointer-events: none; }
+.stage-doc { padding: var(--space-6); max-width: 820px; width: 100%; margin: 0 auto; background: var(--bg); min-height: 100%; line-height: 1.6; }
+.stage-text { margin: 0; padding: var(--space-4) var(--space-5); font-family: var(--font-mono); font-size: 12.5px; line-height: 1.55; white-space: pre; tab-size: 4; color: var(--fg); background: var(--bg); min-height: 100%; }
+.stage-other { margin: auto; display: grid; justify-items: center; gap: var(--space-2); color: var(--fg-muted); text-align: center; padding: var(--space-6); }
+.stage-other strong { color: var(--fg); word-break: break-all; }
+.stage-other-actions { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
+.stage-resize { position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 5; }
+.stage-resize:hover, body.resizing .stage-resize { background: var(--tone-accent-fg); opacity: 0.35; }
 .ctx-rail { display: none; flex: none; width: 340px; overflow: auto; padding: var(--space-4); border-left: 1px solid var(--border); background: var(--bg-raised); gap: var(--space-5); align-content: start; }
 .ctx-rail-group { display: grid; gap: var(--space-2); }
 .ctx-rail-head { display: flex; align-items: center; gap: 6px; margin: 0; font-size: var(--text-xs); font-weight: 600; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }

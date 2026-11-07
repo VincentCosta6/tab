@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
-import { fileName, isImagePath, useImageSrc, type ViewerImage } from "../lib/images";
+import { fileName, isImagePath, isLocalPath, openImages, useImageSrc, type ViewerImage } from "../lib/images";
+import { useStage } from "../lib/stage";
 import { Icon } from "./icons";
 
 /**
@@ -100,11 +101,12 @@ export function ImageViewer() {
 
 /** Small clickable previews of images; click one to open the viewer on it. */
 export function Thumbs({ srcs, onRemove, size = 72 }: { srcs: string[]; onRemove?: (i: number) => void; size?: number }) {
+  const stage = useStage();
   if (!srcs.length) return null;
   return (
     <div className="thumbs">
       {srcs.map((s, i) => (
-        <Thumb key={s} src={s} size={size} onOpen={() => import("../lib/images").then((m) => m.openImages(srcs, i))} onRemove={onRemove && (() => onRemove(i))} />
+        <Thumb key={s} src={s} size={size} onOpen={() => (stage ? stage.open(srcs, i) : openImages(srcs, i))} onRemove={onRemove && (() => onRemove(i))} />
       ))}
     </div>
   );
@@ -125,6 +127,7 @@ function Thumb({ src, size, onOpen, onRemove }: { src: string; size: number; onO
 /** A file that isn't an image: its name, opening in its default app on click. */
 export function FileChip({ path, label, onRemove }: { path: string; label?: string; onRemove?: () => void }) {
   const [error, setError] = useState<string | null>(null);
+  const stage = useStage();
   const name = label || fileName(path.startsWith("blob:") ? path.split("#").pop()! : path);
   return (
     <span className={error ? "file-chip error" : "file-chip"} title={error ?? path}>
@@ -132,6 +135,8 @@ export function FileChip({ path, label, onRemove }: { path: string; label?: stri
         className="file-chip-open"
         onClick={(e) => {
           setError(null);
+          // In a chat with a stage, the file takes the middle of the pane; Alt shows it in its folder.
+          if (stage && !e.altKey && isLocalPath(path)) return stage.open([{ path, name: label }]);
           api.fileOpen(path, e.altKey).catch((err) => setError(String(err)));
         }}
         onContextMenu={(e) => {

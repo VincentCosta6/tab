@@ -235,6 +235,7 @@ export const mockApi = {
         case "attachment_save": return `${URL.createObjectURL(new Blob([args.bytes]))}#${args.name}`;
         case "file_open": return null;
         case "image_read": return await (await fetch(String(args.path))).arrayBuffer();
+        case "file_read": return await (await fetch(String(args.path))).arrayBuffer();
         case "item_by_url": {
           const u = String(args.url).replace(/[?#].*$/, "").replace(/\/$/, "");
           return items.find((i) => i.url && (i.url === u || /^[/#?]/.test(i.url.slice(u.length)) && i.url.startsWith(u))) ?? null;

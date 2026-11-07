@@ -336,6 +336,36 @@ async fn image_read(path: String) -> CmdResult<tauri::ipc::Response> {
     ))
 }
 
+/// Extensions the file stage can show inside tab: PDFs, and text it shows as
+/// text. Other files open in their default app instead.
+const VIEWABLE: &[&str] = &[
+    "pdf", "svg", "txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "log", "yaml", "yml", "toml", "xml",
+    "html", "css", "js", "jsx", "ts", "tsx", "mjs", "cjs", "rs", "py", "rb", "go", "java", "kt", "swift", "c",
+    "h", "cc", "cpp", "hpp", "cs", "sh", "zsh", "bash", "sql", "ini", "env", "conf", "diff", "patch", "lua",
+    "php", "vue", "svelte", "dart", "scala", "ex", "exs", "r", "tex",
+];
+const MAX_VIEWABLE: u64 = 30 * 1024 * 1024;
+
+/// A file's bytes for the file stage, when it is a kind tab can show (see
+/// `VIEWABLE`) and not too big. Images go through `image_read`.
+#[tauri::command]
+async fn file_read(path: String) -> CmdResult<tauri::ipc::Response> {
+    let p = std::path::Path::new(&path);
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if !p.is_absolute() || !VIEWABLE.contains(&ext.as_str()) {
+        return Err("tab can't show this kind of file".into());
+    }
+    let meta = std::fs::metadata(p).map_err(|_| "that file isn't there any more".to_string())?;
+    if !meta.is_file() || meta.len() > MAX_VIEWABLE {
+        return Err("this file is too big to show here".into());
+    }
+    Ok(tauri::ipc::Response::new(std::fs::read(p).map_err(err)?))
+}
+
 /// Starts the system's own dictation in the focused text box (macOS: the
 /// same as Edit → Start Dictation). Elsewhere, says how to start it.
 #[tauri::command]
@@ -1938,6 +1968,7 @@ pub fn run() {
             item_by_url,
             attachment_save,
             image_read,
+            file_read,
             file_open,
             start_dictation,
             github_link_summary,
