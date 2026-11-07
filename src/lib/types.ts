@@ -489,7 +489,7 @@ export interface SandboxConfig {
 
 export interface SandboxStatus {
   enabled: boolean;
-  backend: "seatbelt" | "bubblewrap" | "unavailable";
+  backend: "seatbelt" | "bubblewrap" | "unavailable" | "inherited";
   enforced: boolean;
   summary: string;
   fix: string | null;
