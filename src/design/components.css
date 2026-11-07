@@ -155,7 +155,8 @@
 
 /* FlapTitle: split-flap title changes. */
 .flap { white-space: nowrap; }
-.flap-slot { position: relative; display: inline-block; height: 1lh; overflow: hidden; vertical-align: top; transition-property: width; transition-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1); }
+/* Clip only top and bottom: mid-slide a letter can be wider than its box, and it may overlap a neighbour rather than lose its edges. */
+.flap-slot { position: relative; display: inline-block; height: 1lh; overflow-x: visible; overflow-y: clip; vertical-align: top; transition: width var(--flap-width-ms, 0ms) cubic-bezier(0.45, 0, 0.25, 1); }
 .flap-reel { position: absolute; top: 0; left: 50%; display: flex; flex-direction: column; align-items: center; transform: translateX(-50%); transition-property: transform; transition-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1); }
 .flap-reel > span { height: 1lh; white-space: pre; }
 .flap-go .flap-reel { transform: translateX(-50%) translateY(calc(var(--k) * -1lh)); }

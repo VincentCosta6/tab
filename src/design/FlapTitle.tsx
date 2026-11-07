@@ -93,13 +93,15 @@ export function FlapTitle({
       {!anim ? (
         text
       ) : (
-        <span className={anim.go ? "flap flap-go" : "flap"} aria-hidden>
+        // Every width eases on one shared clock, so each letter slides once,
+        // straight from its old place to its new one. Per-letter timing made
+        // the rest of the line shuffle back and forth as each letter resized.
+        <span className={anim.go ? "flap flap-go" : "flap"} style={{ "--flap-width-ms": `${anim.totalMs}ms` } as CSSProperties} aria-hidden>
           {(() => {
             const breaks = breaksAt(anim, anim.go ? elapsed : -1);
             return anim.slots.map((s) => (
-
               <span key={s.i}>
-                <span className="flap-slot" style={{ width: anim.go ? s.toW : s.fromW, transitionDuration: `${s.ms}ms`, transitionDelay: `${s.delay}ms` }}>
+                <span className="flap-slot" style={{ width: anim.go ? s.toW : s.fromW }}>
                   <span className="flap-reel" style={{ "--k": s.reel.length - 1, transitionDuration: `${s.ms}ms`, transitionDelay: `${s.delay}ms` } as CSSProperties}>
                     {s.reel.map((g, i) => <span key={i}>{g}</span>)}
                   </span>
