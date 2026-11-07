@@ -94,14 +94,17 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
   );
 }
 
-/** A green pill when this computer actually enforces the sandbox for chats. */
+/**
+ * What protects this chat: green "Sandboxed" where the OS enforces it, amber
+ * "Limited sandbox" where it can't (Windows), nothing when it's off.
+ */
 function SandboxPill() {
   const { data } = useQuery({ queryKey: ["sandbox"], queryFn: api.sandboxStatus, staleTime: 60_000 });
-  if (!data?.enforced) return null;
-  const tip = `${data.summary} gh and git's network commands run through tab with your GitHub connection; force pushes, merges and deletes ask you first.`;
+  if (!data?.enabled) return null;
+  const github = "gh and git reach GitHub through tab with your GitHub connection; force pushes, merges and deletes ask you first.";
   return (
-    <span className="sandbox-pill" title={tip}>
-      <Icon name="shield" size={11} /> Sandboxed
+    <span className={cx("sandbox-pill", !data.enforced && "limited")} title={`${data.summary} ${github}`}>
+      <Icon name="shield" size={11} /> {data.enforced ? "Sandboxed" : "Limited sandbox"}
     </span>
   );
 }

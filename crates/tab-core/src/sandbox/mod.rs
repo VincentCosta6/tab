@@ -102,6 +102,8 @@ pub struct Policy {
     pub block_exec: Vec<PathBuf>,
     /// Variables removed from the environment on top of what `trust` removes.
     pub drop_env: Vec<String>,
+    /// tab runs this chat's GitHub CLIs (see [`Sandbox::brokered`]).
+    pub brokered: bool,
     pub network: Network,
     pub trust: Trust,
 }
@@ -470,6 +472,7 @@ impl Sandbox {
             reveal: Vec::new(),
             block_exec: Vec::new(),
             drop_env: Vec::new(),
+            brokered: false,
             network: Network::Any,
             trust: Trust::Person,
         }
@@ -488,6 +491,7 @@ impl Sandbox {
             reveal: Vec::new(),
             block_exec: Vec::new(),
             drop_env: Vec::new(),
+            brokered: false,
             network: Network::Any,
             trust: Trust::Agent,
         }
@@ -507,6 +511,7 @@ impl Sandbox {
             reveal: Vec::new(),
             block_exec: Vec::new(),
             drop_env: Vec::new(),
+            brokered: false,
             network,
             trust: Trust::Untrusted,
         }
@@ -519,6 +524,7 @@ impl Sandbox {
         if !self.config().enabled {
             return p;
         }
+        p.brokered = true;
         for b in broker::all() {
             if b.cli.default == tab_domain::CliEffect::Local {
                 continue;
@@ -611,6 +617,12 @@ impl Sandbox {
     /// Claude Code's own permission rules for a policy. They apply on every
     /// OS, Windows included, to Claude's file tools: edits to protected
     /// folders and reads of hidden ones are refused before they happen.
+    /// They never change the person's permission mode.
+    ///
+    /// Where the sandbox is enforced, shell commands run without asking: the
+    /// sandbox already keeps them off tab, the person's shell setup and
+    /// credentials, and tab asks before anything risky on GitHub. Where it
+    /// isn't (Windows), only `gh` and `git` do, since tab checks those itself.
     pub fn claude_settings(&self, policy: &Policy) -> serde_json::Value {
         let rule = |tool: &str, p: &Path| {
             let s = claude_path(p);
@@ -628,17 +640,24 @@ impl Sandbox {
                 if policy.writable.iter().any(|w| p.starts_with(w)) {
                     continue;
                 }
+                // Claude Code's `Edit` rules cover every file write.
                 deny.extend(rule("Edit", p));
-                deny.extend(rule("Write", p));
             }
             for p in &policy.hide {
                 deny.extend(rule("Read", p));
             }
         }
-        serde_json::json!({
-            "permissions": { "deny": deny },
-            "env": { "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1" }
-        })
+        let allow: Vec<&str> = if self.enforced() {
+            vec!["Bash"]
+        } else if policy.brokered {
+            vec!["Bash(gh:*)", "Bash(git:*)"]
+        } else {
+            Vec::new()
+        };
+        // No CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: it switches Claude Code out
+        // of auto mode, so every command asks. tab scrubs the environment
+        // itself before Claude Code starts (see `env::scrub`).
+        serde_json::json!({ "permissions": { "allow": allow, "deny": deny } })
     }
 }
 

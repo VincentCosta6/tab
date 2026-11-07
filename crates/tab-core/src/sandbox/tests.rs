@@ -157,6 +157,7 @@ fn policy(
         reveal: Vec::new(),
         block_exec: Vec::new(),
         drop_env: Vec::new(),
+        brokered: false,
         network,
         trust: Trust::Untrusted,
     }
@@ -201,7 +202,7 @@ fn claude_rules_cover_protected_and_hidden_paths() {
     let d = claude_path(&dir);
     assert!(d.starts_with("//") && !d.contains('\\'), "{d}");
     assert!(deny.contains(&format!("Edit({d}/**)")), "{deny:?}");
-    assert!(deny.contains(&format!("Write({d}/**)")), "{deny:?}");
+    assert!(!deny.iter().any(|r| r.starts_with("Write(")), "{deny:?}");
     assert!(
         deny.contains(&format!("Read({})", claude_path(&file))),
         "{deny:?}"
@@ -214,7 +215,25 @@ fn claude_rules_cover_protected_and_hidden_paths() {
         claude_path(std::path::Path::new("/home/me/x")),
         "//home/me/x"
     );
-    assert_eq!(v["env"]["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"], "1");
+    // Nothing that would move Claude Code out of the person's permission
+    // mode (CLAUDE_CODE_SUBPROCESS_ENV_SCRUB turns auto into default).
+    assert!(v.get("env").is_none(), "{v}");
+    // Commands run without asking where the sandbox holds; elsewhere only
+    // gh and git, which tab checks itself.
+    let allow = |s: &Sandbox, brokered: bool| {
+        let mut p = p.clone();
+        p.brokered = brokered;
+        s.claude_settings(&p)["permissions"]["allow"].clone()
+    };
+    if s.enforced() {
+        assert_eq!(allow(&s, false), serde_json::json!(["Bash"]));
+    } else {
+        assert_eq!(
+            allow(&s, true),
+            serde_json::json!(["Bash(gh:*)", "Bash(git:*)"])
+        );
+        assert_eq!(allow(&s, false), serde_json::json!([]));
+    }
 
     // Off: no rules, but the scrub stays.
     let off = Sandbox::new(
