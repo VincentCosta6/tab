@@ -79,9 +79,15 @@ export function ModelMenu({
   const match = (r: Row) => !needle || [r.label, r.model ?? "default", byId.get(r.agent)?.name ?? ""].some((s) => s.toLowerCase().includes(needle));
   const filtered = rows.filter(match);
   const locked = (r: Row) => !!lock && r.agent !== lock;
-  const sections: [string, Row[]][] = needle
-    ? [["", filtered]]
-    : [["Common", filtered.filter((r) => r.common)], ["More models", filtered.filter((r) => !r.common)]];
+  // Common models first, grouped by harness; then each harness's other
+  // models under its own heading. A search keeps the harness groups.
+  const byHarness = (list: Row[]) => shown.map((h) => ({ harness: h, rows: list.filter((r) => r.agent === h.id) })).filter((g) => g.rows.length);
+  const sections: { title: string | null; groups: { harness: Harness; rows: Row[] }[]; headed: boolean }[] = needle
+    ? [{ title: null, groups: byHarness(filtered), headed: true }]
+    : [
+        { title: "Common", groups: byHarness(filtered.filter((r) => r.common)), headed: shown.length > 1 },
+        ...byHarness(filtered.filter((r) => !r.common)).map((g) => ({ title: shown.length > 1 ? g.harness.name : "More models", groups: [g], headed: false })),
+      ];
 
   const current = value ? rows.find((r) => r.agent === value.agent && r.model === value.model) : undefined;
   const h = value ? byId.get(value.agent) : undefined;
@@ -118,41 +124,56 @@ export function ModelMenu({
               if (e.key === "Escape") setOpen(false);
               if (e.key === "Enter") {
                 e.preventDefault();
-                const first = filtered.find((r) => !locked(r));
+                const first = sections.flatMap((x) => x.groups.flatMap((g) => g.rows)).find((r) => !locked(r));
                 if (first) pick(first);
               }
             }}
           />
           <div className="model-menu-list">
-            {sections.map(([name, list]) =>
-              list.length ? (
-                <div key={name || "all"}>
-                  {name && <div className="model-menu-section">{name}</div>}
-                  {list.map((r) => {
-                    const harness = byId.get(r.agent);
-                    const on = value?.agent === r.agent && value?.model === r.model;
-                    const help = r.model === null && harness ? defaultLabel?.(harness) : null;
-                    return (
-                      <button
-                        key={`${r.agent}:${r.model ?? ""}`}
-                        type="button"
-                        role="option"
-                        aria-selected={on}
-                        aria-disabled={locked(r)}
-                        className={cx("model-menu-row", on && "on", locked(r) && "locked")}
-                        title={locked(r) ? `This chat runs on ${byId.get(lock!)?.name}. Start a new chat to use ${harness?.name}.` : r.model ?? undefined}
-                        onClick={() => pick(r)}
-                      >
-                        <HarnessIcon harness={harness} size={13} />
-                        <span className="model-menu-name">
-                          {r.label}
-                          {help && <small> · {help}</small>}
-                        </span>
-                        <small className="model-menu-harness">{harness?.name}</small>
-                        {on ? <Icon name="check" size={12} /> : <span />}
-                      </button>
-                    );
-                  })}
+            {sections.map((sec, i) =>
+              sec.groups.length ? (
+                <div key={sec.title ?? i}>
+                  {sec.title && (
+                    <div className="model-menu-section">
+                      {sec.title}
+                      {!sec.headed && sec.groups[0] && locked(sec.groups[0].rows[0]) && <span> · not for this chat</span>}
+                    </div>
+                  )}
+                  {sec.groups.map((g) => (
+                    <div key={g.harness.id} className="model-menu-group">
+                      {sec.headed && (
+                        <div className="model-menu-harness-head">
+                          <HarnessIcon harness={g.harness} size={11} /> {g.harness.name}
+                          {locked(g.rows[0]) && <span> · not for this chat</span>}
+                        </div>
+                      )}
+                      {g.rows.map((r) => {
+                        const harness = g.harness;
+                        const on = value?.agent === r.agent && value?.model === r.model;
+                        const help = r.model === null ? defaultLabel?.(harness) : null;
+                        return (
+                          <button
+                            key={`${r.agent}:${r.model ?? ""}`}
+                            type="button"
+                            role="option"
+                            aria-selected={on}
+                            aria-disabled={locked(r)}
+                            className={cx("model-menu-row", on && "on", locked(r) && "locked")}
+                            title={locked(r) ? `This chat runs on ${byId.get(lock!)?.name}. Start a new chat to use ${harness.name}.` : `${harness.name} · ${r.model ?? "its default model"}`}
+                            onClick={() => pick(r)}
+                          >
+                            <HarnessIcon harness={harness} size={13} />
+                            <span className="model-menu-name">
+                              {r.label}
+                              {help && <small> · {help}</small>}
+                              {!help && r.model?.includes("/") && r.label !== r.model && <small> · {r.model.slice(0, r.model.indexOf("/"))}</small>}
+                            </span>
+                            {on ? <Icon name="check" size={12} /> : <span />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
                 </div>
               ) : null,
             )}
