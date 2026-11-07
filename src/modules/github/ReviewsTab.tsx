@@ -1,8 +1,45 @@
+import { useQuery } from "@tanstack/react-query";
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { EmptyState, PageHeader, Tabs } from "../../design/components";
+import { Badge, Button, EmptyState, PageHeader, Tabs } from "../../design/components";
+import { Icon } from "../../design/icons";
+import { api } from "../../lib/api";
+import { timeAgo } from "../../lib/format";
 import { useItems } from "../../lib/hooks";
+import type { MyPull } from "../../lib/types";
 import { QueueRow } from "../work/WorkTab";
+import { linkStatus } from "./preview";
 import { parsePullUrl, takePendingPull } from "./pulls";
+
+/** GitHub's own check marks: green tick, red cross, amber dot. */
+const checkMark = {
+  passing: { icon: "check", cls: "text-success", title: "All checks passed" },
+  failing: { icon: "x", cls: "text-danger", title: "Some checks failed" },
+  pending: { icon: "circle-dot", cls: "text-warning", title: "Checks running" },
+} as const;
+
+function MyPullRow({ p, onOpen }: { p: MyPull; onOpen: () => void }) {
+  const s = p.summary;
+  const status = linkStatus(s);
+  const mark = s.checks ? checkMark[s.checks] : null;
+  return (
+    <div className="row" role="option" aria-selected={false} onClick={onOpen}>
+      <span className={s.state === "draft" ? "subtle" : "text-success"} style={{ paddingTop: 2 }}>
+        <Icon name={s.state === "draft" ? "git-pull-request-draft" : "git-pull-request"} size={18} />
+      </span>
+      <div className="row-main">
+        <div className="row-title">
+          {s.title}
+          {mark && <span className={mark.cls} title={mark.title} style={{ marginLeft: 6, verticalAlign: "-2px" }}><Icon name={mark.icon} size={14} /></span>}
+        </div>
+        <div className="row-meta">{p.repo} #{p.number}</div>
+      </div>
+      <div className="row-side">
+        {s.updated_at && <span className="row-time">{timeAgo(s.updated_at)}</span>}
+        {status && <Badge tone={status.tone} icon={status.icon}>{status.label}</Badge>}
+      </div>
+    </div>
+  );
+}
 
 type Group = "requested" | "mine";
 
@@ -25,10 +62,9 @@ export function ReviewsTab() {
     return () => window.removeEventListener("tab:open-pr", take);
   }, []);
   const [group, setGroup] = useState<Group>("requested");
-  // GitHub only sends PRs you wrote or were asked to review.
   const requested = pulls.filter((p) => p.kind === "github.review_requested");
-  const mine = pulls.filter((p) => p.kind !== "github.review_requested");
-  const shown = group === "requested" ? requested : mine;
+  // Notifications only cover PRs someone else touched, so ask GitHub for all of yours.
+  const mine = useQuery({ queryKey: ["github", "my-pulls"], queryFn: api.githubMyPulls, staleTime: 60_000, refetchInterval: 120_000 });
   const current = pulls.find((p) => p.id === open);
   // A linked PR that's also in the queue keeps its sample flag.
   const queued = linked ? pulls.find((p) => { const q = parsePullUrl(p.url); return q?.repo === linked.repo && q.number === linked.number; }) : undefined;
@@ -53,19 +89,31 @@ export function ReviewsTab() {
           onChange={setGroup}
           items={[
             { value: "requested", label: "Review requested", count: requested.length },
-            { value: "mine", label: "Your PRs", count: mine.length },
+            { value: "mine", label: "Your PRs", count: mine.data?.length ?? 0 },
           ]}
         />
       </div>
-      {!shown.length &&
-        (group === "requested" ? (
-          <EmptyState icon="git-pull-request" title="No reviews waiting">PRs where your review is requested show up here.</EmptyState>
-        ) : (
-          <EmptyState icon="git-pull-request" title="Nothing on your PRs">Your open PRs show up here when there's activity on them.</EmptyState>
-        ))}
-      <div className="related">
-        {shown.map((p) => <QueueRow key={p.id} item={p} selected={false} onSelect={() => setOpen(p.id)} />)}
-      </div>
+      {group === "requested" ? (
+        <>
+          {!requested.length && <EmptyState icon="git-pull-request" title="No reviews waiting">PRs where your review is requested show up here.</EmptyState>}
+          <div className="related">
+            {requested.map((p) => <QueueRow key={p.id} item={p} selected={false} onSelect={() => setOpen(p.id)} />)}
+          </div>
+        </>
+      ) : mine.isError ? (
+        <EmptyState icon="alert" title="Couldn't load your PRs">
+          {String(mine.error)}
+          <div style={{ marginTop: 12 }}><Button size="sm" icon="refresh" onClick={() => mine.refetch()}>Try again</Button></div>
+        </EmptyState>
+      ) : mine.isLoading ? (
+        <div className="skeleton" />
+      ) : !mine.data?.length ? (
+        <EmptyState icon="git-pull-request" title="No open PRs">Open pull requests you wrote show up here.</EmptyState>
+      ) : (
+        <div className="related">
+          {mine.data.map((p) => <MyPullRow key={p.url} p={p} onOpen={() => (setOpen(null), setLinked({ repo: p.repo, number: p.number }))} />)}
+        </div>
+      )}
     </div>
   );
 }

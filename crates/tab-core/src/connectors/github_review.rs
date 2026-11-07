@@ -1117,47 +1117,7 @@ pub async fn link_summary(
             .await?;
             let pr = &data["repository"]["pullRequest"];
             anyhow::ensure!(!pr.is_null(), "{repo}#{n} wasn't found");
-            let state = if pr["merged"].as_bool() == Some(true) {
-                "merged"
-            } else if pr["state"] == "CLOSED" {
-                "closed"
-            } else if pr["isDraft"].as_bool() == Some(true) {
-                "draft"
-            } else {
-                "open"
-            };
-            let checks = str_at(pr, "/commits/nodes/0/commit/statusCheckRollup/state").map(|s| {
-                match s.as_str() {
-                    "SUCCESS" => "passing",
-                    "FAILURE" | "ERROR" => "failing",
-                    _ => "pending",
-                }
-                .to_string()
-            });
-            let open_threads = pr["reviewThreads"]["nodes"].as_array().map(|ts| {
-                ts.iter()
-                    .filter(|t| t["isResolved"].as_bool() == Some(false))
-                    .count() as u32
-            });
-            let merge_state = match (
-                lower(pr, "mergeable").as_str(),
-                lower(pr, "mergeStateStatus"),
-            ) {
-                ("conflicting", _) => Some("dirty".to_string()),
-                // Mergeable, but the branch rules haven't been worked out yet.
-                ("mergeable", m) if m.is_empty() || m == "unknown" => Some("mergeable".to_string()),
-                (_, m) => Some(m).filter(|m| !m.is_empty()),
-            };
-            let summary = LinkSummary {
-                title: str_at(pr, "/title").unwrap_or_default(),
-                state: state.into(),
-                author: str_at(pr, "/author/login"),
-                checks,
-                updated_at: str_at(pr, "/updatedAt"),
-                merge_state,
-                review_decision: Some(lower(pr, "reviewDecision")).filter(|s| !s.is_empty()),
-                open_threads,
-            };
+            let summary = pull_summary(pr);
             // "unknown" means GitHub is still working out mergeability; don't
             // keep that, so the next look gets the real state.
             if summary
@@ -1209,6 +1169,95 @@ pub async fn link_summary(
         }
         _ => anyhow::bail!("tab doesn't summarise GitHub {what} links"),
     }
+}
+
+/// A GraphQL `PullRequest` (with the fields in `LINK_PULL_QUERY`) as a summary.
+fn pull_summary(pr: &Value) -> LinkSummary {
+    let str_at = |v: &Value, p: &str| v.pointer(p).and_then(Value::as_str).map(str::to_string);
+    let state = if pr["merged"].as_bool() == Some(true) {
+        "merged"
+    } else if pr["state"] == "CLOSED" {
+        "closed"
+    } else if pr["isDraft"].as_bool() == Some(true) {
+        "draft"
+    } else {
+        "open"
+    };
+    let checks = str_at(pr, "/commits/nodes/0/commit/statusCheckRollup/state").map(|s| {
+        match s.as_str() {
+            "SUCCESS" => "passing",
+            "FAILURE" | "ERROR" => "failing",
+            _ => "pending",
+        }
+        .to_string()
+    });
+    let open_threads = pr["reviewThreads"]["nodes"].as_array().map(|ts| {
+        ts.iter()
+            .filter(|t| t["isResolved"].as_bool() == Some(false))
+            .count() as u32
+    });
+    let merge_state = match (
+        lower(pr, "mergeable").as_str(),
+        lower(pr, "mergeStateStatus"),
+    ) {
+        ("conflicting", _) => Some("dirty".to_string()),
+        // Mergeable, but the branch rules haven't been worked out yet.
+        ("mergeable", m) if m.is_empty() || m == "unknown" => Some("mergeable".to_string()),
+        (_, m) => Some(m).filter(|m| !m.is_empty()),
+    };
+    LinkSummary {
+        title: str_at(pr, "/title").unwrap_or_default(),
+        state: state.into(),
+        author: str_at(pr, "/author/login"),
+        checks,
+        updated_at: str_at(pr, "/updatedAt"),
+        merge_state,
+        review_decision: Some(lower(pr, "reviewDecision")).filter(|s| !s.is_empty()),
+        open_threads,
+    }
+}
+
+/// One of your open pull requests, for the Reviews tab's "Your PRs".
+#[derive(Debug, Clone, Serialize)]
+pub struct MyPull {
+    pub repo: String,
+    pub number: u64,
+    pub url: String,
+    pub summary: LinkSummary,
+}
+
+const MY_PULLS_QUERY: &str = r#"
+query {
+  search(query: "is:pr is:open author:@me archived:false sort:updated-desc", type: ISSUE, first: 50) {
+    nodes {
+      ... on PullRequest {
+        number url title state isDraft merged updatedAt mergeable mergeStateStatus reviewDecision
+        author { login }
+        repository { nameWithOwner }
+        reviewThreads(first: 100) { nodes { isResolved } }
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+      }
+    }
+  }
+}"#;
+
+/// Every open pull request you wrote, newest activity first, straight from
+/// GitHub. Notifications only cover PRs someone else touched.
+pub async fn my_pulls(gw: &Gateway) -> anyhow::Result<Vec<MyPull>> {
+    let data = graphql(gw, "your pull requests", MY_PULLS_QUERY, json!({})).await?;
+    Ok(data["search"]["nodes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|pr| {
+            Some(MyPull {
+                repo: pr.pointer("/repository/nameWithOwner")?.as_str()?.to_string(),
+                number: pr["number"].as_u64()?,
+                url: pr["url"].as_str()?.to_string(),
+                summary: pull_summary(pr),
+            })
+        })
+        .collect())
 }
 
 /// Rolls a commit's check runs up into one word. None when it has none or

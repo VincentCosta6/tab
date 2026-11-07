@@ -1106,6 +1106,12 @@ async fn github_link_summary(
         .map_err(err)
 }
 
+/// Your open pull requests, from GitHub's search.
+#[tauri::command]
+async fn github_my_pulls(state: State<'_, AppState>) -> CmdResult<Vec<github_review::MyPull>> {
+    github_review::my_pulls(&state.gateway).await.map_err(err)
+}
+
 #[tauri::command]
 async fn github_file(
     state: State<'_, AppState>,
@@ -1929,6 +1935,7 @@ pub fn run() {
             file_open,
             start_dictation,
             github_link_summary,
+            github_my_pulls,
             item_preview,
             mark_done,
             snooze,
