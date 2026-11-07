@@ -16,14 +16,25 @@ pub struct LinkKind {
 }
 
 pub const KINDS: &[LinkKind] = &[
-    LinkKind { name: "github-pr", commands: &["gh pr create"], label: |u| github(u, "pull") },
-    LinkKind { name: "github-issue", commands: &["gh issue create"], label: |u| github(u, "issues") },
+    LinkKind {
+        name: "github-pr",
+        commands: &["gh pr create"],
+        label: |u| github(u, "pull"),
+    },
+    LinkKind {
+        name: "github-issue",
+        commands: &["gh issue create"],
+        label: |u| github(u, "issues"),
+    },
     // Add services here, e.g. Linear, Jira, GitLab.
 ];
 
 /// `owner/repo#12` for `https://github.com/owner/repo/<segment>/12`.
 fn github(url: &str, segment: &str) -> Option<String> {
-    let p: Vec<&str> = url.strip_prefix("https://github.com/")?.split('/').collect();
+    let p: Vec<&str> = url
+        .strip_prefix("https://github.com/")?
+        .split('/')
+        .collect();
     (p.len() == 4
         && p[2] == segment
         && !p[0].is_empty()
@@ -38,9 +49,14 @@ fn github(url: &str, segment: &str) -> Option<String> {
 pub fn is_creator(tool: &str, input: &Value) -> bool {
     if tool == "Bash" {
         let cmd = input["command"].as_str().unwrap_or_default();
-        return KINDS.iter().flat_map(|k| k.commands).any(|c| cmd.contains(c));
+        return KINDS
+            .iter()
+            .flat_map(|k| k.commands)
+            .any(|c| cmd.contains(c));
     }
-    tool.starts_with("mcp__") && !tool.starts_with("mcp__tab__") && tool.to_lowercase().contains("create")
+    tool.starts_with("mcp__")
+        && !tool.starts_with("mcp__tab__")
+        && tool.to_lowercase().contains("create")
 }
 
 /// The links in a creating call's output, as `(url, label)`, once each.
@@ -66,14 +82,23 @@ mod tests {
     #[test]
     fn finds_created_links_only() {
         let out = "Warning: dirty\nhttps://github.com/o/tab/pull/18\n";
-        assert_eq!(found(out), [("https://github.com/o/tab/pull/18".into(), "o/tab#18".into())]);
+        assert_eq!(
+            found(out),
+            [("https://github.com/o/tab/pull/18".into(), "o/tab#18".into())]
+        );
         assert_eq!(found("see https://github.com/o/r/issues/3.")[0].1, "o/r#3");
-        assert!(found("https://github.com/o/r/pull/new/branch https://github.com/o/r/pull/9/files").is_empty());
+        assert!(
+            found("https://github.com/o/r/pull/new/branch https://github.com/o/r/pull/9/files")
+                .is_empty()
+        );
     }
 
     #[test]
     fn knows_which_calls_create() {
-        assert!(is_creator("Bash", &json!({"command": "gh pr create --draft"})));
+        assert!(is_creator(
+            "Bash",
+            &json!({"command": "gh pr create --draft"})
+        ));
         assert!(!is_creator("Bash", &json!({"command": "gh pr list"})));
         assert!(is_creator("mcp__linear__create_issue", &json!({})));
         assert!(!is_creator("mcp__linear__list_issues", &json!({})));
