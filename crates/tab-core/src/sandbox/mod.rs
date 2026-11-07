@@ -175,6 +175,18 @@ pub enum Backend {
     Bubblewrap,
     /// Nothing to enforce with: Windows, or Linux without a working `bwrap`.
     Unavailable,
+    /// tab itself runs inside a sandbox already (its tests run from a
+    /// sandboxed chat, say). macOS can't start a sandbox inside another,
+    /// so processes start directly, and the outer sandbox's limits still
+    /// apply to them.
+    Inherited,
+}
+
+impl Backend {
+    /// Whether tab applies its own policies with it.
+    pub fn enforces(self) -> bool {
+        matches!(self, Backend::Seatbelt | Backend::Bubblewrap)
+    }
 }
 
 /// For Settings and the chat header.
@@ -400,7 +412,7 @@ impl Sandbox {
 
     /// Whether file and network limits apply on this computer right now.
     pub fn enforced(&self) -> bool {
-        self.config().enabled && self.backend != Backend::Unavailable
+        self.config().enabled && self.backend.enforces()
     }
 
     pub async fn status(&self) -> Status {
@@ -419,6 +431,10 @@ impl Sandbox {
                 "On, with bubblewrap. Agents can't change tab's own files or your shell setup, or read cloud credentials and browser data. Network allowlists aren't enforced on Linux yet.".to_string(),
                 None,
             ),
+            (true, Backend::Inherited) => (
+                "tab is running inside a sandbox already, and macOS can't start another inside it, so agents and commands run under that sandbox's limits instead of tab's.".to_string(),
+                None,
+            ),
             (true, Backend::Unavailable) if cfg!(windows) => (
                 "Windows has no sandbox tab can use yet, so file limits aren't enforced. Agents still start without tab's secrets, Claude Code is told not to touch protected folders, and stopping a chat ends everything it started.".to_string(),
                 Some("Workflow commands that name a container image run isolated in Docker or Podman.".to_string()),
@@ -431,7 +447,7 @@ impl Sandbox {
         Status {
             enabled,
             backend: self.backend,
-            enforced: enabled && self.backend != Backend::Unavailable,
+            enforced: enabled && self.backend.enforces(),
             summary,
             fix,
             container,
@@ -785,7 +801,19 @@ fn temp_dirs() -> Vec<PathBuf> {
 /// namespaces it needs.
 fn detect() -> Backend {
     if cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").exists() {
-        return Backend::Seatbelt;
+        // Fails (exit 71) when this process is sandboxed already.
+        let ok = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        return if ok {
+            Backend::Seatbelt
+        } else {
+            Backend::Inherited
+        };
     }
     if cfg!(target_os = "linux") {
         let ok = std::process::Command::new("bwrap")

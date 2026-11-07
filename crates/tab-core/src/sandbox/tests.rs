@@ -340,8 +340,11 @@ async fn sh(
 #[tokio::test]
 async fn enforces_files_and_network_where_available() {
     let s = Sandbox::new(SandboxConfig::default(), None, None);
-    if s.backend() == Backend::Unavailable {
-        eprintln!("no sandbox on this machine; skipping");
+    if !s.backend().enforces() {
+        eprintln!(
+            "no sandbox tab can start here ({:?}); skipping",
+            s.backend()
+        );
         return;
     }
     let root = tmp("enforce");
