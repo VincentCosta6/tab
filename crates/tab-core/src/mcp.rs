@@ -205,7 +205,7 @@ pub fn tools() -> Value {
     json!([
         {
             "name": "tab_steps",
-            "description": "Show the person your plan as a step list pinned to the bottom of the chat, each with its status. Call it before starting work that takes more than a couple of tool calls, then again whenever a step starts or finishes; each call replaces the whole list. Keep one step in_progress at a time and steps short (a few words, in the person's terms).",
+            "description": "Show the person your plan as a step list pinned to the bottom of the chat, each with its status. Call it before starting work that takes more than a couple of tool calls, then again whenever a step starts or finishes; each call replaces the whole list. Keep one step in_progress at a time. List the whole job up front so the person can see how much is left. Each step is a short outcome in plain words (\"Find where Done is handled\", \"Open a PR\"), never a command, tool name or file path.",
             "inputSchema": { "type": "object", "properties": {
                 "steps": { "type": "array", "items": { "type": "object", "properties": {
                     "title": { "type": "string", "description": "What the step does, e.g. \"Find where the chat scrolls\"." },
