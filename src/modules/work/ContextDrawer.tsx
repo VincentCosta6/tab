@@ -186,12 +186,12 @@ function Card({ glyph, type, title, subtitle, status, note, pinned, onOpen, acti
   const [open, setOpen] = useState(false);
   return (
     <div className={cx("cc", pinned && "pinned", open && "open")}>
-      <div className="cc-row">
+      <div className={cx("cc-row", onOpen && "clickable")} onClick={onOpen ? (e) => { if (!(e.target as HTMLElement).closest(".cc-actions")) onOpen(); } : undefined}>
         {glyph}
         <div className="cc-main">
           <div className="cc-top">
             <span className="cc-type">{type}</span>
-            {onOpen ? <button className="cc-title link-btn" onClick={onOpen} title={title}>{title}</button> : <span className="cc-title" title={title}>{title}</span>}
+            {onOpen ? <span className="cc-title" title={title}>{title}</span> : <span className="cc-title" title={title}>{title}</span>}
           </div>
           {(subtitle || note) && <div className="cc-sub">{[note, subtitle].filter(Boolean).join(" · ")}</div>}
         </div>
