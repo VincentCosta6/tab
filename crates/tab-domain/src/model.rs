@@ -409,6 +409,10 @@ pub struct ConnectorDescriptor {
     /// What workflows can ask this connector to do.
     #[serde(default)]
     pub actions: Vec<ActionInfo>,
+    /// Command-line tools this connection signs in. tab runs them for
+    /// agents with the connection's token (see [`crate::cli`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clis: Vec<crate::cli::CliInfo>,
 }
 
 // ---------------------------------------------------------------------------

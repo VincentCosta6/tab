@@ -51,6 +51,12 @@ pub(super) fn args(policy: &Policy, cwd: &Path) -> Vec<OsString> {
     for p in policy.reveal.iter().filter(|p| p.exists()) {
         bind(&mut a, "--ro-bind", p);
     }
+    // A program covered with /dev/null can't be started.
+    for p in policy.block_exec.iter().filter(|p| p.is_file()) {
+        a.push("--ro-bind".into());
+        a.push("/dev/null".into());
+        a.push(p.into());
+    }
     if policy.network == Network::None {
         a.push("--unshare-net".into());
     }

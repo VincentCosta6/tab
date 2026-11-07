@@ -137,6 +137,19 @@ function LiveEvents() {
         case "workflows_changed":
           qc.invalidateQueries({ queryKey: ["workflows"] });
           break;
+        case "cli_changed": {
+          // An agent changed something on the service: refresh what shows it
+          // now instead of waiting for the next poll. The backend re-fetches
+          // the item's preview and sends it as preview_changed.
+          const c = e.change;
+          if (c.url) qc.invalidateQueries({ queryKey: ["link-preview", c.url] });
+          if (c.repo && c.number != null && c.resource === "pull") qc.invalidateQueries({ queryKey: keys.pull(c.repo, c.number) });
+          // A push moves a branch: any open pull request in the repo may have new commits.
+          if (c.repo && (c.resource === "branch" || c.resource === "repo")) qc.invalidateQueries({ queryKey: ["pull", c.repo] });
+          if (c.connector === "github") qc.invalidateQueries({ queryKey: ["github"] });
+          qc.invalidateQueries({ queryKey: ["linked-tasks"] });
+          break;
+        }
         case "workflow_run":
           qc.invalidateQueries({ queryKey: ["workflow-runs"] });
           if (e.run.item_id && e.run.finished_at) qc.invalidateQueries({ queryKey: ["activity", e.run.item_id] });

@@ -95,6 +95,7 @@ pub(super) async fn run_turn(
     let mut prepared = crate::sandbox::current()
         .command(&exe, &cmd.0, std::path::Path::new(&session.cwd), &policy)
         .await?;
+    hub.add_shims(session, &mut prepared.cmd);
     prepared
         .cmd
         .stdin(Stdio::piped())

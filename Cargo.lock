@@ -4680,6 +4680,7 @@ dependencies = [
  "async-imap",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "futures-util",
  "libc",

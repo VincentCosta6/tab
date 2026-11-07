@@ -85,6 +85,12 @@ pub enum EngineEvent {
         /// `user` or `agent`.
         by: String,
     },
+    /// An agent changed something through a connection's CLI (`gh pr
+    /// merge`, `git push`). The app refreshes what shows it.
+    CliChanged {
+        session_id: String,
+        change: tab_domain::CliChange,
+    },
 }
 
 const MAX_CONCURRENT_RANKS: usize = 4;
@@ -1069,6 +1075,22 @@ impl EngineHandle {
             });
         }
         Ok(self.core.refresh_preview(&c, &item).await.unwrap_or(empty))
+    }
+
+    /// Re-fetches the preview of the item at `url`, if there is one, after
+    /// something changed it (an agent merged the pull request through `gh`).
+    /// The new preview arrives as [`EngineEvent::PreviewChanged`].
+    pub fn refresh_url(&self, url: &str) {
+        let Ok(Some(item)) = self.core.store.item_by_url(url) else {
+            return;
+        };
+        let Some(c) = self.core.connectors.get(&item.event.source).cloned() else {
+            return;
+        };
+        let core = self.core.clone();
+        tokio::spawn(async move {
+            core.refresh_preview(&c, &item).await;
+        });
     }
 
     /// Creates a task in tab's own connector. A due time makes it a

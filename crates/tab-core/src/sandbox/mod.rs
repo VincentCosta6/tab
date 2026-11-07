@@ -29,6 +29,7 @@
 //!   commands. Writes are limited to the checkout or the run's folder, and
 //!   git and SSH credentials are hidden too.
 
+pub mod broker;
 mod bwrap;
 pub mod container;
 pub mod env;
@@ -97,6 +98,10 @@ pub struct Policy {
     pub hide: Vec<PathBuf>,
     /// Readable even inside a hidden folder.
     pub reveal: Vec<PathBuf>,
+    /// Programs that can't be started: the real `gh` when tab brokers it.
+    pub block_exec: Vec<PathBuf>,
+    /// Variables removed from the environment on top of what `trust` removes.
+    pub drop_env: Vec<String>,
     pub network: Network,
     pub trust: Trust,
 }
@@ -457,6 +462,8 @@ impl Sandbox {
             writable,
             hide,
             reveal: Vec::new(),
+            block_exec: Vec::new(),
+            drop_env: Vec::new(),
             network: Network::Any,
             trust: Trust::Person,
         }
@@ -473,6 +480,8 @@ impl Sandbox {
             writable: vec![real(checkout)],
             hide,
             reveal: Vec::new(),
+            block_exec: Vec::new(),
+            drop_env: Vec::new(),
             network: Network::Any,
             trust: Trust::Agent,
         }
@@ -490,9 +499,37 @@ impl Sandbox {
             writable: w,
             hide,
             reveal: Vec::new(),
+            block_exec: Vec::new(),
+            drop_env: Vec::new(),
             network,
             trust: Trust::Untrusted,
         }
+    }
+
+    /// A chat whose `gh` and git network commands go through tab (see
+    /// [`broker`]): the agent can't start the real CLIs that need a token or
+    /// read where they keep it, and gets no GitHub token in its environment.
+    pub fn brokered(&self, mut p: Policy) -> Policy {
+        if !self.config().enabled {
+            return p;
+        }
+        for b in broker::all() {
+            if b.cli.default == tab_domain::CliEffect::Local {
+                continue;
+            }
+            if let Some(exe) = b.real() {
+                let resolved = real(&exe);
+                if resolved != exe {
+                    p.block_exec.push(resolved);
+                }
+                p.block_exec.push(exe);
+            }
+        }
+        p.hide
+            .extend(self.under_home(&[".config/gh", "AppData/Roaming/GitHub CLI"]));
+        p.drop_env
+            .extend(env::GITHUB_KEYS.iter().map(|k| k.to_string()));
+        p
     }
 
     /// Builds the command for `exe args` in `cwd` under `policy`.
@@ -532,6 +569,9 @@ impl Sandbox {
         };
         cmd.current_dir(cwd);
         env::scrub(&mut cmd, policy.trust);
+        for k in &policy.drop_env {
+            cmd.env_remove(k);
+        }
         if let Some(port) = port {
             proxy::point_at(&mut cmd, port);
         }

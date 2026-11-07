@@ -200,7 +200,20 @@ export type EngineEvent =
   | { type: "config_changed" }
   | { type: "project_changed"; project_id: string }
   | { type: "workflow_run"; run: WorkflowRun }
-  | { type: "workflows_changed"; id: string; by: string };
+  | { type: "workflows_changed"; id: string; by: string }
+  | { type: "cli_changed"; session_id: string; change: CliChange };
+
+/** Something an agent changed through a connection's CLI (`gh pr merge`, `git push`). */
+export interface CliChange {
+  connector: string;
+  command: string;
+  effect: "read" | "write" | "destructive";
+  /** `pull`, `issue`, `repo`, `branch`, `release`, `run`, or empty. */
+  resource: string;
+  repo: string | null;
+  number: number | null;
+  url: string | null;
+}
 
 export interface Preview { item_id: string; blocks: Block[]; fetched_at: string | null; stale: boolean }
 

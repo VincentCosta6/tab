@@ -391,10 +391,52 @@ impl AgentHub {
         let sb = crate::sandbox::current();
         let cwd = crate::sandbox::real(Path::new(&session.cwd));
         let workspaces = crate::sandbox::real(&self.dir.join("workspaces"));
-        if cwd.starts_with(&workspaces) {
+        let p = if cwd.starts_with(&workspaces) {
             sb.review_policy(&cwd, Path::new(&self.workdir()))
         } else {
             sb.chat_policy()
+        };
+        // gh and git's network commands go through tab, which needs its
+        // server to be up.
+        if self.mcp().is_some() {
+            sb.brokered(p)
+        } else {
+            p
+        }
+    }
+
+    /// Writes a chat's `gh` and `git` shims and points `cmd` at them, when
+    /// the sandbox is on. Returns whether it did.
+    pub(crate) fn add_shims(&self, session: &Session, cmd: &mut tokio::process::Command) -> bool {
+        let sb = crate::sandbox::current();
+        let (Some(mcp), true) = (self.mcp(), sb.config().enabled) else {
+            return false;
+        };
+        let Ok(exe) = std::env::current_exe() else {
+            return false;
+        };
+        let Ok(dir) = self.session_dir(&session.id) else {
+            return false;
+        };
+        let url = mcp.url.trim_end_matches("/mcp").to_string() + "/cli";
+        let ep = crate::sandbox::broker::Endpoint {
+            url: &url,
+            token: &mcp.token,
+            session: &session.id,
+        };
+        match crate::sandbox::broker::write_shims(&dir, &ep, &exe) {
+            Ok(Some(shims)) => {
+                cmd.env("PATH", shims.path_var());
+                // Claude Code rebuilds PATH from the person's shell setup and
+                // then sources this, so the shims stay first.
+                cmd.env("CLAUDE_ENV_FILE", &shims.env_file);
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(error = %e, "writing CLI shims failed");
+                false
+            }
         }
     }
 
@@ -1024,6 +1066,15 @@ impl AgentHub {
                 "\ntab's own files and stored credentials are off limits to your file tools. If an edit is refused \
                  for that reason, tell the person what you needed instead of working around it.\n"
             });
+            if sb.config().enabled && self.mcp().is_some() && session.agent == AgentKind::ClaudeCode
+            {
+                out.push_str(
+                    "Use `gh` and `git` as usual: tab runs `gh` and git's network commands (fetch, pull, push, \
+                     clone) for you, signed in with the person's GitHub connection. There's no GitHub token in \
+                     your environment, so don't look for one. Force pushes, merges and deletes wait for the \
+                     person to allow them; if one is declined, say what you wanted to do instead of retrying.\n",
+                );
+            }
         }
         if let Ok(Some(brief)) = self.store.session_brief(&session.id) {
             out.push('\n');

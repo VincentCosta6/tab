@@ -66,6 +66,10 @@ pub(super) fn profile(policy: &Policy, proxy_port: Option<u16>) -> String {
     if !policy.reveal.is_empty() {
         p.push_str(&format!("(allow file-read*{})\n", filters(&policy.reveal)));
     }
+    // Programs tab runs on the agent's behalf instead (the real `gh`).
+    for b in &policy.block_exec {
+        p.push_str(&format!("(deny process-exec (literal {}))\n", quote(b)));
+    }
     match (&policy.network, proxy_port) {
         (Network::Any, _) => {}
         (Network::None, _) | (Network::Domains(_), None) => {

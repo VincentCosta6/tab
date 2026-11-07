@@ -145,6 +145,7 @@ impl ConnectorFactory for EmailFactory {
             ],
             builtin: false,
             actions: actions(),
+            clis: Vec::new(),
         }
     }
 

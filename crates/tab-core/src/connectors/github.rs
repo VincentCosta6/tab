@@ -82,6 +82,7 @@ impl ConnectorFactory for GithubFactory {
             ],
             builtin: false,
             actions: actions(),
+            clis: clis(),
         }
     }
 
@@ -118,6 +119,84 @@ fn number_field() -> ActionField {
     ActionField::new("number", "PR or issue number", FieldType::Number)
         .required()
         .default("{{item.metadata.number}}")
+}
+
+/// The CLIs this connection signs in. tab runs them for agents with the
+/// connection's token (see `sandbox::broker`). Reads go straight through,
+/// uncached, since an agent asking usually wants what's there now; changes
+/// tell the app what to refresh.
+pub fn clis() -> Vec<tab_domain::CliInfo> {
+    use tab_domain::{CliAuth, CliEffect as E, CliInfo, CliRule as R};
+    let read = "list|ls|view|status|diff|checks|watch|show";
+    let gh = CliInfo {
+        name: "gh".into(),
+        description: "The GitHub CLI, signed in as this connection.".into(),
+        auth: CliAuth::Env {
+            var: "GH_TOKEN".into(),
+        },
+        value_flags: [
+            "-R", "--repo", "--hostname", "-X", "--method", "-H", "--header", "-f", "-F",
+            "--field", "--raw-field", "--input", "-q", "--jq", "-t", "--template", "--title",
+            "-b", "--body", "--body-file", "-B", "--base", "--head", "-l", "--label", "-a",
+            "--assignee", "-m", "--milestone", "-r", "--reviewer", "-L", "--limit", "-s",
+            "--state", "--json", "-e", "--env",
+        ]
+        .map(String::from)
+        .to_vec(),
+        rules: vec![
+            R::new("", E::Read),
+            R::new("help|version|completion|status|search|browse", E::Read),
+            R::new("auth status", E::Read),
+            R::new("auth", E::Blocked)
+                .reason("tab signs gh in with your GitHub connection, so `gh auth` isn't available in chats"),
+            R::new("extension|extensions|ext", E::Blocked)
+                .reason("gh extensions would run with your GitHub token; install and run them yourself"),
+            R::new("config|alias get|list|ls", E::Read),
+            R::new("config|alias", E::Blocked)
+                .reason("gh's settings are yours; change them outside the chat"),
+            R::new("api", E::ByMethod),
+            R::new(&format!("* {read}"), E::Read),
+            R::new("secret|variable|ssh-key|gpg-key", E::Destructive),
+            R::new("repo delete|archive|unarchive|rename", E::Destructive).resource("repo"),
+            R::new("repo edit", E::Destructive).flags(&["--visibility"]).resource("repo"),
+            R::new("repo clone|sync|set-default", E::Read),
+            R::new("pr checkout", E::Read),
+            R::new("run|release download", E::Read),
+            R::new("pr merge", E::Destructive).resource("pull"),
+            R::new("* delete|delete-asset|transfer", E::Destructive),
+            R::new("pr", E::Write).resource("pull"),
+            R::new("issue", E::Write).resource("issue"),
+            R::new("release", E::Write).resource("release"),
+            R::new("run|workflow", E::Write).resource("run"),
+            R::new("repo", E::Write).resource("repo"),
+        ],
+        default: E::Write,
+    };
+    let git = CliInfo {
+        name: "git".into(),
+        description: "git's network commands, signed in to github.com as this connection. Everything else runs in the chat as usual.".into(),
+        auth: CliAuth::GitHeader {
+            url: "https://github.com/".into(),
+        },
+        value_flags: [
+            "-C", "-c", "--git-dir", "--work-tree", "--namespace", "-o", "--push-option",
+            "--repo", "--receive-pack", "--exec", "-m", "-F",
+        ]
+        .map(String::from)
+        .to_vec(),
+        rules: vec![
+            R::new("fetch|pull|clone|ls-remote", E::Read),
+            R::new("push", E::Destructive)
+                .flags(&[
+                    "-f", "--force", "--force-with-lease", "--force-if-includes", "-d",
+                    "--delete", "--mirror", "--prune", "arg:+", "arg::",
+                ])
+                .resource("branch"),
+            R::new("push", E::Write).resource("branch"),
+        ],
+        default: E::Local,
+    };
+    vec![gh, git]
 }
 
 /// What workflows can do on GitHub. Every one is a single REST call through

@@ -76,6 +76,10 @@ const PERSON_KEYS: &[&str] = &[
     "GITLAB_TOKEN",
 ];
 
+/// GitHub tokens. When tab brokers `gh` and git for a chat, these stay out
+/// of the agent's environment even in the person's own chats.
+pub const GITHUB_KEYS: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"];
+
 pub fn is_secret(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
     if ALWAYS_KEEP.contains(&n.as_str()) {

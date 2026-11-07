@@ -155,6 +155,8 @@ fn policy(
         writable,
         hide,
         reveal: Vec::new(),
+        block_exec: Vec::new(),
+        drop_env: Vec::new(),
         network,
         trust: Trust::Untrusted,
     }

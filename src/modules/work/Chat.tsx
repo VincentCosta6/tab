@@ -94,6 +94,18 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
   );
 }
 
+/** A green pill when this computer actually enforces the sandbox for chats. */
+function SandboxPill() {
+  const { data } = useQuery({ queryKey: ["sandbox"], queryFn: api.sandboxStatus, staleTime: 60_000 });
+  if (!data?.enforced) return null;
+  const tip = `${data.summary} gh and git's network commands run through tab with your GitHub connection; force pushes, merges and deletes ask you first.`;
+  return (
+    <span className="sandbox-pill" title={tip}>
+      <Icon name="shield" size={11} /> Sandboxed
+    </span>
+  );
+}
+
 const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
 
 /**
@@ -276,7 +288,7 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
   return (
     <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null }}>
     <div className="transcript" ref={box} onScroll={(e) => { const el = e.currentTarget; stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}>
-      <div className="transcript-head"><AgentStatus chat={chat} /></div>
+      <div className="transcript-head"><SandboxPill /><AgentStatus chat={chat} /></div>
       {groupTools(messages, paired).map((g) =>
         Array.isArray(g)
           ? <ToolGroup key={g[0].id} calls={g} results={results} />

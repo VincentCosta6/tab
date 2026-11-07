@@ -93,6 +93,11 @@ impl EngineAccess for LiveEngine {
     async fn connector_config(&self, id: &str) -> anyhow::Result<Option<ConnectorConfig>> {
         Ok(self.0.config.lock().await.connectors.get(id).cloned())
     }
+    async fn refresh_url(&self, url: &str) {
+        if let Some(e) = self.0.engine.read().await.as_ref() {
+            e.refresh_url(url);
+        }
+    }
     async fn save_connector(&self, id: &str, cfg: ConnectorConfig) -> anyhow::Result<()> {
         let mut next = self.0.config.lock().await.clone();
         next.connectors.insert(id.to_string(), cfg);
@@ -1105,7 +1110,7 @@ async fn agent_activity(state: State<'_, AppState>) -> CmdResult<Vec<serde_json:
         if matches!(state.store.get(&item), Ok(Some(i)) if i.state == ItemState::Done) {
             continue;
         }
-        let waiting =!state.hub.pending_approvals(&s.id).is_empty();
+        let waiting = !state.hub.pending_approvals(&s.id).is_empty();
         let status = if waiting {
             "needs_input".to_string()
         } else {

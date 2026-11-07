@@ -36,12 +36,15 @@ use serde_json::{Value, json};
 use crate::agents::{AgentHub, Decision, summarize_tool};
 use crate::config::ConnectorConfig;
 use crate::engine::EngineEvent;
+use crate::model::Session;
 use crate::model::{
     ConnectorInfo, ContextSection, Entity, ItemState, NewContext, NewTask, Preview, Project,
     ProjectNote, QueueItem, SettingKind,
 };
-use crate::store::Store;
+use crate::sandbox::broker;
+use crate::store::{AuditEntry, Store};
 use crate::workflow::{self, Run, SavedBy, Workflow};
+use tab_domain::CliEffect;
 
 /// What the MCP server needs from the running engine.
 #[async_trait]
@@ -61,6 +64,23 @@ pub trait EngineAccess: Send + Sync + 'static {
     async fn save_connector(&self, _id: &str, _cfg: ConnectorConfig) -> anyhow::Result<()> {
         anyhow::bail!("connections can't be changed from here")
     }
+    /// The token a connection's CLI runs with: its own setting, or for
+    /// GitHub the GitHub CLI's sign-in. Never sent to agents.
+    async fn cli_token(&self, connector: &str) -> Option<String> {
+        let cfg = self.connector_config(connector).await.ok().flatten();
+        if let Some(t) = cfg.as_ref().and_then(|c| c.str("token")) {
+            return Some(t.to_string());
+        }
+        if connector == "github" {
+            return tokio::task::spawn_blocking(crate::gh::token)
+                .await
+                .ok()
+                .flatten();
+        }
+        None
+    }
+    /// Re-fetches whatever tab shows for `url` (a pull request's preview).
+    async fn refresh_url(&self, _url: &str) {}
     /// Dry-runs a workflow, on an item if given. Nothing changes.
     async fn dry_run_workflow(
         &self,
@@ -95,6 +115,7 @@ pub async fn serve(server: Arc<McpServer>, port: u16) -> anyhow::Result<String> 
             "/mcp",
             post(handle).get(|| async { StatusCode::METHOD_NOT_ALLOWED }),
         )
+        .route("/cli", post(handle_cli))
         .with_state(server);
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -104,13 +125,40 @@ pub async fn serve(server: Arc<McpServer>, port: u16) -> anyhow::Result<String> 
     Ok(url)
 }
 
-async fn handle(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: String) -> Response {
-    let authed = headers
+fn authed(s: &McpServer, headers: &HeaderMap) -> bool {
+    headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|t| !s.token.is_empty() && t == s.token);
-    if !authed {
+        .is_some_and(|t| !s.token.is_empty() && t == s.token)
+}
+
+/// `tab __tab_cli`: a chat's `gh` or `git` command, run by tab with the
+/// connection's token (see [`crate::sandbox::broker`]).
+async fn handle_cli(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: String) -> Response {
+    if !authed(&s, &headers) {
+        return (StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
+    }
+    let session = headers
+        .get("x-tab-session")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|id| s.store.session_get(id).ok().flatten());
+    let Some(session) = session else {
+        return (
+            StatusCode::FORBIDDEN,
+            "only tab's chats can run commands through tab",
+        )
+            .into_response();
+    };
+    let Ok(req) = serde_json::from_str::<broker::Request>(&body) else {
+        return (StatusCode::BAD_REQUEST, "unreadable command").into_response();
+    };
+    let reply = s.run_cli(&session, req).await;
+    axum::Json(reply).into_response()
+}
+
+async fn handle(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: String) -> Response {
+    if !authed(&s, &headers) {
         return (StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
     }
     let session = headers
@@ -527,6 +575,102 @@ impl McpServer {
             Some(p) => self.store.project_find(&p)?,
             None => None,
         })
+    }
+
+    /// Runs a chat's brokered command: asks the person when it's
+    /// destructive (or any change, in a chat about someone else's code),
+    /// runs it in the chat's sandbox with the connection's token, logs it,
+    /// and tells the app what changed.
+    pub async fn run_cli(&self, session: &Session, req: broker::Request) -> broker::Reply {
+        let Some(tool) = broker::find(&req.tool) else {
+            return broker::Reply::refused(&format!("tab doesn't run {} for chats", req.tool));
+        };
+        let m = tool.classify(&req.args);
+        let command = broker::describe(tool.name(), &req.args);
+        match m.effect {
+            CliEffect::Blocked => {
+                return broker::Reply::refused(
+                    m.reason
+                        .as_deref()
+                        .unwrap_or("this command isn't available in chats"),
+                );
+            }
+            CliEffect::Local => {
+                return broker::Reply::refused("this command runs in the chat, not through tab");
+            }
+            _ => {}
+        }
+        let policy = self.hub.policy(session);
+        let ask = m.effect == CliEffect::Destructive
+            || (m.effect == CliEffect::Write && policy.trust != crate::sandbox::Trust::Person);
+        if ask {
+            let decision = self
+                .hub
+                .request_approval(
+                    &session.id,
+                    tool.name(),
+                    format!("Run `{command}`"),
+                    json!({ "command": command, "connection": tool.connector }),
+                )
+                .await;
+            if let Decision::Deny(why) = decision {
+                return broker::Reply::refused(&format!("the person didn't allow this: {why}"));
+            }
+        }
+        let token = self.engine.cli_token(&tool.connector).await;
+        let started = std::time::Instant::now();
+        let reply = broker::execute(&tool, &req, &policy, token.as_deref()).await;
+        let effect = serde_json::to_value(m.effect)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        let error = (reply.code != 0).then(|| {
+            use base64::Engine as _;
+            let e = base64::engine::general_purpose::STANDARD
+                .decode(&reply.stderr)
+                .unwrap_or_default();
+            let e = String::from_utf8_lossy(&e);
+            let e = e.trim();
+            e.chars()
+                .rev()
+                .take(500)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        });
+        let entry = AuditEntry {
+            id: 0,
+            ts: Utc::now(),
+            provider: tool.connector.clone(),
+            connector: tool.connector.clone(),
+            purpose: format!("cli {effect}, chat {}", session.id),
+            method: "CLI".into(),
+            url: command,
+            outcome: if reply.code == 0 { "network" } else { "error" }.into(),
+            status: None,
+            duration_ms: started.elapsed().as_millis() as u64,
+            rl_resource: None,
+            rl_limit: None,
+            rl_remaining: None,
+            rl_reset: None,
+            error,
+        };
+        if let Err(e) = self.store.audit_insert(&entry) {
+            tracing::error!(error = %e, "writing audit log failed");
+        }
+        if reply.code == 0 && matches!(m.effect, CliEffect::Write | CliEffect::Destructive) {
+            let repo = broker::repo_of(&req.cwd).await;
+            let change = broker::change(&tool, &m, &req.args, repo);
+            if let Some(url) = &change.url {
+                self.engine.refresh_url(url).await;
+            }
+            let _ = self.events.send(EngineEvent::CliChanged {
+                session_id: session.id.clone(),
+                change,
+            });
+        }
+        reply
     }
 
     pub async fn call(
@@ -1617,6 +1761,148 @@ mod tests {
             )
             .await);
         assert!(store.project_notes(&p.id).unwrap().is_empty());
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn chats_run_git_and_gh_through_tab() {
+        if which::which("git").is_err() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("tab-cli-{}", uuid::Uuid::new_v4()));
+        let (origin, work) = (root.join("origin.git"), root.join("work"));
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        git(&origin, &["init", "--bare", "-q"]);
+        git(&work, &["init", "-q"]);
+        std::fs::write(work.join("a.txt"), "a").unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-qm", "first"]);
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let mut rx = events.subscribe();
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            root.clone(),
+        );
+        let server = Arc::new(McpServer {
+            store: store.clone(),
+            hub: hub.clone(),
+            engine: Arc::new(NoEngine(store.clone())),
+            events,
+            token: "secret".into(),
+        });
+        let url = serve(server, 47_960).await.unwrap().replace("/mcp", "/cli");
+        let session = store
+            .session_create(
+                None,
+                AgentKind::ClaudeCode,
+                "t",
+                &work.display().to_string(),
+                Utc::now(),
+            )
+            .unwrap();
+        let send = |args: &[&str], id: &str| {
+            let req = broker::Request {
+                tool: args[0].into(),
+                args: args[1..].iter().map(|a| a.to_string()).collect(),
+                cwd: work.clone(),
+                stdin: None,
+            };
+            let (url, id) = (url.clone(), id.to_string());
+            tokio::task::spawn_blocking(move || broker::send(&url, "secret", &id, &req))
+        };
+
+        // Only tab's own chats.
+        assert!(
+            send(&["git", "ls-remote", "x"], "nobody")
+                .await
+                .unwrap()
+                .is_err()
+        );
+
+        // A push changes the remote, is logged, and tells the app.
+        let o = origin.display().to_string();
+        let r = send(&["git", "push", &o, "HEAD:refs/heads/main"], &session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.code, 0, "{}", r.stderr_text());
+        assert_eq!(
+            git(&origin, &["rev-parse", "main"]),
+            git(&work, &["rev-parse", "HEAD"])
+        );
+        let changed = loop {
+            if let EngineEvent::CliChanged { change, .. } = rx.recv().await.unwrap() {
+                break change;
+            }
+        };
+        assert_eq!(changed.resource, "branch");
+        assert!(changed.command.starts_with("git push"));
+        let audit = store
+            .audit_list(&crate::store::AuditQuery {
+                connector: Some("github".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            audit
+                .iter()
+                .any(|a| a.method == "CLI" && a.url.starts_with("git push"))
+        );
+
+        // gh never hands out the token.
+        let r = send(&["gh", "auth", "token"], &session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.code, 1);
+        assert!(r.stderr_text().contains("gh auth"), "{}", r.stderr_text());
+
+        // A force push asks the person first; a no stops it.
+        let pending = send(
+            &["git", "push", "--force", &o, "HEAD:refs/heads/other"],
+            &session.id,
+        );
+        let id = loop {
+            if let EngineEvent::ApprovalRequested { approval } = rx.recv().await.unwrap() {
+                assert!(approval.summary.contains("git push --force"));
+                break approval.id;
+            }
+        };
+        hub.resolve_approval(&id, Decision::Deny("not now".into()));
+        let r = pending.await.unwrap().unwrap();
+        assert_eq!(r.code, 1);
+        assert!(
+            r.stderr_text().contains("didn't allow"),
+            "{}",
+            r.stderr_text()
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     async fn server_call(url: &str, session: &str, body: Value) -> Value {
