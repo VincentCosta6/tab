@@ -1662,11 +1662,12 @@ impl McpServer {
                 let created = w.id.is_empty();
                 let w = self.store.workflow_save(&w, "agent", Utc::now())?;
                 // A new draft's builder chat follows it to its id.
-                if created && let Some(sid) = session.filter(|s| !s.is_empty()) {
-                    if self.store.session_key(sid)?.as_deref() == Some(&*workflow::chat_key("")) {
-                        self.store
-                            .session_set_key(sid, &workflow::chat_key(&w.id))?;
-                    }
+                if created
+                    && let Some(sid) = session.filter(|s| !s.is_empty())
+                    && self.store.session_key(sid)?.as_deref() == Some(&*workflow::chat_key(""))
+                {
+                    self.store
+                        .session_set_key(sid, &workflow::chat_key(&w.id))?;
                 }
                 let _ = self.events.send(EngineEvent::WorkflowsChanged {
                     id: w.id.clone(),

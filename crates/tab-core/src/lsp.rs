@@ -230,13 +230,6 @@ pub const SERVERS: &[ServerSpec] = &[
     },
 ];
 
-/// A server's own settings, sent at start and whenever it asks.
-///
-/// rust-analyzer runs a crate's build scripts and proc macros by default,
-/// which is arbitrary code from the pull request. They stay on only where
-/// the sandbox also holds the network to package registries (macOS);
-/// elsewhere they're off, at the cost of macro-generated items.
-
 pub fn spec(id: &str) -> Option<&'static ServerSpec> {
     SERVERS.iter().find(|s| s.id == id)
 }
@@ -653,7 +646,10 @@ impl LspHub {
             crate::sandbox::Network::from_list(&sb.config().lsp_domains),
         );
         // Each server's lockdown (see its spec), loosened only where the
-        // sandbox really contains it.
+        // sandbox really contains it. rust-analyzer's build scripts and proc
+        // macros are arbitrary code from the pull request, so they run only
+        // where the sandbox also holds the network to package registries
+        // (macOS); elsewhere they're off, at the cost of macro-generated items.
         let contained = sb.backend() == crate::sandbox::Backend::Seatbelt && sb.enforced();
         let mut init_options = (s.init_options)();
         let mut settings = (s.settings)();
