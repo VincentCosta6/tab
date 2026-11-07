@@ -24,6 +24,7 @@ pub mod agents;
 pub mod config;
 pub mod connector;
 pub mod connectors;
+pub mod decisions;
 pub mod deps;
 pub mod embed;
 pub mod engine;

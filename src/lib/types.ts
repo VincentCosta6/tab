@@ -282,6 +282,41 @@ export interface AppUpdateProgress { downloaded: number; total: number | null }
 
 export interface AgentProbe { kind: AgentKind; found: boolean; path: string | null; version: string | null; error: string | null; install?: string | null; upgrade?: string | null; latest?: string | null; install_command?: string | null }
 
+export interface DecisionConfig {
+  provider: string;
+  model: string | null;
+  /** Keys by provider id; masked when read. */
+  api_keys: Record<string, string>;
+  /** Reuse a harness's key, by provider id: `{ openrouter: "opencode" }`. */
+  key_from: Record<string, string>;
+  base_url: string | null;
+}
+
+/** A decision model provider, from its metadata (`decisions.json`). */
+export interface DecisionProvider {
+  id: string;
+  name: string;
+  pitch: string;
+  dialect: string;
+  base_url: string;
+  path: string;
+  env: string;
+  key_url: string;
+  key_from: string[];
+  models: {
+    id: string;
+    label: string;
+    family: string;
+    input_per_mtok: number;
+    output_per_mtok: number;
+    capabilities: { question_types: string[]; max_options?: number; max_questions?: number; confidence: boolean };
+  }[];
+  /** Set from status: a key is in settings or the environment. */
+  has_key: boolean;
+  /** Harnesses that already hold a key for this provider. */
+  reusable_from: string[];
+}
+
 /** What tab knows about a harness, from its metadata (`harnesses.json`). */
 export interface Harness {
   id: AgentKind;
@@ -449,6 +484,8 @@ export interface TabConfig {
   ranking: {
     rules: RankingRules;
     ai: { enabled: boolean; backend: "auto" | "api" | "claude_code"; api_key: string | null; model: string | null; instructions: string };
+    /** A decision model in place of Claude Haiku; an empty provider means Haiku. */
+    decision?: DecisionConfig;
   };
   connectors: Record<string, { enabled: boolean; settings: Record<string, unknown> }>;
   agent: AgentConfig;

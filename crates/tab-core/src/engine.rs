@@ -124,6 +124,18 @@ impl Engine {
         gateway: Arc<Gateway>,
         events: broadcast::Sender<EngineEvent>,
     ) -> Self {
+        Self::with_agents(cfg, store, gateway, events, None)
+    }
+
+    /// [`Engine::from_config`], with the person's agents for rankers that
+    /// answer through a harness.
+    pub fn with_agents(
+        cfg: &TabConfig,
+        store: Arc<Store>,
+        gateway: Arc<Gateway>,
+        events: broadcast::Sender<EngineEvent>,
+        agents: Option<Arc<crate::agents::AgentHub>>,
+    ) -> Self {
         let (built, failed) = connectors::build_enabled(cfg, gateway.clone());
         let infos = connectors::registry()
             .into_iter()
@@ -150,7 +162,12 @@ impl Engine {
         for f in connectors::registry() {
             gateway.declare_limits(&f.descriptor().rate_limits);
         }
-        let ranker = Arc::new(Pipeline::from_config(cfg, gateway.clone(), store.clone()));
+        let ranker = Arc::new(Pipeline::from_config(
+            cfg,
+            gateway.clone(),
+            store.clone(),
+            agents,
+        ));
         Self {
             store,
             gateway,
@@ -1183,6 +1200,7 @@ mod tests {
             rules: RankingRules::default(),
             profile: Default::default(),
             ai: None,
+            decision: None,
         });
         let handle = Engine {
             gateway: Arc::new(Gateway::new(store.clone())),
@@ -1460,6 +1478,7 @@ mod tests {
                 rules: RankingRules::default(),
                 profile: Default::default(),
                 ai: None,
+                decision: None,
             }),
             connectors: vec![acting.clone(), Arc::new(crate::connectors::TabConnector)],
             infos,
@@ -1577,6 +1596,7 @@ mod tests {
                 rules: RankingRules::default(),
                 profile: Default::default(),
                 ai: None,
+                decision: None,
             }),
             connectors: vec![Arc::new(crate::connectors::TabConnector)],
             infos: Vec::new(),
