@@ -55,6 +55,35 @@ pub struct AgentConfig {
     /// Offer a likely next reply after each turn (Tab fills it, Enter sends).
     #[serde(default = "default_true")]
     pub suggest_replies: bool,
+    /// Names chats started in tab with a small model as the work comes into focus.
+    #[serde(default)]
+    pub titler: TitlerConfig,
+}
+
+/// The titler: after the first few turns of a chat, a small model renames
+/// its task so the queue says what the thread is actually doing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TitlerConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Claude Code model alias or id. Empty means `claude-haiku-5-5`.
+    /// OpenCode uses its own configured model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The person's own rules, added after the default ones, e.g.
+    /// "Start with the repo name" or "Use ticket ids when there is one".
+    #[serde(default)]
+    pub instructions: String,
+}
+
+impl Default for TitlerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: None,
+            instructions: String::new(),
+        }
+    }
 }
 
 /// Spend limits for agents and the ranker. Costs are what the agent reports:
@@ -120,6 +149,7 @@ impl Default for AgentConfig {
             opencode_url: None,
             budget: BudgetConfig::default(),
             suggest_replies: true,
+            titler: TitlerConfig::default(),
         }
     }
 }

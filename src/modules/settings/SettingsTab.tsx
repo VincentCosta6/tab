@@ -15,6 +15,7 @@ export function SettingsTab() {
   const [note, setNote] = useState<string | null>(null);
   const qc = useQueryClient();
   const mcp = useQuery({ queryKey: ["mcp"], queryFn: api.mcpInfo });
+  const titlerRules = useQuery({ queryKey: ["titler-rules"], queryFn: api.titlerDefaultRules, staleTime: Infinity });
 
   useEffect(() => {
     api.getConfig().then((c) => (setSaved(c), setDraft(c)));
@@ -30,6 +31,8 @@ export function SettingsTab() {
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
   const rules = draft.ranking.rules;
   const ai = draft.ranking.ai;
+  const titler = draft.agent.titler ?? { enabled: true, model: null, instructions: "" };
+  const setTitler = (patch: Partial<typeof titler>) => set((c) => void (c.agent.titler = { ...titler, ...patch }));
 
   const save = async () => {
     setBusy(true);
@@ -128,6 +131,28 @@ export function SettingsTab() {
               <TextInput placeholder="http://127.0.0.1:4096" value={draft.agent.opencode_url ?? ""} onChange={(e) => set((c) => void (c.agent.opencode_url = e.target.value || null))} />
             </FormRow>
           )}
+        </Card>
+      </Section>
+
+      <Section title="Chat titles" description="After the first few turns of a chat, a small model names it for what the thread is actually doing. It stops once it's confident, and never touches a title you've set yourself.">
+        <Card>
+          <FormRow label="Enabled">
+            <Toggle label="Title chats" checked={titler.enabled} onChange={(v) => setTitler({ enabled: v })} />
+          </FormRow>
+          <FormRow label="Model" help={draft.agent.kind === "opencode" ? "OpenCode uses its own configured model." : "Runs through your agent. Defaults to claude-haiku-5-5."}>
+            <TextInput placeholder="claude-haiku-5-5" disabled={draft.agent.kind === "opencode"} value={titler.model ?? ""} onChange={(e) => setTitler({ model: e.target.value || null })} />
+          </FormRow>
+          <FormRow label="Your rules" help="Plain language. Added after the built-in rules, and yours win.">
+            <div className="titler-rules">
+              <TextArea
+                rows={4}
+                placeholder={"Start with the repo name, e.g. \"tab: Fix badge overflow\".\nUse the ticket id when there is one."}
+                value={titler.instructions}
+                onChange={(e) => setTitler({ instructions: e.target.value })}
+              />
+              {titlerRules.data && <p className="titler-defaults"><strong>Built in:</strong> {titlerRules.data}</p>}
+            </div>
+          </FormRow>
         </Card>
       </Section>
 

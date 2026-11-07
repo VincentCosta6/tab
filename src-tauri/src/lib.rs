@@ -610,6 +610,7 @@ async fn chat_send(
                 body: (text.len() > first.len()).then(|| text.clone()),
                 created_by: "user".into(),
                 project_id,
+                auto_title: true,
                 ..Default::default()
             }).map_err(err))?
         }
@@ -1603,6 +1604,21 @@ async fn reopen(state: State<'_, AppState>, id: String) -> CmdResult<Option<Queu
 }
 
 #[tauri::command]
+async fn rename_item(
+    state: State<'_, AppState>,
+    id: String,
+    title: String,
+) -> CmdResult<Option<QueueItem>> {
+    with_engine!(state, e => e.rename(&id, &title).map_err(err))
+}
+
+/// The titler's built-in rules, shown under the person's own in Settings.
+#[tauri::command]
+fn titler_default_rules() -> &'static str {
+    tab_core::agents::TITLER_DEFAULT_RULES
+}
+
+#[tauri::command]
 async fn list_connectors(state: State<'_, AppState>) -> CmdResult<Vec<ConnectorInfo>> {
     with_engine!(state, e => Ok(e.connectors()))
 }
@@ -1957,6 +1973,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            rename_item,
+            titler_default_rules,
             browser_open,
             browser_bounds,
             browser_visible,
