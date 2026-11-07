@@ -302,6 +302,67 @@ const isStepsTool = (tool?: string) => !!tool && /(^|_)tab_steps$/.test(tool);
 /** Tools that only update the step list: shown in the step card, not as rows. */
 const isStepTool = (tool?: string) => !!tool && (isStepsTool(tool) || TODO_TOOLS.has(tool) || TASK_TOOLS.has(tool) || tool === "TaskList" || tool === "TaskGet");
 
+/** A file path's last part: `/a/b/Chat.tsx` reads as Chat.tsx. */
+const base = (p: unknown) => (typeof p === "string" ? p.split("/").filter(Boolean).pop() ?? p : "");
+
+/**
+ * A tool call in plain words, for the step card when the agent gave no
+ * plan: "Reading Chat.tsx", not the command line it ran.
+ */
+function describeTool(m: SessionMessage): string {
+  const tool = toolName(m.meta?.tool ?? m.content);
+  const input = m.meta?.input ?? {};
+  const desc = typeof input.description === "string" ? input.description.trim() : "";
+  switch (tool) {
+    case "Bash":
+    case "bash":
+      return desc || "Running a command";
+    case "Read":
+    case "read":
+      return `Reading ${base(input.file_path ?? input.filePath) || "a file"}`;
+    case "Edit":
+    case "edit":
+    case "MultiEdit":
+    case "NotebookEdit":
+      return `Editing ${base(input.file_path ?? input.filePath ?? input.notebook_path) || "a file"}`;
+    case "Write":
+    case "write":
+      return `Writing ${base(input.file_path ?? input.filePath) || "a file"}`;
+    case "Grep":
+    case "grep":
+    case "Glob":
+    case "glob":
+      return "Searching the code";
+    case "WebSearch":
+    case "websearch":
+      return "Searching the web";
+    case "WebFetch":
+    case "webfetch":
+      return "Reading a web page";
+    case "Agent":
+    case "Task":
+    case "task":
+      return desc ? `Delegating: ${desc}` : "Delegating to a helper agent";
+    case "ToolSearch":
+      return "Loading tools";
+  }
+  if (tool.startsWith("tab_")) {
+    const what: Record<string, string> = {
+      tab_search: "Searching your queue",
+      tab_get_item: "Reading a queue item",
+      tab_attach_context: "Attaching context",
+      tab_add_found: "Filing something under Found",
+      tab_create_task: "Creating a follow-up task",
+      tab_project: "Reading the project",
+      tab_project_note: "Saving a project note",
+      tab_graph_search: "Looking up what tab knows",
+      tab_graph_expand: "Looking up what tab knows",
+    };
+    return what[tool] ?? "Working in tab";
+  }
+  return desc || tool.replace(/_/g, " ");
+}
+
 /**
  * The agent's step list, from whichever todo tool it uses: TodoWrite
  * (Claude Code, and opencode's todowrite) sends the whole list each time;
@@ -362,7 +423,7 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
     for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { turn = i + 1; break; }
     for (const m of messages.slice(turn)) {
       if (m.kind !== "tool" || isStepTool(m.meta?.tool) || m.meta?.tool === "AskUserQuestion") continue;
-      activity.push({ content: m.content.replace(/^mcp__tab__/, "tab: ").split("\n")[0], status: results.has(m.id) ? "completed" : "in_progress" });
+      activity.push({ content: describeTool(m), status: results.has(m.id) ? "completed" : "in_progress" });
     }
   }
   const earlier = Math.max(0, activity.length - 5);

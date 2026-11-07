@@ -870,9 +870,12 @@ impl AgentHub {
              - To ask the person to choose between options, use AskUserQuestion: tab shows the question \
              with buttons in the chat and returns their answers.\n\
              - Step list (required): whenever answering needs tools, your FIRST tool call is tab_steps with \
-             your plan as 2-6 short steps (the first in_progress, the rest pending). Call tab_steps again each \
-             time a step finishes or the plan changes, and once at the end with every step completed. The \
-             person sees this list pinned under the chat instead of your raw tool calls, so never skip it. \
+             your plan as 2-6 short steps (the first in_progress, the rest pending). Write each step as an \
+             outcome in the person's words, e.g. 'Find where Done is handled', 'Fix the badge layout', \
+             'Open a PR': never a command, tool name, file path or flag. Cover the whole job from the start, \
+             so the list shows how much is left. Call tab_steps again each time a step finishes or the plan \
+             changes, and once at the end with every step completed. The person sees this list pinned under \
+             the chat instead of your raw tool calls, so never skip it. \
              Only a reply that needs no tools at all can go without it. If tab_steps isn't loaded, load it \
              with ToolSearch (select:mcp__tab__tab_steps).\n\
              - To show the person an image or a file (a screenshot you took, a PDF or report you wrote), \
