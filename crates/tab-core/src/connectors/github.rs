@@ -905,27 +905,15 @@ mod tests {
             "github.review_requested"
         );
         assert_eq!(
-            kind_for(
-                "ci_activity",
-                "CheckSuite",
-                "CI workflow run failed for main branch"
-            ),
+            kind_for("ci_activity", "CheckSuite", "CI workflow run failed for main branch"),
             "github.ci_failed"
         );
         assert_eq!(
-            kind_for(
-                "ci_activity",
-                "CheckSuite",
-                "CI workflow run succeeded for fix branch"
-            ),
+            kind_for("ci_activity", "CheckSuite", "CI workflow run succeeded for fix branch"),
             "github.ci_passed"
         );
         assert_eq!(
-            kind_for(
-                "ci_activity",
-                "CheckSuite",
-                "CI workflow run cancelled for main branch"
-            ),
+            kind_for("ci_activity", "CheckSuite", "CI workflow run cancelled for main branch"),
             "github.ci"
         );
         assert_eq!(kind_for("team_mention", "Issue", "Bug"), "github.mention");
