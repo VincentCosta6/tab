@@ -90,18 +90,6 @@ const PNPM_FIELDS: &[&str] = &[
     "peerDependencyRules",
     "patchedDependencies",
 ];
-/// Environment variables a dependency install never needs.
-pub const SECRET_ENV: &[&str] = &[
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "GITHUB_PAT",
-    "GH_ENTERPRISE_TOKEN",
-    "GITLAB_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -290,18 +278,21 @@ impl DepStore {
             let mut ok = true;
             if plan.lockfile != Lockfile::Pnpm {
                 // npm / yarn lockfile → pnpm's, so it shares the store.
-                ok = run(pnpm, dir, &["import".into()]).await.is_ok();
+                ok = run(pnpm, dir, &self.root, &["import".into()]).await.is_ok();
                 if ok {
                     let _ = std::fs::remove_file(dir.join(plan.lockfile.file()));
                 }
             }
             if ok {
-                if run(pnpm, dir, &pnpm_install(true)).await.is_ok() {
+                if run(pnpm, dir, &self.root, &pnpm_install(true))
+                    .await
+                    .is_ok()
+                {
                     return Ok("pnpm".into());
                 }
                 // A lockfile from another pnpm major: resolve again, offline first.
                 if plan.lockfile == Lockfile::Pnpm {
-                    run(pnpm, dir, &pnpm_install(false)).await?;
+                    run(pnpm, dir, &self.root, &pnpm_install(false)).await?;
                     return Ok("pnpm".into());
                 }
             }
@@ -320,6 +311,7 @@ impl DepStore {
                 run(
                     &npm,
                     dir,
+                    &self.root,
                     &[
                         "ci".into(),
                         "--ignore-scripts".into(),
@@ -343,6 +335,7 @@ impl DepStore {
                 run(
                     &yarn,
                     dir,
+                    &self.root,
                     &[
                         "install".into(),
                         "--frozen-lockfile".into(),
@@ -424,6 +417,7 @@ impl DepStore {
                 let _ = run(
                     &pnpm,
                     &self.root,
+                    &self.root,
                     &[
                         "store".into(),
                         "prune".into(),
@@ -437,11 +431,12 @@ impl DepStore {
     }
 }
 
-/// Runs a package manager in `dir`, without scripts, prompts or secrets.
-async fn run(exe: &Path, dir: &Path, args: &[String]) -> anyhow::Result<()> {
-    let mut cmd = crate::lsp::sandboxed(exe);
-    cmd.args(args)
-        .current_dir(dir)
+/// Runs a package manager in `dir`, without scripts, prompts or secrets,
+/// sandboxed to write only to `dir` and the shared stores under `store`.
+async fn run(exe: &Path, dir: &Path, store: &Path, args: &[String]) -> anyhow::Result<()> {
+    let mut p =
+        crate::lsp::sandboxed(exe, args, dir, &[dir.to_path_buf(), store.to_path_buf()]).await?;
+    p.cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -456,7 +451,7 @@ async fn run(exe: &Path, dir: &Path, args: &[String]) -> anyhow::Result<()> {
         .env("COREPACK_ENABLE_STRICT", "0")
         .env("COREPACK_ENABLE_AUTO_PIN", "0")
         .env("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0");
-    let out = tokio::time::timeout(INSTALL_TIMEOUT, cmd.output())
+    let out = tokio::time::timeout(INSTALL_TIMEOUT, p.cmd.output())
         .await
         .map_err(|_| anyhow::anyhow!("The install took more than 15 minutes and was stopped."))??;
     if out.status.success() {

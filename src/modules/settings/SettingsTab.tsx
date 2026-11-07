@@ -189,6 +189,8 @@ export function SettingsTab() {
 
       <HubSection />
 
+      <SandboxSection config={draft.sandbox} onChange={(v) => set((c) => void (c.sandbox = v))} />
+
       <StorageSection config={draft.storage} onChange={(v) => set((c) => void (c.storage = v))} />
 
       <Section title="AI layer" description={`Claude Haiku reads each item with your instructions and nudges the rules score by up to ±25, with a one-line reason. Verdicts are cached by their inputs, so re-ranking is repeatable.`}>
@@ -235,6 +237,53 @@ function DollarInput({ value, onChange }: { value: number | null; onChange: (v: 
       onChange={(e) => onChange(e.target.value === "" ? null : Math.max(0, Number(e.target.value)))}
       style={{ maxWidth: 160 }}
     />
+  );
+}
+
+/** What agents, language servers and workflow commands may touch. */
+function SandboxSection({ config, onChange }: { config: TabConfig["sandbox"]; onChange: (v: TabConfig["sandbox"]) => void }) {
+  const status = useQuery({ queryKey: ["sandbox"], queryFn: api.sandboxStatus });
+  const s = status.data;
+  const list = (v: string[]) => v.join("\n");
+  return (
+    <Section
+      title="Sandbox"
+      description="Agents, language servers on pull requests, and workflow commands run with limits. Your own chats work as before; they just can't change tab itself or your shell setup, or read stored credentials."
+    >
+      <Card>
+        <FormRow label="On" help="Applies from the next message or run.">
+          <Toggle label="Sandbox" checked={config.enabled} onChange={(v) => onChange({ ...config, enabled: v })} />
+        </FormRow>
+        <FormRow label="On this computer">
+          <span className="subtle">{s ? <>{s.summary}{s.fix && <> {s.fix}</>}</> : "Checking…"}</span>
+        </FormRow>
+        <FormRow label="GitHub in chats" help="gh and git reach GitHub through tab, signed in with your GitHub connection. Force pushes, merges and deletes ask you first, and agents never see the token.">
+          <span className="subtle">Always on while the sandbox is on.</span>
+        </FormRow>
+        <FormRow label="SSH keys in chats" help="Off keeps ~/.ssh and your SSH agent out of chats, so GitHub is only reachable through tab. Leave on if agents push to other hosts over SSH.">
+          <Toggle label="SSH keys in chats" checked={config.ssh_in_chats ?? true} onChange={(v) => onChange({ ...config, ssh_in_chats: v })} />
+        </FormRow>
+        <FormRow label="Also protect" help="Folders agents may read but not change, one per line. tab's own data and, in a dev build, its checkout are always protected.">
+          <TextArea rows={3} placeholder={"~/code/production-config"} value={list(config.protected)}
+            onChange={(e) => onChange({ ...config, protected: e.target.value.split("\n") })} />
+        </FormRow>
+        <FormRow label="Also hide" help="Files or folders agents can't read at all, one per line. Cloud credentials, browser profiles and tab's config are always hidden.">
+          <TextArea rows={3} placeholder={"~/.config/acme/credentials"} value={list(config.hidden)}
+            onChange={(e) => onChange({ ...config, hidden: e.target.value.split("\n") })} />
+        </FormRow>
+        <FormRow label="Language servers may reach" help="Hosts code intelligence on a pull request may fetch dependencies from, one per line. *.example.com covers subdomains.">
+          <TextArea rows={4} value={list(config.lsp_domains)}
+            onChange={(e) => onChange({ ...config, lsp_domains: e.target.value.split("\n") })} />
+        </FormRow>
+        <FormRow label="Containers" help={s?.container ? `Workflow commands that name an image run in ${s.container}.` : "Workflow commands that name an image need Docker or Podman running."}>
+          <select className="select" value={config.container_runtime} onChange={(e) => onChange({ ...config, container_runtime: e.target.value })}>
+            <option value="">Whichever is installed</option>
+            <option value="docker">Docker</option>
+            <option value="podman">Podman</option>
+          </select>
+        </FormRow>
+      </Card>
+    </Section>
   );
 }
 
@@ -339,9 +388,17 @@ function HubSection() {
             <Badge>protocol v{h.protocol_version}</Badge>
           </div>
         </FormRow>
-        <FormRow label="Devices connect at" help="Uses the same token as the MCP server.">
-          <code className="mono">{h.url ?? "not listening"}</code>
+        <FormRow label="Devices connect at" help="TLS 1.3 only. Devices send the MCP server's token in a header and pin this hub's certificate.">
+          <div style={{ display: "grid", gap: 4 }}>
+            <code className="mono">{h.url ?? "not listening"}</code>
+            {h.url && <span className="mono" style={{ fontSize: 12, opacity: 0.7 }}>{h.http3 ? "HTTP/3, HTTP/2" : "HTTP/2"}</span>}
+          </div>
         </FormRow>
+        {h.fingerprint && (
+          <FormRow label="Certificate" help="Made by this computer for its hub. A device checks it matches this before it connects.">
+            <code className="mono" style={{ wordBreak: "break-all" }}>{h.fingerprint}</code>
+          </FormRow>
+        )}
         <FormRow label="CPU" help="The hub runs inside the app, so this is the whole app.">
           <div style={{ display: "grid", gap: 4, minWidth: 220 }}>
             <span className="mono">{cpuOfMachine == null ? "unavailable" : `${cpuOfMachine.toFixed(1)}% of ${h.cpus} cores`}</span>
@@ -362,6 +419,9 @@ function HubSection() {
         </FormRow>
         <FormRow label="Storage" help={h.path}>
           <span className="mono">{bytes(h.storage_bytes)}</span>
+        </FormRow>
+        <FormRow label="Files" help="Chat attachments, kept by the hub while a message refers to them.">
+          <span className="mono">{(h.files ?? 0).toLocaleString()} · {bytes(h.file_bytes ?? 0)}</span>
         </FormRow>
         <FormRow label="Waiting to sync" help="Local changes not yet recorded in the hub. Normally 0.">
           <span className="mono">{h.pending.toLocaleString()}</span>

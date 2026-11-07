@@ -26,7 +26,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
+use tokio::process::ChildStdin;
 use tokio::sync::{Mutex, oneshot};
 
 /// One way to install a server, tried when its `needs` tool is present.
@@ -230,6 +230,13 @@ pub const SERVERS: &[ServerSpec] = &[
     },
 ];
 
+/// A server's own settings, sent at start and whenever it asks.
+///
+/// rust-analyzer runs a crate's build scripts and proc macros by default,
+/// which is arbitrary code from the pull request. They stay on only where
+/// the sandbox also holds the network to package registries (macOS);
+/// elsewhere they're off, at the cost of macro-generated items.
+
 pub fn spec(id: &str) -> Option<&'static ServerSpec> {
     SERVERS.iter().find(|s| s.id == id)
 }
@@ -337,17 +344,28 @@ fn command(exe: &Path) -> tokio::process::Command {
     cmd
 }
 
-/// A command for running tools against untrusted checkouts: no tokens in its
-/// environment, and on Windows no looking up programs in the working
-/// directory (Node and others otherwise run a `python.exe` from the checkout
-/// before PATH's).
-pub fn sandboxed(exe: &Path) -> tokio::process::Command {
-    let mut cmd = command(exe);
-    for k in crate::deps::SECRET_ENV {
-        cmd.env_remove(k);
-    }
-    cmd.env("NoDefaultCurrentDirectoryInExePath", "1");
-    cmd
+/// Runs a tool on untrusted input (a PR's manifests, a package install)
+/// under the sandbox: it may write only to `writable` (plus temp and build
+/// caches), reach only package registries, and gets no secrets. On Windows
+/// it also won't run programs from its working directory (Node and others
+/// otherwise pick a `python.exe` there over PATH's).
+pub async fn sandboxed(
+    exe: &Path,
+    args: &[String],
+    cwd: &Path,
+    writable: &[PathBuf],
+) -> anyhow::Result<crate::sandbox::Prepared> {
+    let sb = crate::sandbox::current();
+    let policy = sb.isolated_policy(
+        writable,
+        crate::sandbox::Network::from_list(&sb.config().lsp_domains),
+    );
+    let args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+    let mut p = sb.command(exe, &args, cwd, &policy).await?;
+    p.cmd
+        .env("PATH", path_env())
+        .env("NoDefaultCurrentDirectoryInExePath", "1");
+    Ok(p)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -419,13 +437,10 @@ pub async fn install(id: &str) -> anyhow::Result<ServerStatus> {
     if let (Some(args), Some(npm)) = (managed_args(s), find("npm")) {
         let dir = TOOLS.get().expect("managed_args checked").join(s.id);
         tokio::fs::create_dir_all(&dir).await?;
+        let mut p = sandboxed(&npm, &args, &dir, std::slice::from_ref(&dir)).await?;
         let out = tokio::time::timeout(
             Duration::from_secs(600),
-            sandboxed(&npm)
-                .args(&args)
-                .current_dir(&dir)
-                .stdin(Stdio::null())
-                .output(),
+            p.cmd.stdin(Stdio::null()).output(),
         )
         .await
         .map_err(|_| anyhow::anyhow!("The install took more than 10 minutes and was stopped."))??;
@@ -531,7 +546,7 @@ pub struct Session {
     stdin: Mutex<ChildStdin>,
     pending: Pending,
     next: AtomicI64,
-    child: Mutex<Child>,
+    child: Mutex<crate::sandbox::Guarded>,
 }
 
 async fn write_msg(w: &mut ChildStdin, v: &Value) -> std::io::Result<()> {
@@ -592,7 +607,7 @@ impl Session {
         )
         .await;
         let _ = self.notify("exit", Value::Null).await;
-        let _ = self.child.lock().await.kill().await;
+        self.child.lock().await.kill_tree();
     }
 }
 
@@ -628,17 +643,37 @@ impl LspHub {
             return Ok(existing.clone());
         }
         let exe = find_server(s).ok_or_else(|| anyhow::anyhow!("{} isn't installed", s.command))?;
-        let mut cmd = sandboxed(&exe);
-        for (k, v) in s.env {
-            cmd.env(k, v);
+        // The checkout is someone else's code, and language servers run
+        // parts of it (build scripts, proc macros, `go list`). They get the
+        // checkout and build caches to write to, no credentials, and only
+        // package registries on the network.
+        let sb = crate::sandbox::current();
+        let policy = sb.isolated_policy(
+            &[root.to_path_buf()],
+            crate::sandbox::Network::from_list(&sb.config().lsp_domains),
+        );
+        // Each server's lockdown (see its spec), loosened only where the
+        // sandbox really contains it.
+        let contained = sb.backend() == crate::sandbox::Backend::Seatbelt && sb.enforced();
+        let mut init_options = (s.init_options)();
+        let mut settings = (s.settings)();
+        if s.id == "rust-analyzer" && contained {
+            for v in [&mut init_options, &mut settings["rust-analyzer"]] {
+                v["cargo"]["buildScripts"]["enable"] = json!(true);
+                v["procMacro"]["enable"] = json!(true);
+            }
         }
-        let mut child = cmd
-            .args(s.args)
-            .current_dir(root)
+        let args: Vec<std::ffi::OsString> = s.args.iter().map(Into::into).collect();
+        let mut prepared = sb.command(&exe, &args, root, &policy).await?;
+        prepared
+            .cmd
+            .env("PATH", path_env())
+            .env("NoDefaultCurrentDirectoryInExePath", "1")
+            .envs(s.env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        let mut child = prepared.spawn()?;
         let stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
@@ -669,7 +704,6 @@ impl LspHub {
         // default answer, notifications go to the UI.
         let reader_session = Arc::downgrade(&session);
         let sid = id.clone();
-        let settings = (s.settings)();
         tokio::spawn(async move {
             let mut r = BufReader::new(stdout);
             loop {
@@ -746,7 +780,7 @@ impl LspHub {
                     "processId": std::process::id(),
                     "clientInfo": { "name": "tab" },
                     "rootUri": root_uri,
-                    "initializationOptions": (s.init_options)(),
+                    "initializationOptions": init_options,
                     "workspaceFolders": [{ "uri": root_uri, "name": root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() }],
                     "capabilities": {
                         "general": { "positionEncodings": ["utf-16"] },

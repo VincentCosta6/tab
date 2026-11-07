@@ -67,6 +67,7 @@ impl ConnectorFactory for TabFactory {
             ],
             builtin: true,
             actions: actions(),
+            clis: Vec::new(),
         }
     }
 

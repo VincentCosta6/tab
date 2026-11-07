@@ -31,6 +31,14 @@ pub trait ConnectorFactory: Send + Sync {
         cfg: &ConnectorConfig,
         gateway: Arc<Gateway>,
     ) -> Option<anyhow::Result<Arc<dyn Connector>>>;
+    /// Something changed the things behind these pages (an agent merged a
+    /// pull request, a webhook said an issue closed): drop whatever this
+    /// connector cached about them, so the app's next look is fresh. The
+    /// engine then re-fetches their previews and tells the app.
+    ///
+    /// On the factory, not the connector, so it works while the
+    /// connection isn't running.
+    fn forget_pages(&self, _pages: &[String]) {}
 }
 
 #[async_trait]
@@ -98,6 +106,8 @@ pub(crate) enum EngineMsg {
     /// The item with this external id is finished upstream; mark it done.
     Resolved(String, String),
     Status(String, ConnectorStatus),
+    /// These pages changed upstream; see [`ConnectorContext::changed`].
+    Changed(String, Vec<String>),
 }
 
 #[derive(Clone)]
@@ -129,6 +139,16 @@ impl ConnectorContext {
                 self.id.clone(),
                 external_id.to_string(),
             ))
+            .await;
+    }
+
+    /// Says the things behind these pages changed upstream, so tab drops
+    /// what it cached about them and the app refreshes what shows them.
+    /// Cheaper than waiting for the next poll.
+    pub async fn changed(&self, pages: Vec<String>) {
+        let _ = self
+            .tx
+            .send(EngineMsg::Changed(self.id.clone(), pages))
             .await;
     }
 
@@ -183,6 +203,7 @@ pub fn test_context(id: &str) -> (ConnectorContext, mpsc::Receiver<String>, Canc
                 ),
                 EngineMsg::Status(id, s) => format!("status {id}: {s:?}"),
                 EngineMsg::Resolved(_, ext) => format!("resolved {ext}"),
+                EngineMsg::Changed(_, pages) => format!("changed {}", pages.join(" ")),
             };
             if out_tx.send(line).await.is_err() {
                 break;

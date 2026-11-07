@@ -3,18 +3,39 @@
 
 use std::collections::HashSet;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-use super::{AgentHub, default_command, resolve};
+use super::{AgentHub, Steer, default_command, resolve};
 use crate::model::{AgentKind, Session, SessionStatus};
 
 /// Claude Code permission modes tab passes through. `bypassPermissions` is
 /// deliberately not offered: approvals belong to the person.
 const MODES: &[&str] = &["default", "acceptEdits", "plan", "auto", "dontAsk"];
+
+/// Tool calls in flight, by id. Claude Code reads a steering message only
+/// between tool calls, so "Send now" interrupts while one is running.
+type OpenTools = Arc<Mutex<HashSet<String>>>;
+
+/// The stdin line for a steering command, if it needs one: a message is
+/// queued as a user turn; an interrupt (Esc in the terminal) is sent only
+/// while a tool runs, since otherwise the message is read at the next step.
+fn steer_line(steer: Steer, tools_running: bool, n: u64) -> Option<Value> {
+    match steer {
+        Steer::Message(text) => {
+            Some(json!({ "type": "user", "message": { "role": "user", "content": text } }))
+        }
+        Steer::Interrupt if tools_running => Some(json!({
+            "type": "control_request",
+            "request_id": format!("tab-interrupt-{n}"),
+            "request": { "subtype": "interrupt" },
+        })),
+        Steer::Interrupt => None,
+    }
+}
 
 pub(super) async fn run_turn(
     hub: &Arc<AgentHub>,
@@ -34,7 +55,14 @@ pub(super) async fn run_turn(
     let system_file = dir.join("system.md");
     std::fs::write(&system_file, system)?;
 
-    let mut cmd = super::command(&exe);
+    let policy = hub.policy(session);
+    let settings_file = dir.join("settings.json");
+    std::fs::write(
+        &settings_file,
+        serde_json::to_vec_pretty(&crate::sandbox::current().claude_settings(&policy))?,
+    )?;
+    let mut cmd = super::Args::default();
+    cmd.arg("--settings").arg(&settings_file);
     cmd.args([
         "-p",
         "--input-format",
@@ -64,7 +92,7 @@ pub(super) async fn run_turn(
                     "type": "http",
                     "url": mcp.url,
                     "headers": {
-                        "Authorization": format!("Bearer {}", mcp.token),
+                        "Authorization": format!("Bearer {}", crate::mcp::chat_token(&mcp.token, &session.id)),
                         "X-Tab-Session": session.id,
                     }
                 }
@@ -85,13 +113,18 @@ pub(super) async fn run_turn(
     if let Some(id) = &session.agent_session_id {
         cmd.args(["--resume", id]);
     }
-    cmd.current_dir(&session.cwd)
+    let mut prepared = crate::sandbox::current()
+        .command(&exe, &cmd.0, std::path::Path::new(&session.cwd), &policy)
+        .await?;
+    hub.add_shims(session, &mut prepared.cmd);
+    prepared
+        .cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    tracing::debug!(session = %session.id, mode, resume = ?session.agent_session_id, "starting Claude Code turn");
-    let mut child = cmd
+    tracing::debug!(session = %session.id, mode, resume = ?session.agent_session_id, sandboxed = prepared.enforced, "starting Claude Code turn");
+    let mut child = prepared
         .spawn()
         .map_err(|e| anyhow::anyhow!("starting Claude Code ({}) failed: {e}", exe.display()))?;
     // stdin stays open so the person can steer mid-turn; it closes when the
@@ -100,9 +133,16 @@ pub(super) async fn run_turn(
     let first = json!({ "type": "user", "message": { "role": "user", "content": prompt } });
     stdin.write_all(format!("{first}\n").as_bytes()).await?;
     let mut steer_rx = hub.steering_open(&session.id);
+    let open_tools = OpenTools::default();
+    let tools = open_tools.clone();
     tokio::spawn(async move {
-        while let Some(text) = steer_rx.recv().await {
-            let line = json!({ "type": "user", "message": { "role": "user", "content": text } });
+        let mut n = 0;
+        while let Some(steer) = steer_rx.recv().await {
+            n += 1;
+            let running = !tools.lock().unwrap().is_empty();
+            let Some(line) = steer_line(steer, running, n) else {
+                continue;
+            };
             if stdin
                 .write_all(format!("{line}\n").as_bytes())
                 .await
@@ -123,6 +163,7 @@ pub(super) async fn run_turn(
 
     let mut lines = BufReader::new(stdout).lines();
     let mut parser = Parser::new(hub.clone(), session.id.clone());
+    parser.open_tools = open_tools;
     // Rough size of what tab adds to the system prompt (the item and its context).
     parser.tab_context_tokens = (system.len() / 4) as i64;
     // After the result the CLI normally exits right away. If it stays up,
@@ -156,7 +197,7 @@ pub(super) async fn run_turn(
                 None => break,
             },
             _ = cancel.cancelled() => {
-                let _ = child.kill().await;
+                child.kill_tree();
                 return Ok(());
             }
         }
@@ -203,6 +244,11 @@ struct Parser {
     first_call: Option<Value>,
     last_call: Option<Value>,
     tab_context_tokens: i64,
+    /// Shared with the steering task, which interrupts only while one runs.
+    open_tools: OpenTools,
+    /// The person pressed "Send now": the next result only closes the
+    /// interrupted part, and the turn goes on with their queued message.
+    interrupted: bool,
 }
 
 /// Everything a model call read: new input plus cache writes and reads.
@@ -230,6 +276,8 @@ impl Parser {
             first_call: None,
             last_call: None,
             tab_context_tokens: 0,
+            open_tools: OpenTools::default(),
+            interrupted: false,
         }
     }
 
@@ -323,6 +371,7 @@ impl Parser {
                         Some("tool_use") => {
                             let id = block["id"].as_str().unwrap_or_default().to_string();
                             if self.once(format!("tool:{id}")) {
+                                self.open_tools.lock().unwrap().insert(id.clone());
                                 let name = block["name"].as_str().unwrap_or("tool");
                                 if crate::links::is_creator(name, &block["input"]) {
                                     self.create_calls.insert(id.clone());
@@ -342,7 +391,17 @@ impl Parser {
             }
             "user" => {
                 for block in v["message"]["content"].as_array().into_iter().flatten() {
+                    if block["type"] == "text"
+                        && block["text"]
+                            .as_str()
+                            .is_some_and(|t| t.starts_with("[Request interrupted by user"))
+                    {
+                        self.interrupted = true;
+                    }
                     if block["type"] == "tool_result" {
+                        if let Some(id) = block["tool_use_id"].as_str() {
+                            self.open_tools.lock().unwrap().remove(id);
+                        }
                         let text = match &block["content"] {
                             Value::String(s) => s.clone(),
                             Value::Array(parts) => parts
@@ -391,8 +450,21 @@ impl Parser {
                     );
                 }
             }
+            "result" if std::mem::take(&mut self.interrupted) => {
+                // Interrupted to read steering that is already queued:
+                // count the cost and keep going.
+                self.open_tools.lock().unwrap().clear();
+                crate::usage::record_claude_result(
+                    &hub.store,
+                    v,
+                    "agent",
+                    Some(&sid),
+                    self.billing,
+                );
+            }
             "result" => {
                 self.finished = true;
+                self.open_tools.lock().unwrap().clear();
                 hub.steering_close(&sid);
                 crate::usage::record_claude_result(
                     &hub.store,
@@ -517,5 +589,76 @@ mod tests {
         assert!(!p.finished);
         let s = store.session_get(&s.id).unwrap().unwrap();
         assert_eq!(s.status, SessionStatus::Working);
+    }
+
+    #[test]
+    fn messages_queue_and_send_now_interrupts_only_a_running_tool() {
+        let msg = steer_line(Steer::Message("hi".into()), true, 1).unwrap();
+        assert_eq!(
+            (msg["type"].as_str(), msg["message"]["content"].as_str()),
+            (Some("user"), Some("hi"))
+        );
+        let stop = steer_line(Steer::Interrupt, true, 7).unwrap();
+        assert_eq!(stop["request"]["subtype"], "interrupt");
+        assert_eq!(stop["request_id"], "tab-interrupt-7");
+        // Between tool calls the queued message is read anyway.
+        assert_eq!(steer_line(Steer::Interrupt, false, 8), None);
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_to_steer_does_not_end_the_turn() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        hub.steering_open(&s.id);
+        let mut p = Parser::new(hub.clone(), s.id.clone());
+        let feed = |p: &mut Parser, line: &str| p.handle(&serde_json::from_str(line).unwrap());
+        feed(
+            &mut p,
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"gh pr checks --watch"}}]}}"#,
+        );
+        assert!(p.open_tools.lock().unwrap().contains("t1"));
+        // What Claude Code prints after an interrupt mid-tool.
+        feed(
+            &mut p,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"The user doesn't want to proceed with this tool use.","is_error":true}]}}"#,
+        );
+        feed(
+            &mut p,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#,
+        );
+        assert!(p.open_tools.lock().unwrap().is_empty());
+        feed(
+            &mut p,
+            r#"{"type":"result","session_id":"abc","is_error":false,"stop_reason":"tool_use"}"#,
+        );
+        assert!(!p.finished, "the turn goes on with the steering message");
+        assert!(hub.can_steer(&s.id), "steering stays open");
+        let kinds: Vec<_> = store
+            .messages(&s.id)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.kind)
+            .collect();
+        assert!(!kinds.contains(&"result".to_string()));
+        // The steering message is answered, and that result ends the turn.
+        feed(
+            &mut p,
+            r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Skipping the wait."}]}}"#,
+        );
+        feed(
+            &mut p,
+            r#"{"type":"result","session_id":"abc","is_error":false,"stop_reason":"end_turn"}"#,
+        );
+        assert!(p.finished);
+        assert!(!hub.can_steer(&s.id));
     }
 }

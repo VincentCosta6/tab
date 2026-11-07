@@ -186,4 +186,12 @@ impl HubStore for MemStore {
             bytes: (records + edges + log) as u64,
         })
     }
+
+    fn blob_refs(&self) -> Result<BTreeSet<String>> {
+        Ok(self
+            .records
+            .values()
+            .flat_map(|r| tab_domain::blob::refs(&r.body))
+            .collect())
+    }
 }

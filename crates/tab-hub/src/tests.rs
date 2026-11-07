@@ -371,3 +371,347 @@ fn sync_positions_follow_what_each_connection_was_sent() {
     assert_eq!(st.runs_on, "cloud");
     assert_eq!(st.started_at.unwrap().seconds, t(0).timestamp());
 }
+
+// ---- Live channel ----
+
+const LAPTOP: ConnId = 3;
+
+fn session_row(id: &str, device: &str) -> pb::Op {
+    let (kind, rid) = live::session_record(id);
+    (&Op::Put {
+        kind: kind.into(),
+        id: rid,
+        body: json!({ "id": id, "device": device, "title": "Fix login" }),
+    })
+        .into()
+}
+
+fn watch(sessions: &[&str]) -> Req {
+    Req::Watch(pb::Watch {
+        sessions: sessions.iter().map(|s| s.to_string()).collect(),
+    })
+}
+
+fn publish(session: &str, event: serde_json::Value) -> Req {
+    Req::Publish(pb::Publish {
+        session: session.into(),
+        event_json: event.to_string().into_bytes(),
+    })
+}
+
+fn steer(session: &str, cmd: serde_json::Value) -> Req {
+    Req::Steer(pb::Steer {
+        session: session.into(),
+        body_json: cmd.to_string().into_bytes(),
+    })
+}
+
+fn delivered(h: &Handled) -> u32 {
+    match body(h) {
+        Res::Delivered(d) => d.connections,
+        other => panic!("expected Delivered, got {other:?}"),
+    }
+}
+
+fn error(h: &Handled) -> (i32, String) {
+    match body(h) {
+        Res::Error(e) => (e.code, e.message.clone()),
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
+/// The mac runs session "s1"; the phone and laptop watch and steer it.
+fn live_hub<S: HubStore>(store: S) -> Hub<S> {
+    let mut hub = Hub::new(store, "local", t(0));
+    for (conn, device) in [(MAC, "mac"), (PHONE, "phone"), (LAPTOP, "laptop")] {
+        hub.connect(conn, "test", t(0));
+        send(&mut hub, conn, 1, hello(device, 0), t(0));
+    }
+    let h = send(
+        &mut hub,
+        MAC,
+        2,
+        Req::Apply(pb::Apply {
+            ops: vec![session_row("s1", "mac")],
+        }),
+        t(1),
+    );
+    assert!(matches!(body(&h), Res::Applied(_)));
+    hub
+}
+
+fn live_events<S: HubStore>(store: S) {
+    let mut hub = live_hub(store);
+    assert_eq!(hub.runner("s1").as_deref(), Some("mac"));
+    assert_eq!(hub.runner("nope"), None);
+
+    // Nobody watches yet: publishing reaches no one, and is fine.
+    let h = send(
+        &mut hub,
+        MAC,
+        3,
+        publish("s1", json!({"delta": "Hel"})),
+        t(2),
+    );
+    assert_eq!(delivered(&h), 0);
+    assert!(h.direct.is_empty() && h.push.is_none());
+
+    // The phone starts watching; the runner hears about it so it can send
+    // a snapshot.
+    let h = send(&mut hub, PHONE, 4, watch(&["s1"]), t(2));
+    assert_eq!(h.direct.len(), 1);
+    let (to, notice) = &h.direct[0];
+    assert_eq!(*to, MAC);
+    assert!(matches!(&notice.body, Some(Res::Watched(w)) if w.session == "s1" && w.watchers == 1));
+
+    // Events go to watchers only, untouched, and aren't stored.
+    let head = hub.store().head().unwrap();
+    let h = send(
+        &mut hub,
+        MAC,
+        5,
+        publish("s1", json!({"delta": "lo"})),
+        t(3),
+    );
+    assert_eq!(delivered(&h), 1);
+    assert_eq!(h.direct.len(), 1);
+    let (to, live) = &h.direct[0];
+    assert_eq!(*to, PHONE);
+    assert_eq!(live.request_id, 0);
+    let Some(Res::Live(l)) = &live.body else {
+        panic!("{live:?}")
+    };
+    assert_eq!((l.session.as_str(), l.from.as_str()), ("s1", "mac"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&l.event_json).unwrap(),
+        json!({"delta": "lo"})
+    );
+    assert_eq!(hub.store().head().unwrap(), head);
+
+    // Only the runner may publish for a session.
+    let h = send(
+        &mut hub,
+        LAPTOP,
+        6,
+        publish("s1", json!({"delta": "x"})),
+        t(3),
+    );
+    assert_eq!(error(&h).0, pb::error::Code::Conflict as i32);
+    assert!(h.direct.is_empty());
+    let h = send(&mut hub, MAC, 7, publish("ghost", json!({})), t(3));
+    assert_eq!(error(&h).0, pb::error::Code::BadRequest as i32);
+
+    // A second watcher; both get events.
+    send(&mut hub, LAPTOP, 8, watch(&["s1", "other"]), t(4));
+    let h = send(&mut hub, MAC, 9, publish("s1", json!({"delta": "!"})), t(4));
+    let mut to: Vec<ConnId> = h.direct.iter().map(|(c, _)| *c).collect();
+    to.sort();
+    assert_eq!(to, [PHONE, LAPTOP]);
+
+    // Watching replaces the set; the runner hears the new count.
+    let h = send(&mut hub, PHONE, 10, watch(&[]), t(5));
+    assert!(
+        matches!(&h.direct[..], [(MAC, n)] if matches!(&n.body, Some(Res::Watched(w)) if w.watchers == 1))
+    );
+    let h = send(
+        &mut hub,
+        MAC,
+        11,
+        publish("s1", json!({"delta": "?"})),
+        t(5),
+    );
+    assert_eq!(
+        h.direct.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
+        [LAPTOP]
+    );
+
+    // A watcher leaving tells the runner too.
+    let out = hub.disconnect(LAPTOP);
+    assert!(
+        matches!(&out[..], [(MAC, n)] if matches!(&n.body, Some(Res::Watched(w)) if w.watchers == 0))
+    );
+    assert!(hub.watchers("s1").is_empty());
+}
+
+fn live_steering<S: HubStore>(store: S) {
+    let mut hub = live_hub(store);
+
+    // Steering from the phone reaches the mac, which runs the session.
+    let cmd = json!({"type": "message", "text": "use the staging db"});
+    let h = send(&mut hub, PHONE, 3, steer("s1", cmd.clone()), t(2));
+    assert_eq!(delivered(&h), 1);
+    let [(to, env)] = &h.direct[..] else {
+        panic!("{h:?}")
+    };
+    assert_eq!(*to, MAC);
+    let Some(Res::Steered(s)) = &env.body else {
+        panic!("{env:?}")
+    };
+    assert_eq!((s.session.as_str(), s.from.as_str()), ("s1", "phone"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&s.body_json).unwrap(),
+        cmd
+    );
+    // Nothing went into the log.
+    assert_eq!(hub.store().head().unwrap(), 1);
+
+    // An unknown session, or a runner that isn't connected, is refused.
+    let h = send(&mut hub, PHONE, 4, steer("ghost", json!({})), t(2));
+    assert_eq!(error(&h).0, pb::error::Code::BadRequest as i32);
+    hub.disconnect(MAC);
+    let h = send(&mut hub, PHONE, 5, steer("s1", json!({})), t(2));
+    let (code, message) = error(&h);
+    assert_eq!(code, pb::error::Code::Conflict as i32);
+    assert!(message.contains("mac"), "{message}");
+
+    // The record says where it runs: moving it moves the steering.
+    let h = send(
+        &mut hub,
+        PHONE,
+        6,
+        Req::Apply(pb::Apply {
+            ops: vec![session_row("s1", "laptop")],
+        }),
+        t(3),
+    );
+    assert!(matches!(body(&h), Res::Applied(_)));
+    let h = send(
+        &mut hub,
+        PHONE,
+        7,
+        steer("s1", json!({"type": "stop"})),
+        t(3),
+    );
+    assert_eq!(
+        h.direct.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
+        [LAPTOP]
+    );
+}
+
+#[test]
+fn live_events_in_memory() {
+    live_events(MemStore::new());
+}
+
+#[test]
+fn live_events_on_sqlite() {
+    live_events(SqliteStore::in_memory().unwrap());
+}
+
+#[test]
+fn live_steering_in_memory() {
+    live_steering(MemStore::new());
+}
+
+#[test]
+fn live_steering_on_sqlite() {
+    live_steering(SqliteStore::in_memory().unwrap());
+}
+
+#[test]
+fn live_requests_need_hello_first() {
+    let mut hub = Hub::new(MemStore::new(), "local", t(0));
+    hub.connect(MAC, "test", t(0));
+    for req in [
+        watch(&["s1"]),
+        publish("s1", json!({})),
+        steer("s1", json!({})),
+    ] {
+        let h = send(&mut hub, MAC, 1, req, t(0));
+        assert!(error(&h).1.contains("hello"));
+    }
+}
+
+// ---- Files ----
+
+fn file_cleanup<S: HubStore>(mut store: S) {
+    use tab_store::blob::{BlobStore, MemBlobStore};
+    let mut blobs = MemBlobStore::new();
+    let kept = blobs.put(b"in a message", t(0)).unwrap();
+    let orphan = blobs.put(b"nobody refers to me", t(0)).unwrap();
+    let fresh = blobs.put(b"record on its way", t(100_000)).unwrap();
+    let dropped = blobs.put(b"message deleted", t(0)).unwrap();
+    store
+        .apply(
+            "mac",
+            &[
+                Op::Put {
+                    kind: "session_messages".into(),
+                    id: "[\"m1\"]".into(),
+                    // As the desktop syncs it: meta is JSON text.
+                    body: json!({ "meta": json!({ "files": [{ "hash": kept.hash }] }).to_string() }),
+                },
+                Op::Put {
+                    kind: "session_messages".into(),
+                    id: "[\"m2\"]".into(),
+                    body: json!({ "file": dropped.hash }),
+                },
+            ],
+            t(1),
+        )
+        .unwrap();
+    store
+        .apply(
+            "mac",
+            &[Op::Delete {
+                kind: "session_messages".into(),
+                id: "[\"m2\"]".into(),
+            }],
+            t(2),
+        )
+        .unwrap();
+
+    // Within the grace period nothing goes.
+    let now = t(100_000) + blobs::GRACE - chrono::Duration::seconds(1);
+    let gone = blobs::collect(&store, &mut blobs, t(1000), blobs::GRACE).unwrap();
+    assert!(gone.is_empty());
+
+    // After it, only unreferenced files older than the grace period go.
+    let mut gone: Vec<String> = blobs::collect(&store, &mut blobs, now, blobs::GRACE)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.hash)
+        .collect();
+    gone.sort();
+    let mut want = vec![orphan.hash.clone(), dropped.hash.clone()];
+    want.sort();
+    assert_eq!(gone, want);
+    assert!(blobs.stat(&kept.hash).unwrap().is_some());
+    assert!(blobs.stat(&fresh.hash).unwrap().is_some());
+    assert!(blobs.stat(&orphan.hash).unwrap().is_none());
+    // Running again finds nothing more.
+    assert!(
+        blobs::collect(&store, &mut blobs, now, blobs::GRACE)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn file_cleanup_in_memory() {
+    file_cleanup(MemStore::new());
+}
+
+#[test]
+fn file_cleanup_on_sqlite() {
+    file_cleanup(SqliteStore::in_memory().unwrap());
+}
+
+#[test]
+fn file_cleanup_pages_through_many_files() {
+    use tab_store::blob::{BlobStore, MemBlobStore};
+    let store = MemStore::new();
+    let mut blobs = MemBlobStore::new();
+    for i in 0..1200 {
+        blobs.put(format!("f{i}").as_bytes(), t(0)).unwrap();
+    }
+    let gone = blobs::collect(
+        &store,
+        &mut blobs,
+        t(0) + chrono::Duration::days(2),
+        blobs::GRACE,
+    )
+    .unwrap();
+    assert_eq!(gone.len(), 1200);
+    assert_eq!(blobs.stats().unwrap().files, 0);
+}

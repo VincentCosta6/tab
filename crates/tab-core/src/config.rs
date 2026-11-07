@@ -25,6 +25,9 @@ pub struct TabConfig {
     pub mcp: McpConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    /// What agents, language servers and workflow commands may touch.
+    #[serde(default)]
+    pub sandbox: crate::sandbox::SandboxConfig,
     /// Set once the first-launch onboarding is finished.
     #[serde(default)]
     pub onboarded: bool,
@@ -241,6 +244,7 @@ impl Default for TabConfig {
             agent: AgentConfig::default(),
             mcp: McpConfig::default(),
             storage: StorageConfig::default(),
+            sandbox: Default::default(),
             onboarded: false,
         }
     }

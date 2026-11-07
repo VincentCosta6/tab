@@ -82,6 +82,15 @@ impl ConnectorFactory for GithubFactory {
             ],
             builtin: false,
             actions: actions(),
+            clis: clis(),
+        }
+    }
+
+    fn forget_pages(&self, pages: &[String]) {
+        for p in pages {
+            if let Some((repo, number)) = crate::sandbox::broker::parse_github_url(p) {
+                super::github_review::forget_links(&repo, number);
+            }
         }
     }
 
@@ -118,6 +127,91 @@ fn number_field() -> ActionField {
     ActionField::new("number", "PR or issue number", FieldType::Number)
         .required()
         .default("{{item.metadata.number}}")
+}
+
+/// The CLIs this connection signs in. tab runs them for agents with the
+/// connection's token (see `sandbox::broker`). Reads go straight through,
+/// uncached, since an agent asking usually wants what's there now; changes
+/// tell the app what to refresh.
+pub fn clis() -> Vec<tab_domain::CliInfo> {
+    use tab_domain::{CliAuth, CliEffect as E, CliInfo, CliRule as R};
+    let read = "list|ls|view|status|diff|checks|watch|show";
+    // A push or a repo change can move any pull request in the repo, so
+    // their page is the repo's, which refreshes all of them.
+    let pages = |extra: &[(&str, &str)]| {
+        [
+            ("repo", "https://github.com/{repo}"),
+            ("branch", "https://github.com/{repo}"),
+        ]
+        .iter()
+        .chain(extra)
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let gh = CliInfo {
+        name: "gh".into(),
+        description: "The GitHub CLI, signed in as this connection.".into(),
+        auth: CliAuth::Env {
+            var: "GH_TOKEN".into(),
+        },
+        value_flags: [
+            "-R", "--repo", "--hostname", "-X", "--method", "-H", "--header", "-f", "-F",
+            "--field", "--raw-field", "--input", "-q", "--jq", "-t", "--template", "--title",
+            "-b", "--body", "--body-file", "-B", "--base", "--head", "-l", "--label", "-a",
+            "--assignee", "-m", "--milestone", "-r", "--reviewer", "-L", "--limit", "-s",
+            "--state", "--json", "-e", "--env",
+        ]
+        .map(String::from)
+        .to_vec(),
+        rules: vec![
+            R::new("", E::Read),
+            R::new("help|version|completion|status|search|browse", E::Read),
+            R::new("auth status", E::Read),
+            R::new("auth", E::Blocked)
+                .reason("tab signs gh in with your GitHub connection, so `gh auth` isn't available in chats"),
+            R::new("extension|extensions|ext", E::Blocked)
+                .reason("gh extensions would run with your GitHub token; install and run them yourself"),
+            R::new("config|alias get|list|ls", E::Read),
+            R::new("config|alias", E::Blocked)
+                .reason("gh's settings are yours; change them outside the chat"),
+            R::new("api", E::ByMethod),
+            R::new(&format!("* {read}"), E::Read),
+            R::new("secret|variable|ssh-key|gpg-key", E::Destructive),
+            R::new("repo delete|archive|unarchive|rename", E::Destructive).resource("repo"),
+            R::new("repo edit", E::Destructive).flags(&["--visibility"]).resource("repo"),
+            R::new("repo clone|sync|set-default", E::Read),
+            R::new("pr checkout", E::Read),
+            R::new("run|release download", E::Read),
+            R::new("pr merge", E::Destructive).resource("pull"),
+            R::new("* delete|delete-asset|transfer", E::Destructive),
+            R::new("pr", E::Write).resource("pull"),
+            R::new("issue", E::Write).resource("issue"),
+            R::new("release", E::Write).resource("release"),
+            R::new("run|workflow", E::Write).resource("run"),
+            R::new("repo", E::Write).resource("repo"),
+        ],
+        default: E::Write,
+        pages: pages(&[
+            ("pull", "https://github.com/{repo}/pull/{number}"),
+            ("issue", "https://github.com/{repo}/issues/{number}"),
+        ]),
+    };
+    let git = CliInfo {
+        name: "git".into(),
+        description: "git, signed in to github.com as this connection. tab forwards fetches and pushes to GitHub and asks before force pushes and branch deletes.".into(),
+        auth: CliAuth::GitEndpoint {
+            url: "https://github.com/".into(),
+            remotes: ["https://github.com/", "git@github.com:", "ssh://git@github.com/"]
+                .map(String::from)
+                .to_vec(),
+        },
+        value_flags: Vec::new(),
+        rules: Vec::new(),
+        // Runs in the chat; only its traffic to GitHub goes through tab.
+        default: E::Local,
+        pages: pages(&[]),
+    };
+    vec![gh, git]
 }
 
 /// What workflows can do on GitHub. Every one is a single REST call through

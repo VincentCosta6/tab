@@ -116,6 +116,9 @@ function variables(w: Workflow, upTo: number, connectors: ConnectorInfo[]): { pa
     if (s.type === "action") {
       for (const f of findAction(connectors, s.connector, s.action)?.outputs ?? []) out.push({ path: `steps.${s.id}.${f.key}`, label: `${s.id}: ${f.label}` });
     } else if (s.type === "set") for (const k of Object.keys(s.values)) out.push({ path: `steps.${s.id}.${k}`, label: `${s.id}: ${k}` });
+    else if (s.type === "command") {
+      out.push({ path: `steps.${s.id}.exit_code`, label: `${s.id}: Exit code` }, { path: `steps.${s.id}.stdout`, label: `${s.id}: Output` }, { path: `steps.${s.id}.stderr`, label: `${s.id}: Errors` });
+    }
   }
   out.push({ path: "now", label: "Now" });
   return out;
@@ -227,16 +230,16 @@ export function WorkflowsTab() {
     await qc.invalidateQueries({ queryKey: ["workflows"] });
   });
 
-  const setEnabled = (on: boolean, allowDestructive?: boolean) => act("enable", async () => {
+  const setEnabled = (on: boolean, allowDestructive?: boolean, allowCommands?: boolean) => act("enable", async () => {
     if (dirty) {
       const { workflow, issues: found } = await api.workflowSave(draft!);
       setDirty(false);
       setOpenId(workflow.id);
       if (found.some((i) => i.error)) { setDraft(clone(workflow)); throw new Error("Fix the problems below before turning it on."); }
-      const w = await api.workflowSetEnabled(workflow.id, on, allowDestructive);
+      const w = await api.workflowSetEnabled(workflow.id, on, allowDestructive, allowCommands);
       setDraft(clone(w));
     } else {
-      const w = await api.workflowSetEnabled(draft!.id, on, allowDestructive);
+      const w = await api.workflowSetEnabled(draft!.id, on, allowDestructive, allowCommands);
       setDraft(clone(w));
     }
     await qc.invalidateQueries({ queryKey: ["workflows"] });
@@ -392,7 +395,8 @@ export function WorkflowsTab() {
             </div>
             <div className="wf-side-body">
               {panel === "edit" && (selected === "trigger" || !draft.steps.some((s) => s.id === selected)) && (
-                <TriggerEditor workflow={draft} connectors={connectors} edit={edit} issues={issuesAt("trigger")} onAllowDestructive={(v) => draft.id && !dirty ? setEnabled(draft.enabled, v) : edit((w) => (w.allow_destructive = v))} />
+                <TriggerEditor workflow={draft} connectors={connectors} edit={edit} issues={issuesAt("trigger")} onAllowDestructive={(v) => draft.id && !dirty ? setEnabled(draft.enabled, v) : edit((w) => (w.allow_destructive = v))}
+                  onAllowCommands={(v) => draft.id && !dirty ? setEnabled(draft.enabled, undefined, v) : edit((w) => (w.allow_commands = v))} />
               )}
               {panel === "edit" && selected !== "trigger" && draft.steps.some((s) => s.id === selected) && (
                 <StepEditor
@@ -424,7 +428,7 @@ export function WorkflowsTab() {
   );
 }
 
-type NewStep = { type: "action"; connector: string; action: string } | { type: "filter" | "set" | "emit" };
+type NewStep = { type: "action"; connector: string; action: string } | { type: "filter" | "set" | "emit" | "command" };
 
 function insertStep(w: Workflow, at: number, kind: NewStep, connectors: ConnectorInfo[], select: (id: string) => void) {
   const base = { label: "", when: [] as Condition[], continue_on_error: false };
@@ -436,6 +440,7 @@ function insertStep(w: Workflow, at: number, kind: NewStep, connectors: Connecto
     step = { ...base, id: uniqueId(w, kind.action.split(".").pop() ?? "step"), type: "action", connector: kind.connector, action: kind.action, input };
   } else if (kind.type === "filter") step = { ...base, id: uniqueId(w, "only_if"), type: "filter", conditions: [{ field: "item.title", op: "contains", value: "" }] };
   else if (kind.type === "set") step = { ...base, id: uniqueId(w, "values"), type: "set", values: { name: "" } };
+  else if (kind.type === "command") step = { ...base, id: uniqueId(w, "run"), type: "command", program: "", args: [], folder: "", network: [], env: {}, image: "", timeout_secs: 0 };
   else step = { ...base, id: uniqueId(w, "signal"), type: "emit", signal: "", payload: {} };
   w.steps.splice(at, 0, step);
   setTimeout(() => select(step.id));
@@ -501,6 +506,10 @@ function StepNode({ step, connectors, selected, issues, result, unreached, onCli
   } else if (step.type === "set") {
     icon = "edit"; kicker = "Values"; title = step.label || "Set values";
     lines = Object.entries(step.values).map(([k, v]) => `${k} = ${text(v)}`);
+  } else if (step.type === "command") {
+    icon = "terminal"; tone = "info"; kicker = step.image ? `Command · ${step.image}` : "Command";
+    title = step.label || [step.program, ...step.args].join(" ").trim() || "Run a command";
+    lines = [step.network.length ? `Network: ${step.network.join(", ")}` : "No network", step.folder ? `In ${step.folder}` : "In a fresh folder"];
   } else {
     icon = "zap"; tone = "warning"; kicker = "Signal"; title = step.label || `Signal ${step.signal || "…"}`;
     lines = Object.entries(step.payload).map(([k, v]) => `${k}: ${text(v)}`);
@@ -571,6 +580,7 @@ function AddMenu({ connectors, workflow, onPick, onClose }: { connectors: Connec
             <button onClick={() => onPick({ type: "filter" })}><Icon name="filter" size={14} /> <span><strong>Only continue if</strong><small>Stop the run unless conditions hold</small></span></button>
             <button onClick={() => onPick({ type: "set" })}><Icon name="edit" size={14} /> <span><strong>Set values</strong><small>Compute text for later steps</small></span></button>
             <button onClick={() => onPick({ type: "emit" })}><Icon name="zap" size={14} /> <span><strong>Signal other workflows</strong><small>Start workflows listening for it</small></span></button>
+            <button onClick={() => onPick({ type: "command" })}><Icon name="terminal" size={14} /> <span><strong>Run a command</strong><small>A program in tab's sandbox, or in a container</small></span></button>
           </div>
         )}
         {groups.map(({ c, actions }) => (
@@ -631,7 +641,7 @@ function Field({ label, help, children }: { label: string; help?: string; childr
   );
 }
 
-function TriggerEditor({ workflow: w, connectors, edit, issues, onAllowDestructive }: { workflow: Workflow; connectors: ConnectorInfo[]; edit: Edit; issues: Issue[]; onAllowDestructive: (v: boolean) => void }) {
+function TriggerEditor({ workflow: w, connectors, edit, issues, onAllowDestructive, onAllowCommands }: { workflow: Workflow; connectors: ConnectorInfo[]; edit: Edit; issues: Issue[]; onAllowDestructive: (v: boolean) => void; onAllowCommands: (v: boolean) => void }) {
   const t = w.trigger;
   const setType = (type: Trigger["type"]) =>
     edit((x) => {
@@ -734,10 +744,54 @@ function TriggerEditor({ workflow: w, connectors, edit, issues, onAllowDestructi
         </div>
         <Toggle checked={w.allow_destructive} onChange={onAllowDestructive} label="Allow destructive steps" />
       </div>
+      <div className={cx("wf-safety", w.allow_commands && "on")}>
+        <div>
+          <strong>Allow commands</strong>
+          <p className="subtle">Command steps run programs on this computer, in tab's sandbox: only their folder, the hosts they list, and none of your credentials.{w.steps.some((s) => s.type === "command") ? "" : " This workflow has none."}</p>
+        </div>
+        <Toggle checked={!!w.allow_commands} onChange={onAllowCommands} label="Allow commands" />
+      </div>
       <p className="subtle wf-guard-note">
         <Icon name="shield" size={12} /> A workflow never re-runs from its own changes, chains stop after three workflows, the same trigger runs once, and actions wait when a connection's rate budget is tight.
       </p>
     </div>
+  );
+}
+
+type CommandStep = Extract<Step, { type: "command" }>;
+
+/** A command step: what runs, where, and what it may reach. */
+function CommandFields({ step, vars, set }: { step: CommandStep; vars: { path: string; label: string }[]; set: (f: (s: Step) => void) => void }) {
+  const cmd = (f: (s: CommandStep) => void) => set((s) => s.type === "command" && f(s));
+  return (
+    <>
+      <Field label="Program" help="Run directly, never through a shell. A name on PATH, or a path.">
+        <input className="wf-input mono" value={step.program} placeholder="cargo" onChange={(e) => cmd((s) => (s.program = e.target.value))} />
+      </Field>
+      <Field label="Arguments" help="One per line. Templates like {{item.metadata.repo}} are passed as plain text.">
+        <textarea className="textarea wf-textarea mono" rows={3} value={step.args.join("\n")} placeholder={"test\n--workspace"} onChange={(e) => cmd((s) => (s.args = e.target.value.split("\n")))} />
+      </Field>
+      <Field label="Folder" help="Where it runs and the only place it can change. Empty gives each run a fresh folder, removed afterwards.">
+        <input className="wf-input mono" value={step.folder} placeholder="A fresh folder per run" onChange={(e) => cmd((s) => (s.folder = e.target.value))} />
+      </Field>
+      <Field label="Network" help="Hosts it may reach, one per line. Empty means none; * means any.">
+        <textarea className="textarea wf-textarea mono" rows={2} value={step.network.join("\n")} placeholder={"crates.io\n*.crates.io"} onChange={(e) => cmd((s) => (s.network = e.target.value.split("\n")))} />
+      </Field>
+      <div className="wf-row2">
+        <Field label="Container image" help="Optional. Runs in Docker or Podman instead, with only the folder mounted.">
+          <input className="wf-input mono" value={step.image} placeholder="rust:1" onChange={(e) => cmd((s) => (s.image = e.target.value.trim()))} />
+        </Field>
+        <Field label="Time limit (s)" help="0 is 10 minutes; at most an hour.">
+          <input className="wf-input" type="number" min={0} max={3600} value={step.timeout_secs} onChange={(e) => cmd((s) => (s.timeout_secs = Math.max(0, Math.min(3600, Math.round(Number(e.target.value) || 0)))))} />
+        </Field>
+      </div>
+      <Field label="Environment" help="Only these, plus PATH and the like. None of tab's tokens are passed on.">
+        <Pairs value={step.env} vars={vars} keyLabel="Name" onChange={(v) => cmd((s) => (s.env = v))} />
+      </Field>
+      <p className="subtle wf-outputs">
+        Later steps can use <code>{`{{steps.${step.id}.exit_code}}`}</code><code>{`{{steps.${step.id}.stdout}}`}</code><code>{`{{steps.${step.id}.stderr}}`}</code>
+      </p>
+    </>
   );
 }
 
@@ -754,7 +808,7 @@ function StepEditor({ workflow: w, index, connectors, edit, issues, onSelect }: 
   return (
     <div className="wf-editor">
       <div className="wf-editor-head">
-        <h3>{step.type === "action" ? info?.label ?? step.action : step.type === "filter" ? "Only continue if" : step.type === "set" ? "Set values" : "Signal"}</h3>
+        <h3>{step.type === "action" ? info?.label ?? step.action : step.type === "filter" ? "Only continue if" : step.type === "set" ? "Set values" : step.type === "command" ? "Run a command" : "Signal"}</h3>
         <button className="icon-btn" onClick={() => move(-1)} disabled={index === 0} title="Move up" aria-label="Move up"><Icon name="arrow-up" size={13} /></button>
         <button className="icon-btn" onClick={() => move(1)} disabled={index === w.steps.length - 1} title="Move down" aria-label="Move down"><Icon name="arrow-down" size={13} /></button>
         <button className="icon-btn" onClick={() => { edit((x) => x.steps.splice(index, 1)); onSelect("trigger"); }} title="Remove step" aria-label="Remove step"><Icon name="trash" size={13} /></button>
@@ -799,6 +853,7 @@ function StepEditor({ workflow: w, index, connectors, edit, issues, onSelect }: 
       )}
       {step.type === "filter" && <Conditions value={step.conditions} vars={vars} onChange={(c) => set((s) => s.type === "filter" && (s.conditions = c))} />}
       {step.type === "set" && <Pairs value={step.values} vars={vars} keyLabel="Name" onChange={(v) => set((s) => s.type === "set" && (s.values = v))} />}
+      {step.type === "command" && <CommandFields step={step} vars={vars} set={set} />}
       {step.type === "emit" && (
         <>
           <Field label="Signal name" help="Workflows with a Signal trigger of this name start, with this payload.">

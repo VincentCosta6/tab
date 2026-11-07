@@ -409,6 +409,10 @@ pub struct ConnectorDescriptor {
     /// What workflows can ask this connector to do.
     #[serde(default)]
     pub actions: Vec<ActionInfo>,
+    /// Command-line tools this connection signs in. tab runs them for
+    /// agents with the connection's token (see [`crate::cli`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clis: Vec<crate::cli::CliInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +715,10 @@ pub struct Session {
     pub cwd: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The device that runs it (has the agent's history and working copy).
+    /// Other devices watch and steer it through the hub.
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -120,6 +120,12 @@ function execute(w: Workflow, item: QueueItem | null, dry: boolean, connectors: 
       if (failed.length) { sr.status = "stopped"; sr.output = { failed: failed.map((c) => `${c.field} ${c.op} ${JSON.stringify(c.value)} (was ${JSON.stringify(lookup(ctx, c.field) ?? null)})`) }; status = "stopped"; }
     } else if (s.type === "set") sr.output = render(s.values, ctx);
     else if (s.type === "emit") { sr.input = { signal: s.signal, payload: render(s.payload, ctx) }; if (dry) sr.status = "dry"; }
+    else if (s.type === "command") {
+      sr.input = { program: s.program, args: s.args, folder: s.folder, network: s.network, image: s.image };
+      if (dry) sr.status = "dry";
+      else if (!w.allow_commands) { sr.status = "blocked"; sr.error = "Commands are blocked. Allow commands on this workflow to let it run programs."; status = "blocked"; }
+      else sr.output = { exit_code: 0, stdout: "test result: ok. 42 passed\n", stderr: "", sandbox: "seatbelt" };
+    }
     else {
       sr.input = render(s.input, ctx);
       const info = findAction(connectors, s.connector, s.action);
@@ -175,6 +181,7 @@ export function workflowMock(cmd: string, args: Record<string, any>, env: { item
       if (args.enabled) { const e = validate(w, connectors).find((i) => i.error); if (e) throw e.message; }
       w.enabled = args.enabled;
       if (args.allowDestructive != null) w.allow_destructive = args.allowDestructive;
+      if (args.allowCommands != null) w.allow_commands = args.allowCommands;
       env.emit({ type: "workflows_changed", id: w.id, by: "user" });
       return clone(w);
     }

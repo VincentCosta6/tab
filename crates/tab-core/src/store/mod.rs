@@ -53,6 +53,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/010_item_activity.sql"),
     include_str!("migrations/011_entity_blocks.sql"),
     include_str!("migrations/012_ranking_fired.sql"),
+    include_str!("migrations/013_session_sync.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {
@@ -112,6 +113,17 @@ impl Store {
             index_status: Mutex::new(Default::default()),
             workflows_rev: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// This install's device id (`device-<hex>`), made once by a migration.
+    /// Sessions record which device runs them, and the hub knows this
+    /// device by it.
+    pub fn device_id(&self) -> anyhow::Result<String> {
+        Ok(self
+            .conn()
+            .query_row("SELECT device FROM this_device WHERE id = 1", [], |r| {
+                r.get(0)
+            })?)
     }
 
     /// Fires after every commit to `tab.db` (once per wait, however many

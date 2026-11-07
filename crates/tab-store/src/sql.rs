@@ -352,6 +352,15 @@ pub fn expire_leases(now: &str) -> sea_query::DeleteStatement {
         .to_owned()
 }
 
+/// Bodies of records that may mention a file hash (the caller checks).
+pub fn bodies_mentioning_blobs() -> SelectStatement {
+    Query::select()
+        .column(HubRecords::Body)
+        .from(HubRecords::Table)
+        .and_where(Expr::col(HubRecords::Body).like("%sha256:%"))
+        .to_owned()
+}
+
 pub fn count_records() -> SelectStatement {
     Query::select()
         .expr(Expr::col(HubRecords::Rid).count())

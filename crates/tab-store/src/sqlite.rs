@@ -330,6 +330,19 @@ impl HubStore for SqliteStore {
         })
     }
 
+    fn blob_refs(&self) -> Result<std::collections::BTreeSet<String>> {
+        let bodies = all(&self.conn, &sql::bodies_mentioning_blobs(), |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut out = std::collections::BTreeSet::new();
+        for b in bodies {
+            out.extend(tab_domain::blob::refs(
+                &json_col::<serde_json::Value>(&b).map_err(db)?,
+            ));
+        }
+        Ok(out)
+    }
+
     fn stats(&self, now: DateTime<Utc>) -> Result<StoreStats> {
         let count = |q: &sea_query::SelectStatement| -> Result<u64> {
             Ok(one(&self.conn, q, |r| r.get::<_, i64>(0))?.unwrap_or(0) as u64)

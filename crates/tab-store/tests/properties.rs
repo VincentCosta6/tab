@@ -27,7 +27,18 @@ const NODES: &[&str] = &[
 ];
 const RELS: &[&str] = &["in", "blocks", "mentions"];
 const WORDS: &[&str] = &[
-    "login", "Login", "fix", "page", "ui", "école", "日本", "a b", "\"q\"",
+    "login",
+    "Login",
+    "fix",
+    "page",
+    "ui",
+    "école",
+    "日本",
+    "a b",
+    "\"q\"",
+    // File references (sha256 of "a" and "b").
+    "sha256:ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb",
+    "sha256:3e23e8160039594a33894f6564e1b1348bbd7a0088d42c4acb73eeaed59c009d",
 ];
 const QUERIES: &[&str] = &[
     "login", "LOG", "fix page", "ui", "é", "日本", "\"q", "b", "zzz",
@@ -92,6 +103,7 @@ fn observe<S: HubStore>(s: &S) -> String {
     for q in QUERIES {
         out += &format!("search {q} {:?}\n", s.search(q, 100).unwrap());
     }
+    out += &format!("files {:?}\n", s.blob_refs().unwrap());
     out
 }
 
@@ -209,5 +221,70 @@ proptest! {
                 LeaseStep::Wait(s) => now += s,
             }
         }
+    }
+}
+
+// ---- File stores ----
+
+#[derive(Debug, Clone)]
+enum BlobStep {
+    Put(u8, i64),
+    Delete(u8),
+}
+
+fn blob_step() -> impl Strategy<Value = BlobStep> {
+    prop_oneof![
+        3 => (0u8..8, 0i64..100).prop_map(|(f, at)| BlobStep::Put(f, at)),
+        1 => (0u8..8).prop_map(BlobStep::Delete),
+    ]
+}
+
+fn file(f: u8) -> Vec<u8> {
+    vec![f; f as usize * 37]
+}
+
+fn observe_blobs<B: tab_store::blob::BlobStore>(b: &B) -> String {
+    let mut out = format!("stats {:?}\n", b.stats().unwrap());
+    for m in b.list("", 1000).unwrap() {
+        out += &format!("{} {} {}\n", m.hash, m.size, m.stored_at);
+    }
+    for f in 0..8 {
+        let h = tab_domain::blob::hash(&file(f));
+        out += &format!("get {f} {:?}\n", b.get(&h).unwrap().map(|v| v.len()));
+    }
+    out
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// The folder store behaves exactly like the in-memory reference.
+    #[test]
+    fn file_stores_agree(steps in prop::collection::vec(blob_step(), 1..40)) {
+        use tab_store::blob::{BlobStore, MemBlobStore};
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "tab-blob-props/{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut mem = MemBlobStore::new();
+        let mut fs = tab_store::fs_blob::FsBlobStore::open(&dir).unwrap();
+        for step in steps {
+            match step {
+                BlobStep::Put(f, at) => {
+                    let a = mem.put(&file(f), t(at)).map_err(|e| e.to_string());
+                    let b = fs.put(&file(f), t(at)).map_err(|e| e.to_string());
+                    prop_assert_eq!(a, b);
+                }
+                BlobStep::Delete(f) => {
+                    let h = tab_domain::blob::hash(&file(f));
+                    prop_assert_eq!(mem.delete(&h).unwrap(), fs.delete(&h).unwrap());
+                }
+            }
+            prop_assert_eq!(observe_blobs(&mem), observe_blobs(&fs));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

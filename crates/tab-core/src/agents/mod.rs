@@ -229,6 +229,15 @@ pub async fn run_upgrade(
     Ok(())
 }
 
+/// What the person sends a running turn.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Steer {
+    /// More to say; the agent reads it at its next step.
+    Message(String),
+    /// Don't wait for the running tool: stop it and read what's queued now.
+    Interrupt,
+}
+
 pub struct AgentHub {
     pub(crate) store: Arc<Store>,
     events: broadcast::Sender<EngineEvent>,
@@ -239,30 +248,45 @@ pub struct AgentHub {
     running: Mutex<HashMap<String, CancellationToken>>,
     /// Live turns that take more messages while they run: Claude Code's stdin,
     /// or more prompts to the same OpenCode session.
-    steering: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
+    steering: Mutex<HashMap<String, mpsc::UnboundedSender<Steer>>>,
     /// The receiving end of a turn's steering channel, parked from the moment
     /// the turn is marked running until its runner picks it up, so messages
     /// sent while the agent is still starting wait in the queue.
-    steering_rx: Mutex<HashMap<String, mpsc::UnboundedReceiver<String>>>,
+    steering_rx: Mutex<HashMap<String, mpsc::UnboundedReceiver<Steer>>>,
     /// Messages that arrived after a turn stopped taking steering (its result
     /// is in, the process hasn't exited). They run as the next turn.
     followups: Mutex<HashMap<String, Vec<String>>>,
     approvals: Mutex<HashMap<String, (Approval, oneshot::Sender<Decision>)>>,
-    opencode: tokio::sync::Mutex<Option<Arc<opencode::Server>>>,
+    /// OpenCode servers by chat id (see `opencode::server`).
+    opencode: tokio::sync::Mutex<HashMap<String, Arc<opencode::Server>>>,
 }
 
 /// The checkout a dev build of tab runs from, so agents can be told not to
 /// edit it under the running app. None in release builds.
 fn dev_checkout() -> Option<String> {
-    if !cfg!(debug_assertions) {
-        return None;
+    crate::sandbox::dev_checkout().map(|p| p.display().to_string())
+}
+
+/// Arguments for an agent CLI, collected before the sandbox wraps them.
+#[derive(Default)]
+pub(crate) struct Args(pub Vec<std::ffi::OsString>);
+
+impl Args {
+    pub fn arg(&mut self, a: impl AsRef<std::ffi::OsStr>) -> &mut Self {
+        self.0.push(a.as_ref().to_owned());
+        self
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let root = root.canonicalize().ok()?;
-    root.join(".git").exists().then(|| {
-        let s = root.display().to_string();
-        s.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(s)
-    })
+
+    pub fn args<I, S>(&mut self, it: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        for a in it {
+            self.arg(a);
+        }
+        self
+    }
 }
 
 impl AgentHub {
@@ -283,15 +307,25 @@ impl AgentHub {
             steering_rx: Mutex::new(HashMap::new()),
             followups: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
-            opencode: tokio::sync::Mutex::new(None),
+            opencode: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
     pub async fn set_config(&self, cfg: AgentConfig) {
         let changed = *self.cfg.read().unwrap() != cfg;
         *self.cfg.write().unwrap() = cfg;
-        if changed && let Some(old) = self.opencode.lock().await.take() {
-            old.shutdown();
+        if changed {
+            for (_, old) in self.opencode.lock().await.drain() {
+                old.shutdown();
+            }
+        }
+    }
+
+    /// Stops every OpenCode server; the next turn starts a fresh one with
+    /// the current sandbox settings.
+    pub async fn stop_opencode(&self) {
+        for (_, s) in self.opencode.lock().await.drain() {
+            s.shutdown();
         }
     }
 
@@ -368,6 +402,66 @@ impl AgentHub {
         let d = self.sessions_dir().join(id);
         std::fs::create_dir_all(&d)?;
         Ok(d)
+    }
+
+    /// What a session's agent may touch. A chat about a pull request runs
+    /// in tab's checkout of it, someone else's code, so it gets the review
+    /// policy; every other chat is the person's own.
+    pub fn policy(&self, session: &Session) -> crate::sandbox::Policy {
+        let sb = crate::sandbox::current();
+        let cwd = crate::sandbox::real(Path::new(&session.cwd));
+        let workspaces = crate::sandbox::real(&self.dir.join("workspaces"));
+        let mut p = if cwd.starts_with(&workspaces) {
+            sb.review_policy(&cwd, Path::new(&self.workdir()))
+        } else {
+            sb.chat_policy()
+        };
+        // Other chats' folders hold their tokens: each chat sees only its own
+        // (made now, so the sandbox can show it).
+        let _ = self.session_dir(&session.id);
+        p.hide.push(crate::sandbox::real(&self.sessions_dir()));
+        p.reveal
+            .push(crate::sandbox::real(&self.sessions_dir().join(&session.id)));
+        // gh and git's network commands go through tab, which needs its
+        // server to be up.
+        if self.mcp().is_some() {
+            sb.brokered(p)
+        } else {
+            p
+        }
+    }
+
+    /// Writes a chat's `gh` and `git` shims and points `cmd` at them, when
+    /// the sandbox is on. Returns whether it did.
+    pub(crate) fn add_shims(&self, session: &Session, cmd: &mut tokio::process::Command) -> bool {
+        let sb = crate::sandbox::current();
+        let (Some(mcp), true) = (self.mcp(), sb.config().enabled) else {
+            return false;
+        };
+        let Ok(exe) = std::env::current_exe() else {
+            return false;
+        };
+        let Ok(dir) = self.session_dir(&session.id) else {
+            return false;
+        };
+        let url = mcp.url.trim_end_matches("/mcp").to_string() + "/cli";
+        let chat_token = crate::mcp::chat_token(&mcp.token, &session.id);
+        let ep = crate::sandbox::broker::Endpoint {
+            url: &url,
+            token: &chat_token,
+            session: &session.id,
+        };
+        match crate::sandbox::broker::write_shims(&dir, &ep, &exe) {
+            Ok(Some(shims)) => {
+                shims.apply(cmd);
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(error = %e, "writing CLI shims failed");
+                false
+            }
+        }
     }
 
     pub fn workdir(&self) -> String {
@@ -475,6 +569,15 @@ impl AgentHub {
         Ok(session)
     }
 
+    /// Whether this device runs the session (older sessions, from before
+    /// sessions synced, name no device and are this one's).
+    pub fn runs_here(&self, session: &Session) -> bool {
+        match &session.device {
+            None => true,
+            Some(d) => self.store.device_id().is_ok_and(|me| me == *d),
+        }
+    }
+
     pub fn is_running(&self, session_id: &str) -> bool {
         self.running.lock().unwrap().contains_key(session_id)
     }
@@ -488,10 +591,27 @@ impl AgentHub {
     /// picks it up at its next step instead of after it finishes. Returns
     /// false when no live turn takes messages (it already finished).
     pub fn steer(&self, session_id: &str, text: &str) -> anyhow::Result<bool> {
+        self.steer_with(session_id, text, &[])
+    }
+
+    /// [`Self::steer`] with files the person attached (paths in
+    /// [`Self::attachments_dir`]): the agent is told to open them, just as
+    /// when they start a turn.
+    pub fn steer_with(
+        &self,
+        session_id: &str,
+        text: &str,
+        attachments: &[String],
+    ) -> anyhow::Result<bool> {
         let text = text.trim();
-        anyhow::ensure!(!text.is_empty(), "message is empty");
+        anyhow::ensure!(
+            !text.is_empty() || !attachments.is_empty(),
+            "message is empty"
+        );
+        self.check_attachments(attachments)?;
+        let prompt = with_attachments(text, attachments);
         let tx = self.steering.lock().unwrap().get(session_id).cloned();
-        let sent = tx.is_some_and(|tx| tx.send(text.to_string()).is_ok());
+        let sent = tx.is_some_and(|tx| tx.send(Steer::Message(prompt.clone())).is_ok());
         if !sent {
             // Held under the running lock so a turn that is finishing either
             // sees this message or has already finished (and we return false).
@@ -504,16 +624,39 @@ impl AgentHub {
                 .unwrap()
                 .entry(session_id.into())
                 .or_default()
-                .push(text.to_string());
+                .push(prompt);
         }
-        self.post(
-            session_id,
-            "user",
-            "text",
-            text,
-            serde_json::json!({ "steer": true }),
-        );
+        let meta = if attachments.is_empty() {
+            serde_json::json!({ "steer": true })
+        } else {
+            serde_json::json!({
+                "steer": true,
+                "attachments": attachments,
+                "files": crate::live::file_refs(attachments),
+            })
+        };
+        self.post(session_id, "user", "text", text, meta);
         Ok(true)
+    }
+
+    /// "Send now": cuts short the tool the running turn is waiting on, like
+    /// Esc in Claude Code's terminal, so steering already sent is read right
+    /// away instead of when the tool ends. False when no turn takes steering.
+    pub fn interrupt(&self, session_id: &str) -> bool {
+        let tx = self.steering.lock().unwrap().get(session_id).cloned();
+        tx.is_some_and(|tx| tx.send(Steer::Interrupt).is_ok())
+    }
+
+    /// Attachments must be files in [`Self::attachments_dir`].
+    fn check_attachments(&self, attachments: &[String]) -> anyhow::Result<()> {
+        let dir = self.attachments_dir();
+        for a in attachments {
+            anyhow::ensure!(
+                Path::new(a).starts_with(&dir) && Path::new(a).is_file(),
+                "that attachment is missing"
+            );
+        }
+        Ok(())
     }
 
     /// Opens the steering channel as soon as the turn is marked running.
@@ -527,7 +670,7 @@ impl AgentHub {
     }
 
     /// The turn runner's end of the channel opened by `steering_prepare`.
-    pub(crate) fn steering_open(&self, session_id: &str) -> mpsc::UnboundedReceiver<String> {
+    pub(crate) fn steering_open(&self, session_id: &str) -> mpsc::UnboundedReceiver<Steer> {
         if let Some(rx) = self.steering_rx.lock().unwrap().remove(session_id) {
             return rx;
         }
@@ -565,10 +708,11 @@ impl AgentHub {
         let Ok(sessions) = self.store.sessions_recent(500) else {
             return;
         };
-        for s in sessions
-            .into_iter()
-            .filter(|s| s.status == SessionStatus::Working)
-        {
+        let me = self.store.device_id().ok();
+        for s in sessions.into_iter().filter(|s| {
+            s.status == SessionStatus::Working
+                && s.device.as_ref().is_none_or(|d| me.as_ref() == Some(d))
+        }) {
             if s.agent_session_id.is_none() {
                 self.post(
                     &s.id,
@@ -612,18 +756,16 @@ impl AgentHub {
             .store
             .session_get(session_id)?
             .ok_or_else(|| anyhow::anyhow!("no such session"))?;
+        anyhow::ensure!(
+            self.runs_here(&session),
+            "this chat runs on another device; steer it through the hub"
+        );
         let text = text.trim();
         anyhow::ensure!(
             !text.is_empty() || !attachments.is_empty(),
             "message is empty"
         );
-        let dir = self.attachments_dir();
-        for a in attachments {
-            anyhow::ensure!(
-                Path::new(a).starts_with(&dir) && Path::new(a).is_file(),
-                "that attachment is missing"
-            );
-        }
+        self.check_attachments(attachments)?;
         if let Some(why) = self
             .config()
             .budget
@@ -645,7 +787,11 @@ impl AgentHub {
             let meta = if attachments.is_empty() {
                 serde_json::Value::Null
             } else {
-                serde_json::json!({ "attachments": attachments })
+                // `files` names them in the hub, so other devices can show them.
+                serde_json::json!({
+                    "attachments": attachments,
+                    "files": crate::live::file_refs(attachments),
+                })
             };
             self.post(session_id, "user", "text", text, meta);
             self.attach_pasted_links(session_id, text);
@@ -656,22 +802,7 @@ impl AgentHub {
         self.update(session_id, Some(SessionStatus::Working), None);
 
         let hub = self.clone();
-        let mut prompt = text.to_string();
-        if !attachments.is_empty() {
-            prompt.push_str(&format!(
-                "\n\nThe person attached {} (open each with your Read tool to see it):\n{}",
-                if attachments.len() == 1 {
-                    "a file"
-                } else {
-                    "files"
-                },
-                attachments
-                    .iter()
-                    .map(|a| format!("- {a}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ));
-        }
+        let prompt = with_attachments(text, attachments);
         tokio::spawn(async move {
             let system = hub.system_prompt(&session);
             let result = match session.agent {
@@ -978,12 +1109,33 @@ impl AgentHub {
         );
         if let Some(root) = dev_checkout() {
             out.push_str(&format!(
-                "\nThis is a dev build of tab, running from {root}. Don't edit files in that checkout: each \
-                 save hot-reloads or rebuilds the app you are running inside, and a half-written edit can \
+                "\nThis is a dev build of tab, running from {root}. That checkout is read-only to you: each \
+                 save would hot-reload or rebuild the app you are running inside, and a half-written edit can \
                  blank it or end this chat. To change tab's code, work in a separate worktree (git -C \"{root}\" \
                  worktree add ../tab-<topic> -b <branch> origin/main), and commit, push and open a PR from \
                  there.\n"
             ));
+        }
+        let sb = crate::sandbox::current();
+        if sb.config().enabled {
+            out.push_str(if sb.enforced() {
+                "\nYou run in tab's sandbox. tab's own files, shell startup files and stored cloud and browser \
+                 credentials are off limits, and in a pull request's checkout you can only change that checkout. \
+                 A write that fails with \"Read-only file system\" or \"Operation not permitted\" on one of those \
+                 paths is the sandbox: tell the person what you needed instead of working around it.\n"
+            } else {
+                "\ntab's own files and stored credentials are off limits to your file tools. If an edit is refused \
+                 for that reason, tell the person what you needed instead of working around it.\n"
+            });
+            if sb.config().enabled && self.mcp().is_some() {
+                out.push_str(
+                    "Use `gh` and `git` as usual: tab runs `gh` for you, and git reaches GitHub through tab, \
+                     both signed in with the person's GitHub connection. There's no GitHub token in your \
+                     environment, so don't look for one or change git's remote or credential settings. Force \
+                     pushes, branch deletes and merges wait for the person to allow them; if one is declined, \
+                     say what you wanted to do instead of retrying.\n",
+                );
+            }
         }
         if let Ok(Some(brief)) = self.store.session_brief(&session.id) {
             out.push('\n');
@@ -1070,10 +1222,10 @@ impl AgentHub {
         for c in self.running.lock().unwrap().values() {
             c.cancel();
         }
-        if let Ok(mut oc) = self.opencode.try_lock()
-            && let Some(s) = oc.take()
-        {
-            s.shutdown();
+        if let Ok(mut oc) = self.opencode.try_lock() {
+            for (_, s) in oc.drain() {
+                s.shutdown();
+            }
         }
     }
 
@@ -1122,6 +1274,27 @@ impl AgentHub {
         }
         out
     }
+}
+
+/// The message as the agent sees it: the text, then the attached files to
+/// open.
+fn with_attachments(text: &str, attachments: &[String]) -> String {
+    if attachments.is_empty() {
+        return text.to_string();
+    }
+    format!(
+        "{text}\n\nThe person attached {} (open each with your Read tool to see it):\n{}",
+        if attachments.len() == 1 {
+            "a file"
+        } else {
+            "files"
+        },
+        attachments
+            .iter()
+            .map(|a| format!("- {a}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 pub(crate) fn default_command(kind: AgentKind) -> &'static str {

@@ -12,6 +12,7 @@ use tab_core::config::ConnectorConfig;
 use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
 use tab_core::connectors::registry;
 use tab_core::gateway::{Call, RateLimitState};
+use tab_core::live::SteerCommand;
 use tab_core::local_hub::{HubStatusView, LocalHub};
 use tab_core::lsp::{self, LspHub, ServerStatus};
 use tab_core::mcp::{EngineAccess, McpServer};
@@ -56,6 +57,47 @@ struct AppState {
     data_dir: PathBuf,
 }
 
+impl AppState {
+    /// An attachment path as this device has it. Chats synced from another
+    /// device, or files swept from the cache, name a path that isn't here;
+    /// one in the hub's naming (`.../<hash hex>/<name>`) is fetched from the
+    /// hub into this device's attachments folder.
+    fn local_attachment(&self, path: &str) -> String {
+        let p = std::path::Path::new(path);
+        if p.exists() {
+            return path.to_string();
+        }
+        let (Some(hub), Some(file)) = (&self.work_hub, tab_core::live::file_ref(p)) else {
+            return path.to_string();
+        };
+        match hub.file_materialize(&self.hub.attachments_dir(), &file.hash, &file.name) {
+            Ok(local) => local.display().to_string(),
+            Err(_) => path.to_string(),
+        }
+    }
+
+    /// Sends the person's message to a session another device runs.
+    fn steer_remote(&self, session: &str, text: &str, attachments: &[String]) -> CmdResult<()> {
+        let hub = self
+            .work_hub
+            .as_ref()
+            .ok_or("this chat runs on another device, and the hub isn't running here")?;
+        let files = tab_core::live::file_refs(attachments);
+        if files.len() != attachments.len() {
+            return Err("an attachment isn't in the hub, so the other device can't see it".into());
+        }
+        hub.steer_remote(
+            session,
+            &SteerCommand::Message {
+                text: text.into(),
+                files,
+            },
+        )
+        .map_err(err)?;
+        Ok(())
+    }
+}
+
 impl std::ops::Deref for AppState {
     type Target = Core;
     fn deref(&self) -> &Core {
@@ -92,6 +134,12 @@ impl EngineAccess for LiveEngine {
     }
     async fn connector_config(&self, id: &str) -> anyhow::Result<Option<ConnectorConfig>> {
         Ok(self.0.config.lock().await.connectors.get(id).cloned())
+    }
+    async fn pages_changed(&self, connector: &str, pages: &[String]) {
+        match self.0.engine.read().await.as_ref() {
+            Some(e) => e.pages_changed(connector, pages),
+            None => tab_core::connectors::forget_pages(connector, pages),
+        }
     }
     async fn save_connector(&self, id: &str, cfg: ConnectorConfig) -> anyhow::Result<()> {
         let mut next = self.0.config.lock().await.clone();
@@ -163,6 +211,12 @@ impl Core {
         let ranking_changed = next.ranking != current.ranking || next.profile != current.profile;
         *current = next.clone();
         drop(current);
+        let sandbox = tab_core::sandbox::current();
+        if sandbox.config() != next.sandbox {
+            sandbox.set_config(next.sandbox.clone());
+            // OpenCode servers keep the policy they started with.
+            self.hub.stop_opencode().await;
+        }
         self.hub.set_config(next.agent.clone()).await;
         self.restart(&next).await;
         if ranking_changed && let Some(e) = self.engine.read().await.as_ref() {
@@ -246,6 +300,14 @@ async fn attachment_save(
         .map(percent_decode)
         .unwrap_or_default();
     let name = safe_file_name(&name);
+    // Into the hub, so other devices can show it and the agent's machine
+    // can fetch it; the attachments folder keeps a copy under its hash.
+    if let Some(hub) = &state.work_hub {
+        let path = hub
+            .attach(&state.hub.attachments_dir(), bytes, &name)
+            .map_err(err)?;
+        return Ok(path.display().to_string());
+    }
     let dir = state
         .hub
         .attachments_dir()
@@ -340,8 +402,9 @@ async fn file_open(path: String, reveal: Option<bool>) -> CmdResult<()> {
 /// An image file's bytes, for thumbnails and the viewer: attachments, and
 /// screenshots an agent mentions by path. Only image files are served.
 #[tauri::command]
-async fn image_read(path: String) -> CmdResult<tauri::ipc::Response> {
+async fn image_read(state: State<'_, AppState>, path: String) -> CmdResult<tauri::ipc::Response> {
     image_ext(&path).ok_or("not an image")?;
+    let path = state.local_attachment(&path);
     let meta = std::fs::metadata(&path).map_err(err)?;
     if !meta.is_file() || meta.len() as usize > MAX_IMAGE {
         return Err("not an image tab can show".into());
@@ -365,7 +428,8 @@ const MAX_VIEWABLE: u64 = 30 * 1024 * 1024;
 /// A file's bytes for the file stage, when it is a kind tab can show (see
 /// `VIEWABLE`) and not too big. Images go through `image_read`.
 #[tauri::command]
-async fn file_read(path: String) -> CmdResult<tauri::ipc::Response> {
+async fn file_read(state: State<'_, AppState>, path: String) -> CmdResult<tauri::ipc::Response> {
+    let path = state.local_attachment(&path);
     let p = std::path::Path::new(&path);
     let ext = p
         .extension()
@@ -632,8 +696,18 @@ async fn chat_send(
         }
     };
     let session = state.hub.session_for_item(&item.id).map_err(err)?;
-    // A turn in flight takes the message as steering; otherwise it starts one.
-    if attachments.is_empty() && state.hub.steer(&session.id, &text).map_err(err)? {
+    // Another device runs this chat: the message goes there through the hub.
+    if !state.hub.runs_here(&session) {
+        state.steer_remote(&session.id, &text, &attachments)?;
+        return Ok(ChatStarted { item, session });
+    }
+    // A turn in flight takes the message (and its files) as steering;
+    // otherwise it starts one.
+    if state
+        .hub
+        .steer_with(&session.id, &text, &attachments)
+        .map_err(err)?
+    {
         return Ok(ChatStarted { item, session });
     }
     state
@@ -728,10 +802,17 @@ async fn review_chat_send(
             &brief,
         )
         .map_err(err)?;
-    state
+    // A turn in flight takes the message as steering; otherwise it starts one.
+    if !state
         .hub
-        .send_with(&session.id, &text, &attachments)
-        .map_err(err)?;
+        .steer_with(&session.id, &text, &attachments)
+        .map_err(err)?
+    {
+        state
+            .hub
+            .send_with(&session.id, &text, &attachments)
+            .map_err(err)?;
+    }
     Ok(session)
 }
 
@@ -847,7 +928,39 @@ async fn item_set_project(
 
 #[tauri::command]
 async fn chat_stop(state: State<'_, AppState>, session_id: String) -> CmdResult<()> {
-    state.hub.stop(&session_id);
+    let remote = state
+        .store
+        .session_get(&session_id)
+        .map_err(err)?
+        .is_some_and(|s| !state.hub.runs_here(&s));
+    match (&state.work_hub, remote) {
+        (Some(h), true) => {
+            h.steer_remote(&session_id, &SteerCommand::Stop)
+                .map_err(err)?;
+        }
+        _ => state.hub.stop(&session_id),
+    }
+    Ok(())
+}
+
+/// "Send now": stop the tool a turn is waiting on, so the messages the
+/// person already sent are read right away.
+#[tauri::command]
+async fn chat_interrupt(state: State<'_, AppState>, session_id: String) -> CmdResult<()> {
+    let remote = state
+        .store
+        .session_get(&session_id)
+        .map_err(err)?
+        .is_some_and(|s| !state.hub.runs_here(&s));
+    match (&state.work_hub, remote) {
+        (Some(h), true) => {
+            h.steer_remote(&session_id, &SteerCommand::Interrupt)
+                .map_err(err)?;
+        }
+        _ => {
+            state.hub.interrupt(&session_id);
+        }
+    }
     Ok(())
 }
 
@@ -859,13 +972,28 @@ async fn approval_resolve(
     message: Option<String>,
     answers: Option<serde_json::Value>,
 ) -> CmdResult<bool> {
-    let d = match decision.as_str() {
-        "allow" => Decision::Allow,
-        "answer" => Decision::Answer(answers.unwrap_or_default()),
-        "always" => Decision::AllowAlways,
-        _ => Decision::Deny(message.unwrap_or_else(|| "The person declined.".into())),
+    let d = Decision::from_parts(&decision, message.clone(), answers.clone());
+    if state.hub.resolve_approval(&id, d) {
+        return Ok(true);
+    }
+    // A prompt from a session another device runs: answer it there.
+    let Some(hub) = &state.work_hub else {
+        return Ok(false);
     };
-    Ok(state.hub.resolve_approval(&id, d))
+    let Some(session) = hub.remote_approval(&id) else {
+        return Ok(false);
+    };
+    hub.steer_remote(
+        &session,
+        &SteerCommand::Approval {
+            id,
+            decision,
+            message,
+            answers,
+        },
+    )
+    .map_err(err)?;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -1070,10 +1198,17 @@ async fn ask_chat_send(
         .hub
         .session_for_key(&ask_chat_key(project_id.as_deref()), &title, &cwd, &brief)
         .map_err(err)?;
-    state
+    // A turn in flight takes the message as steering; otherwise it starts one.
+    if !state
         .hub
-        .send_with(&session.id, &text, &attachments)
-        .map_err(err)?;
+        .steer_with(&session.id, &text, &attachments)
+        .map_err(err)?
+    {
+        state
+            .hub
+            .send_with(&session.id, &text, &attachments)
+            .map_err(err)?;
+    }
     Ok(session)
 }
 
@@ -1104,7 +1239,7 @@ async fn agent_activity(state: State<'_, AppState>) -> CmdResult<Vec<serde_json:
         if matches!(state.store.get(&item), Ok(Some(i)) if i.state == ItemState::Done) {
             continue;
         }
-        let waiting =!state.hub.pending_approvals(&s.id).is_empty();
+        let waiting = !state.hub.pending_approvals(&s.id).is_empty();
         let status = if waiting {
             "needs_input".to_string()
         } else {
@@ -1748,6 +1883,7 @@ async fn workflow_set_enabled(
     id: String,
     enabled: bool,
     allow_destructive: Option<bool>,
+    allow_commands: Option<bool>,
 ) -> CmdResult<Workflow> {
     let mut w = state
         .store
@@ -1766,10 +1902,14 @@ async fn workflow_set_enabled(
             return Err(i.message);
         }
     }
-    let changed_destructive = allow_destructive.is_some_and(|a| a != w.allow_destructive);
+    let changed_destructive = allow_destructive.is_some_and(|a| a != w.allow_destructive)
+        || allow_commands.is_some_and(|a| a != w.allow_commands);
     w.enabled = enabled;
     if let Some(a) = allow_destructive {
         w.allow_destructive = a;
+    }
+    if let Some(a) = allow_commands {
+        w.allow_commands = a;
     }
     let w = if changed_destructive {
         state
@@ -1912,7 +2052,11 @@ async fn workflow_chat_send(
         destructive steps (merge, close, move mail); the person does that in the builder, so tell them when it's needed. \
         This chat is about the one workflow open below; work on others only if the person asks.";
     let brief = format!("{brief}{open_now}");
-    let title = match open.as_ref().map(|w| w.name.trim()).filter(|n| !n.is_empty()) {
+    let title = match open
+        .as_ref()
+        .map(|w| w.name.trim())
+        .filter(|n| !n.is_empty())
+    {
         Some(n) => format!("Workflow builder: {n}"),
         None => "Workflow builder".into(),
     };
@@ -2078,6 +2222,12 @@ fn unmask(mut new: TabConfig, old: &TabConfig) -> TabConfig {
 #[tauri::command]
 async fn get_config(state: State<'_, AppState>) -> CmdResult<TabConfig> {
     Ok(masked(&*state.config.lock().await))
+}
+
+/// How the sandbox works on this computer, for Settings.
+#[tauri::command]
+async fn sandbox_status() -> CmdResult<tab_core::sandbox::Status> {
+    Ok(tab_core::sandbox::current().status().await)
 }
 
 #[tauri::command]
@@ -2313,6 +2463,13 @@ pub fn run() {
             lsp::set_tools_dir(data_dir.join("tools"));
             let config_path = app.path().app_config_dir()?.join("config.json");
             let config = TabConfig::load(&config_path)?;
+            // Before anything starts a process: agents, language servers
+            // and workflow commands all go through it.
+            tab_core::sandbox::install(Arc::new(tab_core::sandbox::Sandbox::new(
+                config.sandbox.clone(),
+                Some(data_dir.clone()),
+                config_path.parent().map(Into::into),
+            )));
             let store = Arc::new(Store::open(&data_dir.join("tab.db"))?);
             let gateway = Arc::new(Gateway::new(store.clone()));
             // Search by meaning: follows the setting on the tab connection.
@@ -2362,7 +2519,11 @@ pub fn run() {
             // The hub: this device's copy (tab.db) syncs through its change
             // log, and other devices connect to it on localhost.
             let work_hub = match LocalHub::open(&data_dir.join("hub.db")) {
-                Ok(h) => Some(h),
+                Ok(h) => {
+                    // Other devices steer the sessions this one runs.
+                    h.attach_agents(hub.clone());
+                    Some(h)
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "hub failed to open; running without it");
                     None
@@ -2430,6 +2591,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            sandbox_status,
             rename_item,
             titler_default_rules,
             browser_open,
@@ -2471,6 +2633,7 @@ pub fn run() {
             chat_open,
             chat_send,
             chat_stop,
+            chat_interrupt,
             projects_list,
             project_save,
             project_delete,

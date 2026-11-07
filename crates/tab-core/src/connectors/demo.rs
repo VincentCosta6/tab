@@ -31,6 +31,7 @@ impl ConnectorFactory for DemoFactory {
             features: vec![],
             builtin: false,
             actions: vec![],
+            clis: Vec::new(),
         }
     }
 

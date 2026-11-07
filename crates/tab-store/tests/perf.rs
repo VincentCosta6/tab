@@ -47,11 +47,17 @@ fn load<S: HubStore>(name: &str, s: &mut S) {
         || {
             let ops: Vec<Op> = (0..ITEMS)
                 .flat_map(|i| {
+                    // Every 20th item has an attached file.
+                    let mut body = json!({"title": words(i), "repo": "tab", "n": i});
+                    if i % 20 == 0 {
+                        body["files"] =
+                            json!([{ "hash": tab_domain::blob::hash(i.to_string().as_bytes()) }]);
+                    }
                     [
                         Op::Put {
                             kind: "item".into(),
                             id: i.to_string(),
-                            body: json!({"title": words(i), "repo": "tab", "n": i}),
+                            body,
                         },
                         Op::Link {
                             from: format!("item:{i}"),
@@ -119,6 +125,11 @@ fn queries<S: HubStore>(name: &str, s: &mut S) {
                 );
             }
         },
+    );
+    timed(
+        &format!("{name}: files referenced by {ITEMS} records"),
+        Duration::from_secs(10),
+        || assert_eq!(s.blob_refs().unwrap().len(), ITEMS / 20),
     );
     timed(
         &format!("{name}: 10k lease claims + expire"),

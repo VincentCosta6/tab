@@ -129,6 +129,10 @@ let config: TabConfig = {
     budget: { daily_usd: 10, monthly_usd: null, per_turn_usd: null, ranker_plan_cap: 0.8 }, kind: "claude_code", command: null, model: null, workdir: "C:\\Users\\vince\\code", permission_mode: "auto", opencode_url: null },
   mcp: { port: 47821, token: "mock-token" },
   storage: { keep_days: 7, max_gb: 5 },
+  sandbox: {
+    enabled: true, protected: [], hidden: [], container_runtime: "", ssh_in_chats: true,
+    lsp_domains: ["crates.io", "*.crates.io", "proxy.golang.org", "sum.golang.org", "pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com", "*.githubusercontent.com"],
+  },
   onboarded: true,
 };
 
@@ -345,6 +349,7 @@ export const mockApi = {
         }
         case "set_agent_mode": config = { ...config, agent: { ...config.agent, permission_mode: args.mode } }; return config;
         case "chat_stop": return null;
+        case "chat_interrupt": return null;
         case "approval_resolve": return true;
         case "agent_health": return { kind: "claude_code", found: true, path: "/Users/you/.local/bin/claude", version: mockUpgraded ? "2.1.318 (Claude Code)" : "2.1.91 (Claude Code)", error: null, install: "native", upgrade: "claude update", latest: "2.1.318" };
         case "agent_upgrade": {
@@ -365,13 +370,18 @@ export const mockApi = {
           workspaces: { bytes: mockCheckouts.reduce((n, c) => n + c.bytes, 10_485_760), files: 900 },
           checkouts: mockCheckouts,
         };
+        case "sandbox_status": return {
+          enabled: true, backend: "unavailable", enforced: false, container: "docker",
+          summary: "Windows has no sandbox tab can use yet, so file limits aren't enforced. Agents still start without tab's secrets, Claude Code is told not to touch protected folders, and stopping a chat ends everything it started.",
+          fix: "Workflow commands that name a container image run isolated in Docker or Podman.",
+        };
         case "storage_clean": return { removed: 3, bytes: 2_200_000 };
         case "hub_status": {
           const started = new Date(Date.now() - 3 * 3600_000).toISOString();
           return {
             runs_on: "local", protocol_version: 1, started_at: started,
-            url: "ws://127.0.0.1:47850/hub", path: "C:\\Users\\vince\\AppData\\Roaming\\dev.tab.app\\hub.db",
-            head: 18_422, records: 6_310, edges: 0, live_leases: 1, storage_bytes: 41_943_040,
+            url: "wss://127.0.0.1:47850/hub", fingerprint: "sha256/3f1c9a0e5d7b2c48e6a1f0b9d3c7e2a5b8f4d1c6e9a2b7f0c3d8e5a1b6f9c2d4", http3: true, path: "C:\\Users\\vince\\AppData\\Roaming\\dev.tab.app\\hub.db",
+            head: 18_422, records: 6_310, edges: 0, live_leases: 1, storage_bytes: 41_943_040, files: 38, file_bytes: 12_582_912,
             cpu_percent: 2.4 + Math.random() * 3, memory_bytes: 186_000_000 + Math.round(Math.random() * 4_000_000), cpus: 12, pending: 0,
             connections: [
               { id: 0, device: "this-computer", client: "tab-desktop/0.1.0", address: "this app", connected_at: started, synced_to: 18_422, behind: 0, this_app: true },
