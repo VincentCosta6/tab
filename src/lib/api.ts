@@ -104,6 +104,8 @@ export const api = {
   ghStatus: () => call<GhStatus>("gh_status"),
   ghLogin: () => call<GhStatus>("gh_login"),
   ghInstall: () => call<GhStatus>("gh_install"),
+  /** Why a folder can't be where sessions start, or null when it can. */
+  folderProblem: (path: string) => call<string | null>("folder_problem", { path }),
   mcpInfo: () => call<{ url: string | null; token: string }>("mcp_info"),
   githubPull: (repo: string, number: number, sample: boolean) => call<PullReview>("github_pull", { repo, number, sample }),
   githubFile: (repo: string, sha: string, path: string) => call<string>("github_file", { repo, sha, path }),

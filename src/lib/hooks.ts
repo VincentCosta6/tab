@@ -5,6 +5,18 @@ import { api } from "./api";
 import { keys } from "./query";
 import type { AgentActivity, Chat, ItemState, TabConfig } from "./types";
 
+/** Why `path` can't be a work folder, checked as the person types. */
+export function useFolderProblem(path: string | null | undefined) {
+  const p = (path ?? "").trim();
+  const { data } = useQuery({
+    queryKey: ["folder-problem", p],
+    queryFn: () => api.folderProblem(p),
+    enabled: !!p,
+    staleTime: 2000,
+  });
+  return p ? data ?? null : null;
+}
+
 export function useItems(state: ItemState, query: string) {
   return useQuery({
     queryKey: keys.items(state, query.trim()),

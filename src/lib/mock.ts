@@ -403,6 +403,7 @@ export const mockApi = {
           config = { ...config, agent: { ...config.agent, kind, models, model: kind ? models[kind] ?? null : null } };
           return config;
         }
+        case "folder_problem": return null;
         case "mcp_info": return { url: "http://127.0.0.1:47821/mcp", token: "mock-token" };
         case "github_pull": return samplePull(args.repo, args.number);
         case "storage_usage": return {

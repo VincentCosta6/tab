@@ -819,6 +819,12 @@ impl AgentHub {
             "message is empty"
         );
         self.check_attachments(attachments)?;
+        if let Some(why) = crate::config::folder_problem(&session.cwd) {
+            anyhow::bail!(
+                "This chat starts in a folder tab can't use: {why} Recreate it, or set a work folder \
+                 that exists in Settings → Agents and start a new chat."
+            );
+        }
         if let Some(why) = self
             .config()
             .budget
