@@ -8,6 +8,7 @@ mod activity;
 mod context;
 mod graph;
 mod http;
+pub mod hub_sync;
 mod items;
 mod previews;
 mod projects;
@@ -34,6 +35,8 @@ pub struct Store {
     index_status: Mutex<crate::embed::IndexStatus>,
     /// Bumped on every workflow write, so the runtime knows to reload.
     workflows_rev: std::sync::atomic::AtomicU64,
+    /// Woken after every commit, so the hub sync sends changes right away.
+    commits: std::sync::Arc<tokio::sync::Notify>,
 }
 
 /// Ordered migrations; `PRAGMA user_version` records how many have run.
@@ -96,12 +99,25 @@ impl Store {
             tx.pragma_update(None, "user_version", i + 1)?;
             tx.commit()?;
         }
+        let commits = std::sync::Arc::new(tokio::sync::Notify::new());
+        let woken = commits.clone();
+        conn.commit_hook(Some(move || {
+            woken.notify_one();
+            false
+        }));
         Ok(Self {
+            commits,
             conn: Mutex::new(conn),
             embedder: std::sync::RwLock::new(None),
             index_status: Mutex::new(Default::default()),
             workflows_rev: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Fires after every commit to `tab.db` (once per wait, however many
+    /// commits happened since).
+    pub fn commits(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        self.commits.clone()
     }
 
     pub fn set_embedder(&self, e: std::sync::Arc<dyn crate::embed::Embed>) {

@@ -13,6 +13,12 @@
 //!
 //! Nothing in this crate depends on Tauri, so it can be tested headless and
 //! reused by the MCP server or a CLI later.
+//!
+//! The pure parts (item model, ranking rules, workflow definitions and
+//! validation, link detection) live in `tab-domain`, which has no I/O and
+//! builds for Wasm so the cloud hub can share them. They're re-exported here
+//! under their old paths (`tab_core::model`, `tab_core::links`, ...), so code
+//! that used them doesn't change. See `docs/ARCHITECTURE.md` for the crate map.
 
 pub mod agents;
 pub mod config;
@@ -22,10 +28,9 @@ pub mod embed;
 pub mod engine;
 pub mod gateway;
 pub mod gh;
-pub mod links;
+pub mod local_hub;
 pub mod lsp;
 pub mod mcp;
-pub mod model;
 pub mod ranker;
 pub mod ratelimit;
 pub mod storage;
@@ -33,6 +38,8 @@ pub mod store;
 pub mod usage;
 pub mod workflow;
 pub mod workspace;
+
+pub use tab_domain::{links, model};
 
 pub use config::TabConfig;
 pub use engine::{Change, Engine, EngineEvent, EngineHandle};

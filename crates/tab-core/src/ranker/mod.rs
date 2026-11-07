@@ -12,14 +12,13 @@
 //! reproducible.
 
 mod ai;
-mod rules;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 pub use ai::{AiLayer, DEFAULT_MODEL, MAX_AI_ADJUSTMENT};
-pub use rules::{KeywordRule, RankingRules, RuleResult};
+pub use tab_domain::rules::{KeywordRule, KindScore, RankingRules, RuleResult};
 
 use crate::TabConfig;
 use crate::gateway::Gateway;

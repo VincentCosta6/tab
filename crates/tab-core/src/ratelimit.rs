@@ -19,47 +19,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-/// A limit a connector knows its provider enforces.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RateLimitSpec {
-    pub provider: String,
-    /// Bucket name, matching what the gateway derives from the URL
-    /// (`core`, `search`, `requests`, `default`).
-    pub resource: String,
-    /// Requests allowed per window.
-    pub requests: u32,
-    pub per_seconds: u32,
-    /// More than this many requests in [`BURST_WINDOW`] counts as a burst
-    /// and pauses background calls for [`COOL_DOWN`].
-    pub burst: u32,
-    #[serde(default)]
-    pub note: String,
-}
-
-impl RateLimitSpec {
-    pub fn new(
-        provider: &str,
-        resource: &str,
-        requests: u32,
-        per_seconds: u32,
-        burst: u32,
-    ) -> Self {
-        Self {
-            provider: provider.into(),
-            resource: resource.into(),
-            requests,
-            per_seconds,
-            burst,
-            note: String::new(),
-        }
-    }
-    pub fn note(mut self, note: &str) -> Self {
-        self.note = note.into();
-        self
-    }
-}
+pub use tab_domain::model::RateLimitSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

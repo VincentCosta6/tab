@@ -5,7 +5,7 @@
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
-  RateLimitState, ReviewAction, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
+  RateLimitState, ReviewAction, HubStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun,
 } from "./types";
 import { mockApi } from "./mock";
@@ -105,6 +105,7 @@ export const api = {
     call<void>("review_workspace_open", { repo, number, target, path: path ?? null, line: line ?? null }),
   vscodeAvailable: () => call<boolean>("review_vscode_available"),
   storageUsage: () => call<StorageUsage>("storage_usage"),
+  hubStatus: () => call<HubStatus | null>("hub_status"),
   storageClean: () => call<Swept>("storage_clean"),
   /** One checkout, or every one when no repo is given. */
   storageRemoveCheckouts: (repo?: string, number?: number) =>

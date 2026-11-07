@@ -1,0 +1,18 @@
+[package]
+name = "tab-hub"
+description = "tab's hub: owns work state and answers clients. Runs in the desktop app and, later, in a Durable Object."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Builds for wasm32-unknown-unknown: no tokio, no threads, no clock. The
+# host (the desktop app, or the Worker) passes `now` and moves the frames.
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+tab-domain = { path = "../tab-domain" }
+tab-protocol = { path = "../tab-protocol" }
+tab-store = { path = "../tab-store" }
+
+[dev-dependencies]
+serde_json.workspace = true
+tab-store = { path = "../tab-store", features = ["sqlite"] }

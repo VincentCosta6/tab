@@ -28,3 +28,13 @@ jobs:
       - run: pnpm build
       - run: cargo test -p tab-core
       - run: cargo check -p tab
+      # Shared logic, protocol and hub: fast. The full storage suite
+      # (conformance, property, volume) runs outside CI with
+      # scripts/storage-tests.sh; see CLAUDE.md.
+      - run: cargo test -p tab-domain -p tab-protocol -p tab-hub
+      - run: rustup target add wasm32-unknown-unknown
+      - name: Shared crates build for Wasm (Cloudflare Workers)
+        run: cargo check --target wasm32-unknown-unknown -p tab-domain -p tab-protocol -p tab-hub -p tab-store --features tab-store/sql
+      - run: pnpm proto:lint
+      - name: Generated TypeScript matches hub.proto
+        run: pnpm proto && git diff --exit-code src/lib/protocol

@@ -24,7 +24,7 @@ use crate::model::{
 
 pub struct TabFactory;
 
-pub const SOURCE: &str = "tab";
+pub const SOURCE: &str = tab_domain::model::TAB_SOURCE;
 
 impl ConnectorFactory for TabFactory {
     fn descriptor(&self) -> ConnectorDescriptor {

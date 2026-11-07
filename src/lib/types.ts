@@ -445,3 +445,32 @@ export interface DirSize { bytes: number; files: number }
 export interface CheckoutUsage { repo: string; number: number; last_used: string; bytes: number }
 export interface StorageUsage { attachments: DirSize; sessions: DirSize; workspaces: DirSize; checkouts: CheckoutUsage[] }
 export interface Swept { removed: number; bytes: number }
+
+/** Settings → Hub. Mirrors tab_core::local_hub::HubStatusView. */
+export interface HubConnection {
+  id: number;
+  device: string;
+  client: string;
+  address: string;
+  connected_at: string | null;
+  synced_to: number;
+  behind: number;
+  this_app: boolean;
+}
+export interface HubStatus {
+  runs_on: string;
+  protocol_version: number;
+  started_at: string | null;
+  url: string | null;
+  path: string;
+  head: number;
+  records: number;
+  edges: number;
+  live_leases: number;
+  storage_bytes: number;
+  connections: HubConnection[];
+  cpu_percent: number | null;
+  memory_bytes: number | null;
+  cpus: number;
+  pending: number;
+}

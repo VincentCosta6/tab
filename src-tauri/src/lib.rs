@@ -12,6 +12,7 @@ use tab_core::config::ConnectorConfig;
 use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
 use tab_core::connectors::registry;
 use tab_core::gateway::{Call, RateLimitState};
+use tab_core::local_hub::{HubStatusView, LocalHub};
 use tab_core::lsp::{self, LspHub, ServerStatus};
 use tab_core::mcp::{EngineAccess, McpServer};
 use tab_core::model::{
@@ -47,6 +48,8 @@ struct Core {
 
 struct AppState {
     core: Arc<Core>,
+    /// The hub, running inside the app. None if it couldn't open.
+    work_hub: Option<Arc<LocalHub>>,
     mcp_url: std::sync::Mutex<Option<String>>,
     workspaces: Arc<Workspaces>,
     lsp: Arc<LspHub>,
@@ -893,6 +896,22 @@ async fn agent_upgrade(app: tauri::AppHandle, state: State<'_, AppState>) -> Cmd
 struct McpInfo {
     url: Option<String>,
     token: String,
+}
+
+/// Where the hub listens for other devices (the next free port up from here).
+const HUB_PORT: u16 = 47_850;
+
+/// For Settings → Hub.
+#[tauri::command]
+async fn hub_status(state: State<'_, AppState>) -> CmdResult<Option<HubStatusView>> {
+    let Some(hub) = state.work_hub.clone() else {
+        return Ok(None);
+    };
+    tauri::async_runtime::spawn_blocking(move || hub.status())
+        .await
+        .map_err(err)?
+        .map(Some)
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -2279,8 +2298,18 @@ pub fn run() {
                 config_path,
                 embed,
             });
+            // The hub: this device's copy (tab.db) syncs through its change
+            // log, and other devices connect to it on localhost.
+            let work_hub = match LocalHub::open(&data_dir.join("hub.db")) {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    tracing::error!(error = %e, "hub failed to open; running without it");
+                    None
+                }
+            };
             let state = AppState {
                 core: core.clone(),
+                work_hub: work_hub.clone(),
                 mcp_url: std::sync::Mutex::new(None),
                 workspaces: Arc::new(Workspaces::new(data_dir.join("workspaces"))),
                 lsp: Arc::new(LspHub::new()),
@@ -2306,6 +2335,13 @@ pub fn run() {
                 });
             }
             tauri::async_runtime::block_on(async {
+                if let Some(h) = &work_hub {
+                    h.follow(store.clone(), events.clone());
+                    match h.serve(HUB_PORT, config.mcp.token.clone()).await {
+                        Ok(url) => tracing::info!(%url, "hub listening"),
+                        Err(e) => tracing::error!(error = %e, "hub listener failed to start"),
+                    }
+                }
                 state.restart(&config).await;
                 // Local MCP server for agents.
                 let server = Arc::new(McpServer {
@@ -2397,6 +2433,7 @@ pub fn run() {
             approval_resolve,
             detect_agents,
             mcp_info,
+            hub_status,
             gh_status,
             usage_summary,
             gh_login,

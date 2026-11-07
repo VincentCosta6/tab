@@ -13,7 +13,7 @@ import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client
 import { createSyncStoragePersister } from "@tanstack/query-sync-storage-persister";
 import { useEffect, type ReactNode } from "react";
 import { onEngineEvent } from "./api";
-import type { Chat, ConnectorInfo, ItemContext, QueueItem } from "./types";
+import type { Chat, ConnectorInfo, ItemContext, QueueItem, Session } from "./types";
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -151,13 +151,13 @@ function LiveEvents() {
           if (!s.item_id) {
             // Keyed sessions (a PR's review chat) are found by id.
             const key = chatKeyForSession(qc, s.id);
-            if (key) qc.setQueryData<Chat>(key, (c) => (c ? { ...c, session: s, running: s.status !== "idle" && s.status !== "failed" } : c));
+            if (key) qc.setQueryData<Chat>(key, (c) => (c ? { ...c, session: s, running: isRunning(s, c.running) } : c));
           } else
             qc.setQueryData<Chat>(keys.chat(s.item_id), (c) => ({
               session: s,
               messages: c?.session?.id === s.id ? c.messages : [],
               approvals: c?.session?.id === s.id ? c.approvals : [],
-              running: s.status !== "idle" && s.status !== "failed",
+              running: isRunning(s, c?.running ?? false),
             }));
           break;
         }
@@ -195,4 +195,15 @@ function LiveEvents() {
     };
   }, [qc]);
   return null;
+}
+
+/**
+ * Whether a session's turn is still going. "Needs you" means either an
+ * approval mid-turn (still going) or a turn that ended on a question (over),
+ * and the status alone can't tell which, so it keeps what we knew: a turn
+ * ending goes idle first, then to "needs you".
+ */
+function isRunning(s: Session, was: boolean): boolean {
+  if (s.status === "needs_input") return was;
+  return s.status === "working" || s.status === "monitoring";
 }

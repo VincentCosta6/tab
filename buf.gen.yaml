@@ -1,0 +1,12 @@
+# TypeScript types for the React UI, generated from the same .proto files
+# prost reads. Run `pnpm proto` after changing a .proto file.
+version: v2
+inputs:
+  - directory: crates/tab-protocol/proto
+plugins:
+  - local: protoc-gen-es
+    out: src/lib/protocol/gen
+    opt:
+      - target=ts
+      - import_extension=js
+clean: true

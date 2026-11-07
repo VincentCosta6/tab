@@ -2,15 +2,19 @@
   "name": "tab",
   "private": true,
   "version": "0.1.0",
+  "license": "FSL-1.1-MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "proto": "buf generate",
+    "proto:lint": "buf lint"
   },
   "dependencies": {
+    "@bufbuild/protobuf": "^2.17.0",
     "@monaco-editor/react": "^4.7.0",
     "@tanstack/query-sync-storage-persister": "~5.105.3",
     "@tanstack/react-query": "~5.105.3",
@@ -23,6 +27,8 @@
     "simple-icons": "^16.36.0"
   },
   "devDependencies": {
+    "@bufbuild/buf": "^1.75.0",
+    "@bufbuild/protoc-gen-es": "^2.17.0",
     "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

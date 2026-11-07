@@ -19,7 +19,7 @@ impl Store {
         self.workflows_rev.load(Ordering::Relaxed)
     }
 
-    fn workflows_bump(&self) {
+    pub(crate) fn workflows_bump(&self) {
         self.workflows_rev.fetch_add(1, Ordering::Relaxed);
     }
 

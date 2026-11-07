@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -30,18 +30,7 @@ use crate::store::{Store, Upsert};
 use crate::workflow::runtime::{Host, Runtime};
 use crate::workflow::{Run, Workflow};
 
-/// What happened to an item. These are the triggers automations will hang off.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum Change {
-    Ingested,
-    Updated,
-    Ranked,
-    Snoozed,
-    Woke,
-    Done,
-    Reopened,
-}
+pub use tab_domain::model::Change;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

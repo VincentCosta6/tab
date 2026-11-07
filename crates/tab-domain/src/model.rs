@@ -396,7 +396,7 @@ pub struct ConnectorDescriptor {
     pub available: bool,
     /// Limits the provider enforces. The gateway budgets against these.
     #[serde(default)]
-    pub rate_limits: Vec<crate::ratelimit::RateLimitSpec>,
+    pub rate_limits: Vec<RateLimitSpec>,
     /// Marketplace shelf: `built_in`, `work`, `code`, `communication`, `agents`.
     #[serde(default)]
     pub category: String,
@@ -792,4 +792,61 @@ pub struct NewTask {
     /// The title is a stand-in (a chat's first line) for the titler to replace.
     #[serde(default)]
     pub auto_title: bool,
+}
+
+/// The source id of tab's own connector: items people make by hand and
+/// actions on tab itself (snooze, set project, ...).
+pub const TAB_SOURCE: &str = "tab";
+
+/// What happened to an item. These are the triggers automations will hang off.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Change {
+    Ingested,
+    Updated,
+    Ranked,
+    Snoozed,
+    Woke,
+    Done,
+    Reopened,
+}
+
+/// A limit a connector knows its provider enforces.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RateLimitSpec {
+    pub provider: String,
+    /// Bucket name, matching what the gateway derives from the URL
+    /// (`core`, `search`, `requests`, `default`).
+    pub resource: String,
+    /// Requests allowed per window.
+    pub requests: u32,
+    pub per_seconds: u32,
+    /// More than this many requests in a short burst window pauses
+    /// background calls for a cool-down (see `tab_core::ratelimit`).
+    pub burst: u32,
+    #[serde(default)]
+    pub note: String,
+}
+
+impl RateLimitSpec {
+    pub fn new(
+        provider: &str,
+        resource: &str,
+        requests: u32,
+        per_seconds: u32,
+        burst: u32,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            resource: resource.into(),
+            requests,
+            per_seconds,
+            burst,
+            note: String::new(),
+        }
+    }
+    pub fn note(mut self, note: &str) -> Self {
+        self.note = note.into();
+        self
+    }
 }
