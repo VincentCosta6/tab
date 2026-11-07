@@ -66,7 +66,7 @@ Coming next (designed): `apps/mobile/`, `cloud/worker/` (workers-rs host for tab
 
 The sync speaks only the hub protocol (`Apply`, `GetChanges`), so pointing the app at a cloud hub replaces the in-process call with the WebSocket and nothing else. Not synced, on purpose: caches (HTTP, AI, previews, embeddings), the API audit log and usage counters.
 
-**Chats sync too** (`sessions`, `session_messages`), so other devices can watch and steer them. Each session names the device that runs it (`sessions.device`, this install's id from `this_device`); only that device runs its turns. Messages sync by a `uid` (their local `id` only orders this copy), and a message's text is cut at 256 KB in the hub (huge tool output stays on the device that ran it).
+**Chats sync too** (`sessions`, `session_messages`), so other devices can watch and steer them. Each session names the device that runs it (`sessions.device`, this install's id from `this_device`); only that device runs its turns. Messages sync by a `uid` (their local `id` only orders this copy). Only what the person reads in a chat travels: replies, their own messages, prompts, notes and errors. Tool output stays on the device that ran it, and a tool call syncs as its one-line summary without its input, except the step list and questions for the person, whose input is what they read. A message's text is cut at 64 KB in the hub.
 
 ### Files (built)
 
@@ -87,7 +87,7 @@ A session runs on one device: it has the agent's own history and the working cop
    steer / approve ◄─────Steered────── routes to the runner ◄─Steer── types a message, answers a prompt
 ```
 
-- **Stored messages and status** reach watchers through sync, like any record. **Streamed text and approval prompts** are published live and never stored; a watcher joining mid-turn gets a snapshot (the reply so far, open prompts) because the runner is told when watchers change.
+- **Stored messages and status** reach watchers through sync, like any record. **Streamed reply text and approval prompts** are published live and never stored (nothing else goes live: no tool calls, no tool progress, and long strings in a prompt's tool input are cut at 2,000 characters); a watcher joining mid-turn gets a snapshot (the reply so far, open prompts) because the runner is told when watchers change.
 - **Steering** is a `SteerCommand` (`message` with text and file hashes, `approval`, `stop`). The runner fetches attached files from the hub, then the message steers the running turn or starts the next one. The hub routes by the session record's `device`; if that device isn't connected, steering is refused with a message saying so. Only the runner may publish for a session.
 - **On the desktop**, the app watches the sessions other devices run while they're mid-turn, shows their live events in the chat, and sends what the person types or answers there to the runner.
 

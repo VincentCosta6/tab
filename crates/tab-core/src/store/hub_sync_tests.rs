@@ -411,3 +411,88 @@ fn a_copy_synced_before_chats_did_sends_its_chats_once() {
     s.hub_sync_install().unwrap();
     assert_eq!(s.hub_outbox_len().unwrap(), 0);
 }
+
+#[test]
+fn only_what_the_person_reads_in_a_chat_is_synced() {
+    let s = store();
+    s.hub_backfill_once().unwrap();
+    let c = chat(&s);
+    let input = json!({ "file_path": "src/a.rs", "content": "x".repeat(50_000) });
+    s.message_add(
+        &c.id,
+        "assistant",
+        "text",
+        "Fixing it.",
+        &Value::Null,
+        now(),
+    )
+    .unwrap();
+    s.message_add(
+        &c.id,
+        "assistant",
+        "tool",
+        "Write src/a.rs",
+        &json!({ "tool": "Write", "id": "t1", "input": input }),
+        now(),
+    )
+    .unwrap();
+    s.message_add(
+        &c.id,
+        "tool",
+        "tool_result",
+        "File written.\n...",
+        &json!({"tool_use_id": "t1"}),
+        now(),
+    )
+    .unwrap();
+    let rows: Vec<Value> = outbox(&s)
+        .into_iter()
+        .filter(|(t, ..)| t == "session_messages")
+        .filter_map(|(.., r)| r)
+        .collect();
+    let kinds: Vec<&str> = rows.iter().map(|r| r["kind"].as_str().unwrap()).collect();
+    // Tool output stays here.
+    assert_eq!(kinds, ["text", "tool"]);
+    // The call goes as its summary and tool name, without its input.
+    let tool = &rows[1];
+    assert_eq!(tool["content"], "Write src/a.rs");
+    assert_eq!(
+        serde_json::from_str::<Value>(tool["meta"].as_str().unwrap()).unwrap(),
+        json!({ "tool": "Write" })
+    );
+    assert!(serde_json::to_string(tool).unwrap().len() < 1000);
+    // Everything is still here in full.
+    let here = s.messages(&c.id).unwrap();
+    assert_eq!(here.len(), 3);
+    assert_eq!(here[1].meta["input"]["file_path"], "src/a.rs");
+    // A fresh hub isn't sent tool output either.
+    assert!(
+        s.hub_local_keys()
+            .unwrap()
+            .iter()
+            .filter(|(t, _)| t == "session_messages")
+            .count()
+            == 2
+    );
+}
+
+#[test]
+fn step_lists_and_questions_sync_with_their_input() {
+    let s = store();
+    s.hub_backfill_once().unwrap();
+    let c = chat(&s);
+    let todos = json!({ "tool": "TodoWrite", "input": { "todos": [{ "content": "Fix it", "status": "pending" }] } });
+    let ask = json!({ "tool": "AskUserQuestion", "input": { "questions": [{ "question": "Which db?" }] } });
+    let steps = json!({ "tool": "mcp__tab__tab_steps", "input": { "steps": [] } });
+    for meta in [&todos, &ask, &steps] {
+        s.message_add(&c.id, "assistant", "tool", "…", meta, now())
+            .unwrap();
+    }
+    let metas: Vec<Value> = outbox(&s)
+        .into_iter()
+        .filter(|(t, ..)| t == "session_messages")
+        .filter_map(|(.., r)| r)
+        .map(|r| serde_json::from_str(r["meta"].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(metas, [todos, ask, steps]);
+}

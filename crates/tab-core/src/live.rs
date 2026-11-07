@@ -105,7 +105,28 @@ impl Decision {
     }
 }
 
-/// A live event as watchers receive it.
+/// Longest string in an approval prompt's tool input sent to watchers. The
+/// summary says what's being approved; a file an edit would write needn't
+/// travel whole.
+pub const MAX_LIVE_STRING: usize = 2000;
+
+/// Cuts every string in `v` to `max` characters.
+fn trim_strings(v: &mut Value, max: usize) {
+    match v {
+        Value::String(s) if s.chars().count() > max => {
+            let cut: String = s.chars().take(max).collect();
+            *s = format!("{cut}… (cut off)");
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| trim_strings(x, max)),
+        Value::Object(o) => o.values_mut().for_each(|x| trim_strings(x, max)),
+        _ => {}
+    }
+}
+
+/// A live event as watchers receive it: only what the person sees in a
+/// chat as it happens (streamed reply text, approval prompts). Tool calls
+/// and their output don't go live; the call's summary arrives with the
+/// synced transcript.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LiveEvent {
@@ -122,9 +143,11 @@ impl LiveEvent {
                 session_id: session_id.clone(),
                 text: text.clone(),
             },
-            EngineEvent::ApprovalRequested { approval } => LiveEvent::ApprovalRequested {
-                approval: approval.clone(),
-            },
+            EngineEvent::ApprovalRequested { approval } => {
+                let mut approval = approval.clone();
+                trim_strings(&mut approval.input, MAX_LIVE_STRING);
+                LiveEvent::ApprovalRequested { approval }
+            }
             EngineEvent::ApprovalResolved { session_id, id } => LiveEvent::ApprovalResolved {
                 session_id: session_id.clone(),
                 id: id.clone(),
@@ -222,5 +245,27 @@ mod tests {
         let json = serde_json::to_value(&live).unwrap();
         assert_eq!(json, serde_json::to_value(&delta).unwrap());
         assert!(LiveEvent::from_engine(&EngineEvent::ConfigChanged).is_none());
+    }
+
+    #[test]
+    fn approval_prompts_go_live_without_huge_inputs() {
+        let big = "x".repeat(MAX_LIVE_STRING + 500);
+        let e = EngineEvent::ApprovalRequested {
+            approval: Approval {
+                id: "a".into(),
+                session_id: "s".into(),
+                tool: "Write".into(),
+                summary: "Write src/big.rs".into(),
+                input: json!({ "file_path": "src/big.rs", "content": big, "n": 3 }),
+            },
+        };
+        let LiveEvent::ApprovalRequested { approval } = LiveEvent::from_engine(&e).unwrap() else {
+            panic!()
+        };
+        assert_eq!(approval.input["file_path"], "src/big.rs");
+        assert_eq!(approval.input["n"], 3);
+        let content = approval.input["content"].as_str().unwrap();
+        assert!(content.ends_with("(cut off)") && content.len() < MAX_LIVE_STRING + 50);
+        assert_eq!(approval.summary, "Write src/big.rs");
     }
 }
