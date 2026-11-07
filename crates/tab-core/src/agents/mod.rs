@@ -254,15 +254,29 @@ pub struct AgentHub {
 /// The checkout a dev build of tab runs from, so agents can be told not to
 /// edit it under the running app. None in release builds.
 fn dev_checkout() -> Option<String> {
-    if !cfg!(debug_assertions) {
-        return None;
+    crate::sandbox::dev_checkout().map(|p| p.display().to_string())
+}
+
+/// Arguments for an agent CLI, collected before the sandbox wraps them.
+#[derive(Default)]
+pub(crate) struct Args(pub Vec<std::ffi::OsString>);
+
+impl Args {
+    pub fn arg(&mut self, a: impl AsRef<std::ffi::OsStr>) -> &mut Self {
+        self.0.push(a.as_ref().to_owned());
+        self
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let root = root.canonicalize().ok()?;
-    root.join(".git").exists().then(|| {
-        let s = root.display().to_string();
-        s.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(s)
-    })
+
+    pub fn args<I, S>(&mut self, it: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        for a in it {
+            self.arg(a);
+        }
+        self
+    }
 }
 
 impl AgentHub {
@@ -368,6 +382,20 @@ impl AgentHub {
         let d = self.sessions_dir().join(id);
         std::fs::create_dir_all(&d)?;
         Ok(d)
+    }
+
+    /// What a session's agent may touch. A chat about a pull request runs
+    /// in tab's checkout of it, someone else's code, so it gets the review
+    /// policy; every other chat is the person's own.
+    pub fn policy(&self, session: &Session) -> crate::sandbox::Policy {
+        let sb = crate::sandbox::current();
+        let cwd = crate::sandbox::real(Path::new(&session.cwd));
+        let workspaces = crate::sandbox::real(&self.dir.join("workspaces"));
+        if cwd.starts_with(&workspaces) {
+            sb.review_policy(&cwd, Path::new(&self.workdir()))
+        } else {
+            sb.chat_policy()
+        }
     }
 
     pub fn workdir(&self) -> String {
@@ -978,12 +1006,24 @@ impl AgentHub {
         );
         if let Some(root) = dev_checkout() {
             out.push_str(&format!(
-                "\nThis is a dev build of tab, running from {root}. Don't edit files in that checkout: each \
-                 save hot-reloads or rebuilds the app you are running inside, and a half-written edit can \
+                "\nThis is a dev build of tab, running from {root}. That checkout is read-only to you: each \
+                 save would hot-reload or rebuild the app you are running inside, and a half-written edit can \
                  blank it or end this chat. To change tab's code, work in a separate worktree (git -C \"{root}\" \
                  worktree add ../tab-<topic> -b <branch> origin/main), and commit, push and open a PR from \
                  there.\n"
             ));
+        }
+        let sb = crate::sandbox::current();
+        if sb.config().enabled {
+            out.push_str(if sb.enforced() {
+                "\nYou run in tab's sandbox. tab's own files, shell startup files and stored cloud and browser \
+                 credentials are off limits, and in a pull request's checkout you can only change that checkout. \
+                 A write that fails with \"Read-only file system\" or \"Operation not permitted\" on one of those \
+                 paths is the sandbox: tell the person what you needed instead of working around it.\n"
+            } else {
+                "\ntab's own files and stored credentials are off limits to your file tools. If an edit is refused \
+                 for that reason, tell the person what you needed instead of working around it.\n"
+            });
         }
         if let Ok(Some(brief)) = self.store.session_brief(&session.id) {
             out.push('\n');

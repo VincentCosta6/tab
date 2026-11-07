@@ -209,7 +209,7 @@ Rule of thumb: a new screen should be composable from these; if it isn't, add th
 
 **Actions are connector metadata.** Next to `kinds` (what a connector emits), every `ConnectorDescriptor` lists `actions`: `ActionInfo { id, label, description, icon, effect, inputs, outputs, spends, for_kinds }`. `effect` is `read`, `write` or `destructive`; `inputs`/`outputs` are typed fields (`text`, `long_text`, `number`, `bool`, `select`, `list`) with defaults like `{{item.metadata.repo}}`. `Connector::act(action, input)` runs one, through the gateway like every other call. Built in: GitHub (`pr.get`, `issue.comment`, `issue.add_labels`, `pr.request_reviewers`, `issue.create`, `pr.merge`, `issue.close`), email (`message.mark_read`, `message.flag`, `message.move`) and tab (`task.create`, `item.snooze`, `item.done`, `item.reopen`, `item.set_project`, run by the engine itself). Adding an action needs no UI work: the builder's forms come from the descriptor.
 
-**A workflow is data** (`workflow/mod.rs`): one trigger (`item` change from chosen connections and kinds with conditions, `signal` from another workflow, `schedule`, or `manual`) and ordered steps: `action`, `filter` (stop unless conditions hold), `set` (compute values) and `emit` (signal other workflows). Each step can have `when` conditions. Templates (`{{item.title}}`, `{{steps.pr.additions}}`, `{{signal.repo}}`) let steps feed each other; a value that is exactly one template keeps its type. There's no model call anywhere in a run, so runs are deterministic.
+**A workflow is data** (`workflow/mod.rs`): one trigger (`item` change from chosen connections and kinds with conditions, `signal` from another workflow, `schedule`, or `manual`) and ordered steps: `action`, `filter` (stop unless conditions hold), `set` (compute values), `emit` (signal other workflows) and `command` (run a program in the sandbox; see Sandbox). Each step can have `when` conditions. Templates (`{{item.title}}`, `{{steps.pr.additions}}`, `{{signal.repo}}`) let steps feed each other; a value that is exactly one template keeps its type. There's no model call anywhere in a run, so runs are deterministic.
 
 **Runtime** (`workflow/runtime.rs`) is one more subscriber to the engine's event stream. Stored in `workflows` (JSON definition) with every save kept in `workflow_versions`; runs in `workflow_runs` with each step's inputs, outputs, status and timing, for 30 days.
 
@@ -217,7 +217,7 @@ Rule of thumb: a new screen should be composable from these; if it isn't, add th
 - *Loops.* Each run carries the chain of workflows that caused it (tasks a run creates carry `workflow_chain` in metadata, and items a run changes remember the chain for 10 minutes). A workflow never runs inside its own chain, and chains stop at 3. Saving also refuses a set of enabled workflows that could start each other in a circle (a task-creating workflow on every new tab item, two workflows signalling each other).
 - *Dedup.* The same trigger (change, item, item version; or schedule slot) runs a workflow once, enforced by a unique index.
 - *Rate.* Per-workflow runs per hour (default 30) and per-item cool-down, 200 runs an hour across all workflows, at most 10 actions per run, a 60 s step timeout. Connector actions run at background priority, so the gateway defers them when a provider budget is tight; the run is marked *held back* rather than spending what interactive use needs. Refused runs are written down at most once an hour per workflow.
-- *Consent.* Agents can draft, save and dry-run workflows but every agent save is off and can't allow destructive steps. The person turns a workflow on (which re-validates it), and destructive actions stay blocked until the person allows them on that workflow.
+- *Consent.* Agents can draft, save and dry-run workflows but every agent save is off and can't allow destructive steps or commands. The person turns a workflow on (which re-validates it), and destructive actions and command steps stay blocked until the person allows them on that workflow (`allow_destructive`, `allow_commands`).
 
 **Dry runs** execute reads for real and show what each write would do with its rendered inputs.
 
@@ -272,11 +272,31 @@ Opening a PR (Reviews tab, or Review on a PR item) boots an editor-style workspa
 - **AI.** Each PR has one agent chat (Ask AI in the header opens it beside the editor). The session is keyed `review:<repo>#<n>` (`sessions.key`, migration 006), runs in the PR's worktree, and carries a `brief` about the PR that's added to the agent's instructions each turn. The brief tells the agent to link code as `path#L12`, and those links open in tab's editor or in VS Code (toggle in the panel; Ctrl/Cmd click does the other). The new-comment composer adds **Ask AI**, which sends the selected lines with your question (or "What does this code do?"), and **Add to fix list**. Review threads also have a Fix list button. The fix list is kept per PR on this computer and shown in a banner under the header, where **Run fix list** sends every queued fix, with its lines and code, to the agent in one message. The agent edits the checkout and doesn't commit unless asked.
 - **Data.** One GraphQL query reads the PR, checks rollup, review threads (with resolved / outdated state), the pending review and viewed states; REST adds rename info. Every call goes through the gateway and is audited. Actions apply optimistically, run one at a time, and refetch the PR. Sample PRs simulate the boot and keep edits local.
 
+## Sandbox (built)
+
+Everything tab starts on someone's behalf goes through `sandbox::Sandbox::command` with a `Policy` (`sandbox/mod.rs`): what's read-only (`protect`, `/` for everything), what's writable inside that, what's unreadable (`hide`), and the network (`Any`, `None`, or a domain list). It's on by default and set in Settings → Sandbox.
+
+| Who | Policy | Writes | Hidden | Network |
+|---|---|---|---|---|
+| A person's chat (Claude Code, OpenCode) | `chat_policy` | everywhere except tab's data and config, a dev build's own checkout (its `.git` stays writable for `git worktree add`), shell startup files, `~/.ssh` | cloud credentials, browser profiles, tab's `config.json` and database | any |
+| A chat about a PR, in its checkout | `review_policy` | as a person's chat, but the whole work folder is read-only except the checkout | the above plus git, SSH, npm and cargo credentials | any |
+| Language servers on a PR checkout | `isolated_policy` | the checkout, build caches, temp | as review | registries in `lsp_domains` |
+| Workflow `command` steps | `isolated_policy` | the step's folder (a fresh one per run by default), caches, temp | as review | the step's `network` list (empty is none) |
+
+**Enforcement.** macOS uses Seatbelt (`sandbox-exec` with a generated profile, `seatbelt.rs`); Linux uses bubblewrap (`bwrap.rs`), detected by actually running it. A domain list starts a small CONNECT proxy for that process (`proxy.rs`) and points `HTTPS_PROXY` and friends at it; on macOS the profile also blocks every other outbound connection, so the list is enforced, while on Linux it isn't yet (Settings says so). Windows has no file or network enforcement; there, and everywhere, two layers still apply:
+- *Environment* (`env.rs`): variables that look secret (`*_TOKEN`, `*_KEY`, `AWS_*`, ...) are dropped. A person's chat keeps model keys and `GH_TOKEN`; review chats keep model keys; language servers and commands keep nothing.
+- *Process trees* (`tree.rs`): a process group on Unix, a job object on Windows, so stopping a chat or a step ends everything it started.
+
+OpenCode runs one server for every chat, so it always gets the person's chat policy. Claude Code also gets the policy as its own permission rules (`--settings`, deny `Edit`/`Write` on protected paths and `Read` on hidden ones, and `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`), which holds on Windows too. rust-analyzer's build scripts and proc macros, which run the PR's code, stay on only where the network is enforced (macOS).
+
+**Containers.** A `command` step with an `image` runs in Docker or Podman (`container.rs`): only its folder mounted at `/work`, no capabilities, `no-new-privileges`, the person's uid, and `--network none` unless it lists hosts. That's the strong option on Windows and what a self-hosted server image would use for agents and commands.
+
 ## Security
 
 - Secrets live in `config.json` for now and are masked in the UI; moving them to the OS keychain is phase 2.
 - Item text is passed to models as data with explicit instructions not to follow it; the user's own instructions are the only trusted prompt input.
 - The MCP server binds to localhost and requires a token; configuration tools can be disabled.
+- Agents, language servers and workflow commands run in the sandbox (see Sandbox): they can't change tab or read its secrets, and code from pull requests can only change its own checkout.
 - Automations and agent actions that change external systems are audited and can require confirmation.
 
 ## Server (later)

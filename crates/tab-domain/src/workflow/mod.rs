@@ -64,6 +64,9 @@ pub struct Workflow {
     /// The person allowed destructive steps (merge, close, move mail).
     #[serde(default)]
     pub allow_destructive: bool,
+    /// The person allowed command steps to run programs on this computer.
+    #[serde(default)]
+    pub allow_commands: bool,
     pub trigger: Trigger,
     #[serde(default)]
     pub steps: Vec<Step>,
@@ -178,7 +181,37 @@ pub enum StepKind {
         #[serde(default)]
         payload: Map<String, Value>,
     },
+    /// Run a program in tab's sandbox. Arguments are passed as they are,
+    /// never through a shell, so templated values can't become commands.
+    Command {
+        program: String,
+        #[serde(default)]
+        args: Vec<String>,
+        /// The folder it runs in and may change. Empty means a fresh folder
+        /// for the run, removed when the run ends.
+        #[serde(default)]
+        folder: String,
+        /// Hosts it may reach: empty for none, `*` for any.
+        #[serde(default)]
+        network: Vec<String>,
+        /// Extra environment. Nothing of tab's own environment that looks
+        /// secret is passed on.
+        #[serde(default)]
+        env: Map<String, Value>,
+        /// Run in this container image (Docker or Podman) instead.
+        #[serde(default)]
+        image: String,
+        /// 0 means the default.
+        #[serde(default)]
+        timeout_secs: u32,
+    },
 }
+
+/// Command steps per workflow.
+pub const MAX_COMMANDS: usize = 5;
+/// A command's default and longest time.
+pub const DEFAULT_COMMAND_SECS: u32 = 600;
+pub const MAX_COMMAND_SECS: u32 = 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Condition {
@@ -407,6 +440,17 @@ pub fn validate(w: &Workflow, catalog: &[ConnectorInfo], others: &[Workflow]) ->
             format!("At most {MAX_ACTIONS_PER_RUN} actions per workflow."),
         ));
     }
+    let commands = w
+        .steps
+        .iter()
+        .filter(|s| matches!(s.kind, StepKind::Command { .. }))
+        .count();
+    if commands > MAX_COMMANDS {
+        out.push(Issue::err(
+            None,
+            format!("At most {MAX_COMMANDS} commands per workflow."),
+        ));
+    }
     if w.limits.max_runs_per_hour == 0 {
         out.push(Issue::err(None, "Allow at least one run per hour."));
     }
@@ -506,6 +550,65 @@ pub fn validate(w: &Workflow, catalog: &[ConnectorInfo], others: &[Workflow]) ->
                 }
                 for v in payload.values() {
                     refs.extend(template::refs(v));
+                }
+            }
+            StepKind::Command {
+                program,
+                args,
+                folder,
+                network,
+                env,
+                image,
+                timeout_secs,
+            } => {
+                if program.trim().is_empty() {
+                    out.push(Issue::err(at, "Name the program to run."));
+                }
+                if !template::refs(&Value::String(program.clone())).is_empty() {
+                    out.push(Issue::err(
+                        at,
+                        "The program can't come from a template; pass values as arguments.",
+                    ));
+                }
+                let shell = ["sh", "bash", "zsh", "cmd", "cmd.exe", "powershell", "pwsh"];
+                let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
+                if shell.contains(&base)
+                    && args
+                        .iter()
+                        .any(|a| !template::refs(&Value::String(a.clone())).is_empty())
+                {
+                    out.push(Issue::warn(at, "A shell given templated text can be told to run anything that text says. Call the program directly instead."));
+                }
+                for a in args {
+                    refs.extend(template::refs(&Value::String(a.clone())));
+                }
+                refs.extend(template::refs(&Value::String(folder.clone())));
+                for v in env.values() {
+                    refs.extend(template::refs(v));
+                }
+                if network.iter().any(|d| d.trim() == "*") {
+                    out.push(Issue::warn(
+                        at,
+                        "This command can reach any host. List the hosts it needs if you can.",
+                    ));
+                }
+                if *timeout_secs > MAX_COMMAND_SECS {
+                    out.push(Issue::err(
+                        at,
+                        format!("Commands run at most {} minutes.", MAX_COMMAND_SECS / 60),
+                    ));
+                }
+                if image.trim().is_empty() && !folder.trim().is_empty() {
+                    out.push(Issue::warn(
+                        at,
+                        format!("This command can change everything in {folder}."),
+                    ));
+                }
+                if !w.allow_commands {
+                    out.push(Issue::warn(
+                        at,
+                        "Commands stay blocked until you allow commands on this workflow.",
+                    ));
                 }
             }
         }
@@ -848,6 +951,7 @@ pub fn prepare_save(
     if by == SavedBy::Agent {
         w.enabled = false;
         w.allow_destructive = existing.is_some_and(|e| e.allow_destructive);
+        w.allow_commands = existing.is_some_and(|e| e.allow_commands);
         if existing.is_none() {
             w.created_by = "agent".into();
         }
@@ -996,5 +1100,72 @@ mod tests {
         let mut off = b.clone();
         off.enabled = false;
         assert!(find_loop(&a, &[off]).is_none());
+    }
+
+    #[test]
+    fn command_steps_are_checked_and_only_the_person_allows_them() {
+        let cmd = |program: &str, args: &[&str]| Step {
+            id: "run".into(),
+            label: String::new(),
+            when: vec![],
+            continue_on_error: false,
+            kind: StepKind::Command {
+                program: program.into(),
+                args: args.iter().map(|a| a.to_string()).collect(),
+                folder: String::new(),
+                network: vec![],
+                env: Map::new(),
+                image: String::new(),
+                timeout_secs: 0,
+            },
+        };
+        let w = |step: Step| Workflow {
+            name: "Build".into(),
+            trigger: Trigger::Manual,
+            steps: vec![step],
+            ..Default::default()
+        };
+        let msgs = |w: &Workflow| -> Vec<(bool, String)> {
+            validate(w, &[], &[])
+                .into_iter()
+                .map(|i| (i.error, i.message))
+                .collect()
+        };
+
+        let ok = w(cmd("cargo", &["test"]));
+        let m = msgs(&ok);
+        assert!(m.iter().all(|(e, _)| !e), "{m:?}");
+        assert!(m.iter().any(|(_, t)| t.contains("allow commands")), "{m:?}");
+
+        assert!(
+            msgs(&w(cmd("", &[])))
+                .iter()
+                .any(|(e, t)| *e && t.contains("program"))
+        );
+        assert!(msgs(&w(cmd("{{item.title}}", &[]))).iter().any(|(e, _)| *e));
+        assert!(
+            msgs(&w(cmd("sh", &["-c", "{{item.title}}"])))
+                .iter()
+                .any(|(e, t)| !e && t.contains("shell"))
+        );
+        assert!(
+            msgs(&w(cmd("cargo", &["{{steps.later.x}}"])))
+                .iter()
+                .any(|(e, _)| *e),
+            "templates still only read earlier steps"
+        );
+
+        // An agent can't turn commands on, or keep them on by resaving.
+        let mut allowed = ok.clone();
+        allowed.id = "wf1".into();
+        allowed.allow_commands = true;
+        let (agent, _) = prepare_save(allowed.clone(), SavedBy::Agent, &[], &[]);
+        assert!(!agent.allow_commands);
+        let mut kept = allowed.clone();
+        kept.allow_commands = false;
+        let (resaved, _) = prepare_save(kept, SavedBy::Agent, &[], &[allowed.clone()]);
+        assert!(resaved.allow_commands, "the person's choice stays");
+        let (person, _) = prepare_save(allowed, SavedBy::Person, &[], &[]);
+        assert!(person.allow_commands);
     }
 }

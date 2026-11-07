@@ -1515,4 +1515,83 @@ mod tests {
         assert_eq!(acting.0.lock().unwrap().len(), 1);
         handle.shutdown();
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_steps_run_only_when_allowed() {
+        use crate::workflow::runtime::StepStatus;
+        use crate::workflow::{RunStatus, Step, StepKind, Trigger};
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = broadcast::channel(64);
+        let handle = Engine {
+            gateway: Arc::new(Gateway::new(store.clone())),
+            store: store.clone(),
+            ranker: Arc::new(Pipeline {
+                rules: RankingRules::default(),
+                profile: Default::default(),
+                ai: None,
+            }),
+            connectors: vec![Arc::new(crate::connectors::TabConnector)],
+            infos: Vec::new(),
+            events,
+        }
+        .start();
+        let step = |id: &str, kind: StepKind| Step {
+            id: id.into(),
+            label: String::new(),
+            when: vec![],
+            continue_on_error: false,
+            kind,
+        };
+        let mut w = Workflow {
+            name: "Build".into(),
+            trigger: Trigger::Manual,
+            steps: vec![
+                step(
+                    "run",
+                    StepKind::Command {
+                        program: "sh".into(),
+                        args: vec![
+                            "-c".into(),
+                            "echo \"$1\" > out.txt; cat out.txt".into(),
+                            "sh".into(),
+                            "{{workflow.name}}; rm -rf /".into(),
+                        ],
+                        folder: String::new(),
+                        network: vec![],
+                        env: Default::default(),
+                        image: String::new(),
+                        timeout_secs: 30,
+                    },
+                ),
+                step(
+                    "after",
+                    StepKind::Set {
+                        values: [("said".to_string(), "{{steps.run.stdout}}".into())]
+                            .into_iter()
+                            .collect(),
+                    },
+                ),
+            ],
+            ..Default::default()
+        };
+        w = store.workflow_save(&w, "user", Utc::now()).unwrap();
+
+        let blocked = handle.run_workflow(w.clone(), None, false).await.unwrap();
+        assert_eq!(blocked.status, RunStatus::Blocked);
+        assert_eq!(blocked.steps[0].status, StepStatus::Blocked);
+
+        let dry = handle.run_workflow(w.clone(), None, true).await.unwrap();
+        assert_eq!(dry.steps[0].status, StepStatus::Dry);
+
+        w.allow_commands = true;
+        let w = store.workflow_save(&w, "user", Utc::now()).unwrap();
+        let ran = handle.run_workflow(w, None, false).await.unwrap();
+        assert_eq!(ran.status, RunStatus::Succeeded, "{:?}", ran.error);
+        // A templated argument stays one argument: it's echoed, not run.
+        assert_eq!(ran.steps[0].output["stdout"], "Build; rm -rf /\n");
+        assert_eq!(ran.steps[0].output["exit_code"], 0);
+        assert_eq!(ran.steps[1].output["said"], "Build; rm -rf /\n");
+        handle.shutdown();
+    }
 }

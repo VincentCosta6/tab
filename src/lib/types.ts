@@ -161,11 +161,15 @@ export type StepKind =
   | { type: "action"; connector: string; action: string; input: Record<string, unknown> }
   | { type: "filter"; conditions: Condition[] }
   | { type: "set"; values: Record<string, unknown> }
-  | { type: "emit"; signal: string; payload: Record<string, unknown> };
+  | { type: "emit"; signal: string; payload: Record<string, unknown> }
+  | {
+      type: "command"; program: string; args: string[]; folder: string; network: string[];
+      env: Record<string, unknown>; image: string; timeout_secs: number;
+    };
 export type Step = { id: string; label: string; when: Condition[]; continue_on_error: boolean } & StepKind;
 
 export interface Workflow {
-  id: string; name: string; description: string; enabled: boolean; allow_destructive: boolean;
+  id: string; name: string; description: string; enabled: boolean; allow_destructive: boolean; allow_commands?: boolean;
   trigger: Trigger; steps: Step[]; limits: { max_runs_per_hour: number; cooldown_minutes: number };
   created_by: string; version: number; updated_at: string | null;
 }
@@ -392,7 +396,25 @@ export interface TabConfig {
   agent: AgentConfig;
   mcp: { port: number; token: string };
   storage: { keep_days: number; max_gb: number | null };
+  sandbox: SandboxConfig;
   onboarded: boolean;
+}
+
+export interface SandboxConfig {
+  enabled: boolean;
+  protected: string[];
+  hidden: string[];
+  lsp_domains: string[];
+  container_runtime: string;
+}
+
+export interface SandboxStatus {
+  enabled: boolean;
+  backend: "seatbelt" | "bubblewrap" | "unavailable";
+  enforced: boolean;
+  summary: string;
+  fix: string | null;
+  container: string | null;
 }
 
 export interface AgentConfig {

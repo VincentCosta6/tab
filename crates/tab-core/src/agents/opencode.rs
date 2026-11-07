@@ -35,7 +35,7 @@ pub(super) struct Server {
     directory: String,
     client: reqwest::Client,
     turns: Arc<Mutex<HashMap<String, Turn>>>,
-    child: Mutex<Option<tokio::process::Child>>,
+    child: Mutex<Option<crate::sandbox::Guarded>>,
     cancel: CancellationToken,
 }
 
@@ -43,7 +43,7 @@ impl Server {
     pub(super) fn shutdown(&self) {
         self.cancel.cancel();
         if let Some(mut c) = self.child.lock().unwrap().take() {
-            let _ = c.start_kill();
+            c.kill_tree();
         }
     }
 
@@ -85,18 +85,21 @@ async fn server(hub: &Arc<AgentHub>) -> anyhow::Result<Arc<Server>> {
                     .unwrap_or(default_command(AgentKind::OpenCode)),
             )?;
             let port = free_port();
-            let mut cmd = super::command(&exe);
-            cmd.args([
-                "serve",
-                "--hostname",
-                "127.0.0.1",
-                "--port",
-                &port.to_string(),
-            ])
-            .current_dir(&directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            // One server serves every chat, so it runs under a person's
+            // chat policy.
+            let policy = crate::sandbox::current().chat_policy();
+            let args: Vec<std::ffi::OsString> = ["serve", "--hostname", "127.0.0.1", "--port"]
+                .iter()
+                .map(Into::into)
+                .chain([port.to_string().into()])
+                .collect();
+            let mut prepared = crate::sandbox::current()
+                .command(&exe, &args, std::path::Path::new(&directory), &policy)
+                .await?;
+            let cmd = &mut prepared.cmd;
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
             if let Some(mcp) = hub.mcp() {
                 // Inline config: adds tab's MCP server without touching the
                 // person's own opencode.json.
@@ -112,7 +115,7 @@ async fn server(hub: &Arc<AgentHub>) -> anyhow::Result<Arc<Server>> {
                 });
                 cmd.env("OPENCODE_CONFIG_CONTENT", config.to_string());
             }
-            let child = cmd.spawn().map_err(|e| {
+            let child = prepared.spawn().map_err(|e| {
                 anyhow::anyhow!("starting OpenCode ({}) failed: {e}", exe.display())
             })?;
             (format!("http://127.0.0.1:{port}"), Some(child))

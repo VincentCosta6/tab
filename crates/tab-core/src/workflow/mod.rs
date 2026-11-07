@@ -4,6 +4,7 @@
 
 pub use tab_domain::workflow::*;
 
+pub mod command;
 pub mod runtime;
 
 #[cfg(test)]

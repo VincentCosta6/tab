@@ -480,6 +480,9 @@ impl Runtime {
         }
         let trigger_item = run.item_id.clone();
         let mut actions = 0;
+        // A command step without a folder of its own gets this run's
+        // scratch folder, shared by the run's steps and removed after.
+        let mut scratch: Option<std::path::PathBuf> = None;
         run.status = RunStatus::Succeeded;
         for step in &w.steps {
             let started = Instant::now();
@@ -499,6 +502,116 @@ impl Runtime {
             }
             let mut stop: Option<RunStatus> = None;
             match &step.kind {
+                StepKind::Command {
+                    program,
+                    args,
+                    folder,
+                    network,
+                    env,
+                    image,
+                    timeout_secs,
+                } => {
+                    let text = |s: &str| {
+                        let v = template::render(&Value::String(s.to_string()), &ctx);
+                        match v {
+                            Value::String(s) => s,
+                            Value::Null => String::new(),
+                            other => other.to_string(),
+                        }
+                    };
+                    let args: Vec<String> = args
+                        .iter()
+                        .filter(|a| !a.trim().is_empty())
+                        .map(|a| text(a))
+                        .collect();
+                    let folder = text(folder);
+                    let env: Vec<(String, String)> = env
+                        .iter()
+                        .map(|(k, v)| {
+                            let v = template::render(v, &ctx);
+                            (
+                                k.clone(),
+                                v.as_str().map(str::to_string).unwrap_or_else(|| {
+                                    if v.is_null() {
+                                        String::new()
+                                    } else {
+                                        v.to_string()
+                                    }
+                                }),
+                            )
+                        })
+                        .collect();
+                    sr.input = json!({
+                        "program": program,
+                        "args": args,
+                        "folder": folder,
+                        "network": network,
+                        "image": image,
+                        "env": env.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+                    });
+                    if run.dry_run {
+                        sr.status = StepStatus::Dry;
+                    } else if !w.allow_commands {
+                        sr.status = StepStatus::Blocked;
+                        sr.error = Some(
+                            "Commands are blocked. Allow commands on this workflow to let it run programs."
+                                .into(),
+                        );
+                        stop = Some(RunStatus::Blocked);
+                    } else {
+                        let dir = if folder.trim().is_empty() {
+                            let d = scratch.get_or_insert_with(|| {
+                                std::env::temp_dir().join("tab-runs").join(&run.id)
+                            });
+                            d.clone()
+                        } else {
+                            std::path::PathBuf::from(folder.trim())
+                        };
+                        let secs = if *timeout_secs == 0 {
+                            super::DEFAULT_COMMAND_SECS
+                        } else {
+                            (*timeout_secs).min(super::MAX_COMMAND_SECS)
+                        };
+                        let spec = super::command::Spec {
+                            program: program.trim().to_string(),
+                            args,
+                            folder: dir,
+                            network: crate::sandbox::Network::from_list(network),
+                            env,
+                            image: Some(image.trim().to_string()).filter(|i| !i.is_empty()),
+                            timeout: Duration::from_secs(u64::from(secs)),
+                        };
+                        match super::command::run(spec).await {
+                            Ok(done) => {
+                                sr.output = done.output;
+                                if done.exit_code != Some(0) {
+                                    sr.status = StepStatus::Failed;
+                                    let err = sr.output["stderr"].as_str().unwrap_or_default();
+                                    let last = err
+                                        .lines()
+                                        .rev()
+                                        .find(|l| !l.trim().is_empty())
+                                        .unwrap_or_default();
+                                    sr.error = Some(match done.exit_code {
+                                        Some(c) => format!(
+                                            "{program} exited with {c}{}",
+                                            if last.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!(": {last}")
+                                            }
+                                        ),
+                                        None => format!("{program} was killed"),
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                sr.status = StepStatus::Failed;
+                                sr.error = Some(format!("{e:#}"));
+                            }
+                        }
+                    }
+                }
                 StepKind::Filter { conditions } => {
                     let failed: Vec<String> = conditions
                         .iter()
@@ -642,6 +755,9 @@ impl Runtime {
                 }
                 break;
             }
+        }
+        if let Some(d) = scratch {
+            let _ = std::fs::remove_dir_all(d);
         }
     }
 }

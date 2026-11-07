@@ -163,6 +163,7 @@ impl Core {
         let ranking_changed = next.ranking != current.ranking || next.profile != current.profile;
         *current = next.clone();
         drop(current);
+        tab_core::sandbox::current().set_config(next.sandbox.clone());
         self.hub.set_config(next.agent.clone()).await;
         self.restart(&next).await;
         if ranking_changed && let Some(e) = self.engine.read().await.as_ref() {
@@ -1707,6 +1708,7 @@ async fn workflow_set_enabled(
     id: String,
     enabled: bool,
     allow_destructive: Option<bool>,
+    allow_commands: Option<bool>,
 ) -> CmdResult<Workflow> {
     let mut w = state
         .store
@@ -1725,10 +1727,14 @@ async fn workflow_set_enabled(
             return Err(i.message);
         }
     }
-    let changed_destructive = allow_destructive.is_some_and(|a| a != w.allow_destructive);
+    let changed_destructive = allow_destructive.is_some_and(|a| a != w.allow_destructive)
+        || allow_commands.is_some_and(|a| a != w.allow_commands);
     w.enabled = enabled;
     if let Some(a) = allow_destructive {
         w.allow_destructive = a;
+    }
+    if let Some(a) = allow_commands {
+        w.allow_commands = a;
     }
     let w = if changed_destructive {
         state
@@ -2025,6 +2031,12 @@ async fn get_config(state: State<'_, AppState>) -> CmdResult<TabConfig> {
     Ok(masked(&*state.config.lock().await))
 }
 
+/// How the sandbox works on this computer, for Settings.
+#[tauri::command]
+async fn sandbox_status() -> CmdResult<tab_core::sandbox::Status> {
+    Ok(tab_core::sandbox::current().status().await)
+}
+
 #[tauri::command]
 async fn save_config(state: State<'_, AppState>, config: TabConfig) -> CmdResult<TabConfig> {
     let next = unmask(config, &*state.config.lock().await);
@@ -2257,6 +2269,13 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             let config_path = app.path().app_config_dir()?.join("config.json");
             let config = TabConfig::load(&config_path)?;
+            // Before anything starts a process: agents, language servers
+            // and workflow commands all go through it.
+            tab_core::sandbox::install(Arc::new(tab_core::sandbox::Sandbox::new(
+                config.sandbox.clone(),
+                Some(data_dir.clone()),
+                config_path.parent().map(Into::into),
+            )));
             let store = Arc::new(Store::open(&data_dir.join("tab.db"))?);
             let gateway = Arc::new(Gateway::new(store.clone()));
             // Search by meaning: follows the setting on the tab connection.
@@ -2374,6 +2393,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            sandbox_status,
             rename_item,
             titler_default_rules,
             browser_open,
