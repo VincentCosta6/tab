@@ -21,6 +21,9 @@ export interface LinkPreview {
   facts?: Array<[string, string]>;
   /** True while the answer is still being worked out; tab asks again shortly. */
   settling?: boolean;
+  /** True while something is in progress (CI running): tab checks back every
+   * 15s instead of every minute, without the 5s pace of `settling`. */
+  active?: boolean;
   /** True once nothing about it can change (merged, closed): no need to keep checking. */
   final?: boolean;
 }

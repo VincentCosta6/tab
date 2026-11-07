@@ -60,5 +60,7 @@ export function toPreview(s: LinkSummary): LinkPreview {
     // "unknown" means GitHub is still working out mergeability.
     final: s.state === "merged" || s.state === "closed",
     settling: s.state === "open" && s.review_decision !== undefined && (!s.merge_state || s.merge_state === "unknown"),
+    // CI running: keep checking so the badge flips when it finishes.
+    active: (s.state === "open" || s.state === "draft") && s.checks === "pending",
   };
 }
