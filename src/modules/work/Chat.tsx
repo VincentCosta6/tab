@@ -268,9 +268,6 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
           <Markdown text={stream} />
         </div>
       )}
-      {chat?.running && !stream && !chat.approvals.length && (
-        <div className="msg-working"><span className="dots"><i /><i /><i /></span> Working</div>
-      )}
       {chat?.approvals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
       <div ref={end} />
       <ProgressBar messages={messages} running={!!chat?.running} />
@@ -285,7 +282,7 @@ interface Todo { content: string; status: "pending" | "in_progress" | "completed
  * (from TodoWrite) with progress, and the step it's on right now.
  */
 function ProgressBar({ messages, running }: { messages: SessionMessage[]; running: boolean }) {
-  const [open, setOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false); // steps are shown by default
   let todos: Todo[] = [];
   let step = "";
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -303,13 +300,13 @@ function ProgressBar({ messages, running }: { messages: SessionMessage[]; runnin
   const label = active ? active.activeForm || active.content : step || "Working";
   return (
     <div className={cx("progress-bar", running && "running")}>
-      <button className="progress-head" onClick={() => todos.length && setOpen(!open)} aria-expanded={open}>
+      <button className="progress-head" onClick={() => todos.length && setCollapsed(!collapsed)} aria-expanded={!collapsed}>
         {running ? <span className="dots"><i /><i /><i /></span> : <Icon name="check" size={12} />}
         <span className="progress-label">{running ? label : "Done"}</span>
         {todos.length > 0 && <span className="progress-count">{done}/{todos.length}</span>}
       </button>
       {todos.length > 0 && <div className="progress-track"><i style={{ width: `${(done / todos.length) * 100}%` }} /></div>}
-      {open && (
+      {todos.length > 0 && !collapsed && (
         <ul className="progress-list">
           {todos.map((t, i) => (
             <li key={i} className={t.status}>

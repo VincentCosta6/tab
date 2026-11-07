@@ -758,3 +758,6 @@ body.resizing iframe { pointer-events: none; }
 .ctx-rail-toggle .subtle { text-transform: none; letter-spacing: 0; font-weight: 400; }
 .ctx-rail-toggle .ctx-chevron { transform: rotate(-90deg); }
 .ctx-rail-toggle[aria-expanded="true"] .ctx-chevron { transform: none; }
+
+/* Slim, themed scrollbars instead of the chunky OS default. */
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
