@@ -6,6 +6,7 @@ use tab_protocol::{ClientEnvelope, decode_server};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use super::*;
+use crate::live::SteerCommand;
 use crate::model::{IncomingEvent, ItemState, QueueItem};
 use crate::store::Upsert;
 
@@ -83,7 +84,7 @@ async fn existing_data_is_copied_in_and_new_changes_follow() {
     // The app is its own connection, caught up.
     assert_eq!(st.connections.len(), 1);
     assert!(st.connections[0].this_app);
-    assert_eq!(st.connections[0].device, "this-computer");
+    assert_eq!(st.connections[0].device, store.device_id().unwrap());
     assert_eq!(st.connections[0].behind, 0);
     assert_eq!(st.runs_on, "local");
     let _ = std::fs::remove_dir_all(dir);
@@ -379,5 +380,372 @@ async fn changes_reach_the_hub_as_they_commit() {
         assert!(started.elapsed() < IDLE / 2, "waited for the idle backstop");
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// ---- Files and the live channel ----
+
+#[test]
+fn attached_files_go_into_the_hub_and_back_out() {
+    let (hub, dir) = temp_hub("files");
+    let cache = dir.join("attachments");
+    let path = hub.attach(&cache, b"png bytes", "../shot.png").unwrap();
+    assert!(path.starts_with(&cache));
+    assert_eq!(std::fs::read(&path).unwrap(), b"png bytes");
+    let file = crate::live::file_ref(&path).unwrap();
+    assert_eq!(file.hash, tab_domain::blob::hash(b"png bytes"));
+    assert_eq!(file.name, "shot.png");
+
+    // The cache can be swept; the hub still has it.
+    std::fs::remove_dir_all(&cache).unwrap();
+    let again = hub
+        .file_materialize(&cache, &file.hash, &file.name)
+        .unwrap();
+    assert_eq!(again, path);
+    assert_eq!(std::fs::read(&again).unwrap(), b"png bytes");
+    assert!(
+        hub.file_materialize(&cache, &tab_domain::blob::hash(b"never"), "x")
+            .is_err()
+    );
+
+    let st = hub.status().unwrap();
+    assert_eq!((st.files, st.file_bytes), (1, 9));
+    // Fresh and unreferenced: kept for the grace period.
+    assert_eq!(hub.collect_files().unwrap(), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+async fn connect(url: &str, device: &str) -> Socket {
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("{url}?token=secret"))
+        .await
+        .unwrap();
+    ws.send(frame(
+        1,
+        Req::Hello(pb::Hello {
+            device: device.into(),
+            client: "test".into(),
+            since: 0,
+        }),
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(next(&mut ws).await.body, Some(Res::Welcome(_))));
+    ws
+}
+
+#[tokio::test]
+async fn files_upload_and_download_over_http() {
+    let (hub, dir) = temp_hub("http");
+    let url = hub.serve(48_740, "secret".into()).await.unwrap();
+    let base = url.replace("ws://", "http://").replace("/hub", "");
+    let client = reqwest::Client::new();
+    let res = client
+        .put(format!("{base}/files?token=wrong"))
+        .body("x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 401);
+    let res: serde_json::Value = client
+        .put(format!("{base}/files?token=secret"))
+        .body("a file from the phone")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let hash = res["hash"].as_str().unwrap().to_string();
+    assert_eq!(hash, tab_domain::blob::hash(b"a file from the phone"));
+    assert_eq!(res["size"], 21);
+    let got = client
+        .get(format!("{base}/files/{hash}?token=secret"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.status(), 200);
+    assert_eq!(&got.bytes().await.unwrap()[..], b"a file from the phone");
+    let missing = client
+        .get(format!(
+            "{base}/files/{}?token=secret",
+            tab_domain::blob::hash(b"nope")
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn this_app_watches_and_steers_a_session_another_device_runs() {
+    let (hub, dir) = temp_hub("live");
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (events, mut ui) = broadcast::channel(64);
+    hub.follow(store.clone(), events);
+    let url = hub.serve(48_760, "secret".into()).await.unwrap();
+    let mut laptop = connect(&url, "device-laptop").await;
+
+    // The laptop's chat syncs in, mid-turn.
+    let sid = "s-laptop";
+    let session = Op::Put {
+        kind: "sessions".into(),
+        id: json!([sid]).to_string(),
+        body: json!({
+            "id": sid, "item_id": null, "agent": "claude_code", "agent_session_id": null,
+            "title": "On the laptop", "status": "working", "cwd": "/w",
+            "created_at": "2027-01-15T08:00:00.000Z", "updated_at": "2027-01-15T08:00:00.000Z",
+            "key": null, "brief": null, "device": "device-laptop",
+        }),
+    };
+    laptop
+        .send(frame(
+            2,
+            Req::Apply(pb::Apply {
+                ops: vec![(&session).into()],
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        next(&mut laptop).await.body,
+        Some(Res::Applied(_))
+    ));
+    until("the chat to land here", || {
+        store.session_get(sid).unwrap().is_some()
+    })
+    .await;
+    // The app starts watching it: the laptop is told.
+    let watched = loop {
+        if let Some(Res::Watched(w)) = next(&mut laptop).await.body {
+            break w;
+        }
+    };
+    assert_eq!((watched.session.as_str(), watched.watchers), (sid, 1));
+
+    // What the laptop streams shows up here.
+    let delta = crate::live::LiveEvent::SessionDelta {
+        session_id: sid.into(),
+        text: "Looking at the".into(),
+    };
+    let approval = crate::live::LiveEvent::ApprovalRequested {
+        approval: crate::model::Approval {
+            id: "a1".into(),
+            session_id: sid.into(),
+            tool: "Bash".into(),
+            summary: "rm -rf build".into(),
+            input: json!({}),
+        },
+    };
+    for (i, ev) in [&delta, &approval].into_iter().enumerate() {
+        laptop
+            .send(frame(
+                10 + i as u64,
+                Req::Publish(pb::Publish {
+                    session: sid.into(),
+                    event_json: serde_json::to_vec(ev).unwrap(),
+                }),
+            ))
+            .await
+            .unwrap();
+    }
+    let mut seen = vec![];
+    while seen.len() < 2 {
+        let ev = tokio::time::timeout(Duration::from_secs(2), ui.recv())
+            .await
+            .expect("live events should reach the UI")
+            .unwrap();
+        match ev {
+            EngineEvent::SessionDelta { session_id, text } => {
+                assert_eq!(
+                    (session_id.as_str(), text.as_str()),
+                    (sid, "Looking at the")
+                );
+                seen.push("delta");
+            }
+            EngineEvent::ApprovalRequested { approval } => {
+                assert_eq!(approval.id, "a1");
+                seen.push("approval");
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(hub.remote_approval("a1").as_deref(), Some(sid));
+
+    // Answering here, and a message with a file, go to the laptop.
+    hub.steer_remote(
+        sid,
+        &SteerCommand::Approval {
+            id: "a1".into(),
+            decision: "allow".into(),
+            message: None,
+            answers: None,
+        },
+    )
+    .unwrap();
+    let file = hub.file_put(b"diagram").unwrap();
+    hub.steer_remote(
+        sid,
+        &SteerCommand::Message {
+            text: "use this".into(),
+            files: vec![crate::live::FileRef {
+                hash: file.hash.clone(),
+                name: "d.png".into(),
+                size: file.size,
+            }],
+        },
+    )
+    .unwrap();
+    let mut got = vec![];
+    while got.len() < 2 {
+        if let Some(Res::Steered(s)) = next(&mut laptop).await.body {
+            assert_eq!(s.session, sid);
+            got.push(serde_json::from_slice::<SteerCommand>(&s.body_json).unwrap());
+        }
+    }
+    assert!(matches!(&got[0], SteerCommand::Approval { id, .. } if id == "a1"));
+    assert!(matches!(&got[1], SteerCommand::Message { files, .. } if files[0].hash == file.hash));
+
+    // The turn ends: the app stops watching.
+    let mut done = session.clone();
+    if let Op::Put { body, .. } = &mut done {
+        body["status"] = json!("idle");
+    }
+    laptop
+        .send(frame(
+            3,
+            Req::Apply(pb::Apply {
+                ops: vec![(&done).into()],
+            }),
+        ))
+        .await
+        .unwrap();
+    let watched = loop {
+        if let Some(Res::Watched(w)) = next(&mut laptop).await.body {
+            break w;
+        }
+    };
+    assert_eq!(watched.watchers, 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn steering_a_session_whose_device_is_away_says_so() {
+    let (hub, dir) = temp_hub("away");
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (events, _) = broadcast::channel(16);
+    hub.follow(store.clone(), events);
+    hub.apply(&[Op::Put {
+        kind: "sessions".into(),
+        id: json!(["s1"]).to_string(),
+        body: json!({ "id": "s1", "device": "device-desktop-at-home" }),
+    }])
+    .unwrap();
+    let e = hub.steer_remote("s1", &SteerCommand::Stop).unwrap_err();
+    assert!(e.to_string().contains("isn't connected"), "{e}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_phone_watches_a_session_this_app_runs_and_answers_its_prompt() {
+    let (hub, dir) = temp_hub("runner");
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (events, _) = broadcast::channel(64);
+    let agents = crate::agents::AgentHub::new(
+        store.clone(),
+        events.clone(),
+        crate::config::AgentConfig {
+            kind: Some(crate::model::AgentKind::ClaudeCode),
+            ..Default::default()
+        },
+        dir.join("agents"),
+    );
+    hub.attach_agents(agents.clone());
+    hub.follow(store.clone(), events.clone());
+    let url = hub.serve(48_780, "secret".into()).await.unwrap();
+    let session = store
+        .session_create(
+            None,
+            crate::model::AgentKind::ClaudeCode,
+            "Here",
+            "/w",
+            Utc::now(),
+        )
+        .unwrap();
+    until("the chat to reach the hub", || {
+        hub.hub.lock().unwrap().runner(&session.id).is_some()
+    })
+    .await;
+
+    // The agent is part-way through a reply when the phone starts watching.
+    let _ = events.send(EngineEvent::SessionDelta {
+        session_id: session.id.clone(),
+        text: "So far ".into(),
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut phone = connect(&url, "phone").await;
+    phone
+        .send(frame(
+            2,
+            Req::Watch(pb::Watch {
+                sessions: vec![session.id.clone()],
+            }),
+        ))
+        .await
+        .unwrap();
+    let live = |env: tab_protocol::ServerEnvelope| match env.body {
+        Some(Res::Live(l)) => {
+            Some(serde_json::from_slice::<crate::live::LiveEvent>(&l.event_json).unwrap())
+        }
+        _ => None,
+    };
+    // It gets the text so far, then what streams after.
+    let first = loop {
+        if let Some(ev) = live(next(&mut phone).await) {
+            break ev;
+        }
+    };
+    assert_eq!(
+        first,
+        crate::live::LiveEvent::SessionDelta {
+            session_id: session.id.clone(),
+            text: "So far ".into()
+        }
+    );
+
+    // The agent asks; the phone sees the prompt and answers it.
+    let (a, sid) = (agents.clone(), session.id.clone());
+    let asked = tokio::spawn(async move {
+        a.request_approval(&sid, "Bash", "rm -rf build".into(), json!({}))
+            .await
+    });
+    let approval = loop {
+        if let Some(crate::live::LiveEvent::ApprovalRequested { approval }) =
+            live(next(&mut phone).await)
+        {
+            break approval;
+        }
+    };
+    let cmd = SteerCommand::Approval {
+        id: approval.id.clone(),
+        decision: "allow".into(),
+        message: None,
+        answers: None,
+    };
+    phone
+        .send(frame(
+            3,
+            Req::Steer(pb::Steer {
+                session: session.id.clone(),
+                body_json: serde_json::to_vec(&cmd).unwrap(),
+            }),
+        ))
+        .await
+        .unwrap();
+    let decision = tokio::time::timeout(Duration::from_secs(3), asked)
+        .await
+        .expect("the answer should reach the agent")
+        .unwrap();
+    assert_eq!(decision, crate::agents::Decision::Allow);
     let _ = std::fs::remove_dir_all(dir);
 }

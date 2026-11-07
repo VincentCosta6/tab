@@ -560,6 +560,15 @@ impl AgentHub {
         Ok(session)
     }
 
+    /// Whether this device runs the session (older sessions, from before
+    /// sessions synced, name no device and are this one's).
+    pub fn runs_here(&self, session: &Session) -> bool {
+        match &session.device {
+            None => true,
+            Some(d) => self.store.device_id().is_ok_and(|me| me == *d),
+        }
+    }
+
     pub fn is_running(&self, session_id: &str) -> bool {
         self.running.lock().unwrap().contains_key(session_id)
     }
@@ -573,10 +582,27 @@ impl AgentHub {
     /// picks it up at its next step instead of after it finishes. Returns
     /// false when no live turn takes messages (it already finished).
     pub fn steer(&self, session_id: &str, text: &str) -> anyhow::Result<bool> {
+        self.steer_with(session_id, text, &[])
+    }
+
+    /// [`Self::steer`] with files the person attached (paths in
+    /// [`Self::attachments_dir`]): the agent is told to open them, just as
+    /// when they start a turn.
+    pub fn steer_with(
+        &self,
+        session_id: &str,
+        text: &str,
+        attachments: &[String],
+    ) -> anyhow::Result<bool> {
         let text = text.trim();
-        anyhow::ensure!(!text.is_empty(), "message is empty");
+        anyhow::ensure!(
+            !text.is_empty() || !attachments.is_empty(),
+            "message is empty"
+        );
+        self.check_attachments(attachments)?;
+        let prompt = with_attachments(text, attachments);
         let tx = self.steering.lock().unwrap().get(session_id).cloned();
-        let sent = tx.is_some_and(|tx| tx.send(text.to_string()).is_ok());
+        let sent = tx.is_some_and(|tx| tx.send(prompt.clone()).is_ok());
         if !sent {
             // Held under the running lock so a turn that is finishing either
             // sees this message or has already finished (and we return false).
@@ -589,16 +615,31 @@ impl AgentHub {
                 .unwrap()
                 .entry(session_id.into())
                 .or_default()
-                .push(text.to_string());
+                .push(prompt);
         }
-        self.post(
-            session_id,
-            "user",
-            "text",
-            text,
-            serde_json::json!({ "steer": true }),
-        );
+        let meta = if attachments.is_empty() {
+            serde_json::json!({ "steer": true })
+        } else {
+            serde_json::json!({
+                "steer": true,
+                "attachments": attachments,
+                "files": crate::live::file_refs(attachments),
+            })
+        };
+        self.post(session_id, "user", "text", text, meta);
         Ok(true)
+    }
+
+    /// Attachments must be files in [`Self::attachments_dir`].
+    fn check_attachments(&self, attachments: &[String]) -> anyhow::Result<()> {
+        let dir = self.attachments_dir();
+        for a in attachments {
+            anyhow::ensure!(
+                Path::new(a).starts_with(&dir) && Path::new(a).is_file(),
+                "that attachment is missing"
+            );
+        }
+        Ok(())
     }
 
     /// Opens the steering channel as soon as the turn is marked running.
@@ -650,10 +691,11 @@ impl AgentHub {
         let Ok(sessions) = self.store.sessions_recent(500) else {
             return;
         };
-        for s in sessions
-            .into_iter()
-            .filter(|s| s.status == SessionStatus::Working)
-        {
+        let me = self.store.device_id().ok();
+        for s in sessions.into_iter().filter(|s| {
+            s.status == SessionStatus::Working
+                && s.device.as_ref().is_none_or(|d| me.as_ref() == Some(d))
+        }) {
             if s.agent_session_id.is_none() {
                 self.post(
                     &s.id,
@@ -697,18 +739,16 @@ impl AgentHub {
             .store
             .session_get(session_id)?
             .ok_or_else(|| anyhow::anyhow!("no such session"))?;
+        anyhow::ensure!(
+            self.runs_here(&session),
+            "this chat runs on another device; steer it through the hub"
+        );
         let text = text.trim();
         anyhow::ensure!(
             !text.is_empty() || !attachments.is_empty(),
             "message is empty"
         );
-        let dir = self.attachments_dir();
-        for a in attachments {
-            anyhow::ensure!(
-                Path::new(a).starts_with(&dir) && Path::new(a).is_file(),
-                "that attachment is missing"
-            );
-        }
+        self.check_attachments(attachments)?;
         if let Some(why) = self
             .config()
             .budget
@@ -730,7 +770,11 @@ impl AgentHub {
             let meta = if attachments.is_empty() {
                 serde_json::Value::Null
             } else {
-                serde_json::json!({ "attachments": attachments })
+                // `files` names them in the hub, so other devices can show them.
+                serde_json::json!({
+                    "attachments": attachments,
+                    "files": crate::live::file_refs(attachments),
+                })
             };
             self.post(session_id, "user", "text", text, meta);
             self.attach_pasted_links(session_id, text);
@@ -741,22 +785,7 @@ impl AgentHub {
         self.update(session_id, Some(SessionStatus::Working), None);
 
         let hub = self.clone();
-        let mut prompt = text.to_string();
-        if !attachments.is_empty() {
-            prompt.push_str(&format!(
-                "\n\nThe person attached {} (open each with your Read tool to see it):\n{}",
-                if attachments.len() == 1 {
-                    "a file"
-                } else {
-                    "files"
-                },
-                attachments
-                    .iter()
-                    .map(|a| format!("- {a}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ));
-        }
+        let prompt = with_attachments(text, attachments);
         tokio::spawn(async move {
             let system = hub.system_prompt(&session);
             let result = match session.agent {
@@ -1228,6 +1257,27 @@ impl AgentHub {
         }
         out
     }
+}
+
+/// The message as the agent sees it: the text, then the attached files to
+/// open.
+fn with_attachments(text: &str, attachments: &[String]) -> String {
+    if attachments.is_empty() {
+        return text.to_string();
+    }
+    format!(
+        "{text}\n\nThe person attached {} (open each with your Read tool to see it):\n{}",
+        if attachments.len() == 1 {
+            "a file"
+        } else {
+            "files"
+        },
+        attachments
+            .iter()
+            .map(|a| format!("- {a}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 pub(crate) fn default_command(kind: AgentKind) -> &'static str {

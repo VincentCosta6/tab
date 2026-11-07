@@ -27,8 +27,10 @@ crates/tab-domain/      Pure logic. No I/O, no clock, no threads; builds for was
   links.rs              Recognizing links agents create or mention
 crates/tab-protocol/    The shared API layer. Protobuf (proto/tab/hub/v1/hub.proto), no gRPC; builds for wasm32.
 crates/tab-store/       HubStore trait + backends (in-memory reference, SQLite), sea-query statements,
-                        and the conformance suite every backend must pass.
-crates/tab-hub/         The hub: answers protocol requests on any HubStore; migration between stores.
+                        and the conformance suite every backend must pass. BlobStore (files) with its
+                        own suite: in-memory and local-folder backends.
+crates/tab-hub/         The hub: answers protocol requests on any HubStore; the live channel (watch and
+                        steer); file cleanup; migration between stores.
                         Builds for wasm32 so the Worker can host it.
 crates/tab-core/        The desktop engine. No Tauri dependency, fully unit tested. Re-exports tab-domain
                         under its old paths (tab_core::model, tab_core::links, ...).
@@ -62,7 +64,34 @@ Coming next (designed): `apps/mobile/`, `cloud/worker/` (workers-rs host for tab
 - **Other devices.** The hub listens on `ws://127.0.0.1:47850/hub?token=<MCP token>` (binary Protobuf frames; the next free port if taken), and their changes wake the same sync loop.
 - **Status.** Settings → Hub shows where the hub runs, its address, the app process's CPU and memory, the size of the log and store, changes still waiting to sync, and each connected device with how far behind it is.
 
-The sync speaks only the hub protocol (`Apply`, `GetChanges`), so pointing the app at a cloud hub replaces the in-process call with the WebSocket and nothing else. Not synced, on purpose: caches (HTTP, AI, previews, embeddings), the API audit log, usage counters, and agent chats, which belong to the machine running the agent.
+The sync speaks only the hub protocol (`Apply`, `GetChanges`), so pointing the app at a cloud hub replaces the in-process call with the WebSocket and nothing else. Not synced, on purpose: caches (HTTP, AI, previews, embeddings), the API audit log and usage counters.
+
+**Chats sync too** (`sessions`, `session_messages`), so other devices can watch and steer them. Each session names the device that runs it (`sessions.device`, this install's id from `this_device`); only that device runs its turns. Messages sync by a `uid` (their local `id` only orders this copy), and a message's text is cut at 256 KB in the hub (huge tool output stays on the device that ran it).
+
+### Files (built)
+
+Attachments live in the hub's file store, beside the records: `tab_store::blob::BlobStore`, content-addressed by SHA-256 (`sha256:<hex>`), so the same file attached twice is stored once. Backends: in memory, and a local folder (`hub-files/` next to `hub.db`, sharded by the first two hex digits, written via a temp file and rename). An R2 backend comes with the cloud hub.
+
+- **Records refer to files by hash**, anywhere in their body (a message's `meta.files`). `HubStore::blob_refs` lists every hash a current record mentions, and `tab_hub::blobs::collect` deletes files nothing refers to once they're a day old (the grace period covers an upload whose record hasn't arrived yet). The desktop runs it hourly. The hub owns cleanup; each device's `attachments/` folder is a cache.
+- **Bytes go over HTTP, not the sync socket**: `PUT /files?token=…` returns `{hash, size}`, `GET /files/<hash>?token=…` returns the bytes (immutable, so cacheable forever). In the cloud these become signed R2 URLs.
+- **On the desktop** a pasted file goes into the hub and is copied into `attachments/<hash hex>/<name>`, so the path itself names the file. A path that isn't there (swept from the cache, or from a chat another device runs) is fetched from the hub when shown.
+
+### Watch and steer (built)
+
+A session runs on one device: it has the agent's own history and the working copy. Other devices watch and steer it through the hub's **live channel** (`tab_hub::live`), which carries what doesn't belong in the change log:
+
+```
+ runner (desktop)                     hub                       watcher (phone, laptop)
+   agent streams ──Publish(session)──► relays to watchers ──Live──► shows the reply as it streams
+                  ◄──────Watched────── when watchers change ◄─Watch── opens the chat
+   steer / approve ◄─────Steered────── routes to the runner ◄─Steer── types a message, answers a prompt
+```
+
+- **Stored messages and status** reach watchers through sync, like any record. **Streamed text and approval prompts** are published live and never stored; a watcher joining mid-turn gets a snapshot (the reply so far, open prompts) because the runner is told when watchers change.
+- **Steering** is a `SteerCommand` (`message` with text and file hashes, `approval`, `stop`). The runner fetches attached files from the hub, then the message steers the running turn or starts the next one. The hub routes by the session record's `device`; if that device isn't connected, steering is refused with a message saying so. Only the runner may publish for a session.
+- **On the desktop**, the app watches the sessions other devices run while they're mid-turn, shows their live events in the chat, and sends what the person types or answers there to the runner.
+
+Next: "Continue on this device" (hand a session to another device: code over a git branch, the transcript and agent history as an encrypted file in the file store, a `session:<id>` lease to fence the old runner), then end-to-end encryption of message bodies and files with routing metadata left readable.
 
 ### Hub protocol (built)
 
@@ -84,8 +113,9 @@ SQL backends share their tables and queries through `tab_store::sql`, built with
 
 **Rule: every behavior of the storage layer has a test, and every backend passes all of them.** That's what lets us add or swap a backend (Durable Object SQLite, Postgres) with confidence.
 
-- **Conformance suite** (`crates/tab-store/src/conformance.rs`): one function per behavior (80 today: log ordering and paging, validation and all-or-nothing batches, record round-trips, graph edges and ordering, search matching and FTS edge cases, lease grant/renew/refuse/expire/release and fencing tokens). `conformance_tests!` turns each into its own `#[test]` for a backend; it runs against the in-memory store, SQLite in memory, and SQLite on disk. A test fails if a check isn't registered in the macro.
-- **Property tests** (`tests/properties.rs`, proptest): random workloads run on two backends at once must agree on everything observable; replaying any log rebuilds the same state; a lease key never has two live holders and tokens only go up.
+- **Conformance suite** (`crates/tab-store/src/conformance.rs`): one function per behavior (80 today: log ordering and paging, validation and all-or-nothing batches, record round-trips, graph edges and ordering, search matching and FTS edge cases, lease grant/renew/refuse/expire/release and fencing tokens, file references). `conformance_tests!` turns each into its own `#[test]` for a backend; it runs against the in-memory store, SQLite in memory, and SQLite on disk. A test fails if a check isn't registered in the macro.
+- **File store suite** (`crates/tab-store/src/blob_conformance.rs`, `blob_conformance_tests!`): the same rules for `BlobStore` backends (dedupe, first-stored time, size limit, malformed hashes, paging), run against the in-memory and folder stores.
+- **Property tests** (`tests/properties.rs`, proptest): random workloads run on two backends at once must agree on everything observable (the folder file store against the in-memory one too); replaying any log rebuilds the same state; a lease key never has two live holders and tokens only go up.
 - **Volume and timing** (`tests/perf.rs`, ignored by default): 100k items plus edges, paging the log, gets, searches, neighbors and 10k lease claims, each with a time budget. It already caught one problem: without WAL every lease claim waited on an fsync.
 - **New behavior lands with its check. A storage bug gets a failing check before the fix.** A new backend runs `conformance_tests!` and joins the property tests.
 

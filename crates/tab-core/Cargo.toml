@@ -21,7 +21,7 @@ uuid.workspace = true
 tab-domain = { path = "../tab-domain" }
 tab-protocol = { path = "../tab-protocol" }
 prost-types = "0.14"
-tab-store = { path = "../tab-store", features = ["sqlite"] }
+tab-store = { path = "../tab-store", features = ["sqlite", "fs"] }
 tab-hub = { path = "../tab-hub" }
 sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 sha2.workspace = true

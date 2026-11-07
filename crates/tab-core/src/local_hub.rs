@@ -34,18 +34,23 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, put};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tab_domain::ops::Op;
 use tab_hub::{ConnId, Handled, Hub};
-use tab_protocol::encode;
-use tab_protocol::pb::{self, client_envelope::Body as Req};
+use tab_protocol::pb::{self, client_envelope::Body as Req, server_envelope::Body as Res};
+use tab_protocol::{ServerEnvelope, encode};
 use tab_store::HubStore;
+use tab_store::blob::{BlobMeta, BlobStore};
+use tab_store::fs_blob::FsBlobStore;
 use tab_store::sqlite::SqliteStore;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
+use crate::agents::{AgentHub, Decision};
 use crate::engine::{Change, EngineEvent};
+use crate::live::{FileRef, LiveEvent, SteerCommand, attachment_path};
+use crate::model::SessionStatus;
 use crate::store::Store;
 
 /// The desktop app's own connection to its hub.
@@ -56,12 +61,34 @@ const TICK: Duration = Duration::from_secs(5);
 const IDLE: Duration = Duration::from_secs(5);
 /// Changes read from the hub per request.
 const PULL: u32 = 500;
+/// How often files nothing refers to are cleaned up.
+const COLLECT: Duration = Duration::from_secs(60 * 60);
+
+/// Who a frame is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum To {
+    /// Every connection that said hello except this one (sync pushes).
+    AllBut(ConnId),
+    /// One connection (live events, steering).
+    Only(ConnId),
+}
 
 pub struct LocalHub {
     hub: Mutex<Hub<SqliteStore>>,
+    /// Files (attachments), beside `hub.db` in `hub-files/`.
+    files: Mutex<FsBlobStore>,
     path: PathBuf,
-    /// Frames to push, with the connection that caused them.
-    pushes: broadcast::Sender<(ConnId, Arc<Vec<u8>>)>,
+    /// Frames for the sockets.
+    pushes: broadcast::Sender<(To, Arc<Vec<u8>>)>,
+    /// Frames for the app itself (live events, steering for sessions it runs).
+    inbox: mpsc::UnboundedSender<ServerEnvelope>,
+    inbox_rx: Mutex<Option<mpsc::UnboundedReceiver<ServerEnvelope>>>,
+    /// Runs the sessions steered from other devices, once set.
+    agents: OnceLock<Arc<AgentHub>>,
+    /// Approval prompts from sessions other devices run, by id: their session.
+    remote_approvals: Mutex<std::collections::HashMap<String, String>>,
+    /// Sessions other devices run that the app is watching.
+    watching: Mutex<std::collections::BTreeSet<String>>,
     next_conn: AtomicU64,
     next_request: AtomicU64,
     url: OnceLock<String>,
@@ -87,6 +114,9 @@ pub struct HubStatusView {
     pub edges: u64,
     pub live_leases: u64,
     pub storage_bytes: u64,
+    /// Files kept for attachments, and their total size.
+    pub files: u64,
+    pub file_bytes: u64,
     pub connections: Vec<ConnectionView>,
     pub cpu_percent: Option<f64>,
     pub memory_bytes: Option<u64>,
@@ -128,10 +158,19 @@ impl LocalHub {
         });
         reply_ok(hub.handle(APP, 0, hello, now))?;
         let (pushes, _) = broadcast::channel(256);
+        let (inbox, inbox_rx) = mpsc::unbounded_channel();
+        let files = FsBlobStore::open(path.with_file_name("hub-files"))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(Arc::new(Self {
             hub: Mutex::new(hub),
+            files: Mutex::new(files),
             path: path.to_path_buf(),
             pushes,
+            inbox,
+            inbox_rx: Mutex::new(Some(inbox_rx)),
+            agents: OnceLock::new(),
+            remote_approvals: Default::default(),
+            watching: Default::default(),
             next_conn: AtomicU64::new(1),
             next_request: AtomicU64::new(1),
             url: OnceLock::new(),
@@ -141,13 +180,31 @@ impl LocalHub {
         }))
     }
 
+    /// Sends what handling a request from `from` produced to everyone it's
+    /// for (but not the reply).
+    fn deliver(
+        &self,
+        from: ConnId,
+        push: Option<&ServerEnvelope>,
+        direct: Vec<(ConnId, ServerEnvelope)>,
+    ) {
+        if let Some(push) = push {
+            let _ = self.pushes.send((To::AllBut(from), Arc::new(encode(push))));
+        }
+        for (to, env) in direct {
+            if to == APP {
+                let _ = self.inbox.send(env);
+            } else {
+                let _ = self.pushes.send((To::Only(to), Arc::new(encode(&env))));
+            }
+        }
+    }
+
     /// Runs one request as the app, sending any push to other devices.
     fn request(&self, req: Req) -> anyhow::Result<pb::server_envelope::Body> {
         let id = self.next_request.fetch_add(1, Ordering::Relaxed);
         let handled = self.hub.lock().unwrap().handle(APP, id, req, Utc::now());
-        if let Some(push) = &handled.push {
-            let _ = self.pushes.send((APP, Arc::new(encode(push))));
-        }
+        self.deliver(APP, handled.push.as_ref(), handled.direct);
         match handled.reply.body {
             Some(pb::server_envelope::Body::Error(e)) => Err(anyhow::anyhow!("hub: {}", e.message)),
             Some(body) => Ok(body),
@@ -294,6 +351,20 @@ impl LocalHub {
                         });
                     }
                 }
+                "sessions" => {
+                    if let Some(session) =
+                        first().and_then(|id| store.session_get(&id).ok().flatten())
+                    {
+                        let _ = events.send(EngineEvent::SessionChanged { session });
+                    }
+                }
+                "session_messages" => {
+                    if let Some(message) =
+                        first().and_then(|uid| store.message_by_uid(&uid).ok().flatten())
+                    {
+                        let _ = events.send(EngineEvent::SessionMessage { message });
+                    }
+                }
                 "item_context" => {
                     let item = store
                         .hub_row(table, key)
@@ -353,7 +424,23 @@ impl LocalHub {
     /// Starts syncing `tab.db` with the hub: introduces them, then sends
     /// each local change as it commits and reads each change the hub gets.
     pub fn follow(self: &Arc<Self>, store: Arc<Store>, events: broadcast::Sender<EngineEvent>) {
-        let _ = self.local.set((store.clone(), events));
+        let _ = self.local.set((store.clone(), events.clone()));
+        // The app's connection goes by this install's device id, which is
+        // what its sessions name as where they run.
+        match store.device_id() {
+            Ok(device) => {
+                let hello = Req::Hello(pb::Hello {
+                    device,
+                    client: format!("tab-desktop/{}", env!("CARGO_PKG_VERSION")),
+                    since: self.head().unwrap_or(0),
+                });
+                if let Err(e) = self.request(hello) {
+                    tracing::warn!(error = %e, "hub: couldn't say hello as this device");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "hub: no device id"),
+        }
+        self.run_live(store.clone(), events);
         let me = self.clone();
         tokio::spawn(async move {
             if let Err(e) = me.introduce(&store) {
@@ -378,9 +465,7 @@ impl LocalHub {
                 tokio::time::sleep(TICK).await;
                 let push = me.hub.lock().unwrap().tick(Utc::now());
                 match push {
-                    Ok(Some(p)) => {
-                        let _ = me.pushes.send((APP, Arc::new(encode(&p))));
-                    }
+                    Ok(Some(p)) => me.deliver(APP, Some(&p), vec![]),
                     Ok(None) => {}
                     Err(e) => tracing::warn!(error = %e, "hub: expiring leases failed"),
                 }
@@ -402,6 +487,11 @@ impl LocalHub {
         let url = format!("ws://{}/hub", listener.local_addr()?);
         let app = Router::new()
             .route("/hub", get(upgrade))
+            .route("/files", put(file_upload))
+            .route("/files/{hash}", get(file_download))
+            .layer(axum::extract::DefaultBodyLimit::max(
+                tab_domain::blob::MAX_BLOB_BYTES + 1024,
+            ))
             .with_state((self.clone(), Arc::new(token)));
         tokio::spawn(async move {
             let svc = app.into_make_service_with_connect_info::<SocketAddr>();
@@ -422,6 +512,12 @@ impl LocalHub {
             .status(Utc::now())
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let (cpu, mem, cpus) = self.resources();
+        let files = self
+            .files
+            .lock()
+            .unwrap()
+            .stats()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(HubStatusView {
             runs_on: st.runs_on,
             protocol_version: st.protocol_version,
@@ -433,6 +529,8 @@ impl LocalHub {
             edges: st.edges,
             live_leases: st.live_leases,
             storage_bytes: st.storage_bytes,
+            files: files.files,
+            file_bytes: files.bytes,
             connections: st
                 .connections
                 .into_iter()
@@ -482,6 +580,323 @@ impl LocalHub {
     }
 }
 
+/// Files, and the live channel.
+impl LocalHub {
+    /// Lets other devices steer the sessions this app runs.
+    pub fn attach_agents(&self, agents: Arc<AgentHub>) {
+        let _ = self.agents.set(agents);
+    }
+
+    /// Stores a file in the hub. The hub keeps it while a record mentions
+    /// its hash (and a day after, for one that's on its way).
+    pub fn file_put(&self, bytes: &[u8]) -> anyhow::Result<BlobMeta> {
+        self.files
+            .lock()
+            .unwrap()
+            .put(bytes, Utc::now())
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    pub fn file_get(&self, hash: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        self.files
+            .lock()
+            .unwrap()
+            .get(hash)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// Puts a hub file in the attachments folder `dir` as
+    /// `<dir>/<hash hex>/<name>` and returns its path. Already there: just the path.
+    pub fn file_materialize(&self, dir: &Path, hash: &str, name: &str) -> anyhow::Result<PathBuf> {
+        let dest = attachment_path(dir, hash, name)
+            .ok_or_else(|| anyhow::anyhow!("not a file hash: {hash}"))?;
+        if dest.is_file() {
+            return Ok(dest);
+        }
+        let src = self
+            .files
+            .lock()
+            .unwrap()
+            .path(hash)
+            .filter(|p| p.is_file())
+            .ok_or_else(|| anyhow::anyhow!("the hub doesn't have that file"))?;
+        std::fs::create_dir_all(dest.parent().expect("has a folder"))?;
+        // A copy, not a link: an agent editing the attachment mustn't change
+        // the bytes behind the hash. (On APFS and Btrfs this is a cheap clone.)
+        std::fs::copy(&src, &dest)?;
+        Ok(dest)
+    }
+
+    /// Saves a file the person attached: into the hub, then into the
+    /// attachments folder `dir` under its hash. Returns its path there.
+    pub fn attach(&self, dir: &Path, bytes: &[u8], name: &str) -> anyhow::Result<PathBuf> {
+        let meta = self.file_put(bytes)?;
+        self.file_materialize(dir, &meta.hash, name)
+    }
+
+    /// Deletes files nothing refers to any more (after the grace period).
+    pub fn collect_files(&self) -> anyhow::Result<usize> {
+        let hub = self.hub.lock().unwrap();
+        let mut files = self.files.lock().unwrap();
+        let gone =
+            tab_hub::blobs::collect(hub.store(), &mut *files, Utc::now(), tab_hub::blobs::GRACE)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(gone.len())
+    }
+
+    /// Sends a command to the device running `session`. Returns how many of
+    /// its connections got it; fails if it isn't connected.
+    pub fn steer_remote(&self, session: &str, cmd: &SteerCommand) -> anyhow::Result<u32> {
+        match self.request(Req::Steer(pb::Steer {
+            session: session.into(),
+            body_json: serde_json::to_vec(cmd)?,
+        }))? {
+            Res::Delivered(d) => Ok(d.connections),
+            _ => anyhow::bail!("hub: unexpected reply to Steer"),
+        }
+    }
+
+    /// The session of an approval prompt another device's session raised.
+    pub fn remote_approval(&self, id: &str) -> Option<String> {
+        self.remote_approvals.lock().unwrap().get(id).cloned()
+    }
+
+    /// Publishes a live event for a session this app runs, if anyone watches.
+    fn publish(&self, event: &LiveEvent) {
+        if self
+            .hub
+            .lock()
+            .unwrap()
+            .watchers(event.session())
+            .is_empty()
+        {
+            return;
+        }
+        let Ok(json) = serde_json::to_vec(event) else {
+            return;
+        };
+        if let Err(e) = self.request(Req::Publish(pb::Publish {
+            session: event.session().into(),
+            event_json: json,
+        })) {
+            tracing::debug!(error = %e, "hub: couldn't publish a live event");
+        }
+    }
+
+    /// Watches the sessions other devices run that are mid-turn, so their
+    /// streamed text and prompts show here.
+    fn rewatch(&self, store: &Store) {
+        let me = store.device_id().ok();
+        let want: std::collections::BTreeSet<String> = store
+            .sessions_recent(200)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.device.is_some() && s.device != me)
+            .filter(|s| matches!(s.status, SessionStatus::Working | SessionStatus::NeedsInput))
+            .map(|s| s.id)
+            .collect();
+        let mut watching = self.watching.lock().unwrap();
+        if *watching == want {
+            return;
+        }
+        *watching = want.clone();
+        drop(watching);
+        if let Err(e) = self.request(Req::Watch(pb::Watch {
+            sessions: want.into_iter().collect(),
+        })) {
+            tracing::debug!(error = %e, "hub: couldn't update what this app watches");
+        }
+    }
+
+    /// The live side of [`Self::follow`]: publishes this app's streamed
+    /// events for watchers, handles steering and watch notices addressed to
+    /// it, and shows other devices' live events here.
+    fn run_live(self: &Arc<Self>, store: Arc<Store>, events: broadcast::Sender<EngineEvent>) {
+        // Text streamed so far in each session's current reply, for
+        // watchers who join mid-turn.
+        let partial: Arc<Mutex<std::collections::HashMap<String, String>>> = Default::default();
+
+        let (me, mut rx, part, st) = (
+            self.clone(),
+            events.subscribe(),
+            partial.clone(),
+            store.clone(),
+        );
+        tokio::spawn(async move {
+            loop {
+                let e = match rx.recv().await {
+                    Ok(e) => e,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                match &e {
+                    EngineEvent::SessionDelta { session_id, text } => {
+                        part.lock()
+                            .unwrap()
+                            .entry(session_id.clone())
+                            .or_default()
+                            .push_str(text);
+                    }
+                    EngineEvent::SessionMessage { message } => {
+                        part.lock().unwrap().remove(&message.session_id);
+                    }
+                    EngineEvent::SessionChanged { session } => {
+                        if session.status != SessionStatus::Working {
+                            part.lock().unwrap().remove(&session.id);
+                        }
+                        me.rewatch(&st);
+                    }
+                    _ => {}
+                }
+                let Some(live) = LiveEvent::from_engine(&e) else {
+                    continue;
+                };
+                // Only sessions this app runs, and only while someone watches.
+                if me.hub.lock().unwrap().watchers(live.session()).is_empty() {
+                    continue;
+                }
+                let mine = me.agents.get().is_some_and(|a| {
+                    st.session_get(live.session())
+                        .ok()
+                        .flatten()
+                        .is_some_and(|s| a.runs_here(&s))
+                });
+                if mine {
+                    me.publish(&live);
+                }
+            }
+        });
+
+        let Some(mut inbox) = self.inbox_rx.lock().unwrap().take() else {
+            return;
+        };
+        let me = self.clone();
+        tokio::spawn(async move {
+            me.rewatch(&store);
+            while let Some(env) = inbox.recv().await {
+                match env.body {
+                    Some(Res::Steered(s)) => me.steered(&store, s).await,
+                    Some(Res::Watched(w)) if w.watchers > 0 => {
+                        let text = partial.lock().unwrap().get(&w.session).cloned();
+                        if let Some(text) = text.filter(|t| !t.is_empty()) {
+                            me.publish(&LiveEvent::SessionDelta {
+                                session_id: w.session.clone(),
+                                text,
+                            });
+                        }
+                        if let Some(agents) = me.agents.get() {
+                            for approval in agents.pending_approvals(&w.session) {
+                                me.publish(&LiveEvent::ApprovalRequested { approval });
+                            }
+                        }
+                    }
+                    Some(Res::Live(l)) => {
+                        let Ok(live) = serde_json::from_slice::<LiveEvent>(&l.event_json) else {
+                            continue;
+                        };
+                        if live.session() != l.session {
+                            continue;
+                        }
+                        let mut remote = me.remote_approvals.lock().unwrap();
+                        match &live {
+                            LiveEvent::ApprovalRequested { approval } => {
+                                remote.insert(approval.id.clone(), approval.session_id.clone());
+                            }
+                            LiveEvent::ApprovalResolved { id, .. } => {
+                                remote.remove(id);
+                            }
+                            _ => {}
+                        }
+                        drop(remote);
+                        if let Some((_, events)) = me.local.get() {
+                            let _ = events.send(live.into_engine());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let me = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(COLLECT).await;
+                match me.collect_files() {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(files = n, "hub: removed files nothing refers to"),
+                    Err(e) => tracing::warn!(error = %e, "hub: cleaning up files failed"),
+                }
+            }
+        });
+    }
+
+    /// Another device steering a session this app runs.
+    async fn steered(&self, store: &Store, s: pb::Steered) {
+        let Some(agents) = self.agents.get() else {
+            return;
+        };
+        let session = match store.session_get(&s.session) {
+            Ok(Some(session)) if agents.runs_here(&session) => session,
+            _ => return,
+        };
+        let cmd = match serde_json::from_slice::<SteerCommand>(&s.body_json) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, from = %s.from, "hub: unreadable steering");
+                return;
+            }
+        };
+        tracing::info!(session = %session.id, from = %s.from, "hub: steered from another device");
+        let result = match cmd {
+            SteerCommand::Message { text, files } => {
+                self.steer_message(agents, &session.id, &text, &files)
+            }
+            SteerCommand::Approval {
+                id,
+                decision,
+                message,
+                answers,
+            } => {
+                agents.resolve_approval(&id, Decision::from_parts(&decision, message, answers));
+                Ok(())
+            }
+            SteerCommand::Stop => {
+                agents.stop(&session.id);
+                Ok(())
+            }
+        };
+        if let Err(e) = result {
+            tracing::warn!(session = %session.id, error = %e, "hub: steering failed");
+        }
+    }
+
+    fn steer_message(
+        &self,
+        agents: &Arc<AgentHub>,
+        session: &str,
+        text: &str,
+        files: &[FileRef],
+    ) -> anyhow::Result<()> {
+        let dir = agents.attachments_dir();
+        let paths = files
+            .iter()
+            .map(|f| {
+                self.file_materialize(&dir, &f.hash, &f.name)
+                    .map(|p| p.display().to_string())
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let text = if text.trim().is_empty() && !paths.is_empty() {
+            "Have a look at this."
+        } else {
+            text
+        };
+        if !agents.steer_with(session, text, &paths)? {
+            agents.send_with(session, text, &paths)?;
+        }
+        Ok(())
+    }
+}
+
 fn reply_ok(h: Handled) -> anyhow::Result<()> {
     match h.reply.body {
         Some(pb::server_envelope::Body::Error(e)) => Err(anyhow::anyhow!("hub: {}", e.message)),
@@ -507,6 +922,49 @@ async fn upgrade(
     ws.on_upgrade(move |socket| connection(hub, socket, addr))
 }
 
+/// `PUT /files?token=…` with the file's bytes: stores it and answers its
+/// hash and size as JSON.
+async fn file_upload(
+    State((hub, token)): State<(Arc<LocalHub>, Arc<String>)>,
+    Query(auth): Query<Auth>,
+    body: axum::body::Bytes,
+) -> Response {
+    if token.is_empty() || auth.token != *token {
+        return (StatusCode::UNAUTHORIZED, "missing or wrong token").into_response();
+    }
+    match hub.file_put(&body) {
+        Ok(m) => axum::Json(serde_json::json!({ "hash": m.hash, "size": m.size })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+/// `GET /files/<hash>?token=…`: the file's bytes.
+async fn file_download(
+    State((hub, token)): State<(Arc<LocalHub>, Arc<String>)>,
+    axum::extract::Path(hash): axum::extract::Path<String>,
+    Query(auth): Query<Auth>,
+) -> Response {
+    if token.is_empty() || auth.token != *token {
+        return (StatusCode::UNAUTHORIZED, "missing or wrong token").into_response();
+    }
+    match hub.file_get(&hash) {
+        Ok(Some(bytes)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "application/octet-stream"),
+                // Content-addressed: the bytes behind a hash never change.
+                (
+                    axum::http::header::CACHE_CONTROL,
+                    "private, max-age=31536000, immutable",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "no such file").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn connection(hub: Arc<LocalHub>, mut socket: WebSocket, addr: SocketAddr) {
     let conn = hub.next_conn.fetch_add(1, Ordering::Relaxed);
     let mut pushes = hub.pushes.subscribe();
@@ -524,17 +982,17 @@ async fn connection(hub: Arc<LocalHub>, mut socket: WebSocket, addr: SocketAddr)
                     Some(Ok(_)) => continue,
                 };
                 let handled = hub.hub.lock().unwrap().handle_frame(conn, &frame, Utc::now());
-                if let Some(push) = &handled.push {
+                if handled.push.is_some() {
                     hub.remote.notify_one();
-                    let _ = hub.pushes.send((conn, Arc::new(encode(push))));
                 }
+                hub.deliver(conn, handled.push.as_ref(), handled.direct);
                 if socket.send(Message::Binary(encode(&handled.reply).into())).await.is_err() {
                     break;
                 }
             }
             push = pushes.recv() => {
                 match push {
-                    Ok((from, frame)) if from != conn => {
+                    Ok((to, frame)) if to == To::Only(conn) || matches!(to, To::AllBut(from) if from != conn) => {
                         let subscribed = hub.hub.lock().unwrap().subscribers().any(|c| c == conn);
                         if subscribed && socket.send(Message::Binary(frame.to_vec().into())).await.is_err() {
                             break;
@@ -548,7 +1006,8 @@ async fn connection(hub: Arc<LocalHub>, mut socket: WebSocket, addr: SocketAddr)
             }
         }
     }
-    hub.hub.lock().unwrap().disconnect(conn);
+    let told = hub.hub.lock().unwrap().disconnect(conn);
+    hub.deliver(conn, None, told);
     tracing::info!(conn, "hub: device disconnected");
 }
 

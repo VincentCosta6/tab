@@ -247,6 +247,8 @@ export interface Session {
   cwd: string;
   created_at: string;
   updated_at: string;
+  /** The device that runs it. Other devices watch and steer it through the hub. */
+  device?: string | null;
 }
 export interface SessionMessage {
   id: number;
@@ -507,6 +509,9 @@ export interface HubStatus {
   edges: number;
   live_leases: number;
   storage_bytes: number;
+  /** Files kept for attachments, and their total size. */
+  files: number;
+  file_bytes: number;
   connections: HubConnection[];
   cpu_percent: number | null;
   memory_bytes: number | null;

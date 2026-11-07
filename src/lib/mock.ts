@@ -380,7 +380,7 @@ export const mockApi = {
           return {
             runs_on: "local", protocol_version: 1, started_at: started,
             url: "ws://127.0.0.1:47850/hub", path: "C:\\Users\\vince\\AppData\\Roaming\\dev.tab.app\\hub.db",
-            head: 18_422, records: 6_310, edges: 0, live_leases: 1, storage_bytes: 41_943_040,
+            head: 18_422, records: 6_310, edges: 0, live_leases: 1, storage_bytes: 41_943_040, files: 38, file_bytes: 12_582_912,
             cpu_percent: 2.4 + Math.random() * 3, memory_bytes: 186_000_000 + Math.round(Math.random() * 4_000_000), cpus: 12, pending: 0,
             connections: [
               { id: 0, device: "this-computer", client: "tab-desktop/0.1.0", address: "this app", connected_at: started, synced_to: 18_422, behind: 0, this_app: true },

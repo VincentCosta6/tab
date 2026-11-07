@@ -271,3 +271,143 @@ fn children_arriving_before_their_parents_still_land() {
     b.hub_apply_remote(&changes).unwrap();
     assert_eq!(dump(&a), dump(&b));
 }
+
+// ---- Chats ----
+
+fn chat(s: &Store) -> crate::model::Session {
+    s.session_create(
+        None,
+        crate::model::AgentKind::ClaudeCode,
+        "Fix login",
+        "/w",
+        now(),
+    )
+    .unwrap()
+}
+
+/// Everything in the outbox as (table, key, row).
+fn outbox(s: &Store) -> Vec<(String, String, Option<Value>)> {
+    s.hub_outbox_take(1000)
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.table, r.key, r.row))
+        .collect()
+}
+
+#[test]
+fn chats_sync_with_their_device_and_messages_by_uid() {
+    let s = store();
+    s.hub_backfill_once().unwrap();
+    let c = chat(&s);
+    s.message_add(&c.id, "user", "text", "hello", &json!({"x": 1}), now())
+        .unwrap();
+    let out = outbox(&s);
+    let session = out.iter().find(|(t, ..)| t == "sessions").unwrap();
+    assert_eq!(session.1, json!([c.id]).to_string());
+    let row = session.2.as_ref().unwrap();
+    assert_eq!(row["device"], json!(s.device_id().unwrap()));
+    assert!(s.device_id().unwrap().starts_with("device-"));
+    let msg = out.iter().find(|(t, ..)| t == "session_messages").unwrap();
+    let row = msg.2.as_ref().unwrap();
+    // Keyed by uid; the local row id stays here.
+    assert_eq!(msg.1, json!([row["uid"]]).to_string());
+    assert!(row.get("id").is_none(), "{row}");
+    assert_eq!(row["content"], "hello");
+}
+
+#[test]
+fn another_devices_chat_lands_here_in_order() {
+    let s = store();
+    let here = chat(&s);
+    s.message_add(&here.id, "user", "text", "mine", &Value::Null, now())
+        .unwrap();
+    let queued = s.hub_outbox_len().unwrap();
+    let sid = "remote-session";
+    let session = json!({
+        "id": sid, "item_id": null, "agent": "claude_code", "agent_session_id": null,
+        "title": "On the laptop", "status": "working", "cwd": "/Users/x/w",
+        "created_at": "2027-01-15T08:00:00.000Z", "updated_at": "2027-01-15T08:00:00.000Z",
+        "key": null, "brief": null, "device": "device-laptop",
+    });
+    let msg = |uid: &str, text: &str| {
+        (
+            "session_messages".to_string(),
+            json!([uid]).to_string(),
+            Some(json!({
+                "uid": uid, "session_id": sid, "role": "assistant", "kind": "text",
+                "content": text, "meta": "null", "created_at": "2027-01-15T08:00:01.000Z",
+            })),
+        )
+    };
+    let changed = s
+        .hub_apply_remote(&[
+            ("sessions".into(), json!([sid]).to_string(), Some(session)),
+            msg("u1", "first"),
+            msg("u2", "second"),
+        ])
+        .unwrap();
+    assert_eq!(changed.len(), 3);
+    let got = s.session_get(sid).unwrap().unwrap();
+    assert_eq!(got.device.as_deref(), Some("device-laptop"));
+    let texts: Vec<String> = s
+        .messages(sid)
+        .unwrap()
+        .into_iter()
+        .map(|m| m.content)
+        .collect();
+    assert_eq!(texts, ["first", "second"]);
+    // Their ids are this copy's own, after the local message's.
+    let local_id = s.messages(&here.id).unwrap()[0].id;
+    assert!(s.messages(sid).unwrap().iter().all(|m| m.id > local_id));
+    assert_eq!(s.message_by_uid("u2").unwrap().unwrap().content, "second");
+    // Writing them didn't queue anything to send back.
+    assert_eq!(s.hub_outbox_len().unwrap(), queued);
+    // The same message again changes nothing.
+    assert!(
+        s.hub_apply_remote(&[msg("u1", "first")])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn huge_tool_output_is_cut_off_in_the_hub_but_kept_here() {
+    let s = store();
+    s.hub_backfill_once().unwrap();
+    let c = chat(&s);
+    let big = "x".repeat(MAX_SYNCED_CONTENT + 10);
+    s.message_add(&c.id, "tool", "tool", &big, &Value::Null, now())
+        .unwrap();
+    let out = outbox(&s);
+    let (_, _, row) = out.iter().find(|(t, ..)| t == "session_messages").unwrap();
+    let synced = row.as_ref().unwrap()["content"].as_str().unwrap();
+    assert!(synced.len() < big.len() + 100 && synced.len() > MAX_SYNCED_CONTENT);
+    assert!(synced.contains("cut off"));
+    assert_eq!(s.messages(&c.id).unwrap()[0].content, big);
+    assert!(serde_json::to_vec(row).unwrap().len() <= tab_domain::ops::MAX_BODY_BYTES);
+}
+
+#[test]
+fn a_copy_synced_before_chats_did_sends_its_chats_once() {
+    let s = Store::in_memory().unwrap();
+    let c = chat(&s);
+    s.message_add(&c.id, "user", "text", "old", &Value::Null, now())
+        .unwrap();
+    // As an older version left it: introduced to its hub, no table list.
+    s.hub_sync_install().unwrap();
+    {
+        let conn = s.conn();
+        conn.execute_batch(
+            "DELETE FROM hub_outbox; DELETE FROM hub_tables; UPDATE hub_sync SET backfilled = 1;",
+        )
+        .unwrap();
+    }
+    s.hub_sync_install().unwrap();
+    let mut tables: Vec<String> = outbox(&s).into_iter().map(|(t, ..)| t).collect();
+    tables.sort();
+    assert_eq!(tables, ["session_messages", "sessions"]);
+    // Only once.
+    s.hub_outbox_done(i64::MAX).unwrap();
+    s.hub_sync_install().unwrap();
+    assert_eq!(s.hub_outbox_len().unwrap(), 0);
+}

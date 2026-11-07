@@ -412,6 +412,9 @@ function HubSection() {
         <FormRow label="Storage" help={h.path}>
           <span className="mono">{bytes(h.storage_bytes)}</span>
         </FormRow>
+        <FormRow label="Files" help="Chat attachments, kept by the hub while a message refers to them.">
+          <span className="mono">{(h.files ?? 0).toLocaleString()} · {bytes(h.file_bytes ?? 0)}</span>
+        </FormRow>
         <FormRow label="Waiting to sync" help="Local changes not yet recorded in the hub. Normally 0.">
           <span className="mono">{h.pending.toLocaleString()}</span>
         </FormRow>
