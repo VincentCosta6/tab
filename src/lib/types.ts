@@ -503,6 +503,10 @@ export interface HubStatus {
   protocol_version: number;
   started_at: string | null;
   url: string | null;
+  /** The hub certificate's fingerprint (`sha256/<hex>`), which devices pin. */
+  fingerprint?: string | null;
+  /** HTTP/3 (QUIC) is up next to HTTP/2. */
+  http3?: boolean;
   path: string;
   head: number;
   records: number;

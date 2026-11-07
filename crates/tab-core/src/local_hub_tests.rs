@@ -152,17 +152,23 @@ async fn another_device_syncs_both_ways() {
     until("the backfill", || hub_item(&hub, &it.id).is_some()).await;
     let url = hub.serve(48_700, "secret".into()).await.unwrap();
 
-    // No token, no connection.
-    assert!(tokio_tungstenite::connect_async(url.clone()).await.is_err());
+    assert!(url.starts_with("wss://127.0.0.1:"));
+    // No token, no connection; a token in the URL doesn't count.
+    assert!(ws_connect(&hub, &url, None).await.is_err());
     assert!(
-        tokio_tungstenite::connect_async(format!("{url}?token=wrong"))
+        ws_connect(&hub, &format!("{url}?token=secret"), None)
+            .await
+            .is_err()
+    );
+    assert!(ws_connect(&hub, &url, Some("wrong")).await.is_err());
+    // Plain ws:// isn't served at all.
+    assert!(
+        tokio_tungstenite::connect_async(url.replace("wss://", "ws://"))
             .await
             .is_err()
     );
 
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("{url}?token=secret"))
-        .await
-        .unwrap();
+    let mut ws = ws_connect(&hub, &url, Some("secret")).await.unwrap();
     ws.send(frame(
         1,
         Req::Hello(pb::Hello {
@@ -415,10 +421,33 @@ fn attached_files_go_into_the_hub_and_back_out() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-async fn connect(url: &str, device: &str) -> Socket {
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("{url}?token=secret"))
-        .await
-        .unwrap();
+/// Opens the hub's WebSocket the way a paired device does: TLS 1.3 with the
+/// hub's certificate pinned, and the token in a header.
+async fn ws_connect(
+    hub: &LocalHub,
+    url: &str,
+    token: Option<&str>,
+) -> Result<Socket, tokio_tungstenite::tungstenite::Error> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let fp = hub.status().unwrap().fingerprint.unwrap();
+    let tls = crate::hub_tls::pinned_client(&fp, &[crate::hub_tls::H1]).unwrap();
+    let mut req = url.into_client_request()?;
+    if let Some(t) = token {
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {t}").parse().unwrap());
+    }
+    tokio_tungstenite::connect_async_tls_with_config(
+        req,
+        None,
+        false,
+        Some(tokio_tungstenite::Connector::Rustls(Arc::new(tls))),
+    )
+    .await
+    .map(|(ws, _)| ws)
+}
+
+async fn connect(hub: &LocalHub, url: &str, device: &str) -> Socket {
+    let mut ws = ws_connect(hub, url, Some("secret")).await.unwrap();
     ws.send(frame(
         1,
         Req::Hello(pb::Hello {
@@ -434,47 +463,186 @@ async fn connect(url: &str, device: &str) -> Socket {
 }
 
 #[tokio::test]
-async fn files_upload_and_download_over_http() {
+async fn files_upload_and_download_over_http2_and_http3() {
     let (hub, dir) = temp_hub("http");
     let url = hub.serve(48_740, "secret".into()).await.unwrap();
-    let base = url.replace("ws://", "http://").replace("/hub", "");
-    let client = reqwest::Client::new();
+    let st = hub.status().unwrap();
+    assert!(st.http3, "HTTP/3 should be up");
+    let base = url.replace("wss://", "https://").replace("/hub", "");
+    let fp = st.fingerprint.unwrap();
+
+    // HTTP/2 over TLS 1.3, certificate pinned.
+    let tls = crate::hub_tls::pinned_client(&fp, &[crate::hub_tls::H2]).unwrap();
+    let client = reqwest::Client::builder()
+        .use_preconfigured_tls(tls)
+        .build()
+        .unwrap();
     let res = client
-        .put(format!("{base}/files?token=wrong"))
+        .put(format!("{base}/files"))
         .body("x")
         .send()
         .await
         .unwrap();
     assert_eq!(res.status(), 401);
-    let res: serde_json::Value = client
+    assert_eq!(res.version(), reqwest::Version::HTTP_2);
+    let res = client
         .put(format!("{base}/files?token=secret"))
+        .body("x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 401, "a token in the URL doesn't count");
+    let res = client
+        .put(format!("{base}/files"))
+        .bearer_auth("secret")
         .body("a file from the phone")
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
+    // HTTP/3 is advertised.
+    let port = url.rsplit(':').next().unwrap().trim_end_matches("/hub");
+    assert_eq!(
+        res.headers()["alt-svc"].to_str().unwrap(),
+        format!("h3=\":{port}\"; ma=86400")
+    );
+    let res: serde_json::Value = res.json().await.unwrap();
     let hash = res["hash"].as_str().unwrap().to_string();
     assert_eq!(hash, tab_domain::blob::hash(b"a file from the phone"));
     assert_eq!(res["size"], 21);
     let got = client
-        .get(format!("{base}/files/{hash}?token=secret"))
+        .get(format!("{base}/files/{hash}"))
+        .bearer_auth("secret")
         .send()
         .await
         .unwrap();
     assert_eq!(got.status(), 200);
     assert_eq!(&got.bytes().await.unwrap()[..], b"a file from the phone");
     let missing = client
-        .get(format!(
-            "{base}/files/{}?token=secret",
-            tab_domain::blob::hash(b"nope")
-        ))
+        .get(format!("{base}/files/{}", tab_domain::blob::hash(b"nope")))
+        .bearer_auth("secret")
         .send()
         .await
         .unwrap();
     assert_eq!(missing.status(), 404);
+
+    // A client that pins another certificate won't talk to it.
+    let other =
+        crate::hub_tls::pinned_client(&format!("sha256/{}", "0".repeat(64)), &[crate::hub_tls::H2])
+            .unwrap();
+    let wrong = reqwest::Client::builder()
+        .use_preconfigured_tls(other)
+        .build()
+        .unwrap();
+    assert!(
+        wrong
+            .get(format!("{base}/files/{hash}"))
+            .send()
+            .await
+            .is_err()
+    );
+
+    // TLS 1.2 is refused.
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(rustls::pki_types::CertificateDer::from(
+            std::fs::read(dir.join("hub-tls/cert.der")).unwrap(),
+        ))
+        .unwrap();
+    let tls12 = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS12])
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let old = reqwest::Client::builder()
+        .use_preconfigured_tls(tls12)
+        .build()
+        .unwrap();
+    let e = old
+        .get(format!("{base}/files/{hash}"))
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{e:?}").contains("AlertReceived(ProtocolVersion)"),
+        "{e:?}"
+    );
+
+    // HTTP/3 over QUIC on the same port.
+    let addr: SocketAddr = base.trim_start_matches("https://").parse().unwrap();
+    let (status, body) = h3_request(
+        &fp,
+        addr,
+        "GET",
+        &format!("/files/{hash}"),
+        Some("secret"),
+        vec![],
+    )
+    .await;
+    assert_eq!((status, &body[..]), (200, &b"a file from the phone"[..]));
+    let (status, body) = h3_request(
+        &fp,
+        addr,
+        "PUT",
+        "/files",
+        Some("secret"),
+        b"over quic".to_vec(),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let put: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(put["hash"], tab_domain::blob::hash(b"over quic"));
+    assert_eq!(
+        hub.file_get(put["hash"].as_str().unwrap())
+            .unwrap()
+            .unwrap(),
+        b"over quic"
+    );
+    let (status, _) = h3_request(&fp, addr, "GET", &format!("/files/{hash}"), None, vec![]).await;
+    assert_eq!(status, 401);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// One HTTP/3 request to the hub, its certificate pinned.
+async fn h3_request(
+    fp: &str,
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Vec<u8>,
+) -> (u16, Vec<u8>) {
+    use bytes::Buf;
+    let tls = crate::hub_tls::pinned_client(fp, &[crate::hub_tls::H3]).unwrap();
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(crypto)));
+    let conn = endpoint.connect(addr, "localhost").unwrap().await.unwrap();
+    let (mut driver, mut send) = h3::client::new(h3_quinn::Connection::new(conn))
+        .await
+        .unwrap();
+    let drive = tokio::spawn(async move { std::future::poll_fn(|cx| driver.poll_close(cx)).await });
+    let mut req = http::Request::builder()
+        .method(method)
+        .uri(format!("https://localhost{path}"));
+    if let Some(t) = token {
+        req = req.header("authorization", format!("Bearer {t}"));
+    }
+    let mut stream = send.send_request(req.body(()).unwrap()).await.unwrap();
+    if !body.is_empty() {
+        stream.send_data(bytes::Bytes::from(body)).await.unwrap();
+    }
+    stream.finish().await.unwrap();
+    let res = stream.recv_response().await.unwrap();
+    let mut out = vec![];
+    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+        out.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+    }
+    drop(stream);
+    drop(send);
+    drive.abort();
+    (res.status().as_u16(), out)
 }
 
 #[tokio::test]
@@ -484,7 +652,7 @@ async fn this_app_watches_and_steers_a_session_another_device_runs() {
     let (events, mut ui) = broadcast::channel(64);
     hub.follow(store.clone(), events);
     let url = hub.serve(48_760, "secret".into()).await.unwrap();
-    let mut laptop = connect(&url, "device-laptop").await;
+    let mut laptop = connect(&hub, &url, "device-laptop").await;
 
     // The laptop's chat syncs in, mid-turn.
     let sid = "s-laptop";
@@ -683,7 +851,7 @@ async fn a_phone_watches_a_session_this_app_runs_and_answers_its_prompt() {
         text: "So far ".into(),
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
-    let mut phone = connect(&url, "phone").await;
+    let mut phone = connect(&hub, &url, "phone").await;
     phone
         .send(frame(
             2,

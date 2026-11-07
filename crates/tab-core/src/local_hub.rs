@@ -19,7 +19,8 @@
 //! loop can later point at a hub in the cloud.
 //!
 //! The hub also listens for other devices on a localhost WebSocket
-//! (`ws://127.0.0.1:<port>/hub?token=…`, binary Protobuf frames from
+//! (`wss://127.0.0.1:<port>/hub`, TLS 1.3 with a pinned certificate and the
+//! token in a header, binary Protobuf frames from
 //! `tab-protocol`), and reports what it's doing for the Hub page in
 //! Settings ([`LocalHub::status`]).
 
@@ -31,7 +32,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, Query, State};
+use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
@@ -92,6 +93,10 @@ pub struct LocalHub {
     next_conn: AtomicU64,
     next_request: AtomicU64,
     url: OnceLock<String>,
+    /// The listener certificate's fingerprint, which devices pin.
+    fingerprint: OnceLock<String>,
+    /// Whether HTTP/3 (QUIC) is up next to the TCP listener.
+    http3: OnceLock<bool>,
     /// This device's copy and the engine's event stream, once following.
     local: OnceLock<(Arc<Store>, broadcast::Sender<EngineEvent>)>,
     /// None where the OS won't say.
@@ -108,6 +113,10 @@ pub struct HubStatusView {
     pub started_at: Option<DateTime<Utc>>,
     /// Where other devices connect, once the listener is up.
     pub url: Option<String>,
+    /// The hub certificate's fingerprint (`sha256/<hex>`), which devices pin.
+    pub fingerprint: Option<String>,
+    /// HTTP/3 (QUIC) is up next to HTTP/2.
+    pub http3: bool,
     pub path: String,
     pub head: u64,
     pub records: u64,
@@ -174,6 +183,8 @@ impl LocalHub {
             next_conn: AtomicU64::new(1),
             next_request: AtomicU64::new(1),
             url: OnceLock::new(),
+            fingerprint: OnceLock::new(),
+            http3: OnceLock::new(),
             local: OnceLock::new(),
             sys: Mutex::new(sysinfo::System::new().ok()),
             remote: tokio::sync::Notify::new(),
@@ -473,9 +484,16 @@ impl LocalHub {
         });
     }
 
-    /// Listens for other devices on localhost. Returns the URL (without
-    /// the token).
+    /// Listens for other devices on localhost: TLS 1.3 only, with this
+    /// install's own certificate (see [`crate::hub_tls`]). TCP carries
+    /// HTTP/2 and HTTP/1.1 (the sync WebSocket, over either), and QUIC on
+    /// the same port carries HTTP/3 for files, advertised with `Alt-Svc`.
+    /// Requests authenticate with `Authorization: Bearer <token>` (or, for
+    /// a browser's WebSocket, the subprotocol `tab.token.<token>`), never a
+    /// token in the URL. Returns the sync URL.
     pub async fn serve(self: &Arc<Self>, port: u16, token: String) -> anyhow::Result<String> {
+        let identity =
+            crate::hub_tls::Identity::load_or_create(&self.path.with_file_name("hub-tls"))?;
         let mut listener = None;
         for p in port..port.saturating_add(20) {
             if let Ok(l) = tokio::net::TcpListener::bind(("127.0.0.1", p)).await {
@@ -484,23 +502,103 @@ impl LocalHub {
             }
         }
         let listener = listener.ok_or_else(|| anyhow::anyhow!("no free port for the hub"))?;
-        let url = format!("ws://{}/hub", listener.local_addr()?);
-        let app = Router::new()
-            .route("/hub", get(upgrade))
+        let addr = listener.local_addr()?;
+        let token = Arc::new(token);
+        let h3 = match self.serve_h3(addr, &identity, token.clone()) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "hub: HTTP/3 isn't available; serving HTTP/2 only");
+                false
+            }
+        };
+        let mut app = Router::new()
+            // `any`: a WebSocket is a GET upgrade on HTTP/1.1, a CONNECT on HTTP/2.
+            .route("/hub", axum::routing::any(upgrade))
             .route("/files", put(file_upload))
             .route("/files/{hash}", get(file_download))
             .layer(axum::extract::DefaultBodyLimit::max(
                 tab_domain::blob::MAX_BLOB_BYTES + 1024,
             ))
-            .with_state((self.clone(), Arc::new(token)));
+            .with_state((self.clone(), token));
+        if h3 {
+            let alt =
+                axum::http::HeaderValue::from_str(&format!("h3=\":{}\"; ma=86400", addr.port()))?;
+            app = app.layer(axum::middleware::map_response(move |mut res: Response| {
+                let alt = alt.clone();
+                async move {
+                    res.headers_mut().insert(axum::http::header::ALT_SVC, alt);
+                    res
+                }
+            }));
+        }
+        let tls = tokio_rustls::TlsAcceptor::from(Arc::new(
+            identity.server(&[crate::hub_tls::H2, crate::hub_tls::H1])?,
+        ));
         tokio::spawn(async move {
-            let svc = app.into_make_service_with_connect_info::<SocketAddr>();
-            if let Err(e) = axum::serve(listener, svc).await {
-                tracing::error!(error = %e, "hub listener stopped");
+            loop {
+                let (tcp, peer) = match listener.accept().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "hub: accept failed");
+                        continue;
+                    }
+                };
+                let (tls, app) = (tls.clone(), app.clone());
+                tokio::spawn(async move {
+                    let Ok(stream) = tls.accept(tcp).await else {
+                        return;
+                    };
+                    let svc = hyper::service::service_fn(
+                        move |mut req: http::Request<hyper::body::Incoming>| {
+                            req.extensions_mut().insert(ConnectInfo(peer));
+                            tower::ServiceExt::oneshot(app.clone(), req)
+                        },
+                    );
+                    let mut builder = hyper_util::server::conn::auto::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    );
+                    // WebSockets over HTTP/2 (RFC 8441).
+                    builder.http2().enable_connect_protocol();
+                    if let Err(e) = builder
+                        .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), svc)
+                        .await
+                    {
+                        tracing::debug!(error = %e, "hub: connection ended");
+                    }
+                });
             }
         });
+        let url = format!("wss://{addr}/hub");
         let _ = self.url.set(url.clone());
+        let _ = self.fingerprint.set(identity.fingerprint());
+        let _ = self.http3.set(h3);
         Ok(url)
+    }
+
+    /// HTTP/3 on QUIC (UDP) at `addr`, for files.
+    fn serve_h3(
+        self: &Arc<Self>,
+        addr: SocketAddr,
+        identity: &crate::hub_tls::Identity,
+        token: Arc<String>,
+    ) -> anyhow::Result<()> {
+        // No 0-RTT: early data can be replayed.
+        let tls = identity.server(&[crate::hub_tls::H3])?;
+        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
+        let endpoint =
+            quinn::Endpoint::server(quinn::ServerConfig::with_crypto(Arc::new(crypto)), addr)?;
+        let hub = self.clone();
+        tokio::spawn(async move {
+            while let Some(incoming) = endpoint.accept().await {
+                let (hub, token) = (hub.clone(), token.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = h3_connection(hub, incoming, token).await {
+                        tracing::debug!(error = %e, "hub: HTTP/3 connection ended");
+                    }
+                });
+            }
+        });
+        Ok(())
     }
 
     /// For the Hub page.
@@ -523,6 +621,8 @@ impl LocalHub {
             protocol_version: st.protocol_version,
             started_at: time(st.started_at),
             url: self.url.get().cloned(),
+            fingerprint: self.fingerprint.get().cloned(),
+            http3: self.http3.get().copied().unwrap_or(false),
             path: self.path.display().to_string(),
             head: st.head,
             records: st.records,
@@ -904,33 +1004,58 @@ fn reply_ok(h: Handled) -> anyhow::Result<()> {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct Auth {
-    #[serde(default)]
-    token: String,
+const WS_PROTOCOL: &str = "tab.hub";
+const WS_TOKEN: &str = "tab.token.";
+
+/// Whether a request carries the token: `Authorization: Bearer <token>`,
+/// or a WebSocket subprotocol `tab.token.<token>` (browsers can't set
+/// headers on a WebSocket).
+fn authorized(headers: &axum::http::HeaderMap, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let proto = headers
+        .get_all(axum::http::header::SEC_WEBSOCKET_PROTOCOL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .find_map(|p| p.trim().strip_prefix(WS_TOKEN));
+    bearer
+        .into_iter()
+        .chain(proto)
+        .any(|t| crate::hub_tls::same_secret(t, token))
+}
+
+fn unauthorized() -> Response {
+    (StatusCode::UNAUTHORIZED, "missing or wrong token").into_response()
 }
 
 async fn upgrade(
     State((hub, token)): State<(Arc<LocalHub>, Arc<String>)>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Query(auth): Query<Auth>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if token.is_empty() || auth.token != *token {
-        return (StatusCode::UNAUTHORIZED, "missing or wrong token").into_response();
+    if !authorized(&headers, &token) {
+        return unauthorized();
     }
-    ws.on_upgrade(move |socket| connection(hub, socket, addr))
+    ws.protocols([WS_PROTOCOL])
+        .on_upgrade(move |socket| connection(hub, socket, addr))
 }
 
-/// `PUT /files?token=…` with the file's bytes: stores it and answers its
-/// hash and size as JSON.
+/// `PUT /files` with the file's bytes: stores it and answers its hash and
+/// size as JSON.
 async fn file_upload(
     State((hub, token)): State<(Arc<LocalHub>, Arc<String>)>,
-    Query(auth): Query<Auth>,
+    headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if token.is_empty() || auth.token != *token {
-        return (StatusCode::UNAUTHORIZED, "missing or wrong token").into_response();
+    if !authorized(&headers, &token) {
+        return unauthorized();
     }
     match hub.file_put(&body) {
         Ok(m) => axum::Json(serde_json::json!({ "hash": m.hash, "size": m.size })).into_response(),
@@ -938,14 +1063,14 @@ async fn file_upload(
     }
 }
 
-/// `GET /files/<hash>?token=…`: the file's bytes.
+/// `GET /files/<hash>`: the file's bytes.
 async fn file_download(
     State((hub, token)): State<(Arc<LocalHub>, Arc<String>)>,
     axum::extract::Path(hash): axum::extract::Path<String>,
-    Query(auth): Query<Auth>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
-    if token.is_empty() || auth.token != *token {
-        return (StatusCode::UNAUTHORIZED, "missing or wrong token").into_response();
+    if !authorized(&headers, &token) {
+        return unauthorized();
     }
     match hub.file_get(&hash) {
         Ok(Some(bytes)) => (
@@ -963,6 +1088,110 @@ async fn file_download(
         Ok(None) => (StatusCode::NOT_FOUND, "no such file").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// One HTTP/3 connection: the same file routes as over TCP.
+async fn h3_connection(
+    hub: Arc<LocalHub>,
+    incoming: quinn::Incoming,
+    token: Arc<String>,
+) -> anyhow::Result<()> {
+    let conn = incoming.await?;
+    let mut h3c: h3::server::Connection<h3_quinn::Connection, bytes::Bytes> = h3::server::builder()
+        .build(h3_quinn::Connection::new(conn))
+        .await?;
+    while let Some(resolver) = h3c.accept().await? {
+        let (req, stream) = resolver.resolve_request().await?;
+        let (hub, token) = (hub.clone(), token.clone());
+        tokio::spawn(async move {
+            if let Err(e) = h3_request(hub, req, stream, token).await {
+                tracing::debug!(error = %e, "hub: HTTP/3 request failed");
+            }
+        });
+    }
+    Ok(())
+}
+
+async fn h3_request(
+    hub: Arc<LocalHub>,
+    req: http::Request<()>,
+    mut stream: h3::server::RequestStream<h3_quinn::BidiStream<bytes::Bytes>, bytes::Bytes>,
+    token: Arc<String>,
+) -> anyhow::Result<()> {
+    use bytes::Buf;
+    let reply = |status: StatusCode, kind: &'static str, body: Vec<u8>| (status, kind, body);
+    let (status, kind, body) = if !authorized(req.headers(), &token) {
+        reply(
+            StatusCode::UNAUTHORIZED,
+            "text/plain",
+            b"missing or wrong token".to_vec(),
+        )
+    } else {
+        match (req.method().as_str(), req.uri().path()) {
+            ("GET", path) if path.starts_with("/files/") => {
+                match hub.file_get(&path["/files/".len()..]) {
+                    Ok(Some(b)) => reply(StatusCode::OK, "application/octet-stream", b),
+                    Ok(None) => reply(
+                        StatusCode::NOT_FOUND,
+                        "text/plain",
+                        b"no such file".to_vec(),
+                    ),
+                    Err(e) => reply(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "text/plain",
+                        e.to_string().into_bytes(),
+                    ),
+                }
+            }
+            ("PUT", "/files") => {
+                let mut buf = Vec::new();
+                let mut too_big = false;
+                while let Some(mut chunk) = stream.recv_data().await? {
+                    if buf.len() + chunk.remaining() > tab_domain::blob::MAX_BLOB_BYTES {
+                        too_big = true;
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk.copy_to_bytes(chunk.remaining()));
+                }
+                if too_big {
+                    reply(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "text/plain",
+                        b"file too large".to_vec(),
+                    )
+                } else {
+                    match hub.file_put(&buf) {
+                        Ok(m) => reply(
+                            StatusCode::OK,
+                            "application/json",
+                            serde_json::to_vec(
+                                &serde_json::json!({ "hash": m.hash, "size": m.size }),
+                            )?,
+                        ),
+                        Err(e) => reply(
+                            StatusCode::BAD_REQUEST,
+                            "text/plain",
+                            e.to_string().into_bytes(),
+                        ),
+                    }
+                }
+            }
+            _ => reply(StatusCode::NOT_FOUND, "text/plain", b"not here".to_vec()),
+        }
+    };
+    let mut res = http::Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, kind);
+    if status == StatusCode::OK && kind == "application/octet-stream" {
+        res = res.header(
+            http::header::CACHE_CONTROL,
+            "private, max-age=31536000, immutable",
+        );
+    }
+    stream.send_response(res.body(())?).await?;
+    stream.send_data(bytes::Bytes::from(body)).await?;
+    stream.finish().await?;
+    Ok(())
 }
 
 async fn connection(hub: Arc<LocalHub>, mut socket: WebSocket, addr: SocketAddr) {

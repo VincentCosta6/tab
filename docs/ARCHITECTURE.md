@@ -61,19 +61,30 @@ Coming next (designed): `apps/mobile/`, `cloud/worker/` (workers-rs host for tab
 - **In, from the log.** The app then reads the hub's log with `GetChanges` from where this copy last got to (`hub_sync.pulled_to`) and writes the hub's rows into `tab.db` with the triggers off, so nothing echoes. Rows changed here that the hub hasn't seen yet keep the local change. Rows already identical are skipped, and the UI is told about the rest. Other devices' changes arrive this way, and a fresh or deleted `tab.db` is rebuilt from the hub.
 - **Twins.** Two devices can ingest the same thing (one GitHub notification) under different ids. When a hub row collides with a local row on a natural key, the one later in the log wins. Every device replays the same order, so they keep the same one.
 - **First meeting.** An empty hub gets everything in `tab.db`. A `tab.db` meeting a hub that already has data takes the hub's rows, then sends only what the hub lacked. If `hub.db` is replaced by one that's behind this copy, they're introduced again.
-- **Other devices.** The hub listens on `ws://127.0.0.1:47850/hub?token=<MCP token>` (binary Protobuf frames; the next free port if taken), and their changes wake the same sync loop.
+- **Other devices.** The hub listens on `wss://127.0.0.1:47850/hub` (binary Protobuf frames; the next free port if taken), and their changes wake the same sync loop. See *Transport* below.
 - **Status.** Settings → Hub shows where the hub runs, its address, the app process's CPU and memory, the size of the log and store, changes still waiting to sync, and each connected device with how far behind it is.
 
 The sync speaks only the hub protocol (`Apply`, `GetChanges`), so pointing the app at a cloud hub replaces the in-process call with the WebSocket and nothing else. Not synced, on purpose: caches (HTTP, AI, previews, embeddings), the API audit log and usage counters.
 
 **Chats sync too** (`sessions`, `session_messages`), so other devices can watch and steer them. Each session names the device that runs it (`sessions.device`, this install's id from `this_device`); only that device runs its turns. Messages sync by a `uid` (their local `id` only orders this copy). Only what the person reads in a chat travels: replies, their own messages, prompts, notes and errors. Tool output stays on the device that ran it, and a tool call syncs as its one-line summary without its input, except the step list and questions for the person, whose input is what they read. A message's text is cut at 64 KB in the hub.
 
+### Transport (built)
+
+Even on localhost, the hub only speaks **TLS 1.3**: no plain HTTP, no TLS 1.2 (refused with a `protocol_version` alert).
+
+- **Certificate.** No public CA signs certificates for `127.0.0.1` or LAN addresses, so each install makes its own (ECDSA P-256, in `hub-tls/` next to `hub.db`, key readable only by the user). Devices don't trust it through a CA: they **pin** its fingerprint (`sha256/<hex>`, shown on the Hub page), learned at pairing along with the token (`tab_core::hub_tls::pinned_client`). Nobody else can mint a certificate a paired device accepts.
+- **TCP** carries HTTP/2 and HTTP/1.1 (ALPN). The sync WebSocket works over either: an HTTP/1.1 upgrade, or HTTP/2 extended CONNECT (RFC 8441).
+- **QUIC** on the same port (UDP) carries **HTTP/3** for files, advertised with `Alt-Svc: h3=":<port>"`, so clients that speak it switch. No 0-RTT, since early data can be replayed.
+- **Auth** is `Authorization: Bearer <token>`, or the WebSocket subprotocol `tab.token.<token>` for browsers (they can't set headers on a WebSocket). A token in the URL is ignored, since URLs end up in logs. Tokens compare in constant time.
+- **Not yet over QUIC: the sync stream.** WebSockets over HTTP/3 (RFC 9220) isn't supported by the Rust HTTP/3 stack (`h3`) or, as far as we know, by Cloudflare yet; WebTransport is the QUIC-native replacement to move to once the cloud side supports it. Its frames are already compact Protobuf.
+- **In the cloud (designed)**, Cloudflare terminates TLS and HTTP/3 at the edge; the zone's minimum TLS version is to be set to 1.3 so the cloud hub matches.
+
 ### Files (built)
 
 Attachments live in the hub's file store, beside the records: `tab_store::blob::BlobStore`, content-addressed by SHA-256 (`sha256:<hex>`), so the same file attached twice is stored once. Backends: in memory, and a local folder (`hub-files/` next to `hub.db`, sharded by the first two hex digits, written via a temp file and rename). An R2 backend comes with the cloud hub.
 
 - **Records refer to files by hash**, anywhere in their body (a message's `meta.files`). `HubStore::blob_refs` lists every hash a current record mentions, and `tab_hub::blobs::collect` deletes files nothing refers to once they're a day old (the grace period covers an upload whose record hasn't arrived yet). The desktop runs it hourly. The hub owns cleanup; each device's `attachments/` folder is a cache.
-- **Bytes go over HTTP, not the sync socket**: `PUT /files?token=…` returns `{hash, size}`, `GET /files/<hash>?token=…` returns the bytes (immutable, so cacheable forever). In the cloud these become signed R2 URLs.
+- **Bytes go over HTTP, not the sync socket**: `PUT /files` returns `{hash, size}`, `GET /files/<hash>` returns the bytes (immutable, so cacheable forever), over HTTP/3 or HTTP/2. In the cloud these become signed R2 URLs.
 - **On the desktop** a pasted file goes into the hub and is copied into `attachments/<hash hex>/<name>`, so the path itself names the file. A path that isn't there (swept from the cache, or from a chat another device runs) is fetched from the hub when shown.
 
 ### Watch and steer (built)

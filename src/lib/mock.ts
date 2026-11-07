@@ -379,7 +379,7 @@ export const mockApi = {
           const started = new Date(Date.now() - 3 * 3600_000).toISOString();
           return {
             runs_on: "local", protocol_version: 1, started_at: started,
-            url: "ws://127.0.0.1:47850/hub", path: "C:\\Users\\vince\\AppData\\Roaming\\dev.tab.app\\hub.db",
+            url: "wss://127.0.0.1:47850/hub", fingerprint: "sha256/3f1c9a0e5d7b2c48e6a1f0b9d3c7e2a5b8f4d1c6e9a2b7f0c3d8e5a1b6f9c2d4", http3: true, path: "C:\\Users\\vince\\AppData\\Roaming\\dev.tab.app\\hub.db",
             head: 18_422, records: 6_310, edges: 0, live_leases: 1, storage_bytes: 41_943_040, files: 38, file_bytes: 12_582_912,
             cpu_percent: 2.4 + Math.random() * 3, memory_bytes: 186_000_000 + Math.round(Math.random() * 4_000_000), cpus: 12, pending: 0,
             connections: [
