@@ -1,9 +1,10 @@
 //! Claude Code adapter: one `claude -p` process per turn, resumed by session id,
 //! read as `stream-json`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -15,6 +16,33 @@ use crate::model::{AgentKind, Session, SessionStatus};
 /// Claude Code permission modes tab passes through. `bypassPermissions` is
 /// deliberately not offered: approvals belong to the person.
 const MODES: &[&str] = &["default", "acceptEdits", "plan", "auto", "dontAsk"];
+
+/// Claude Code reads a queued message only between tool calls, so a message
+/// sent during a long command (a build, `gh pr checks --watch`) would wait for
+/// it to end. Once a tool has run this long, steering interrupts it first,
+/// like pressing Esc in the terminal, so the message is read right away.
+const INTERRUPT_AFTER: Duration = Duration::from_secs(2);
+
+/// Tool calls in flight, by id, with when each started.
+type OpenTools = Arc<Mutex<HashMap<String, Instant>>>;
+
+/// The stdin lines that deliver a steering message: an interrupt first if a
+/// tool has been running for `INTERRUPT_AFTER` or longer, then the message.
+fn steer_lines(text: &str, open: &HashMap<String, Instant>, now: Instant, n: u64) -> Vec<Value> {
+    let mut lines = Vec::new();
+    if open
+        .values()
+        .any(|since| now.saturating_duration_since(*since) >= INTERRUPT_AFTER)
+    {
+        lines.push(json!({
+            "type": "control_request",
+            "request_id": format!("tab-steer-{n}"),
+            "request": { "subtype": "interrupt" },
+        }));
+    }
+    lines.push(json!({ "type": "user", "message": { "role": "user", "content": text } }));
+    lines
+}
 
 pub(super) async fn run_turn(
     hub: &Arc<AgentHub>,
@@ -112,14 +140,18 @@ pub(super) async fn run_turn(
     let first = json!({ "type": "user", "message": { "role": "user", "content": prompt } });
     stdin.write_all(format!("{first}\n").as_bytes()).await?;
     let mut steer_rx = hub.steering_open(&session.id);
+    let open_tools = OpenTools::default();
+    let tools = open_tools.clone();
     tokio::spawn(async move {
+        let mut n = 0;
         while let Some(text) = steer_rx.recv().await {
-            let line = json!({ "type": "user", "message": { "role": "user", "content": text } });
-            if stdin
-                .write_all(format!("{line}\n").as_bytes())
-                .await
-                .is_err()
-            {
+            n += 1;
+            let lines = steer_lines(&text, &tools.lock().unwrap(), Instant::now(), n);
+            let mut out = String::new();
+            for l in lines {
+                out.push_str(&format!("{l}\n"));
+            }
+            if stdin.write_all(out.as_bytes()).await.is_err() {
                 break;
             }
         }
@@ -135,6 +167,7 @@ pub(super) async fn run_turn(
 
     let mut lines = BufReader::new(stdout).lines();
     let mut parser = Parser::new(hub.clone(), session.id.clone());
+    parser.open_tools = open_tools;
     // Rough size of what tab adds to the system prompt (the item and its context).
     parser.tab_context_tokens = (system.len() / 4) as i64;
     // After the result the CLI normally exits right away. If it stays up,
@@ -215,6 +248,11 @@ struct Parser {
     first_call: Option<Value>,
     last_call: Option<Value>,
     tab_context_tokens: i64,
+    /// Shared with the steering task, which interrupts long-running tools.
+    open_tools: OpenTools,
+    /// The person interrupted the turn to steer it: the next result only
+    /// closes the interrupted part, and the turn goes on with their message.
+    interrupted: bool,
 }
 
 /// Everything a model call read: new input plus cache writes and reads.
@@ -242,6 +280,8 @@ impl Parser {
             first_call: None,
             last_call: None,
             tab_context_tokens: 0,
+            open_tools: OpenTools::default(),
+            interrupted: false,
         }
     }
 
@@ -335,6 +375,10 @@ impl Parser {
                         Some("tool_use") => {
                             let id = block["id"].as_str().unwrap_or_default().to_string();
                             if self.once(format!("tool:{id}")) {
+                                self.open_tools
+                                    .lock()
+                                    .unwrap()
+                                    .insert(id.clone(), Instant::now());
                                 let name = block["name"].as_str().unwrap_or("tool");
                                 if crate::links::is_creator(name, &block["input"]) {
                                     self.create_calls.insert(id.clone());
@@ -354,7 +398,17 @@ impl Parser {
             }
             "user" => {
                 for block in v["message"]["content"].as_array().into_iter().flatten() {
+                    if block["type"] == "text"
+                        && block["text"]
+                            .as_str()
+                            .is_some_and(|t| t.starts_with("[Request interrupted by user"))
+                    {
+                        self.interrupted = true;
+                    }
                     if block["type"] == "tool_result" {
+                        if let Some(id) = block["tool_use_id"].as_str() {
+                            self.open_tools.lock().unwrap().remove(id);
+                        }
                         let text = match &block["content"] {
                             Value::String(s) => s.clone(),
                             Value::Array(parts) => parts
@@ -403,8 +457,21 @@ impl Parser {
                     );
                 }
             }
+            "result" if std::mem::take(&mut self.interrupted) => {
+                // Interrupted to read a steering message, which is already
+                // queued: count the cost and keep going.
+                self.open_tools.lock().unwrap().clear();
+                crate::usage::record_claude_result(
+                    &hub.store,
+                    v,
+                    "agent",
+                    Some(&sid),
+                    self.billing,
+                );
+            }
             "result" => {
                 self.finished = true;
+                self.open_tools.lock().unwrap().clear();
                 hub.steering_close(&sid);
                 crate::usage::record_claude_result(
                     &hub.store,
@@ -529,5 +596,84 @@ mod tests {
         assert!(!p.finished);
         let s = store.session_get(&s.id).unwrap().unwrap();
         assert_eq!(s.status, SessionStatus::Working);
+    }
+
+    #[test]
+    fn steering_interrupts_only_a_tool_that_has_been_running_a_while() {
+        let now = Instant::now();
+        let kinds = |open: &HashMap<String, Instant>| -> Vec<String> {
+            steer_lines("hi", open, now, 1)
+                .iter()
+                .map(|l| l["type"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(kinds(&HashMap::new()), ["user"]);
+        let quick = HashMap::from([("t1".to_string(), now - Duration::from_millis(300))]);
+        assert_eq!(kinds(&quick), ["user"]);
+        let long = HashMap::from([
+            ("t1".to_string(), now - Duration::from_millis(300)),
+            ("t2".to_string(), now - Duration::from_secs(90)),
+        ]);
+        let lines = steer_lines("hi", &long, now, 7);
+        assert_eq!(lines[0]["request"]["subtype"], "interrupt");
+        assert_eq!(lines[0]["request_id"], "tab-steer-7");
+        assert_eq!(lines[1]["message"]["content"], "hi");
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_to_steer_does_not_end_the_turn() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        hub.steering_open(&s.id);
+        let mut p = Parser::new(hub.clone(), s.id.clone());
+        let feed = |p: &mut Parser, line: &str| p.handle(&serde_json::from_str(line).unwrap());
+        feed(
+            &mut p,
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"gh pr checks --watch"}}]}}"#,
+        );
+        assert!(p.open_tools.lock().unwrap().contains_key("t1"));
+        // What Claude Code prints after an interrupt mid-tool.
+        feed(
+            &mut p,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"The user doesn't want to proceed with this tool use.","is_error":true}]}}"#,
+        );
+        feed(
+            &mut p,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#,
+        );
+        assert!(p.open_tools.lock().unwrap().is_empty());
+        feed(
+            &mut p,
+            r#"{"type":"result","session_id":"abc","is_error":false,"stop_reason":"tool_use"}"#,
+        );
+        assert!(!p.finished, "the turn goes on with the steering message");
+        assert!(hub.can_steer(&s.id), "steering stays open");
+        let kinds: Vec<_> = store
+            .messages(&s.id)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.kind)
+            .collect();
+        assert!(!kinds.contains(&"result".to_string()));
+        // The steering message is answered, and that result ends the turn.
+        feed(
+            &mut p,
+            r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Skipping the wait."}]}}"#,
+        );
+        feed(
+            &mut p,
+            r#"{"type":"result","session_id":"abc","is_error":false,"stop_reason":"end_turn"}"#,
+        );
+        assert!(p.finished);
+        assert!(!hub.can_steer(&s.id));
     }
 }
