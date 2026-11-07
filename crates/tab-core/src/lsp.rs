@@ -19,7 +19,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
+use tokio::process::ChildStdin;
 use tokio::sync::{Mutex, oneshot};
 
 /// One way to install a server, tried when its `needs` tool is present.
@@ -113,6 +113,23 @@ pub const SERVERS: &[ServerSpec] = &[
         note: "Hover, go to definition, references and type errors.",
     },
 ];
+
+/// A server's own settings, sent at start and whenever it asks.
+///
+/// rust-analyzer runs a crate's build scripts and proc macros by default,
+/// which is arbitrary code from the pull request. They stay on only where
+/// the sandbox also holds the network to package registries (macOS);
+/// elsewhere they're off, at the cost of macro-generated items.
+fn server_settings(id: &str, contained: bool) -> Value {
+    match id {
+        "rust-analyzer" => json!({
+            "cargo": { "buildScripts": { "enable": contained } },
+            "procMacro": { "enable": contained },
+            "checkOnSave": false,
+        }),
+        _ => Value::Null,
+    }
+}
 
 pub fn spec(id: &str) -> Option<&'static ServerSpec> {
     SERVERS.iter().find(|s| s.id == id)
@@ -317,7 +334,7 @@ pub struct Session {
     stdin: Mutex<ChildStdin>,
     pending: Pending,
     next: AtomicI64,
-    child: Mutex<Child>,
+    child: Mutex<crate::sandbox::Guarded>,
 }
 
 async fn write_msg(w: &mut ChildStdin, v: &Value) -> std::io::Result<()> {
@@ -378,7 +395,7 @@ impl Session {
         )
         .await;
         let _ = self.notify("exit", Value::Null).await;
-        let _ = self.child.lock().await.kill().await;
+        self.child.lock().await.kill_tree();
     }
 }
 
@@ -415,13 +432,28 @@ impl LspHub {
         }
         let exe =
             find(s.command).ok_or_else(|| anyhow::anyhow!("{} isn't installed", s.command))?;
-        let mut child = command(&exe)
-            .args(s.args)
-            .current_dir(root)
+        // The checkout is someone else's code, and language servers run
+        // parts of it (build scripts, proc macros, `go list`). They get the
+        // checkout and build caches to write to, no credentials, and only
+        // package registries on the network.
+        let sb = crate::sandbox::current();
+        let policy = sb.isolated_policy(
+            &[root.to_path_buf()],
+            crate::sandbox::Network::from_list(&sb.config().lsp_domains),
+        );
+        let settings = server_settings(
+            s.id,
+            sb.backend() == crate::sandbox::Backend::Seatbelt && sb.enforced(),
+        );
+        let args: Vec<std::ffi::OsString> = s.args.iter().map(Into::into).collect();
+        let mut prepared = sb.command(&exe, &args, root, &policy).await?;
+        prepared
+            .cmd
+            .env("PATH", path_env())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
+            .stderr(Stdio::piped());
+        let mut child = prepared.spawn()?;
         let stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let stderr = child.stderr.take().expect("piped");
@@ -450,6 +482,7 @@ impl LspHub {
 
         // Reader: responses go to their waiters, server requests get a
         // default answer, notifications go to the UI.
+        let init_settings = settings.clone();
         let reader_session = Arc::downgrade(&session);
         let sid = id.clone();
         tokio::spawn(async move {
@@ -479,8 +512,21 @@ impl LspHub {
                 if let Some(req_id) = msg.get("id").cloned() {
                     // workspace/configuration wants one item per request; others take null.
                     let result = if method == "workspace/configuration" {
-                        let n = msg["params"]["items"].as_array().map(Vec::len).unwrap_or(1);
-                        Value::Array(vec![Value::Null; n])
+                        let items = msg["params"]["items"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        Value::Array(
+                            items
+                                .iter()
+                                .map(|i| match i["section"].as_str() {
+                                    Some(sec) if !settings.is_null() && sec == name => {
+                                        settings.clone()
+                                    }
+                                    _ => Value::Null,
+                                })
+                                .collect(),
+                        )
                     } else {
                         Value::Null
                     };
@@ -518,6 +564,7 @@ impl LspHub {
                     "processId": std::process::id(),
                     "clientInfo": { "name": "tab" },
                     "rootUri": root_uri,
+                    "initializationOptions": init_settings,
                     "workspaceFolders": [{ "uri": root_uri, "name": root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() }],
                     "capabilities": {
                         "general": { "positionEncodings": ["utf-16"] },

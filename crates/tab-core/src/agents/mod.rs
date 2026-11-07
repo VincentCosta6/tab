@@ -248,21 +248,36 @@ pub struct AgentHub {
     /// is in, the process hasn't exited). They run as the next turn.
     followups: Mutex<HashMap<String, Vec<String>>>,
     approvals: Mutex<HashMap<String, (Approval, oneshot::Sender<Decision>)>>,
-    opencode: tokio::sync::Mutex<Option<Arc<opencode::Server>>>,
+    /// OpenCode servers by chat id (see `opencode::server`).
+    opencode: tokio::sync::Mutex<HashMap<String, Arc<opencode::Server>>>,
 }
 
 /// The checkout a dev build of tab runs from, so agents can be told not to
 /// edit it under the running app. None in release builds.
 fn dev_checkout() -> Option<String> {
-    if !cfg!(debug_assertions) {
-        return None;
+    crate::sandbox::dev_checkout().map(|p| p.display().to_string())
+}
+
+/// Arguments for an agent CLI, collected before the sandbox wraps them.
+#[derive(Default)]
+pub(crate) struct Args(pub Vec<std::ffi::OsString>);
+
+impl Args {
+    pub fn arg(&mut self, a: impl AsRef<std::ffi::OsStr>) -> &mut Self {
+        self.0.push(a.as_ref().to_owned());
+        self
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let root = root.canonicalize().ok()?;
-    root.join(".git").exists().then(|| {
-        let s = root.display().to_string();
-        s.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(s)
-    })
+
+    pub fn args<I, S>(&mut self, it: I) -> &mut Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        for a in it {
+            self.arg(a);
+        }
+        self
+    }
 }
 
 impl AgentHub {
@@ -283,15 +298,25 @@ impl AgentHub {
             steering_rx: Mutex::new(HashMap::new()),
             followups: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
-            opencode: tokio::sync::Mutex::new(None),
+            opencode: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
     pub async fn set_config(&self, cfg: AgentConfig) {
         let changed = *self.cfg.read().unwrap() != cfg;
         *self.cfg.write().unwrap() = cfg;
-        if changed && let Some(old) = self.opencode.lock().await.take() {
-            old.shutdown();
+        if changed {
+            for (_, old) in self.opencode.lock().await.drain() {
+                old.shutdown();
+            }
+        }
+    }
+
+    /// Stops every OpenCode server; the next turn starts a fresh one with
+    /// the current sandbox settings.
+    pub async fn stop_opencode(&self) {
+        for (_, s) in self.opencode.lock().await.drain() {
+            s.shutdown();
         }
     }
 
@@ -368,6 +393,66 @@ impl AgentHub {
         let d = self.sessions_dir().join(id);
         std::fs::create_dir_all(&d)?;
         Ok(d)
+    }
+
+    /// What a session's agent may touch. A chat about a pull request runs
+    /// in tab's checkout of it, someone else's code, so it gets the review
+    /// policy; every other chat is the person's own.
+    pub fn policy(&self, session: &Session) -> crate::sandbox::Policy {
+        let sb = crate::sandbox::current();
+        let cwd = crate::sandbox::real(Path::new(&session.cwd));
+        let workspaces = crate::sandbox::real(&self.dir.join("workspaces"));
+        let mut p = if cwd.starts_with(&workspaces) {
+            sb.review_policy(&cwd, Path::new(&self.workdir()))
+        } else {
+            sb.chat_policy()
+        };
+        // Other chats' folders hold their tokens: each chat sees only its own
+        // (made now, so the sandbox can show it).
+        let _ = self.session_dir(&session.id);
+        p.hide.push(crate::sandbox::real(&self.sessions_dir()));
+        p.reveal
+            .push(crate::sandbox::real(&self.sessions_dir().join(&session.id)));
+        // gh and git's network commands go through tab, which needs its
+        // server to be up.
+        if self.mcp().is_some() {
+            sb.brokered(p)
+        } else {
+            p
+        }
+    }
+
+    /// Writes a chat's `gh` and `git` shims and points `cmd` at them, when
+    /// the sandbox is on. Returns whether it did.
+    pub(crate) fn add_shims(&self, session: &Session, cmd: &mut tokio::process::Command) -> bool {
+        let sb = crate::sandbox::current();
+        let (Some(mcp), true) = (self.mcp(), sb.config().enabled) else {
+            return false;
+        };
+        let Ok(exe) = std::env::current_exe() else {
+            return false;
+        };
+        let Ok(dir) = self.session_dir(&session.id) else {
+            return false;
+        };
+        let url = mcp.url.trim_end_matches("/mcp").to_string() + "/cli";
+        let chat_token = crate::mcp::chat_token(&mcp.token, &session.id);
+        let ep = crate::sandbox::broker::Endpoint {
+            url: &url,
+            token: &chat_token,
+            session: &session.id,
+        };
+        match crate::sandbox::broker::write_shims(&dir, &ep, &exe) {
+            Ok(Some(shims)) => {
+                shims.apply(cmd);
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(error = %e, "writing CLI shims failed");
+                false
+            }
+        }
     }
 
     pub fn workdir(&self) -> String {
@@ -978,12 +1063,33 @@ impl AgentHub {
         );
         if let Some(root) = dev_checkout() {
             out.push_str(&format!(
-                "\nThis is a dev build of tab, running from {root}. Don't edit files in that checkout: each \
-                 save hot-reloads or rebuilds the app you are running inside, and a half-written edit can \
+                "\nThis is a dev build of tab, running from {root}. That checkout is read-only to you: each \
+                 save would hot-reload or rebuild the app you are running inside, and a half-written edit can \
                  blank it or end this chat. To change tab's code, work in a separate worktree (git -C \"{root}\" \
                  worktree add ../tab-<topic> -b <branch> origin/main), and commit, push and open a PR from \
                  there.\n"
             ));
+        }
+        let sb = crate::sandbox::current();
+        if sb.config().enabled {
+            out.push_str(if sb.enforced() {
+                "\nYou run in tab's sandbox. tab's own files, shell startup files and stored cloud and browser \
+                 credentials are off limits, and in a pull request's checkout you can only change that checkout. \
+                 A write that fails with \"Read-only file system\" or \"Operation not permitted\" on one of those \
+                 paths is the sandbox: tell the person what you needed instead of working around it.\n"
+            } else {
+                "\ntab's own files and stored credentials are off limits to your file tools. If an edit is refused \
+                 for that reason, tell the person what you needed instead of working around it.\n"
+            });
+            if sb.config().enabled && self.mcp().is_some() {
+                out.push_str(
+                    "Use `gh` and `git` as usual: tab runs `gh` for you, and git reaches GitHub through tab, \
+                     both signed in with the person's GitHub connection. There's no GitHub token in your \
+                     environment, so don't look for one or change git's remote or credential settings. Force \
+                     pushes, branch deletes and merges wait for the person to allow them; if one is declined, \
+                     say what you wanted to do instead of retrying.\n",
+                );
+            }
         }
         if let Ok(Some(brief)) = self.store.session_brief(&session.id) {
             out.push('\n');
@@ -1070,10 +1176,10 @@ impl AgentHub {
         for c in self.running.lock().unwrap().values() {
             c.cancel();
         }
-        if let Ok(mut oc) = self.opencode.try_lock()
-            && let Some(s) = oc.take()
-        {
-            s.shutdown();
+        if let Ok(mut oc) = self.opencode.try_lock() {
+            for (_, s) in oc.drain() {
+                s.shutdown();
+            }
         }
     }
 

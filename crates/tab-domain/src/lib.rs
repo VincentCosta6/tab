@@ -14,6 +14,7 @@
 //! here may touch the network, the filesystem, threads or the clock. That's
 //! what lets it build for `wasm32-unknown-unknown`, and CI keeps it that way.
 
+pub mod cli;
 pub mod lease;
 pub mod links;
 pub mod model;
@@ -21,4 +22,5 @@ pub mod ops;
 pub mod rules;
 pub mod workflow;
 
+pub use cli::*;
 pub use model::*;

@@ -4680,8 +4680,10 @@ dependencies = [
  "async-imap",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "futures-util",
+ "libc",
  "mail-parser",
  "model2vec-rs",
  "prost-types",
@@ -4705,6 +4707,7 @@ dependencies = [
  "uuid",
  "webpki-roots",
  "which",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

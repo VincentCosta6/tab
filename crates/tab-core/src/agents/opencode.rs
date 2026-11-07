@@ -3,6 +3,7 @@
 //! `prompt_async`, and follows the server's SSE event stream.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -35,15 +36,17 @@ pub(super) struct Server {
     directory: String,
     client: reqwest::Client,
     turns: Arc<Mutex<HashMap<String, Turn>>>,
-    child: Mutex<Option<tokio::process::Child>>,
+    child: Mutex<Option<crate::sandbox::Guarded>>,
     cancel: CancellationToken,
+    /// When a turn last used it, so idle servers can be stopped.
+    used: Mutex<std::time::Instant>,
 }
 
 impl Server {
     pub(super) fn shutdown(&self) {
         self.cancel.cancel();
         if let Some(mut c) = self.child.lock().unwrap().take() {
-            let _ = c.start_kill();
+            c.kill_tree();
         }
     }
 
@@ -63,15 +66,48 @@ fn free_port() -> u16 {
         .unwrap_or(4096)
 }
 
-async fn server(hub: &Arc<AgentHub>) -> anyhow::Result<Arc<Server>> {
-    let mut slot = hub.opencode.lock().await;
-    if let Some(s) = slot.as_ref()
+/// Servers tab keeps running at once; the least recently used idle one
+/// stops when another chat needs one.
+const MAX_SERVERS: usize = 4;
+
+/// The OpenCode server for a chat. Each chat gets its own, started in the
+/// chat's folder under the chat's own sandbox policy, with its own `gh` and
+/// `git` shims and its id on every call to tab's MCP server. A server the
+/// person runs themselves (`opencode_url`) is shared by every chat.
+async fn server(hub: &Arc<AgentHub>, session: Option<&Session>) -> anyhow::Result<Arc<Server>> {
+    let cfg = hub.config();
+    let remote = cfg
+        .opencode_url
+        .as_deref()
+        .is_some_and(|u| !u.trim().is_empty());
+    let key = match (remote, session) {
+        (true, _) => "remote".to_string(),
+        (false, Some(s)) => s.id.clone(),
+        (false, None) => String::new(),
+    };
+    let mut servers = hub.opencode.lock().await;
+    if let Some(s) = servers.get(&key)
         && !s.cancel.is_cancelled()
     {
+        *s.used.lock().unwrap() = std::time::Instant::now();
         return Ok(s.clone());
     }
-    let cfg = hub.config();
-    let directory = hub.workdir();
+    servers.retain(|_, s| !s.cancel.is_cancelled());
+    while servers.len() >= MAX_SERVERS {
+        let idle = servers
+            .iter()
+            .filter(|(k, _)| !hub.is_running(k))
+            .min_by_key(|(_, s)| *s.used.lock().unwrap())
+            .map(|(k, _)| k.clone());
+        let Some(k) = idle else { break };
+        if let Some(old) = servers.remove(&k) {
+            old.shutdown();
+        }
+    }
+    let directory = match session {
+        Some(s) if !remote && Path::new(&s.cwd).is_dir() => s.cwd.clone(),
+        _ => hub.workdir(),
+    };
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .build()?;
@@ -85,34 +121,48 @@ async fn server(hub: &Arc<AgentHub>) -> anyhow::Result<Arc<Server>> {
                     .unwrap_or(default_command(AgentKind::OpenCode)),
             )?;
             let port = free_port();
-            let mut cmd = super::command(&exe);
-            cmd.args([
-                "serve",
-                "--hostname",
-                "127.0.0.1",
-                "--port",
-                &port.to_string(),
-            ])
-            .current_dir(&directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            let policy = match session {
+                Some(s) => hub.policy(s),
+                None => crate::sandbox::current().chat_policy(),
+            };
+            let args: Vec<std::ffi::OsString> = ["serve", "--hostname", "127.0.0.1", "--port"]
+                .iter()
+                .map(Into::into)
+                .chain([port.to_string().into()])
+                .collect();
+            let mut prepared = crate::sandbox::current()
+                .command(&exe, &args, std::path::Path::new(&directory), &policy)
+                .await?;
+            let cmd = &mut prepared.cmd;
+            cmd.stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if let Some(s) = session {
+                hub.add_shims(s, cmd);
+            }
             if let Some(mcp) = hub.mcp() {
                 // Inline config: adds tab's MCP server without touching the
                 // person's own opencode.json.
+                // Each chat's server holds that chat's token only; the one
+                // for suggestions belongs to no chat.
+                let id = session.map(|s| s.id.as_str()).unwrap_or("suggestions");
+                let headers = json!({
+                    "Authorization": format!("Bearer {}", crate::mcp::chat_token(&mcp.token, id)),
+                    "X-Tab-Session": id,
+                });
                 let config = json!({
                     "mcp": {
                         "tab": {
                             "type": "remote",
                             "url": mcp.url,
                             "enabled": true,
-                            "headers": { "Authorization": format!("Bearer {}", mcp.token) }
+                            "headers": headers
                         }
                     }
                 });
                 cmd.env("OPENCODE_CONFIG_CONTENT", config.to_string());
             }
-            let child = cmd.spawn().map_err(|e| {
+            let child = prepared.spawn().map_err(|e| {
                 anyhow::anyhow!("starting OpenCode ({}) failed: {e}", exe.display())
             })?;
             (format!("http://127.0.0.1:{port}"), Some(child))
@@ -143,9 +193,10 @@ async fn server(hub: &Arc<AgentHub>) -> anyhow::Result<Arc<Server>> {
         turns: Arc::new(Mutex::new(HashMap::new())),
         child: Mutex::new(child),
         cancel: CancellationToken::new(),
+        used: Mutex::new(std::time::Instant::now()),
     });
     tokio::spawn(follow_events(hub.clone(), s.clone()));
-    *slot = Some(s.clone());
+    servers.insert(key, s.clone());
     Ok(s)
 }
 
@@ -380,7 +431,7 @@ pub(super) async fn run_turn(
     system: &str,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let s = server(hub).await?;
+    let s = server(hub, Some(session)).await?;
     let oc_id = match &session.agent_session_id {
         Some(id) => id.clone(),
         None => {
@@ -482,7 +533,7 @@ pub(super) async fn complete(
     system: &str,
     prompt: &str,
 ) -> anyhow::Result<String> {
-    let s = server(hub).await?;
+    let s = server(hub, None).await?;
     let v: Value = s
         .client
         .post(s.url("/session"))

@@ -34,7 +34,14 @@ pub(super) async fn run_turn(
     let system_file = dir.join("system.md");
     std::fs::write(&system_file, system)?;
 
-    let mut cmd = super::command(&exe);
+    let policy = hub.policy(session);
+    let settings_file = dir.join("settings.json");
+    std::fs::write(
+        &settings_file,
+        serde_json::to_vec_pretty(&crate::sandbox::current().claude_settings(&policy))?,
+    )?;
+    let mut cmd = super::Args::default();
+    cmd.arg("--settings").arg(&settings_file);
     cmd.args([
         "-p",
         "--input-format",
@@ -64,7 +71,7 @@ pub(super) async fn run_turn(
                     "type": "http",
                     "url": mcp.url,
                     "headers": {
-                        "Authorization": format!("Bearer {}", mcp.token),
+                        "Authorization": format!("Bearer {}", crate::mcp::chat_token(&mcp.token, &session.id)),
                         "X-Tab-Session": session.id,
                     }
                 }
@@ -85,13 +92,18 @@ pub(super) async fn run_turn(
     if let Some(id) = &session.agent_session_id {
         cmd.args(["--resume", id]);
     }
-    cmd.current_dir(&session.cwd)
+    let mut prepared = crate::sandbox::current()
+        .command(&exe, &cmd.0, std::path::Path::new(&session.cwd), &policy)
+        .await?;
+    hub.add_shims(session, &mut prepared.cmd);
+    prepared
+        .cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    tracing::debug!(session = %session.id, mode, resume = ?session.agent_session_id, "starting Claude Code turn");
-    let mut child = cmd
+    tracing::debug!(session = %session.id, mode, resume = ?session.agent_session_id, sandboxed = prepared.enforced, "starting Claude Code turn");
+    let mut child = prepared
         .spawn()
         .map_err(|e| anyhow::anyhow!("starting Claude Code ({}) failed: {e}", exe.display()))?;
     // stdin stays open so the person can steer mid-turn; it closes when the
@@ -156,7 +168,7 @@ pub(super) async fn run_turn(
                 None => break,
             },
             _ = cancel.cancelled() => {
-                let _ = child.kill().await;
+                child.kill_tree();
                 return Ok(());
             }
         }

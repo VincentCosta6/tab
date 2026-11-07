@@ -129,6 +129,10 @@ let config: TabConfig = {
     budget: { daily_usd: 10, monthly_usd: null, per_turn_usd: null, ranker_plan_cap: 0.8 }, kind: "claude_code", command: null, model: null, workdir: "C:\\Users\\vince\\code", permission_mode: "auto", opencode_url: null },
   mcp: { port: 47821, token: "mock-token" },
   storage: { keep_days: 7, max_gb: 5 },
+  sandbox: {
+    enabled: true, protected: [], hidden: [], container_runtime: "", ssh_in_chats: true,
+    lsp_domains: ["crates.io", "*.crates.io", "proxy.golang.org", "sum.golang.org", "pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com", "*.githubusercontent.com"],
+  },
   onboarded: true,
 };
 
@@ -364,6 +368,11 @@ export const mockApi = {
           sessions: { bytes: 311_296, files: 64 },
           workspaces: { bytes: mockCheckouts.reduce((n, c) => n + c.bytes, 10_485_760), files: 900 },
           checkouts: mockCheckouts,
+        };
+        case "sandbox_status": return {
+          enabled: true, backend: "unavailable", enforced: false, container: "docker",
+          summary: "Windows has no sandbox tab can use yet, so file limits aren't enforced. Agents still start without tab's secrets, Claude Code is told not to touch protected folders, and stopping a chat ends everything it started.",
+          fix: "Workflow commands that name a container image run isolated in Docker or Podman.",
         };
         case "storage_clean": return { removed: 3, bytes: 2_200_000 };
         case "hub_status": {

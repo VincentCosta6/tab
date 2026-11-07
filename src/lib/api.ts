@@ -5,7 +5,7 @@
 import type {
   AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
-  RateLimitState, ReviewAction, HubStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
+  RateLimitState, ReviewAction, HubStatus, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun,
 } from "./types";
 import { mockApi } from "./mock";
@@ -104,6 +104,7 @@ export const api = {
   workspaceOpen: (repo: string, number: number, target: "vscode" | "folder", path?: string, line?: number) =>
     call<void>("review_workspace_open", { repo, number, target, path: path ?? null, line: line ?? null }),
   vscodeAvailable: () => call<boolean>("review_vscode_available"),
+  sandboxStatus: () => call<SandboxStatus>("sandbox_status"),
   storageUsage: () => call<StorageUsage>("storage_usage"),
   hubStatus: () => call<HubStatus | null>("hub_status"),
   storageClean: () => call<Swept>("storage_clean"),
@@ -120,8 +121,8 @@ export const api = {
   workflowTemplates: () => call<Workflow[]>("workflow_templates"),
   workflowValidate: (workflow: Workflow) => call<Issue[]>("workflow_validate", { workflow }),
   workflowSave: (workflow: Workflow) => call<{ workflow: Workflow; issues: Issue[] }>("workflow_save", { workflow }),
-  workflowSetEnabled: (id: string, enabled: boolean, allowDestructive?: boolean) =>
-    call<Workflow>("workflow_set_enabled", { id, enabled, allowDestructive: allowDestructive ?? null }),
+  workflowSetEnabled: (id: string, enabled: boolean, allowDestructive?: boolean, allowCommands?: boolean) =>
+    call<Workflow>("workflow_set_enabled", { id, enabled, allowDestructive: allowDestructive ?? null, allowCommands: allowCommands ?? null }),
   workflowDelete: (id: string) => call<void>("workflow_delete", { id }),
   workflowRuns: (workflowId: string | null, limit = 50) => call<WorkflowRun[]>("workflow_runs", { workflowId, limit }),
   workflowRun: (workflow: Workflow, itemId: string | null, dryRun: boolean) => call<WorkflowRun>("workflow_run", { workflow, itemId, dryRun }),

@@ -85,6 +85,19 @@ pub enum EngineEvent {
         /// `user` or `agent`.
         by: String,
     },
+    /// An agent changed something through a connection's CLI (`gh pr
+    /// merge`, `git push`). The app refreshes what shows it.
+    CliChanged {
+        session_id: String,
+        change: tab_domain::CliChange,
+    },
+    /// The things behind these pages changed (an agent's `gh pr merge`, a
+    /// connector noticing upstream). The app refreshes link previews of
+    /// them, and whatever else the connection says shows them.
+    PagesChanged {
+        connector: String,
+        pages: Vec<String>,
+    },
 }
 
 const MAX_CONCURRENT_RANKS: usize = 4;
@@ -464,6 +477,33 @@ impl Core {
         })
     }
 
+    /// The things behind `pages` changed upstream. The connector drops
+    /// what it cached about them, queue items at those pages get a fresh
+    /// preview (sent as [`EngineEvent::PreviewChanged`]), and the app hears
+    /// [`EngineEvent::PagesChanged`] to refresh link previews showing them.
+    fn pages_changed(self: &Arc<Self>, connector: &str, pages: &[String]) {
+        if pages.is_empty() {
+            return;
+        }
+        crate::connectors::forget_pages(connector, pages);
+        for page in pages {
+            let Ok(Some(item)) = self.store.item_by_url(page) else {
+                continue;
+            };
+            let Some(c) = self.connectors.get(&item.event.source).cloned() else {
+                continue;
+            };
+            let core = self.clone();
+            tokio::spawn(async move {
+                core.refresh_preview(&c, &item).await;
+            });
+        }
+        let _ = self.events.send(EngineEvent::PagesChanged {
+            connector: connector.to_string(),
+            pages: pages.to_vec(),
+        });
+    }
+
     /// Fetches and caches one preview. Returns `None` when the call was
     /// deferred or refused by a rate budget; the old cache stays.
     async fn refresh_preview(
@@ -835,6 +875,7 @@ impl Engine {
                             }
                         }
                     }
+                    EngineMsg::Changed(id, pages) => ingest.pages_changed(&id, &pages),
                     EngineMsg::Status(id, status) => {
                         let mut all = ingest_infos.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(info) = all.iter_mut().find(|c| c.descriptor.id == id)
@@ -1069,6 +1110,12 @@ impl EngineHandle {
             });
         }
         Ok(self.core.refresh_preview(&c, &item).await.unwrap_or(empty))
+    }
+
+    /// Something changed the things behind `pages` (an agent merged a pull
+    /// request through `gh`): see [`Core::pages_changed`].
+    pub fn pages_changed(&self, connector: &str, pages: &[String]) {
+        self.core.pages_changed(connector, pages);
     }
 
     /// Creates a task in tab's own connector. A due time makes it a
@@ -1513,6 +1560,85 @@ mod tests {
             "Looking at CI failed: outage in checkout"
         );
         assert_eq!(acting.0.lock().unwrap().len(), 1);
+        handle.shutdown();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_steps_run_only_when_allowed() {
+        use crate::workflow::runtime::StepStatus;
+        use crate::workflow::{RunStatus, Step, StepKind, Trigger};
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = broadcast::channel(64);
+        let handle = Engine {
+            gateway: Arc::new(Gateway::new(store.clone())),
+            store: store.clone(),
+            ranker: Arc::new(Pipeline {
+                rules: RankingRules::default(),
+                profile: Default::default(),
+                ai: None,
+            }),
+            connectors: vec![Arc::new(crate::connectors::TabConnector)],
+            infos: Vec::new(),
+            events,
+        }
+        .start();
+        let step = |id: &str, kind: StepKind| Step {
+            id: id.into(),
+            label: String::new(),
+            when: vec![],
+            continue_on_error: false,
+            kind,
+        };
+        let mut w = Workflow {
+            name: "Build".into(),
+            trigger: Trigger::Manual,
+            steps: vec![
+                step(
+                    "run",
+                    StepKind::Command {
+                        program: "sh".into(),
+                        args: vec![
+                            "-c".into(),
+                            "echo \"$1\" > out.txt; cat out.txt".into(),
+                            "sh".into(),
+                            "{{workflow.name}}; rm -rf /".into(),
+                        ],
+                        folder: String::new(),
+                        network: vec![],
+                        env: Default::default(),
+                        image: String::new(),
+                        timeout_secs: 30,
+                    },
+                ),
+                step(
+                    "after",
+                    StepKind::Set {
+                        values: [("said".to_string(), "{{steps.run.stdout}}".into())]
+                            .into_iter()
+                            .collect(),
+                    },
+                ),
+            ],
+            ..Default::default()
+        };
+        w = store.workflow_save(&w, "user", Utc::now()).unwrap();
+
+        let blocked = handle.run_workflow(w.clone(), None, false).await.unwrap();
+        assert_eq!(blocked.status, RunStatus::Blocked);
+        assert_eq!(blocked.steps[0].status, StepStatus::Blocked);
+
+        let dry = handle.run_workflow(w.clone(), None, true).await.unwrap();
+        assert_eq!(dry.steps[0].status, StepStatus::Dry);
+
+        w.allow_commands = true;
+        let w = store.workflow_save(&w, "user", Utc::now()).unwrap();
+        let ran = handle.run_workflow(w, None, false).await.unwrap();
+        assert_eq!(ran.status, RunStatus::Succeeded, "{:?}", ran.error);
+        // A templated argument stays one argument: it's echoed, not run.
+        assert_eq!(ran.steps[0].output["stdout"], "Build; rm -rf /\n");
+        assert_eq!(ran.steps[0].output["exit_code"], 0);
+        assert_eq!(ran.steps[1].output["said"], "Build; rm -rf /\n");
         handle.shutdown();
     }
 }

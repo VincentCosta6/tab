@@ -33,6 +33,7 @@ pub mod lsp;
 pub mod mcp;
 pub mod ranker;
 pub mod ratelimit;
+pub mod sandbox;
 pub mod storage;
 pub mod store;
 pub mod usage;
