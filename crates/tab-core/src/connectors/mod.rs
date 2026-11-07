@@ -33,6 +33,17 @@ pub fn registry() -> Vec<Box<dyn ConnectorFactory>> {
     v
 }
 
+/// Has connector `id` drop what it cached about `pages`, after something
+/// changed them. See [`ConnectorFactory::forget_pages`].
+pub fn forget_pages(id: &str, pages: &[String]) {
+    if pages.is_empty() {
+        return;
+    }
+    if let Some(f) = registry().iter().find(|f| f.descriptor().id == id) {
+        f.forget_pages(pages);
+    }
+}
+
 /// Whether tab still has a connector with this id. Items from one it
 /// dropped (like the old sample data) are cleared on start.
 pub fn known(id: &str) -> bool {

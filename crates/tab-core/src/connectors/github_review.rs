@@ -1344,3 +1344,45 @@ mod link_tests {
         assert_eq!(rollup(std::iter::empty()), None);
     }
 }
+
+#[cfg(test)]
+mod link_cache_tests {
+    use super::*;
+    use crate::connector::ConnectorFactory;
+
+    fn cache(key: &str) {
+        let s = LinkSummary {
+            title: "t".into(),
+            state: "open".into(),
+            author: None,
+            checks: None,
+            updated_at: None,
+            merge_state: None,
+            review_decision: None,
+            open_threads: None,
+        };
+        LINK_CACHE
+            .lock()
+            .unwrap()
+            .insert(key.into(), (std::time::Instant::now(), s));
+    }
+
+    fn cached(key: &str) -> bool {
+        LINK_CACHE.lock().unwrap().contains_key(key)
+    }
+
+    #[test]
+    fn a_changed_page_drops_its_cached_summary() {
+        for k in ["fp/a#1", "fp/a#2", "fp/b#1"] {
+            cache(k);
+        }
+        let github = super::super::GithubFactory;
+        github.forget_pages(&["https://github.com/fp/a/pull/1".into()]);
+        assert!(!cached("fp/a#1"));
+        assert!(cached("fp/a#2") && cached("fp/b#1"));
+        // A repo's page (a push) drops every pull request in it.
+        github.forget_pages(&["https://github.com/fp/a".into()]);
+        assert!(!cached("fp/a#2"));
+        assert!(cached("fp/b#1"));
+    }
+}

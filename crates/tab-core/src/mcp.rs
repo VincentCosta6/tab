@@ -79,8 +79,12 @@ pub trait EngineAccess: Send + Sync + 'static {
         }
         None
     }
-    /// Re-fetches whatever tab shows for `url` (a pull request's preview).
-    async fn refresh_url(&self, _url: &str) {}
+    /// The things behind `pages` changed (an agent merged a pull request):
+    /// drop what tab cached about them and refresh what shows them. See
+    /// [`crate::engine::Engine::pages_changed`].
+    async fn pages_changed(&self, connector: &str, pages: &[String]) {
+        crate::connectors::forget_pages(connector, pages);
+    }
     /// Dry-runs a workflow, on an item if given. Nothing changes.
     async fn dry_run_workflow(
         &self,
@@ -181,20 +185,6 @@ async fn handle_cli(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: S
     };
     let reply = s.run_cli(&session, req).await;
     axum::Json(reply).into_response()
-}
-
-/// What tab cached about what a CLI just changed, so the app's next look
-/// is fresh (link summaries keep a pull request for two minutes).
-fn forget_cached(change: &tab_domain::CliChange) {
-    if change.connector != "github" {
-        return;
-    }
-    if let Some(repo) = &change.repo {
-        let number = (change.resource == "pull")
-            .then_some(change.number)
-            .flatten();
-        crate::connectors::github_review::forget_links(repo, number);
-    }
 }
 
 fn upstream_client() -> &'static reqwest::Client {
@@ -415,9 +405,11 @@ async fn handle_git(
                 resource: "branch".into(),
                 repo: Some(repo.clone()),
                 number: None,
-                url: None,
+                url: tool.cli.page("branch", Some(&repo), None),
             };
-            forget_cached(&change);
+            s.engine
+                .pages_changed(&change.connector, change.url.as_slice())
+                .await;
             let _ = s.events.send(EngineEvent::CliChanged {
                 session_id: session.id.clone(),
                 change,
@@ -1001,10 +993,9 @@ impl McpServer {
         if reply.code == 0 && matches!(m.effect, CliEffect::Write | CliEffect::Destructive) {
             let repo = broker::repo_of(&req.cwd).await;
             let change = broker::change(&tool, &m, &req.args, repo);
-            forget_cached(&change);
-            if let Some(url) = &change.url {
-                self.engine.refresh_url(url).await;
-            }
+            self.engine
+                .pages_changed(&change.connector, change.url.as_slice())
+                .await;
             let _ = self.events.send(EngineEvent::CliChanged {
                 session_id: session.id.clone(),
                 change,

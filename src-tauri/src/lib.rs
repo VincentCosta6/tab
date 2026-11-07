@@ -93,9 +93,10 @@ impl EngineAccess for LiveEngine {
     async fn connector_config(&self, id: &str) -> anyhow::Result<Option<ConnectorConfig>> {
         Ok(self.0.config.lock().await.connectors.get(id).cloned())
     }
-    async fn refresh_url(&self, url: &str) {
-        if let Some(e) = self.0.engine.read().await.as_ref() {
-            e.refresh_url(url);
+    async fn pages_changed(&self, connector: &str, pages: &[String]) {
+        match self.0.engine.read().await.as_ref() {
+            Some(e) => e.pages_changed(connector, pages),
+            None => tab_core::connectors::forget_pages(connector, pages),
         }
     }
     async fn save_connector(&self, id: &str, cfg: ConnectorConfig) -> anyhow::Result<()> {

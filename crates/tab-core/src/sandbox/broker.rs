@@ -855,11 +855,7 @@ pub fn change(tool: &Brokered, m: &CliMatch, args: &[String], repo: Option<Strin
             .skip(2)
             .find_map(|a| a.trim_start_matches('#').parse::<u64>().ok())
     });
-    let url = match (&repo, number, resource.as_str()) {
-        (Some(r), Some(n), "pull") => Some(format!("https://github.com/{r}/pull/{n}")),
-        (Some(r), Some(n), "issue") => Some(format!("https://github.com/{r}/issues/{n}")),
-        _ => None,
-    };
+    let url = tool.cli.page(&resource, repo.as_deref(), number);
     CliChange {
         connector: tool.connector.clone(),
         command: describe(tool.name(), args),
@@ -872,7 +868,7 @@ pub fn change(tool: &Brokered, m: &CliMatch, args: &[String], repo: Option<Strin
 }
 
 /// `https://github.com/o/r/pull/12` → (`o/r`, 12).
-fn parse_github_url(s: &str) -> Option<(String, Option<u64>)> {
+pub(crate) fn parse_github_url(s: &str) -> Option<(String, Option<u64>)> {
     let rest = s
         .strip_prefix("https://github.com/")
         .or_else(|| s.strip_prefix("git@github.com:"))?;
@@ -1027,6 +1023,13 @@ mod tests {
             .collect();
         let c = change(&gh, &gh.classify(&args), &args, None);
         assert_eq!(c.url.as_deref(), Some("https://github.com/x/y/issues/3"));
+
+        // A push touches the repo, so its page is the repo's.
+        let git = find("git").unwrap();
+        assert_eq!(
+            git.cli.page("branch", Some("o/r"), None).as_deref(),
+            Some("https://github.com/o/r")
+        );
     }
 
     #[test]

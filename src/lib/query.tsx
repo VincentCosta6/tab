@@ -15,6 +15,22 @@ import { useEffect, type ReactNode } from "react";
 import { onEngineEvent } from "./api";
 import type { Chat, ConnectorInfo, ItemContext, QueueItem, Session } from "./types";
 
+/**
+ * Beyond link previews (refreshed for every connection), the queries that
+ * show a connection's page, so a change to it shows up right away. A
+ * connection with nothing of its own leaves this out.
+ */
+const pageQueries: Record<string, (page: string) => readonly (readonly unknown[])[]> = {
+  github: (page) => {
+    const m = /^https:\/\/github\.com\/([^/]+\/[^/]+)(?:\/(pull|issues)\/(\d+))?/.exec(page);
+    if (!m) return [];
+    const [, repo, kind, n] = m;
+    // A repo page means a push or repo change: any of its pull requests may have moved.
+    const pulls = kind === "pull" ? [keys.pull(repo, Number(n))] : kind ? [] : [["pull", repo]];
+    return [...pulls, ["github"]];
+  },
+};
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -137,19 +153,19 @@ function LiveEvents() {
         case "workflows_changed":
           qc.invalidateQueries({ queryKey: ["workflows"] });
           break;
-        case "cli_changed": {
-          // An agent changed something on the service: refresh what shows it
-          // now instead of waiting for the next poll. The backend re-fetches
-          // the item's preview and sends it as preview_changed.
-          const c = e.change;
-          if (c.url) qc.invalidateQueries({ queryKey: ["link-preview", c.url] });
-          if (c.repo && c.number != null && c.resource === "pull") qc.invalidateQueries({ queryKey: keys.pull(c.repo, c.number) });
-          // A push moves a branch: any open pull request in the repo may have new commits.
-          if (c.repo && (c.resource === "branch" || c.resource === "repo")) qc.invalidateQueries({ queryKey: ["pull", c.repo] });
-          if (c.connector === "github") qc.invalidateQueries({ queryKey: ["github"] });
+        case "cli_changed":
+          // An agent changed something on the service. What shows it is
+          // refreshed by the pages_changed that comes with it.
           qc.invalidateQueries({ queryKey: ["linked-tasks"] });
           break;
-        }
+        case "pages_changed":
+          // The backend already dropped its cached copies and re-fetches
+          // queue items at these pages (they arrive as preview_changed).
+          for (const page of e.pages) {
+            qc.invalidateQueries({ queryKey: ["link-preview", page] });
+            for (const queryKey of pageQueries[e.connector]?.(page) ?? []) qc.invalidateQueries({ queryKey });
+          }
+          break;
         case "workflow_run":
           qc.invalidateQueries({ queryKey: ["workflow-runs"] });
           if (e.run.item_id && e.run.finished_at) qc.invalidateQueries({ queryKey: ["activity", e.run.item_id] });

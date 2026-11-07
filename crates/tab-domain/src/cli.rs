@@ -106,6 +106,12 @@ pub struct CliInfo {
     pub rules: Vec<CliRule>,
     /// When no rule matches.
     pub default: CliEffect,
+    /// The page that shows each `resource` a rule names, so a change to it
+    /// refreshes that page's preview. `{repo}` and `{number}` are filled in
+    /// (`pull` → `https://github.com/{repo}/pull/{number}`). A template
+    /// whose values aren't known gives no page.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pages: std::collections::BTreeMap<String, String>,
 }
 
 /// What [`CliInfo::classify`] decided.
@@ -118,6 +124,19 @@ pub struct CliMatch {
 }
 
 impl CliInfo {
+    /// The page a change to `resource` shows on, from [`CliInfo::pages`].
+    pub fn page(&self, resource: &str, repo: Option<&str>, number: Option<u64>) -> Option<String> {
+        let t = self.pages.get(resource)?;
+        let mut out = t.clone();
+        if t.contains("{repo}") {
+            out = out.replace("{repo}", repo?);
+        }
+        if t.contains("{number}") {
+            out = out.replace("{number}", &number?.to_string());
+        }
+        Some(out)
+    }
+
     /// The words of a command line that aren't options or their values.
     pub fn positionals<'a>(&self, args: &'a [String]) -> Vec<&'a str> {
         let mut out = Vec::new();
@@ -253,4 +272,37 @@ pub struct CliChange {
     /// The page that shows what changed, when there is one.
     #[serde(default)]
     pub url: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_page_a_change_shows_on() {
+        let cli = CliInfo {
+            name: "gh".into(),
+            description: String::new(),
+            auth: CliAuth::Env { var: "T".into() },
+            value_flags: Vec::new(),
+            rules: Vec::new(),
+            default: CliEffect::Read,
+            pages: [
+                ("pull", "https://x.test/{repo}/pull/{number}"),
+                ("repo", "https://x.test/{repo}"),
+            ]
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .into(),
+        };
+        assert_eq!(
+            cli.page("pull", Some("o/r"), Some(4)).as_deref(),
+            Some("https://x.test/o/r/pull/4")
+        );
+        assert_eq!(cli.page("pull", Some("o/r"), None), None);
+        assert_eq!(
+            cli.page("repo", Some("o/r"), Some(4)).as_deref(),
+            Some("https://x.test/o/r")
+        );
+        assert_eq!(cli.page("issue", Some("o/r"), Some(4)), None);
+    }
 }

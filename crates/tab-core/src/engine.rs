@@ -91,6 +91,13 @@ pub enum EngineEvent {
         session_id: String,
         change: tab_domain::CliChange,
     },
+    /// The things behind these pages changed (an agent's `gh pr merge`, a
+    /// connector noticing upstream). The app refreshes link previews of
+    /// them, and whatever else the connection says shows them.
+    PagesChanged {
+        connector: String,
+        pages: Vec<String>,
+    },
 }
 
 const MAX_CONCURRENT_RANKS: usize = 4;
@@ -470,6 +477,33 @@ impl Core {
         })
     }
 
+    /// The things behind `pages` changed upstream. The connector drops
+    /// what it cached about them, queue items at those pages get a fresh
+    /// preview (sent as [`EngineEvent::PreviewChanged`]), and the app hears
+    /// [`EngineEvent::PagesChanged`] to refresh link previews showing them.
+    fn pages_changed(self: &Arc<Self>, connector: &str, pages: &[String]) {
+        if pages.is_empty() {
+            return;
+        }
+        crate::connectors::forget_pages(connector, pages);
+        for page in pages {
+            let Ok(Some(item)) = self.store.item_by_url(page) else {
+                continue;
+            };
+            let Some(c) = self.connectors.get(&item.event.source).cloned() else {
+                continue;
+            };
+            let core = self.clone();
+            tokio::spawn(async move {
+                core.refresh_preview(&c, &item).await;
+            });
+        }
+        let _ = self.events.send(EngineEvent::PagesChanged {
+            connector: connector.to_string(),
+            pages: pages.to_vec(),
+        });
+    }
+
     /// Fetches and caches one preview. Returns `None` when the call was
     /// deferred or refused by a rate budget; the old cache stays.
     async fn refresh_preview(
@@ -841,6 +875,7 @@ impl Engine {
                             }
                         }
                     }
+                    EngineMsg::Changed(id, pages) => ingest.pages_changed(&id, &pages),
                     EngineMsg::Status(id, status) => {
                         let mut all = ingest_infos.lock().unwrap_or_else(|e| e.into_inner());
                         if let Some(info) = all.iter_mut().find(|c| c.descriptor.id == id)
@@ -1077,20 +1112,10 @@ impl EngineHandle {
         Ok(self.core.refresh_preview(&c, &item).await.unwrap_or(empty))
     }
 
-    /// Re-fetches the preview of the item at `url`, if there is one, after
-    /// something changed it (an agent merged the pull request through `gh`).
-    /// The new preview arrives as [`EngineEvent::PreviewChanged`].
-    pub fn refresh_url(&self, url: &str) {
-        let Ok(Some(item)) = self.core.store.item_by_url(url) else {
-            return;
-        };
-        let Some(c) = self.core.connectors.get(&item.event.source).cloned() else {
-            return;
-        };
-        let core = self.core.clone();
-        tokio::spawn(async move {
-            core.refresh_preview(&c, &item).await;
-        });
+    /// Something changed the things behind `pages` (an agent merged a pull
+    /// request through `gh`): see [`Core::pages_changed`].
+    pub fn pages_changed(&self, connector: &str, pages: &[String]) {
+        self.core.pages_changed(connector, pages);
     }
 
     /// Creates a task in tab's own connector. A due time makes it a

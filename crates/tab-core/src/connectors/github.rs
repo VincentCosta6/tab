@@ -86,6 +86,14 @@ impl ConnectorFactory for GithubFactory {
         }
     }
 
+    fn forget_pages(&self, pages: &[String]) {
+        for p in pages {
+            if let Some((repo, number)) = crate::sandbox::broker::parse_github_url(p) {
+                super::github_review::forget_links(&repo, number);
+            }
+        }
+    }
+
     fn build(
         &self,
         cfg: &ConnectorConfig,
@@ -128,6 +136,18 @@ fn number_field() -> ActionField {
 pub fn clis() -> Vec<tab_domain::CliInfo> {
     use tab_domain::{CliAuth, CliEffect as E, CliInfo, CliRule as R};
     let read = "list|ls|view|status|diff|checks|watch|show";
+    // A push or a repo change can move any pull request in the repo, so
+    // their page is the repo's, which refreshes all of them.
+    let pages = |extra: &[(&str, &str)]| {
+        [
+            ("repo", "https://github.com/{repo}"),
+            ("branch", "https://github.com/{repo}"),
+        ]
+        .iter()
+        .chain(extra)
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect::<std::collections::BTreeMap<_, _>>()
+    };
     let gh = CliInfo {
         name: "gh".into(),
         description: "The GitHub CLI, signed in as this connection.".into(),
@@ -171,6 +191,10 @@ pub fn clis() -> Vec<tab_domain::CliInfo> {
             R::new("repo", E::Write).resource("repo"),
         ],
         default: E::Write,
+        pages: pages(&[
+            ("pull", "https://github.com/{repo}/pull/{number}"),
+            ("issue", "https://github.com/{repo}/issues/{number}"),
+        ]),
     };
     let git = CliInfo {
         name: "git".into(),
@@ -185,6 +209,7 @@ pub fn clis() -> Vec<tab_domain::CliInfo> {
         rules: Vec::new(),
         // Runs in the chat; only its traffic to GitHub goes through tab.
         default: E::Local,
+        pages: pages(&[]),
     };
     vec![gh, git]
 }

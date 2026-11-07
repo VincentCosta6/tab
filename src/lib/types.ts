@@ -201,7 +201,9 @@ export type EngineEvent =
   | { type: "project_changed"; project_id: string }
   | { type: "workflow_run"; run: WorkflowRun }
   | { type: "workflows_changed"; id: string; by: string }
-  | { type: "cli_changed"; session_id: string; change: CliChange };
+  | { type: "cli_changed"; session_id: string; change: CliChange }
+  /** The things behind these pages changed: refresh what shows them. */
+  | { type: "pages_changed"; connector: string; pages: string[] };
 
 /** Something an agent changed through a connection's CLI (`gh pr merge`, `git push`). */
 export interface CliChange {
