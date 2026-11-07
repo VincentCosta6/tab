@@ -90,8 +90,9 @@ export function QueryProvider({ children }: { children: ReactNode }) {
         persister,
         maxAge: Infinity,
         buster: CACHE_VERSION,
-        // Streaming buffers and live telemetry are not worth restoring.
-        dehydrateOptions: { shouldDehydrateQuery: (q) => !["stream", "pressure", "search-index", "workflow-issues"].includes(String(q.queryKey[0])) && q.state.status === "success" },
+        // Streaming buffers and live telemetry are not worth restoring. Nor is
+        // the app's version or update check, which a restart may have changed.
+        dehydrateOptions: { shouldDehydrateQuery: (q) => !["stream", "pressure", "search-index", "workflow-issues", "app-version", "app-update"].includes(String(q.queryKey[0])) && q.state.status === "success" },
       }}
       // The queue is a cheap local read, so re-read it once after restoring:
       // items can change while the app is closed (or a connection was turned off).
