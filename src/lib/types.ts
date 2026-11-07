@@ -388,6 +388,7 @@ export interface TabConfig {
   connectors: Record<string, { enabled: boolean; settings: Record<string, unknown> }>;
   agent: AgentConfig;
   mcp: { port: number; token: string };
+  storage: { keep_days: number; max_gb: number | null };
   onboarded: boolean;
 }
 
@@ -436,3 +437,8 @@ export interface UsageSummary {
   billing: "subscription" | "api" | "unknown" | null;
   windows: PlanWindow[];
 }
+
+export interface DirSize { bytes: number; files: number }
+export interface CheckoutUsage { repo: string; number: number; last_used: string; bytes: number }
+export interface StorageUsage { attachments: DirSize; sessions: DirSize; workspaces: DirSize; checkouts: CheckoutUsage[] }
+export interface Swept { removed: number; bytes: number }

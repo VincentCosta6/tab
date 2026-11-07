@@ -28,6 +28,7 @@ pub mod mcp;
 pub mod model;
 pub mod ranker;
 pub mod ratelimit;
+pub mod storage;
 pub mod store;
 pub mod usage;
 pub mod workflow;

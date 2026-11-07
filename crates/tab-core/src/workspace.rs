@@ -11,7 +11,12 @@
 //! ```text
 //! workspaces/<owner>/<name>/repo        the shared clone
 //! workspaces/<owner>/<name>/pr-<n>      worktree at the PR's head
+//! workspaces/<owner>/<name>/pr-<n>.used when the PR was last opened
 //! ```
+//!
+//! Checkouts are removed again once their PR closes or they go unused (see
+//! [`Workspaces::checkouts`] and [`Workspaces::remove`]); the shared clone
+//! goes with the last of them.
 //!
 //! The GitHub token is handed to git through `GIT_CONFIG_*` environment
 //! variables for each command, so it is never written to `.git/config` or
@@ -46,6 +51,15 @@ pub struct Workspace {
     pub files: Vec<String>,
     /// True when the clone already existed.
     pub reused: bool,
+}
+
+/// One PR checkout on disk.
+#[derive(Debug, Clone, Serialize)]
+pub struct Checkout {
+    pub repo: String,
+    pub number: u64,
+    /// When the PR was last opened for review.
+    pub last_used: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -316,6 +330,100 @@ impl Workspaces {
         Ok(self.repo_dir(repo)?.join(format!("pr-{number}")))
     }
 
+    fn used_marker(&self, repo: &str, number: u64) -> anyhow::Result<PathBuf> {
+        Ok(self.repo_dir(repo)?.join(format!("pr-{number}.used")))
+    }
+
+    /// Notes that a PR's checkout was just opened, so the sweep leaves it.
+    pub fn mark_used(&self, repo: &str, number: u64) {
+        if let Ok(p) = self.used_marker(repo, number) {
+            let _ = std::fs::create_dir_all(p.parent().unwrap_or(&self.root));
+            let _ = std::fs::write(&p, b"");
+        }
+    }
+
+    /// Every PR checkout on disk, with when it was last opened.
+    pub fn checkouts(&self) -> Vec<Checkout> {
+        let mut out = Vec::new();
+        let dirs = |p: &Path| -> Vec<std::fs::DirEntry> {
+            std::fs::read_dir(p)
+                .map(|r| r.flatten().filter(|e| e.path().is_dir()).collect())
+                .unwrap_or_default()
+        };
+        let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        for owner in dirs(&self.root) {
+            for name in dirs(&owner.path()) {
+                for wt in dirs(&name.path()) {
+                    let file = wt.file_name();
+                    let Some(n) = file
+                        .to_str()
+                        .and_then(|f| f.strip_prefix("pr-"))
+                        .and_then(|n| n.parse::<u64>().ok())
+                    else {
+                        continue;
+                    };
+                    let repo = format!(
+                        "{}/{}",
+                        owner.file_name().to_string_lossy(),
+                        name.file_name().to_string_lossy()
+                    );
+                    if valid_repo(&repo).is_err() {
+                        continue;
+                    }
+                    let used = mtime(&name.path().join(format!("pr-{n}.used")))
+                        .or_else(|| mtime(&wt.path()))
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    out.push(Checkout {
+                        repo,
+                        number: n,
+                        last_used: used.into(),
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| (&a.repo, a.number).cmp(&(&b.repo, b.number)));
+        out
+    }
+
+    /// Removes a PR's checkout, and the repository's clone once no checkout
+    /// is left. It comes back the next time the PR is opened.
+    pub async fn remove(&self, repo: &str, number: u64) -> anyhow::Result<()> {
+        let dir = self.repo_dir(repo)?;
+        let clone = dir.join("repo");
+        let wt = self.worktree(repo, number)?;
+        if let Ok(git) = self.git(None)
+            && clone.join(".git").exists()
+        {
+            let wt_str = wt.to_string_lossy().into_owned();
+            let _ = git
+                .run(&clone, &["worktree", "remove", "--force", &wt_str])
+                .await;
+            if wt.exists() {
+                tokio::fs::remove_dir_all(&wt).await?;
+            }
+            let _ = git.run(&clone, &["worktree", "prune"]).await;
+        } else if wt.exists() {
+            tokio::fs::remove_dir_all(&wt).await?;
+        }
+        let _ = tokio::fs::remove_file(self.used_marker(repo, number)?).await;
+
+        let others = std::fs::read_dir(&dir)
+            .map(|r| {
+                r.flatten().any(|e| {
+                    e.path().is_dir() && e.file_name().to_string_lossy().starts_with("pr-")
+                })
+            })
+            .unwrap_or(false);
+        if !others && dir.exists() {
+            tokio::fs::remove_dir_all(&dir).await?;
+            if let Some(owner) = dir.parent() {
+                // Only goes if empty.
+                let _ = tokio::fs::remove_dir(owner).await;
+            }
+        }
+        Ok(())
+    }
+
     fn git(&self, token: Option<String>) -> anyhow::Result<Git> {
         Ok(Git {
             exe: git_exe()?,
@@ -347,6 +455,7 @@ impl Workspaces {
             })
         };
         tokio::fs::create_dir_all(&dir).await?;
+        self.mark_used(&t.repo, t.number);
 
         // 1. The shared clone.
         let reused = clone.join(".git").is_dir() || clone.join("HEAD").is_file();
@@ -787,6 +896,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(many, vec![("lib/a.txt".into(), "hello world\n".into())]);
+
+        let co = ws.checkouts();
+        assert_eq!(co.len(), 1);
+        assert_eq!((co[0].repo.as_str(), co[0].number), ("acme/demo", 7));
+        assert!(chrono::Utc::now() - co[0].last_used < chrono::Duration::minutes(5));
+        ws.remove("acme/demo", 7).await.unwrap();
+        assert!(ws.checkouts().is_empty());
+        assert!(!clone.exists(), "the clone goes with its last checkout");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

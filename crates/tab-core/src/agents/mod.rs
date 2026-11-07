@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -334,8 +334,38 @@ impl AgentHub {
         }
     }
 
+    /// Each chat's own folder (system prompt, MCP config).
+    pub fn sessions_dir(&self) -> PathBuf {
+        self.dir.join("sessions")
+    }
+
+    /// Clears out attachments and chat folders unused for `keep`.
+    pub fn sweep_files(
+        &self,
+        now: DateTime<Utc>,
+        keep: std::time::Duration,
+    ) -> anyhow::Result<crate::storage::Swept> {
+        use crate::storage::{sweep_attachments, sweep_sessions};
+        let mut swept = sweep_attachments(&self.store, &self.attachments_dir(), now, keep)?;
+        swept.add(sweep_sessions(
+            &self.store,
+            &self.sessions_dir(),
+            now,
+            keep,
+        )?);
+        Ok(swept)
+    }
+
+    /// Every attachment with when it was last used, for the size limit.
+    pub fn attachments(
+        &self,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<crate::storage::Candidate<PathBuf>>> {
+        crate::storage::attachments(&self.store, &self.attachments_dir(), now)
+    }
+
     pub(crate) fn session_dir(&self, id: &str) -> anyhow::Result<PathBuf> {
-        let d = self.dir.join("sessions").join(id);
+        let d = self.sessions_dir().join(id);
         std::fs::create_dir_all(&d)?;
         Ok(d)
     }

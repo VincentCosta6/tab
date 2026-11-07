@@ -189,4 +189,54 @@ impl Store {
             .collect::<Result<_, _>>()?;
         Ok(rows)
     }
+
+    /// When each attached file was last part of an active chat: the later of
+    /// the message it was sent in and the chat's last activity. Files in a
+    /// chat that's mid-turn count as used now.
+    pub fn attachments_last_used(
+        &self,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<std::collections::HashMap<String, DateTime<Utc>>> {
+        let conn = self.conn();
+        let rows: Vec<(String, String, String, String)> = conn
+            .prepare(
+                "SELECT m.meta, m.created_at, s.updated_at, s.status
+                 FROM session_messages m JOIN sessions s ON s.id = m.session_id
+                 WHERE m.meta LIKE '%\"attachments\"%'",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<_, _>>()?;
+        let mut out = std::collections::HashMap::new();
+        for (meta, sent, updated, status) in rows {
+            let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta) else {
+                continue;
+            };
+            let Some(paths) = meta.get("attachments").and_then(|a| a.as_array()) else {
+                continue;
+            };
+            let used = if status == "working" {
+                now
+            } else {
+                parse_ts(&sent)?.max(parse_ts(&updated)?)
+            };
+            for p in paths.iter().filter_map(|p| p.as_str()) {
+                let e = out.entry(p.to_string()).or_insert(used);
+                *e = (*e).max(used);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Ids of chats that have been active since `since` or are mid-turn.
+    pub fn sessions_active(
+        &self,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        let conn = self.conn();
+        let ids = conn
+            .prepare("SELECT id FROM sessions WHERE updated_at >= ?1 OR status = 'working'")?
+            .query_map([ts(since)], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(ids)
+    }
 }
