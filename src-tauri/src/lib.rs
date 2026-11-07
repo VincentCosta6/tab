@@ -2011,7 +2011,11 @@ async fn workflow_chat_send(
         destructive steps (merge, close, move mail); the person does that in the builder, so tell them when it's needed. \
         This chat is about the one workflow open below; work on others only if the person asks.";
     let brief = format!("{brief}{open_now}");
-    let title = match open.as_ref().map(|w| w.name.trim()).filter(|n| !n.is_empty()) {
+    let title = match open
+        .as_ref()
+        .map(|w| w.name.trim())
+        .filter(|n| !n.is_empty())
+    {
         Some(n) => format!("Workflow builder: {n}"),
         None => "Workflow builder".into(),
     };
