@@ -503,15 +503,17 @@ body.resizing iframe { pointer-events: none; }
 .question-option:disabled { cursor: default; }
 .question-other { padding: 8px 10px; border: 1px dashed var(--border-strong); border-radius: var(--radius-md); background: var(--bg); color: var(--fg); font: inherit; }
 .question-other:focus { outline: none; border-style: solid; border-color: var(--project, var(--fg-muted)); }
-.progress-bar { position: sticky; bottom: 0; display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-raised); font-size: var(--text-sm); }
+.progress-bar { min-width: 0; position: sticky; bottom: 0; display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-raised); font-size: var(--text-sm); }
 .progress-head { display: flex; align-items: center; gap: var(--space-2); background: none; border: 0; padding: 0; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
 .progress-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .progress-count { color: var(--fg-subtle); font-size: var(--text-xs); }
 .progress-track { height: 3px; border-radius: 2px; background: var(--bg-hover); overflow: hidden; }
 .progress-track i { display: block; height: 100%; background: var(--project, var(--fg-muted)); transition: width 0.3s; }
-.progress-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
-.progress-list li { display: flex; align-items: center; gap: 6px; color: var(--fg-subtle); }
+.progress-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; min-width: 0; max-height: 30vh; overflow-y: auto; overflow-x: hidden; }
+.progress-list li { min-width: 0; display: flex; align-items: flex-start; gap: 6px; color: var(--fg-subtle); }
 .progress-list li.in_progress { color: var(--fg); }
+.progress-list li span { min-width: 0; overflow-wrap: anywhere; }
+.progress-list li svg { flex: none; margin-top: 3px; }
 .progress-list li.completed span { text-decoration: line-through; }
 .progress-step { color: var(--fg-subtle); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .question-hint { font-size: var(--text-xs); }
