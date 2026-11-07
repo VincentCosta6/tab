@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Tauri embeds this file in the dev binary (target/debug/tab), which has
+	     no app bundle. Without a bundle identifier, macOS dictation treats tab
+	     as an unknown client and refuses to start ("bottom line input").
+	     Keep in sync with "identifier" in tauri.conf.json. -->
+	<key>CFBundleIdentifier</key>
+	<string>dev.tab.app</string>
+</dict>
+</plist>

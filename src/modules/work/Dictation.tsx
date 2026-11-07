@@ -34,6 +34,8 @@ export function Dictation({ onText, target }: { onText: (text: string) => void; 
     return () => window.clearTimeout(t);
   }, [note]);
 
+  // The button keeps focus off itself (onMouseDown), so the box stays the
+  // focused field macOS dictation types into.
   const system = async () => {
     target.current?.focus();
     try {
@@ -78,7 +80,7 @@ export function Dictation({ onText, target }: { onText: (text: string) => void; 
 
   return (
     <span className="dictation">
-      <button className={cx("bar-icon", on && "on")} onClick={toggle} title={on ? "Stop dictation" : "Dictate"} aria-label={on ? "Stop dictation" : "Dictate"} aria-pressed={on}>
+      <button className={cx("bar-icon", on && "on")} onMouseDown={(e) => e.preventDefault()} onClick={toggle} title={on ? "Stop dictation" : "Dictate"} aria-label={on ? "Stop dictation" : "Dictate"} aria-pressed={on}>
         <Icon name="mic" size={14} />
       </button>
       {note && <span className="dictation-note" role="status">{note}</span>}
