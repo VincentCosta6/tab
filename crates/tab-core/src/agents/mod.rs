@@ -723,6 +723,7 @@ impl AgentHub {
                     }
                 }
                 Ok(()) => {
+                    hub.mark_waiting_if_asked(&session.id);
                     suggest::spawn(hub.clone(), session.id.clone());
                 }
                 Err(e) => {
@@ -739,6 +740,30 @@ impl AgentHub {
             }
         });
         Ok(())
+    }
+
+    /// A turn that ends on the agent asking the person something ("Want me
+    /// to open a PR?") is waiting on them, not idle.
+    fn mark_waiting_if_asked(&self, session_id: &str) {
+        let Ok(Some(s)) = self.store.session_get(session_id) else {
+            return;
+        };
+        if s.status != SessionStatus::Idle {
+            return;
+        }
+        let Ok(messages) = self.store.messages(session_id) else {
+            return;
+        };
+        let asked = messages
+            .iter()
+            .rev()
+            .find(|m| !matches!(m.kind.as_str(), "result" | "status" | "suggestion"))
+            .is_some_and(|m| {
+                m.role == "assistant" && m.kind == "text" && ends_with_question(&m.content)
+            });
+        if asked {
+            self.update(session_id, Some(SessionStatus::NeedsInput), None);
+        }
     }
 
     pub fn stop(&self, session_id: &str) {
@@ -1183,6 +1208,34 @@ pub(crate) fn summarize_tool(tool: &str, input: &serde_json::Value) -> String {
     match detail {
         Some(d) => format!("{tool}: {}", d.chars().take(300).collect::<String>()),
         None => tool.to_string(),
+    }
+}
+
+/// Whether a reply ends by asking the person something: its last line
+/// (ignoring trailing markdown) ends with a question mark.
+fn ends_with_question(text: &str) -> bool {
+    text.lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty() && !l.starts_with("```"))
+        .map(|l| l.trim_end_matches(['*', '_', '`', ')', '"', '\'', ' ']))
+        .is_some_and(|l| l.ends_with('?'))
+}
+
+#[cfg(test)]
+mod question_tests {
+    use super::ends_with_question;
+
+    #[test]
+    fn spots_a_closing_question() {
+        assert!(ends_with_question(
+            "Two ways.\n\nWant me to build option 1 and open a PR?"
+        ));
+        assert!(ends_with_question("Which one? **Option A or B?**\n"));
+        assert!(!ends_with_question(
+            "Is it broken? No, it's fixed.\n\nDone."
+        ));
+        assert!(!ends_with_question("Opened the PR."));
+        assert!(!ends_with_question(""));
     }
 }
 

@@ -307,7 +307,8 @@ mod tests {
             c("middle", 50, 30),
             c("old", 80, 20),
         ];
-        let keys = |v: Vec<Candidate<&'static str>>| v.into_iter().map(|c| c.key).collect::<Vec<_>>();
+        let keys =
+            |v: Vec<Candidate<&'static str>>| v.into_iter().map(|c| c.key).collect::<Vec<_>>();
         let grace = now - chrono::Duration::hours(1);
         // 25 over: the two oldest free 30.
         assert_eq!(keys(evict(all.clone(), 125, 100, grace)), ["oldest", "old"]);
