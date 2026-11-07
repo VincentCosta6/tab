@@ -5,7 +5,8 @@ import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type 
  * letters flip up and away, then each new letter rolls in through a few
  * random glyphs, like a departures board. Use it anywhere a title can be
  * renamed under the person (the titler, a rename elsewhere), so every place
- * that shows the title changes together.
+ * that shows the title changes together. The old title lifts away whole, so
+ * its ellipsis and wrapping don't shift as it goes.
  *
  * It only animates a change to the same thing: pass `id` and a new id shows
  * its text at once. The first render, reduced motion and `still` show the
@@ -70,20 +71,17 @@ export function FlapTitle({
 
   useEffect(() => () => clearTimeout(settle.current), []);
 
+  const leaving = anim?.phase === "start" || anim?.phase === "out";
   return (
-    <Tag {...rest} ref={el} aria-label={anim ? text : rest["aria-label"]}>
-      {!anim ? text : anim.phase === "start" || anim.phase === "out" ? (
-        <span className={anim.phase === "out" ? "flap flap-go" : "flap"} aria-hidden>
-          {words(anim.prev).map((w, wi) =>
-            w === " " ? " " : (
-              <span key={wi} className="flap-word">
-                {w.chars.map((c, i) => (
-                  <span key={i} className="flap-out" style={{ transitionDelay: `${(w.start + i) * anim.outStagger}ms` }}>{c}</span>
-                ))}
-              </span>
-            ),
-          )}
-        </span>
+    <Tag
+      {...rest}
+      ref={el}
+      className={[rest.className, leaving && "flap-leave", anim?.phase === "out" && "flap-leave-go"].filter(Boolean).join(" ") || undefined}
+      aria-label={anim ? text : rest["aria-label"]}
+    >
+      {!anim ? text : leaving ? (
+        // The old title leaves as one piece, so its ellipsis and wrapping hold.
+        anim.prev
       ) : (
         <span className={anim.phase === "rolling" ? "flap flap-go" : "flap"} aria-hidden>
           {words(anim.next).map((w, wi) =>
@@ -119,7 +117,6 @@ type Anim = {
   phase: "start" | "out" | "roll" | "rolling";
   /** Per letter of `next`: random glyphs, then the letter itself. */
   reels: string[][];
-  outStagger: number;
   rollStagger: number;
   outMs: number;
   rollMs: number;
@@ -130,10 +127,8 @@ const MAX_STAGGER_MS = 900;
 let seq = 0;
 
 function plan(prev: string, next: string): Anim {
-  const p = Array.from(prev);
   const n = Array.from(next);
   // Long titles still finish in about the same time.
-  const outStagger = Math.min(6, 240 / Math.max(p.length, 1));
   const rollStagger = Math.min(28, MAX_STAGGER_MS / Math.max(n.length, 1));
   const reels = n.map((c, i) => (c === " " ? [" "] : [...Array.from({ length: 3 + (i % 3) }, () => GLYPHS[(Math.random() * GLYPHS.length) | 0]), c]));
   const longest = Math.max(1, ...reels.map((r) => r.length));
@@ -143,9 +138,8 @@ function plan(prev: string, next: string): Anim {
     next,
     phase: "start",
     reels,
-    outStagger,
     rollStagger,
-    outMs: 260 + Math.min(p.length, 60) * outStagger,
+    outMs: 240,
     rollMs: n.length * rollStagger + 380 + longest * 70 + 60,
   };
 }
