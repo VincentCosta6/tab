@@ -33,7 +33,7 @@ export function LinkedWork({ url }: { url: string }) {
         const s = look[status];
         return (
           <button key={t.id} className={cx("rv-linked-task", `is-${status}`)} onClick={() => openItem(t.id)} title={`${t.title} · agent ${s.label.toLowerCase()}${a ? ` · updated ${timeAgo(a.updated_at)}` : ""}`}>
-            <Icon name="bot" size={13} className="rv-linked-agent" />
+            <span className="rv-linked-agent" aria-hidden="true"><Icon name="bot" size={12} /></span>
             <span className="rv-linked-title">{t.title}</span>
             <span className={cx("rv-linked-status", `tone-${s.tone}`)}>
               <i className="rv-linked-pulse" />
