@@ -302,6 +302,33 @@ pub struct RankingConfig {
     pub rules: RankingRules,
     #[serde(default)]
     pub ai: AiConfig,
+    /// A decision model (Jev, Luna) in place of Claude Haiku for the AI
+    /// layer. Off until a provider is picked.
+    #[serde(default)]
+    pub decision: DecisionConfig,
+}
+
+/// Which decision model ranks the queue. See `tab_core::decisions`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DecisionConfig {
+    /// A provider from the decision catalog (`openrouter`, `typesafe`,
+    /// `openai`). Empty means the AI layer uses Claude Haiku.
+    #[serde(default)]
+    pub provider: String,
+    /// One of the provider's models; empty means its first.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Keys by provider id. A provider's environment variable fills in a
+    /// missing one.
+    #[serde(default)]
+    pub api_keys: std::collections::BTreeMap<String, String>,
+    /// Reuse the key a harness already has, by provider id
+    /// (`{"openrouter": "opencode"}`). Set only when the person says yes.
+    #[serde(default)]
+    pub key_from: std::collections::BTreeMap<String, String>,
+    /// Another address for the provider (a proxy, or a test server).
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

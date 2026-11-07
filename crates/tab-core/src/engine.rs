@@ -1183,6 +1183,7 @@ mod tests {
             rules: RankingRules::default(),
             profile: Default::default(),
             ai: None,
+            decision: None,
         });
         let handle = Engine {
             gateway: Arc::new(Gateway::new(store.clone())),
@@ -1460,6 +1461,7 @@ mod tests {
                 rules: RankingRules::default(),
                 profile: Default::default(),
                 ai: None,
+                decision: None,
             }),
             connectors: vec![acting.clone(), Arc::new(crate::connectors::TabConnector)],
             infos,
@@ -1577,6 +1579,7 @@ mod tests {
                 rules: RankingRules::default(),
                 profile: Default::default(),
                 ai: None,
+                decision: None,
             }),
             connectors: vec![Arc::new(crate::connectors::TabConnector)],
             infos: Vec::new(),

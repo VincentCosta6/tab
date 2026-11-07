@@ -4,8 +4,9 @@
 import { NOT_HANDLED, withActions, workflowMock } from "./mock-workflows";
 // The same harness metadata the app ships.
 import harnessData from "../../crates/tab-core/src/agents/harnesses.json";
+import decisionData from "../../crates/tab-core/src/decisions/decisions.json";
 import type {
-  AgentKind, GhLoginCode, GhStatus, Harness, LspServer, ModelOption,
+  AgentKind, DecisionProvider, GhLoginCode, GhStatus, Harness, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
@@ -136,6 +137,7 @@ let config: TabConfig = {
   ranking: {
     rules: { kinds: [], default_score: 30, keywords: [{ contains: "outage", delta: 20 }, { contains: "urgent", delta: 15 }], vip_actors: [], vip_boost: 15, muted: [] },
     ai: { enabled: true, backend: "auto", api_key: "••••••••", model: null, instructions: "Anything from on-call or my manager is urgent. Dependabot can wait until Friday." },
+    decision: { provider: "", model: null, api_keys: {}, key_from: {}, base_url: null },
   },
   connectors: { demo: { enabled: true, settings: {} }, tab: { enabled: true, settings: {} } },
   agent: {
@@ -388,6 +390,11 @@ export const mockApi = {
           { kind: "claude_code", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\claude.cmd", version: "2.1.318 (Claude Code)", error: null },
         ];
         case "agent_harnesses": return harnesses;
+        case "decision_providers": return (decisionData as unknown as DecisionProvider[]).map((p) => ({
+          ...p,
+          has_key: !!config.ranking.decision?.api_keys[p.id],
+          reusable_from: p.id === "openrouter" && mockOpenCode ? ["opencode"] : [],
+        }));
         case "agent_models": return mockModels();
         case "agent_install": {
           const steps = ["npm install -g opencode-ai", "added 12 packages in 4s", "Installed OpenCode 1.4.2"];

@@ -109,6 +109,11 @@ export function useHarnesses() {
   return useQuery({ queryKey: ["harnesses"], queryFn: api.agentHarnesses, staleTime: Infinity });
 }
 
+/** Decision model providers (Jev, Luna), with key status. */
+export function useDecisionProviders() {
+  return useQuery({ queryKey: ["decision-providers"], queryFn: api.decisionProviders, staleTime: 0 });
+}
+
 /** The models of every installed harness. */
 export function useModels() {
   return useQuery({ queryKey: ["agent-models"], queryFn: api.agentModels, staleTime: 5 * 60_000 });

@@ -1010,6 +1010,16 @@ fn agent_harnesses() -> Vec<tab_core::agents::catalog::Harness> {
     tab_core::agents::catalog::harnesses().to_vec()
 }
 
+/// Every decision model provider, whether it has a key, and which harnesses
+/// hold one tab could reuse (never the keys).
+#[tauri::command]
+async fn decision_providers(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<tab_core::decisions::ProviderStatus>> {
+    let cfg = state.config.lock().await.ranking.decision.clone();
+    Ok(tab_core::decisions::status(&cfg))
+}
+
 /// The models of every installed harness, for the pickers.
 #[tauri::command]
 async fn agent_models(
@@ -2206,6 +2216,11 @@ fn masked(cfg: &TabConfig) -> TabConfig {
     if cfg.ranking.ai.api_key.is_some() {
         cfg.ranking.ai.api_key = Some(SECRET_MASK.into());
     }
+    for k in cfg.ranking.decision.api_keys.values_mut() {
+        if !k.is_empty() {
+            *k = SECRET_MASK.into();
+        }
+    }
     for (id, key) in secret_keys() {
         if let Some(v) = cfg
             .connectors
@@ -2223,6 +2238,18 @@ fn unmask(mut new: TabConfig, old: &TabConfig) -> TabConfig {
     if new.ranking.ai.api_key.as_deref() == Some(SECRET_MASK) {
         new.ranking.ai.api_key = old.ranking.ai.api_key.clone();
     }
+    for (provider, k) in new.ranking.decision.api_keys.iter_mut() {
+        if k == SECRET_MASK {
+            *k = old
+                .ranking
+                .decision
+                .api_keys
+                .get(provider)
+                .cloned()
+                .unwrap_or_default();
+        }
+    }
+    new.ranking.decision.api_keys.retain(|_, k| !k.is_empty());
     for (id, key) in secret_keys() {
         let keep = new
             .connectors
@@ -2701,6 +2728,7 @@ pub fn run() {
             approval_resolve,
             detect_agents,
             agent_harnesses,
+            decision_providers,
             agent_models,
             agent_install,
             mcp_info,

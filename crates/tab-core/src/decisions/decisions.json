@@ -1,0 +1,65 @@
+[
+  {
+    "id": "openrouter",
+    "name": "OpenRouter",
+    "pitch": "One OpenRouter key reaches Jev with no waitlist, and it's billed to the same credits as OpenCode or any other tool using that key.",
+    "dialect": "system_one",
+    "base_url": "https://openrouter.ai",
+    "path": "/api/v1/systemone",
+    "env": "OPENROUTER_API_KEY",
+    "key_url": "https://openrouter.ai/settings/keys",
+    "key_from": ["opencode"],
+    "models": [
+      {
+        "id": "typesafe/jev-1.14",
+        "label": "Jev 1.14",
+        "family": "Jev",
+        "input_per_mtok": 0.042,
+        "output_per_mtok": 0.0,
+        "capabilities": { "question_types": ["choice", "score", "yes_no"], "max_options": 255, "confidence": true }
+      }
+    ]
+  },
+  {
+    "id": "typesafe",
+    "name": "TypeSafe",
+    "pitch": "Jev straight from TypeSafe, with a key from the TypeSafe console (early access).",
+    "dialect": "system_one",
+    "base_url": "https://api.typesafe.ai",
+    "path": "/v1/systemone",
+    "env": "TYPESAFE_API_KEY",
+    "key_url": "https://console.typesafe.ai/keys",
+    "key_from": [],
+    "models": [
+      {
+        "id": "jev-latest",
+        "label": "Jev",
+        "family": "Jev",
+        "input_per_mtok": 0.042,
+        "output_per_mtok": 0.0,
+        "capabilities": { "question_types": ["choice", "score", "yes_no"], "max_options": 255, "confidence": true }
+      }
+    ]
+  },
+  {
+    "id": "openai",
+    "name": "OpenAI",
+    "pitch": "GPT-6 Luna on OpenAI's Decisions API. It needs an API key; ChatGPT Pro and Business owners can pay for it with their monthly API credits.",
+    "dialect": "openai_decisions",
+    "base_url": "https://api.openai.com",
+    "path": "/v1/decisions",
+    "env": "OPENAI_API_KEY",
+    "key_url": "https://platform.openai.com/api-keys",
+    "key_from": ["opencode"],
+    "models": [
+      {
+        "id": "gpt-6-luna",
+        "label": "GPT-6 Luna",
+        "family": "Luna",
+        "input_per_mtok": 0.10,
+        "output_per_mtok": 0.0,
+        "capabilities": { "question_types": ["choice", "score", "yes_no"], "max_questions": 400, "confidence": true }
+      }
+    ]
+  }
+]

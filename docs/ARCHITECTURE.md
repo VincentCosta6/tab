@@ -24,6 +24,7 @@ crates/tab-domain/      Pure logic. No I/O, no clock, no threads; builds for was
   lease.rs              Lease rules: grant / renew / refuse, fencing tokens
   ops.rs                The change vocabulary (Put, Delete, Link, Unlink), validation, search text
   workflow/             Workflow definitions, validation, templates, run records
+  decision.rs           Questions for decision models (choice, score, yes/no), typed answers, ranking nudge
   links.rs              Recognizing links agents create or mention
 crates/tab-protocol/    The shared API layer. Protobuf (proto/tab/hub/v1/hub.proto), no gRPC; builds for wasm32.
 crates/tab-store/       HubStore trait + backends (in-memory reference, SQLite), sea-query statements,
@@ -38,7 +39,8 @@ crates/tab-core/        The desktop engine. No Tauri dependency, fully unit test
   connectors/           github.rs, demo.rs, email.rs, ...
   engine.rs             Wires connectors → store → ranker → events
   gateway.rs            Cache, rate limits, audit for every API call
-  ranker/               ai.rs (Haiku layer) over tab-domain's rules
+  ranker/               ai.rs (Haiku layer) and decision.rs (decision-model layer) over tab-domain's rules
+  decisions/            Decision model providers as data (decisions.json) + one adapter per wire format
   store/                SQLite: items, graph, http cache, audit; migrations/
   workflow/runtime.rs   Runs workflows off the engine's event stream
   config.rs             TabConfig (profile, ranking, connectors map)
