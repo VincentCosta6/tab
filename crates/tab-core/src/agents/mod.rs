@@ -335,17 +335,29 @@ impl AgentHub {
         self.dir.join("sessions")
     }
 
-    /// Clears out attachments and chat folders nothing active needs.
-    pub fn sweep_files(&self, now: DateTime<Utc>) -> anyhow::Result<crate::storage::Swept> {
-        use crate::storage::{IDLE_CHAT, sweep_attachments, sweep_sessions};
-        let mut swept = sweep_attachments(&self.store, &self.attachments_dir(), now, IDLE_CHAT)?;
+    /// Clears out attachments and chat folders unused for `keep`.
+    pub fn sweep_files(
+        &self,
+        now: DateTime<Utc>,
+        keep: std::time::Duration,
+    ) -> anyhow::Result<crate::storage::Swept> {
+        use crate::storage::{sweep_attachments, sweep_sessions};
+        let mut swept = sweep_attachments(&self.store, &self.attachments_dir(), now, keep)?;
         swept.add(sweep_sessions(
             &self.store,
             &self.sessions_dir(),
             now,
-            IDLE_CHAT,
+            keep,
         )?);
         Ok(swept)
+    }
+
+    /// Every attachment with when it was last used, for the size limit.
+    pub fn attachments(
+        &self,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<crate::storage::Candidate<PathBuf>>> {
+        crate::storage::attachments(&self.store, &self.attachments_dir(), now)
     }
 
     pub(crate) fn session_dir(&self, id: &str) -> anyhow::Result<PathBuf> {

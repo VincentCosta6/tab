@@ -128,6 +128,7 @@ let config: TabConfig = {
   agent: {
     budget: { daily_usd: 10, monthly_usd: null, per_turn_usd: null, ranker_plan_cap: 0.8 }, kind: "claude_code", command: null, model: null, workdir: "C:\\Users\\vince\\code", permission_mode: "auto", opencode_url: null },
   mcp: { port: 47821, token: "mock-token" },
+  storage: { keep_days: 7, max_gb: null },
   onboarded: true,
 };
 

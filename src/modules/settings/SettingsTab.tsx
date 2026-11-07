@@ -162,7 +162,7 @@ export function SettingsTab() {
         </Card>
       </Section>
 
-      <StorageSection />
+      <StorageSection config={draft.storage} onChange={(v) => set((c) => void (c.storage = v))} />
 
       <Section title="AI layer" description={`Claude Haiku reads each item with your instructions and nudges the rules score by up to ±25, with a one-line reason. Verdicts are cached by their inputs, so re-ranking is repeatable.`}>
         <Card>
@@ -212,7 +212,7 @@ function DollarInput({ value, onChange }: { value: number | null; onChange: (v: 
 }
 
 /** What tab keeps on disk, and clearing it out. */
-function StorageSection() {
+function StorageSection({ config, onChange }: { config: TabConfig["storage"]; onChange: (v: TabConfig["storage"]) => void }) {
   const qc = useQueryClient();
   const usage = useQuery({ queryKey: ["storage"], queryFn: api.storageUsage });
   const [busy, setBusy] = useState<string | null>(null);
@@ -236,10 +236,24 @@ function StorageSection() {
   return (
     <Section
       title="Storage"
-      description="Cleared automatically every few hours: attachments once their chat has been idle for 30 days, and review checkouts once their PR closes or they go unopened for 14 days."
+      description="Cleared automatically every few hours. Review checkouts also go as soon as their PR closes or merges."
       actions={<Button size="sm" disabled={busy !== null} onClick={() => run("clean", api.storageClean)}>{busy === "clean" ? "Cleaning…" : "Clean up now"}</Button>}
     >
       <Card>
+        <FormRow label="Keep for" help="Attachments of chats idle this long, and review checkouts not opened this long, are removed.">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <TextInput type="number" min={1} step={1} value={config.keep_days} style={{ maxWidth: 100 }}
+              onChange={(e) => onChange({ ...config, keep_days: Math.max(1, Math.round(Number(e.target.value) || 1)) })} />
+            <span>days</span>
+          </div>
+        </FormRow>
+        <FormRow label="Size limit" help="Past this, the least recently used attachments and checkouts are removed until it fits. Anything used in the last hour stays.">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <TextInput type="number" min={0} step={0.5} placeholder="No limit" value={config.max_gb ?? ""} style={{ maxWidth: 100 }}
+              onChange={(e) => onChange({ ...config, max_gb: e.target.value === "" || Number(e.target.value) <= 0 ? null : Number(e.target.value) })} />
+            <span>GB</span>
+          </div>
+        </FormRow>
         <FormRow label="Chat attachments" help="Files you attach to chats.">
           <span className="mono">{size(u?.attachments)}</span>
         </FormRow>

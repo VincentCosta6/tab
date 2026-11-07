@@ -1133,8 +1133,6 @@ async fn gh_install() -> CmdResult<tab_core::gh::GhStatus> {
 
 // --- Storage -------------------------------------------------------------
 
-/// A review checkout goes once it hasn't been opened for this long.
-const CHECKOUT_IDLE: chrono::Duration = chrono::Duration::days(14);
 /// A closed or merged PR's checkout stays this long after it was last opened,
 /// so one being looked at right as it merges isn't pulled out from under you.
 const CHECKOUT_GRACE: chrono::Duration = chrono::Duration::days(1);
@@ -1180,17 +1178,105 @@ async fn pr_closed(gateway: &Gateway, repo: &str, number: u64) -> bool {
 }
 
 /// Removes review checkouts whose PR has closed, or that nobody has opened
-/// in [`CHECKOUT_IDLE`].
-async fn sweep_checkouts(ws: &Workspaces, gateway: &Gateway) -> storage::Swept {
+/// for `keep`.
+async fn sweep_checkouts(
+    ws: &Workspaces,
+    gateway: &Gateway,
+    keep: std::time::Duration,
+) -> storage::Swept {
     let now = Utc::now();
+    let keep = chrono::Duration::from_std(keep).unwrap_or(chrono::Duration::days(7));
     let mut swept = storage::Swept::default();
     for c in ws.checkouts() {
         let idle = now - c.last_used;
-        let gone = idle > CHECKOUT_IDLE
-            || (idle > CHECKOUT_GRACE && pr_closed(gateway, &c.repo, c.number).await);
+        let gone =
+            idle > keep || (idle > CHECKOUT_GRACE && pr_closed(gateway, &c.repo, c.number).await);
         if gone {
             swept.add(remove_checkout(ws, &c.repo, c.number).await);
         }
+    }
+    swept
+}
+
+/// Something the size limit can remove.
+#[derive(Debug, Clone, PartialEq)]
+enum Evictable {
+    Attachment(PathBuf),
+    Checkout(String, u64),
+}
+
+/// Total size of everything the storage settings cover.
+fn storage_total(hub: &AgentHub, data_dir: &std::path::Path) -> u64 {
+    [
+        hub.attachments_dir(),
+        hub.sessions_dir(),
+        data_dir.join("workspaces"),
+    ]
+    .iter()
+    .map(|d| storage::dir_size(d).bytes)
+    .sum()
+}
+
+/// Past the size limit, removes the least recently used attachments and
+/// review checkouts until it fits.
+async fn enforce_limit(
+    hub: Arc<AgentHub>,
+    ws: Arc<Workspaces>,
+    data_dir: PathBuf,
+    limit: u64,
+) -> storage::Swept {
+    let mut swept = storage::Swept::default();
+    // Removing a repository's last checkout also frees its clone, which the
+    // plan can't see, so re-measure and go again if still over.
+    for _ in 0..3 {
+        let (h, w, d) = (hub.clone(), ws.clone(), data_dir.clone());
+        let plan = tauri::async_runtime::spawn_blocking(move || {
+            let now = Utc::now();
+            let total = storage_total(&h, &d);
+            if total <= limit {
+                return Vec::new();
+            }
+            let mut candidates: Vec<storage::Candidate<Evictable>> = h
+                .attachments(now)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| storage::Candidate {
+                    key: Evictable::Attachment(c.key),
+                    last_used: c.last_used,
+                    bytes: c.bytes,
+                })
+                .collect();
+            candidates.extend(w.checkouts().into_iter().map(|c| {
+                storage::Candidate {
+                    bytes: w
+                        .worktree(&c.repo, c.number)
+                        .map(|p| storage::dir_size(&p).bytes)
+                        .unwrap_or(0),
+                    key: Evictable::Checkout(c.repo, c.number),
+                    last_used: c.last_used,
+                }
+            }));
+            let grace = chrono::Duration::from_std(storage::EVICT_GRACE).unwrap_or_default();
+            storage::evict(candidates, total, limit, now - grace)
+        })
+        .await
+        .unwrap_or_default();
+        if plan.is_empty() {
+            break;
+        }
+        for c in plan {
+            swept.add(match c.key {
+                Evictable::Attachment(p) => storage::remove_path(&p),
+                Evictable::Checkout(repo, n) => remove_checkout(&ws, &repo, n).await,
+            });
+        }
+    }
+    if swept.removed > 0 {
+        tracing::info!(
+            removed = swept.removed,
+            bytes = swept.bytes,
+            "evicted to fit the storage limit"
+        );
     }
     swept
 }
@@ -1212,9 +1298,14 @@ async fn remove_checkout(ws: &Workspaces, repo: &str, number: u64) -> storage::S
     }
 }
 
-/// Clears out attachments, chat folders and review checkouts nothing needs.
-async fn sweep_storage(hub: Arc<AgentHub>, ws: &Workspaces, gateway: &Gateway) -> storage::Swept {
-    let mut swept = tauri::async_runtime::spawn_blocking(move || hub.sweep_files(Utc::now()))
+/// Clears out attachments, chat folders and review checkouts by the
+/// Settings → Storage rules: unused for `keep_days`, then past `max_gb`.
+async fn sweep_storage(core: &Core, ws: Arc<Workspaces>, data_dir: PathBuf) -> storage::Swept {
+    let cfg = core.config.lock().await.storage.clone();
+    let hub = core.hub.clone();
+    let keep = cfg.keep();
+    let h = hub.clone();
+    let mut swept = tauri::async_runtime::spawn_blocking(move || h.sweep_files(Utc::now(), keep))
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r)
@@ -1222,7 +1313,10 @@ async fn sweep_storage(hub: Arc<AgentHub>, ws: &Workspaces, gateway: &Gateway) -
             tracing::warn!(error = %e, "sweeping chat files failed");
             storage::Swept::default()
         });
-    swept.add(sweep_checkouts(ws, gateway).await);
+    swept.add(sweep_checkouts(&ws, &core.gateway, keep).await);
+    if let Some(limit) = cfg.max_bytes() {
+        swept.add(enforce_limit(hub, ws, data_dir, limit).await);
+    }
     swept
 }
 
@@ -1260,7 +1354,12 @@ async fn storage_usage(state: State<'_, AppState>) -> CmdResult<StorageUsage> {
 /// Runs the cleanup sweep now.
 #[tauri::command]
 async fn storage_clean(state: State<'_, AppState>) -> CmdResult<storage::Swept> {
-    Ok(sweep_storage(state.hub.clone(), &state.workspaces, &state.gateway).await)
+    Ok(sweep_storage(
+        &state.core,
+        state.workspaces.clone(),
+        state.data_dir.clone(),
+    )
+    .await)
 }
 
 /// Removes one review checkout, or every one when `repo` is empty. They come
@@ -2148,15 +2247,15 @@ pub fn run() {
             // Clean out old attachments, chat folders and review checkouts:
             // shortly after launch, then every few hours.
             {
-                let (hub, ws, gateway) = (
-                    state.hub.clone(),
+                let (core, ws, data) = (
+                    state.core.clone(),
                     state.workspaces.clone(),
-                    state.gateway.clone(),
+                    state.data_dir.clone(),
                 );
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(120)).await;
                     loop {
-                        let s = sweep_storage(hub.clone(), &ws, &gateway).await;
+                        let s = sweep_storage(&core, ws.clone(), data.clone()).await;
                         if s.removed > 0 {
                             tracing::info!(removed = s.removed, bytes = s.bytes, "storage sweep");
                         }

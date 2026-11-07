@@ -23,6 +23,8 @@ pub struct TabConfig {
     pub agent: AgentConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
     /// Set once the first-launch onboarding is finished.
     #[serde(default)]
     pub onboarded: bool,
@@ -155,6 +157,47 @@ fn default_mcp_port() -> u16 {
     47821
 }
 
+/// How long tab keeps chat attachments and review checkouts, and how much
+/// space they may take.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StorageConfig {
+    /// Attachments of chats idle this long, and review checkouts unopened
+    /// this long, are removed.
+    #[serde(default = "default_keep_days")]
+    pub keep_days: u32,
+    /// Past this many GB, the least recently used attachments and checkouts
+    /// are removed until it fits. `None` for no limit.
+    #[serde(default)]
+    pub max_gb: Option<f64>,
+}
+
+fn default_keep_days() -> u32 {
+    7
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            keep_days: default_keep_days(),
+            max_gb: None,
+        }
+    }
+}
+
+impl StorageConfig {
+    /// How long unused things are kept; at least a day.
+    pub fn keep(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.keep_days.max(1)) * 86_400)
+    }
+
+    /// The size limit in bytes, if any.
+    pub fn max_bytes(&self) -> Option<u64> {
+        self.max_gb
+            .filter(|g| g.is_finite() && *g > 0.0)
+            .map(|g| (g * 1024.0 * 1024.0 * 1024.0) as u64)
+    }
+}
+
 impl Default for TabConfig {
     fn default() -> Self {
         Self {
@@ -163,6 +206,7 @@ impl Default for TabConfig {
             connectors: default_connectors(),
             agent: AgentConfig::default(),
             mcp: McpConfig::default(),
+            storage: StorageConfig::default(),
             onboarded: false,
         }
     }

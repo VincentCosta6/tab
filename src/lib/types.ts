@@ -388,6 +388,7 @@ export interface TabConfig {
   connectors: Record<string, { enabled: boolean; settings: Record<string, unknown> }>;
   agent: AgentConfig;
   mcp: { port: number; token: string };
+  storage: { keep_days: number; max_gb: number | null };
   onboarded: boolean;
 }
 

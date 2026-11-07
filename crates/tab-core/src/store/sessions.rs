@@ -190,33 +190,41 @@ impl Store {
         Ok(rows)
     }
 
-    /// Paths of files attached in chats that have been active since `since`.
-    /// The cleanup sweep keeps these; anything else in the attachments folder
-    /// can go once it's old enough.
-    pub fn attachments_in_use(
+    /// When each attached file was last part of an active chat: the later of
+    /// the message it was sent in and the chat's last activity. Files in a
+    /// chat that's mid-turn count as used now.
+    pub fn attachments_last_used(
         &self,
-        since: DateTime<Utc>,
-    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<std::collections::HashMap<String, DateTime<Utc>>> {
         let conn = self.conn();
-        let metas: Vec<String> = conn
+        let rows: Vec<(String, String, String, String)> = conn
             .prepare(
-                "SELECT m.meta FROM session_messages m JOIN sessions s ON s.id = m.session_id
-                 WHERE (s.updated_at >= ?1 OR m.created_at >= ?1 OR s.status = 'working')
-                   AND m.meta LIKE '%\"attachments\"%'",
+                "SELECT m.meta, m.created_at, s.updated_at, s.status
+                 FROM session_messages m JOIN sessions s ON s.id = m.session_id
+                 WHERE m.meta LIKE '%\"attachments\"%'",
             )?
-            .query_map([ts(since)], |r| r.get(0))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<Result<_, _>>()?;
-        Ok(metas
-            .iter()
-            .filter_map(|m| serde_json::from_str::<serde_json::Value>(m).ok())
-            .flat_map(|m| match m.get("attachments") {
-                Some(serde_json::Value::Array(a)) => a
-                    .iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
-            })
-            .collect())
+        let mut out = std::collections::HashMap::new();
+        for (meta, sent, updated, status) in rows {
+            let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta) else {
+                continue;
+            };
+            let Some(paths) = meta.get("attachments").and_then(|a| a.as_array()) else {
+                continue;
+            };
+            let used = if status == "working" {
+                now
+            } else {
+                parse_ts(&sent)?.max(parse_ts(&updated)?)
+            };
+            for p in paths.iter().filter_map(|p| p.as_str()) {
+                let e = out.entry(p.to_string()).or_insert(used);
+                *e = (*e).max(used);
+            }
+        }
+        Ok(out)
     }
 
     /// Ids of chats that have been active since `since` or are mid-turn.
