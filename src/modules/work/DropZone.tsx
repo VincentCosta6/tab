@@ -100,13 +100,13 @@ export function DropOverlay() {
       <div className="drop-frame" />
       {r && <div className="drop-spot" style={{ left: r.left - pad, top: r.top - pad, width: r.width + pad * 2, height: r.height + pad * 2 }} />}
       <div className="drop-card">
-        <span className="drop-card-icon"><Icon name={r ? "files" : "x"} size={28} /></span>
-        <strong>{r ? "Drop anywhere to attach" : "No chat to drop into"}</strong>
-        <span>{r ? "Files go to the highlighted chat" : "Open a chat first, then drop files anywhere"}</span>
+        <Icon name="upload" size={32} />
+        <strong>{r ? "Drop files to attach" : "No chat to attach to"}</strong>
+        <span>{r ? "Drop anywhere. They'll be added to the highlighted chat." : "Open a chat, then drop files anywhere."}</span>
       </div>
       {r && (
         <div className="drop-tag" style={{ left: r.left + r.width / 2, top: Math.max(12, r.top - pad - 34) }}>
-          <Icon name="arrow-down" size={12} /> Goes here
+          <Icon name="arrow-down" size={12} /> Attaching here
         </div>
       )}
     </div>
