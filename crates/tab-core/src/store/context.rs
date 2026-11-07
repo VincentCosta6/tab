@@ -177,6 +177,46 @@ impl Store {
             related,
         }))
     }
+
+    /// The tasks that have this link in their Context, by URL or because the
+    /// link is a queue item they attach. Query, fragment and subpages like a
+    /// PR's /files are ignored. Newest first.
+    pub fn items_with_context_link(
+        &self,
+        url: &str,
+    ) -> anyhow::Result<Vec<crate::model::QueueItem>> {
+        fn bare(u: &str) -> &str {
+            u.split(['?', '#']).next().unwrap_or("").trim_end_matches('/')
+        }
+        let url = bare(url);
+        if !url.starts_with("http") {
+            return Ok(vec![]);
+        }
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT ic.item_id FROM item_context ic
+             LEFT JOIN items r ON r.id = ic.ref_item_id
+             WHERE ic.section = 'context'
+               AND ((substr(ic.url, 1, length(?1)) = ?1
+                     AND (length(ic.url) = length(?1) OR substr(ic.url, length(?1) + 1, 1) IN ('/', '#', '?')))
+                 OR (substr(r.url, 1, length(?1)) = ?1
+                     AND (length(r.url) = length(?1) OR substr(r.url, length(?1) + 1, 1) IN ('/', '#', '?'))))",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map([url], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(i) = get_item(&conn, &id)? {
+                // The PR's own queue item isn't a task about it.
+                if i.event.url.as_deref().map(bare) != Some(url) {
+                    out.push(i);
+                }
+            }
+        }
+        out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

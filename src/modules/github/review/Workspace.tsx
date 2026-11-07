@@ -24,6 +24,7 @@ import { DiffStack, FileHeader } from "./DiffStack";
 import { FileDiff } from "./FileDiff";
 import { FileView } from "./FileView";
 import { Header } from "./Header";
+import { LinkedWork } from "./LinkedWork";
 import { LanguageStatus } from "./LanguageServers";
 import { buildTree, compactTree, isViewed, openThreads, splitPath, treeOrder } from "./model";
 import { Overview } from "./Overview";
@@ -213,6 +214,7 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack }: 
     <Ctx.Provider value={ctx}>
       <div className="rv">
         <Header onBack={onBack} local={local} onRefresh={() => qc.invalidateQueries({ queryKey: keys.pull(repo, number) })} refreshing={pull.isFetching} />
+        <LinkedWork url={pr.url} />
         {item && <ContextDrawer item={item} onSelect={openItem} />}
         <FixBanner ai={ctx.ai} local={boot.phase !== "remote"} />
         <div className="rv-body" style={{ gridTemplateColumns: `48px ${panel ? `${sideWidth}px ` : ""}minmax(0, 1fr)${ctx.ai.open ? " minmax(320px, 400px)" : ""}` }}>

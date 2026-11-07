@@ -37,6 +37,7 @@ export const api = {
   saveConfig: (config: TabConfig) => call<TabConfig>("save_config", { config }),
   ratePressure: () => call<Pressure[]>("rate_pressure"),
   itemContext: (id: string) => call<ItemContext | null>("item_context", { id }),
+  itemsForLink: (url: string) => call<QueueItem[]>("items_for_link", { url }),
   contextAdd: (itemId: string, entry: NewContext) => call<ContextEntry>("context_add", { itemId, entry }),
   contextUpdate: (id: string, patch: { section?: ContextSection; pinned?: boolean }) =>
     call<ContextEntry | null>("context_update", { id, section: patch.section ?? null, pinned: patch.pinned ?? null }),
