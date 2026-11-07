@@ -50,6 +50,8 @@ Everything is optional. Each group only takes effect once all of its required en
 | `TAURI_SIGNING_PRIVATE_KEY` | secret | Updater signing key (the file's contents) |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret | Its password |
 | `TAURI_UPDATER_PUBKEY` | variable | The updater key's public half. Built into the app so it can verify updates |
+| `TAB_SUPABASE_URL` | variable | The tab Supabase project, `https://<ref>.supabase.co`. Built in so the app can sign in to tab cloud |
+| `TAB_SUPABASE_ANON_KEY` | variable | That project's publishable (anon) key. Not secret. Without both, the build can't sign in |
 | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` | secrets | Windows signing: the Entra app registration |
 | `AZURE_SIGNING_ENDPOINT` | variable | Windows signing: like `https://eus.codesigning.azure.net` |
 | `AZURE_SIGNING_ACCOUNT` | variable | Windows signing: the Artifact Signing account name |
