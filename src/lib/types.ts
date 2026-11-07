@@ -275,6 +275,11 @@ export interface GhStatus {
 
 export interface GhLoginCode { code: string; url: string }
 
+/** This build of tab, and whether it can update itself. */
+export interface AppVersion { version: string; updates: boolean; reason: string | null }
+export interface AppUpdate { version: string; notes: string | null; date: string | null }
+export interface AppUpdateProgress { downloaded: number; total: number | null }
+
 export interface AgentProbe { kind: AgentKind; found: boolean; path: string | null; version: string | null; error: string | null; install?: string | null; upgrade?: string | null; latest?: string | null }
 
 export interface Pressure {

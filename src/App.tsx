@@ -14,6 +14,8 @@ import { Onboarding } from "./modules/onboarding/Onboarding";
 import { tabs } from "./modules/registry";
 import { UsageMeter } from "./modules/usage/UsageMeter";
 import { Updater } from "./modules/updates/Updater";
+import { AppUpdater } from "./modules/updates/AppUpdater";
+import { openSettings } from "./modules/settings/SettingsTab";
 
 export default function App() {
   return (
@@ -54,6 +56,12 @@ function Shell() {
   }, [reviews]);
 
   useEffect(() => {
+    const settings = () => setActive("settings");
+    window.addEventListener("tab:open-settings", settings);
+    return () => window.removeEventListener("tab:open-settings", settings);
+  }, []);
+
+  useEffect(() => {
     const open = () => setOnboarding(true);
     window.addEventListener("tab:onboarding", open);
     return () => window.removeEventListener("tab:onboarding", open);
@@ -88,8 +96,9 @@ function Shell() {
       <nav className="nav">
         <div className="nav-group">{visible.filter((t) => !t.footer).map(navButton)}</div>
         <div className="nav-group nav-footer">
+          <AppUpdater />
           <Updater />
-          <UsageMeter onSettings={() => setActive("settings")} />
+          <UsageMeter onSettings={() => openSettings("agents")} />
           {visible.filter((t) => t.footer).map(navButton)}
         </div>
       </nav>
