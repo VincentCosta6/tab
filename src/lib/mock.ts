@@ -358,6 +358,17 @@ export const mockApi = {
           mockUpgraded = true;
           return undefined;
         }
+        case "app_version": return { version: mockAppUpdated ? "0.0.4" : "0.0.3", updates: true, reason: null };
+        case "app_update_check": {
+          await new Promise((r) => setTimeout(r, 600));
+          return mockAppUpdated ? null : { version: "0.0.4", notes: "## What's changed\n- Settings has its own pages\n- tab updates itself", date: new Date().toISOString() };
+        }
+        case "app_update_install": {
+          const total = 18_400_000;
+          for (let d = 0; d <= total; d += 2_300_000) { await new Promise((r) => setTimeout(r, 250)); appUpdateListeners.forEach((l) => l({ downloaded: d, total })); }
+          mockAppUpdated = true;
+          return undefined;
+        }
         case "detect_agents": return [
           { kind: "opencode", found: false, path: null, version: null, error: "`opencode` was not found on PATH." },
           { kind: "claude_code", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\claude.cmd", version: "2.1.318 (Claude Code)", error: null },
@@ -438,6 +449,10 @@ export const mockApi = {
   onWorkspace(_cb: (p: WorkspaceProgress) => void) {
     return () => {};
   },
+  onAppUpdate(cb: (p: { downloaded: number; total: number | null }) => void) {
+    appUpdateListeners.add(cb);
+    return () => void appUpdateListeners.delete(cb);
+  },
   onAgentUpgrade(cb: (line: string) => void) {
     upgradeListeners.add(cb);
     return () => void upgradeListeners.delete(cb);
@@ -465,6 +480,8 @@ let gh: GhStatus = { installed: false, path: null, version: null, logged_in: fal
 const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
 const upgradeListeners = new Set<(line: string) => void>();
 let mockUpgraded = false;
+const appUpdateListeners = new Set<(p: { downloaded: number; total: number | null }) => void>();
+let mockAppUpdated = false;
 
 // A link an agent attached, to show links rendered by what they point at.
 let contexts: ContextEntry[] = items.slice(0, 4).map((i) => ({ id: `ctx-seed-${i.id}`, item_id: i.id, section: "context", pinned: false, ref_item: null, url: "https://github.com/acme/payments/pull/491", title: "https://github.com/acme/payments/pull/491", summary: null, added_by: "agent", created_at: new Date().toISOString() }));

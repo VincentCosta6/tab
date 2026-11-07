@@ -49,6 +49,7 @@ Everything is optional. Each group only takes effect once all of its required en
 | `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | secrets | Notarization, the alternative to the API key: Apple ID, app-specific password, Team ID |
 | `TAURI_SIGNING_PRIVATE_KEY` | secret | Updater signing key (the file's contents) |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret | Its password |
+| `TAURI_UPDATER_PUBKEY` | variable | The updater key's public half. Built into the app so it can verify updates |
 | `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_TENANT_ID` | secrets | Windows signing: the Entra app registration |
 | `AZURE_SIGNING_ENDPOINT` | variable | Windows signing: like `https://eus.codesigning.azure.net` |
 | `AZURE_SIGNING_ACCOUNT` | variable | Windows signing: the Artifact Signing account name |
@@ -147,7 +148,9 @@ Your options:
 
 The Windows job then installs [`artifact-signing-cli`](https://github.com/Levminer/artifact-signing-cli) and signs the app and both installers through Tauri's `signCommand`, as [Tauri's guide](https://v2.tauri.app/distribute/sign/windows/) describes. Client secrets expire (24 months at most), so put a reminder in your calendar.
 
-## Updater signing key
+## In-app updates
+
+tab checks `https://github.com/VincentCosta6/tab/releases/latest/download/latest.json` when it starts and every hour after that. When a newer release is out, a card appears at the bottom of the nav and under Settings → Updates; one click downloads it, checks its signature, installs it and restarts tab. On Windows the installer runs in passive mode (a progress bar, no questions).
 
 Tauri's updater refuses an update unless it's signed with your updater key. This is separate from Apple and Microsoft signing, and it's free. Once `TAURI_SIGNING_PRIVATE_KEY` is set, every release also uploads the update bundles (`.app.tar.gz` and `.sig` for macOS, `.exe.sig` for Windows) and a `latest.json` that lists them.
 
@@ -156,10 +159,13 @@ Tauri's updater refuses an update unless it's signed with your updater key. This
    pnpm tauri signer generate -w ~/.tauri/tab-updater.key
    ```
    Pick a password. The output shows the **public key** (also saved as `~/.tauri/tab-updater.key.pub`).
-2. Save the **private** key file's contents as `TAURI_SIGNING_PRIVATE_KEY`, and the password as `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-3. Back up the private key. **If you lose it, installed copies can never update again.** You'd have to ship a new key in a release people install by hand.
+2. Save the **private** key file's contents as the secret `TAURI_SIGNING_PRIVATE_KEY`, and the password as `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+3. Save the **public** key (the `.pub` file's contents, one line) as the **variable** `TAURI_UPDATER_PUBKEY`. It isn't secret; it goes into every build so the app can check what it downloads.
+4. Back up the private key. **If you lose it, installed copies can never update again.** You'd have to ship a new key in a release people install by hand.
 
-The app doesn't check for updates yet. That's the next piece of work: add `tauri-plugin-updater` with your **public** key and the endpoint `https://github.com/VincentCosta6/tab/releases/latest/download/latest.json`. Set the key up now anyway, so the releases before then already carry signed update bundles.
+Both halves are needed. A build made without `TAURI_UPDATER_PUBKEY` can't update itself and says so in Settings → Updates, so the first release with the key is one people install by hand; every release after it arrives on its own. Development builds never update themselves.
+
+Updates only come from the release marked latest. Releases cut with **Run workflow** are published only after every build is uploaded, so the app never sees a half-finished one. A release published from the GitHub UI is latest while it builds, and checks during that time report "Couldn't check" until its `latest.json` is uploaded.
 
 ## iOS (later)
 

@@ -27,6 +27,8 @@ use tab_core::workflow::{self, Issue, Run, SavedBy, Workflow};
 use tab_core::workspace::{self, SearchHit, SearchQuery, Target, Workspace, Workspaces};
 use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tauri::{Emitter, Manager, State};
+
+mod updates;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
 /// Shown in place of stored secrets; sending it back means "keep the old value".
@@ -2458,6 +2460,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updates::PendingUpdate::default())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             lsp::set_tools_dir(data_dir.join("tools"));
@@ -2591,6 +2595,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            updates::app_version,
+            updates::app_update_check,
+            updates::app_update_install,
             sandbox_status,
             rename_item,
             titler_default_rules,
