@@ -232,7 +232,8 @@ export const mockApi = {
             ? { title: "Retry webhook deliveries with exponential backoff", state: "open", author: "dana-k", checks: "passing", updated_at: new Date(Date.now() - 3_600_000).toISOString(), merge_state: "blocked", review_decision: "review_required", open_threads: 2 }
             : { title: "Sample " + args.what, state: "open", author: "sam", checks: null, updated_at: null };
         case "start_dictation": throw "Dictation needs the desktop app.";
-        case "attachment_save": return URL.createObjectURL(new Blob([args.bytes]));
+        case "attachment_save": return `${URL.createObjectURL(new Blob([args.bytes]))}#${args.name}`;
+        case "file_open": return null;
         case "image_read": return await (await fetch(String(args.path))).arrayBuffer();
         case "item_by_url": {
           const u = String(args.url).replace(/[?#].*$/, "").replace(/\/$/, "");

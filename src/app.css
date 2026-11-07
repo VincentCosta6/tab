@@ -786,3 +786,13 @@ body.resizing iframe { pointer-events: none; }
 
 /* Slim, themed scrollbars instead of the chunky OS default. */
 * { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+
+/* Files in chats (not images): a chip that opens the file; right-click shows it in its folder. */
+.file-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.file-chip { position: relative; display: inline-flex; max-width: 100%; min-width: 0; vertical-align: middle; }
+.file-chip-open { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; padding: 4px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); color: var(--fg); font: inherit; font-size: var(--text-sm); cursor: pointer; }
+.file-chip-open:hover { border-color: var(--border-strong); background: var(--bg-hover); }
+.file-chip-open svg { flex: none; color: var(--fg-subtle); }
+.file-chip-open span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chip.error .file-chip-open { border-color: var(--tone-danger-fg); }
+.msg-user .file-chips { margin-bottom: 6px; }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { fileName, useImageSrc, type ViewerImage } from "../lib/images";
+import { api } from "../lib/api";
+import { fileName, isImagePath, useImageSrc, type ViewerImage } from "../lib/images";
 import { Icon } from "./icons";
 
 /**
@@ -118,5 +119,46 @@ function Thumb({ src, size, onOpen, onRemove }: { src: string; size: number; onO
       </button>
       {onRemove && <button className="thumb-x" onClick={onRemove} aria-label="Remove"><Icon name="x" size={11} /></button>}
     </span>
+  );
+}
+
+/** A file that isn't an image: its name, opening in its default app on click. */
+export function FileChip({ path, label, onRemove }: { path: string; label?: string; onRemove?: () => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const name = label || fileName(path.startsWith("blob:") ? path.split("#").pop()! : path);
+  return (
+    <span className={error ? "file-chip error" : "file-chip"} title={error ?? path}>
+      <button
+        className="file-chip-open"
+        onClick={(e) => {
+          setError(null);
+          api.fileOpen(path, e.altKey).catch((err) => setError(String(err)));
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          api.fileOpen(path, true).catch((err) => setError(String(err)));
+        }}
+      >
+        <Icon name="file" size={13} />
+        <span>{name}</span>
+      </button>
+      {onRemove && <button className="thumb-x" onClick={onRemove} aria-label="Remove"><Icon name="x" size={11} /></button>}
+    </span>
+  );
+}
+
+/** Attached files: images as thumbnails, everything else as file chips. */
+export function Attachments({ paths, size = 72, onRemove }: { paths: string[]; size?: number; onRemove?: (path: string) => void }) {
+  const images = paths.filter(isImagePath);
+  const files = paths.filter((p) => !isImagePath(p));
+  return (
+    <>
+      <Thumbs srcs={images} size={size} onRemove={onRemove && ((i) => onRemove(images[i]))} />
+      {files.length > 0 && (
+        <div className="file-chips">
+          {files.map((f) => <FileChip key={f} path={f} onRemove={onRemove && (() => onRemove(f))} />)}
+        </div>
+      )}
+    </>
   );
 }

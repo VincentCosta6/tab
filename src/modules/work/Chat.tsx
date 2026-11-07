@@ -4,8 +4,9 @@ import { Button, cx } from "../../design/components";
 import { Brand } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { Markdown } from "../../design/markdown";
-import { Thumbs } from "../../design/ImageViewer";
-import { imageTypes, saveAttachment } from "../../lib/images";
+import { Attachments } from "../../design/ImageViewer";
+import { MarkdownFiles } from "../../design/markdown";
+import { saveAttachment } from "../../lib/images";
 import { AgentNotice } from "./AgentNotice";
 import { Dictation } from "./Dictation";
 import { api } from "../../lib/api";
@@ -260,6 +261,7 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
     );
 
   return (
+    <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null }}>
     <div className="transcript">
       <div className="transcript-head"><AgentStatus chat={chat} /></div>
       {messages.map((m) => (m.kind === "tool_result" && [...results.values()].includes(m) ? null : <MessageView key={m.id} m={m} result={results.get(m.id)} onSend={onSend} />))}
@@ -272,6 +274,7 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
       <div ref={end} />
       <ProgressBar messages={messages} results={results} running={!!chat?.running} />
     </div>
+    </MarkdownFiles.Provider>
   );
 }
 
@@ -366,7 +369,7 @@ function MessageView({ m, result, onSend }: { m: SessionMessage; result?: Sessio
     const images: string[] = Array.isArray(m.meta?.attachments) ? m.meta.attachments : [];
     return (
       <div className="msg msg-user">
-        {images.length > 0 && <Thumbs srcs={images} size={96} />}
+        {images.length > 0 && <Attachments paths={images} size={96} />}
         {/```|\]\(/.test(m.content) ? <Markdown text={m.content} /> : m.content}
       </div>
     );
@@ -775,11 +778,11 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   }, []);
 
   const add = async (files: File[]) => {
-    const imgs = files.filter((f) => imageTypes.includes(f.type));
-    if (files.length && !imgs.length) return setError("tab takes PNG, JPEG, GIF and WebP images.");
-    setError(null);
-    setUploading((n) => n + imgs.length);
-    for (const f of imgs) {
+    const big = files.filter((f) => f.size > 50 * 1024 * 1024);
+    const ok = files.filter((f) => f.size <= 50 * 1024 * 1024);
+    setError(big.length ? `${big.map((f) => f.name).join(", ")} ${big.length > 1 ? "are" : "is"} over 50 MB.` : null);
+    setUploading((n) => n + ok.length);
+    for (const f of ok) {
       try {
         const path = await saveAttachment(f);
         setImages((xs) => [...xs, path]);
@@ -825,11 +828,11 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
         void add([...e.dataTransfer.files]);
       }}
     >
-      {armed && <div className="composer-drop"><Icon name="plus" size={14} /> Drop images to attach</div>}
+      {armed && <div className="composer-drop"><Icon name="plus" size={14} /> Drop files to attach</div>}
       <AgentNotice messages={chat?.messages} />
       {(images.length > 0 || uploading > 0) && (
         <div className="composer-images">
-          <Thumbs srcs={images} size={56} onRemove={(i) => setImages((xs) => xs.filter((_, j) => j !== i))} />
+          <Attachments paths={images} size={56} onRemove={(p) => setImages((xs) => xs.filter((x) => x !== p))} />
           {uploading > 0 && <span className="thumb thumb-busy" style={{ width: 56, height: 56 }}><Icon name="refresh" size={14} /></span>}
         </div>
       )}
@@ -866,8 +869,8 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
       {suggestion && !text && <div className="composer-suggest subtle"><kbd>Tab</kbd> to use the suggested reply, then <kbd>Enter</kbd> to send</div>}
       <div className="composer-foot">
         <span className="subtle composer-agent">
-          <button className="bar-icon" onClick={() => file.current?.click()} title="Attach images (or paste or drop them)" aria-label="Attach images"><Icon name="plus" size={14} /></button>
-          <input ref={file} type="file" accept={imageTypes.join(",")} multiple hidden onChange={(e) => (void add([...(e.target.files ?? [])]), (e.target.value = ""))} />
+          <button className="bar-icon" onClick={() => file.current?.click()} title="Attach files or images (or paste or drop them)" aria-label="Attach files"><Icon name="plus" size={14} /></button>
+          <input ref={file} type="file" multiple hidden onChange={(e) => (void add([...(e.target.files ?? [])]), (e.target.value = ""))} />
           <Dictation onText={(t) => setText((cur) => (cur && !/\s$/.test(cur) ? `${cur} ${t}` : cur + t))} target={ref} />
           {config?.agent.kind && <><span className="composer-brand" title={agentLabel[config.agent.kind]}><Brand name={agentBrand[config.agent.kind]} size={11} /></span><ModelPicker /><ModePicker /></>}
           {extra}
