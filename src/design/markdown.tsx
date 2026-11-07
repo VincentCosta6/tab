@@ -7,6 +7,7 @@ import { openLink, parseLink } from "../lib/links";
 import { LinkPill } from "./LinkPill";
 import { isFilePath, isImagePath, isLocalPath, openImages, resolvePath, useImageSrc } from "../lib/images";
 import { FileChip } from "./ImageViewer";
+import { useStage } from "../lib/stage";
 
 /**
  * Handles links that aren't http(s), such as `src/a.ts#L12` in an agent's
@@ -40,11 +41,12 @@ function LocalLink({ href, label, children }: { href: string; label: string; chi
 /** An image in a message: a thumbnail that opens the viewer. */
 function InlineImage({ src: raw, alt }: { src: string; alt: string }) {
   const files = useContext(MarkdownFiles);
+  const stage = useStage();
   const src = resolvePath(raw, files?.base);
   const url = useImageSrc(/^(https?:|data:|blob:)/.test(src) || isLocalPath(src) ? src : null);
   if (!url) return <code>{alt || src}</code>;
   return (
-    <button className="md-image" onClick={() => openImages([{ src, name: alt || undefined }])} title={alt || src}>
+    <button className="md-image" onClick={() => (stage ? stage.open([{ path: src, name: alt || undefined }]) : openImages([{ src, name: alt || undefined }]))} title={alt || src}>
       <img src={url} alt={alt} />
     </button>
   );

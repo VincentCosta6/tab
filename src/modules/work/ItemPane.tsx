@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, UrgencyLabel, cx } from "../../design/components";
 import { OpenMenu } from "../../design/OpenMenu";
+import { StageHost } from "../../design/FileStage";
 import { SourceGlyph } from "../../design/brands";
 import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
@@ -130,10 +131,11 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         }
         right={tab === "content" && <RichSwitch item={item} mode={readMode} onChange={setReadMode} />}
       />
-      <div className="item-body">
+      {/* A file opened from the chat takes the middle; the chat docks on its right. */}
+      <StageHost className="item-body">
         <ChatView item={item} body={tab === "timeline" ? <Timeline itemId={item.id} /> : <Reader item={item} mode={readMode} />} showBody={tab !== "chat"} onSent={() => setTab("chat")} />
         <ContextRail key={item.id} item={item} onSelect={onSelect} />
-      </div>
+      </StageHost>
     </div>
   );
 }
