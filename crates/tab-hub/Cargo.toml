@@ -12,7 +12,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 tab-domain = { path = "../tab-domain" }
 tab-protocol = { path = "../tab-protocol" }
 tab-store = { path = "../tab-store" }
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 tab-store = { path = "../tab-store", features = ["sqlite"] }

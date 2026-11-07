@@ -14,6 +14,8 @@ sql = ["dep:sea-query"]
 # The shared test suite every backend must pass. Backends that live in
 # other crates (the Durable Object one) turn this on in their tests.
 conformance = []
+# The local-folder file store (desktop). Off for Wasm builds.
+fs = []
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
@@ -24,6 +26,6 @@ rusqlite = { workspace = true, optional = true }
 sea-query = { version = "1", optional = true, default-features = false, features = ["derive", "backend-sqlite", "backend-postgres"] }
 
 [dev-dependencies]
-tab-store = { path = ".", features = ["sqlite", "conformance"] }
+tab-store = { path = ".", features = ["sqlite", "fs", "conformance"] }
 tab-domain = { path = "../tab-domain" }
 proptest = "1"

@@ -388,9 +388,17 @@ function HubSection() {
             <Badge>protocol v{h.protocol_version}</Badge>
           </div>
         </FormRow>
-        <FormRow label="Devices connect at" help="Uses the same token as the MCP server.">
-          <code className="mono">{h.url ?? "not listening"}</code>
+        <FormRow label="Devices connect at" help="TLS 1.3 only. Devices send the MCP server's token in a header and pin this hub's certificate.">
+          <div style={{ display: "grid", gap: 4 }}>
+            <code className="mono">{h.url ?? "not listening"}</code>
+            {h.url && <span className="mono" style={{ fontSize: 12, opacity: 0.7 }}>{h.http3 ? "HTTP/3, HTTP/2" : "HTTP/2"}</span>}
+          </div>
         </FormRow>
+        {h.fingerprint && (
+          <FormRow label="Certificate" help="Made by this computer for its hub. A device checks it matches this before it connects.">
+            <code className="mono" style={{ wordBreak: "break-all" }}>{h.fingerprint}</code>
+          </FormRow>
+        )}
         <FormRow label="CPU" help="The hub runs inside the app, so this is the whole app.">
           <div style={{ display: "grid", gap: 4, minWidth: 220 }}>
             <span className="mono">{cpuOfMachine == null ? "unavailable" : `${cpuOfMachine.toFixed(1)}% of ${h.cpus} cores`}</span>
@@ -411,6 +419,9 @@ function HubSection() {
         </FormRow>
         <FormRow label="Storage" help={h.path}>
           <span className="mono">{bytes(h.storage_bytes)}</span>
+        </FormRow>
+        <FormRow label="Files" help="Chat attachments, kept by the hub while a message refers to them.">
+          <span className="mono">{(h.files ?? 0).toLocaleString()} · {bytes(h.file_bytes ?? 0)}</span>
         </FormRow>
         <FormRow label="Waiting to sync" help="Local changes not yet recorded in the hub. Normally 0.">
           <span className="mono">{h.pending.toLocaleString()}</span>

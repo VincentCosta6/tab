@@ -11,6 +11,12 @@
 //!
 //! Every backend has to pass the same [`conformance`] suite.
 //!
+//! Files (chat attachments, later encrypted handoff bundles) live beside
+//! the records in a [`blob::BlobStore`], content-addressed by hash, with its
+//! own suite in [`blob_conformance`]. Backends: [`blob::MemBlobStore`], and
+//! [`fs_blob::FsBlobStore`] (feature `fs`, a local folder). An R2 backend
+//! for the cloud hub comes with the Worker.
+//!
 //! Backends:
 //! - [`mem::MemStore`]: in memory. Tests, and a reference for new backends.
 //! - [`sqlite::SqliteStore`] (feature `sqlite`): local SQLite.
@@ -24,12 +30,19 @@
 //! the object's single thread), and a sync trait builds for Wasm with no
 //! async runtime. A network database would sit behind an async adapter.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Duration, Utc};
 use tab_domain::lease::{Claim, Lease};
 use tab_domain::ops::{Applied, Edge, Op, OpError, Record, SearchHit, Seq};
 
+pub mod blob;
+#[cfg(feature = "conformance")]
+pub mod blob_conformance;
 #[cfg(feature = "conformance")]
 pub mod conformance;
+#[cfg(feature = "fs")]
+pub mod fs_blob;
 pub mod mem;
 #[cfg(feature = "sql")]
 pub mod sql;
@@ -113,6 +126,12 @@ pub trait HubStore {
 
     /// How much the store holds right now.
     fn stats(&self, now: DateTime<Utc>) -> Result<StoreStats>;
+
+    /// Every file hash a current record refers to (see
+    /// [`tab_domain::blob::refs`]). Older versions of records and deleted
+    /// ones don't count. The hub deletes files outside this set once
+    /// they're past their grace period.
+    fn blob_refs(&self) -> Result<BTreeSet<String>>;
 }
 
 #[cfg(test)]

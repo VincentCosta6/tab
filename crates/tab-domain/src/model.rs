@@ -715,6 +715,10 @@ pub struct Session {
     pub cwd: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The device that runs it (has the agent's history and working copy).
+    /// Other devices watch and steer it through the hub.
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

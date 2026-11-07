@@ -17,9 +17,15 @@
 //!   don't echo. That covers other devices' changes, and rebuilds a fresh
 //!   or deleted `tab.db` from the hub.
 //!
+//! Agent chats sync too (`sessions`, `session_messages`), so other devices
+//! can watch and steer them; each session names the device that runs it.
+//! A message's local `id` only orders this copy, so messages sync by their
+//! `uid` and `id` stays here ([`LOCAL_ONLY`]). Only what the person reads
+//! in a chat travels: tool output stays here ([`KEEP_LOCAL`]), and a tool
+//! call syncs as its one-line summary without its input.
+//!
 //! What isn't synced stays on this device on purpose: caches (HTTP, AI,
-//! previews, embeddings), the API audit log, usage counters, and agent
-//! chats, which belong to the machine that runs the agent.
+//! previews, embeddings), the API audit log and usage counters.
 //!
 //! Every row change is recorded as a whole-row `Put` (or a `Delete`), and
 //! the last write the hub orders wins.
@@ -34,6 +40,8 @@ use super::Store;
 pub const SYNCED: &[(&str, &[&str])] = &[
     ("projects", &["id"]),
     ("items", &["id"]),
+    ("sessions", &["id"]),
+    ("session_messages", &["uid"]),
     ("project_notes", &["id"]),
     ("item_context", &["id"]),
     ("entities", &["id"]),
@@ -44,6 +52,52 @@ pub const SYNCED: &[(&str, &[&str])] = &[
     ("workflows", &["id"]),
     ("workflow_versions", &["workflow_id", "version"]),
     ("workflow_runs", &["id"]),
+];
+
+/// Columns that only mean something in this copy, so they aren't sent and
+/// a row from the hub leaves them to this copy's defaults.
+pub const LOCAL_ONLY: &[(&str, &str)] = &[("session_messages", "id")];
+
+/// Rows of a synced table that stay on this device anyway, as a condition
+/// on the row (`{r}` is its alias). Tool output is the agent's working
+/// material: big, and not something the person reads in a chat on another
+/// device. The tool call itself syncs as its one-line summary.
+const KEEP_LOCAL: &[(&str, &str)] = &[("session_messages", "{r}.kind = 'tool_result'")];
+
+/// `AND NOT (...)` for the rows of `table` that sync, with alias `r`.
+fn synced_rows(table: &str, r: &str) -> String {
+    KEEP_LOCAL
+        .iter()
+        .filter(|(t, _)| *t == table)
+        .map(|(_, cond)| format!(" AND NOT ({})", cond.replace("{r}", r)))
+        .collect()
+}
+
+/// Tool calls whose input is shown to the person as it is (the step list,
+/// questions for them), as a condition on `meta`: these sync whole.
+const PERSON_FACING_TOOL: &str = "json_extract(meta, '$.tool') IN \
+     ('TodoWrite', 'todowrite', 'TaskCreate', 'TaskUpdate', 'AskUserQuestion') \
+     OR json_extract(meta, '$.tool') LIKE '%tab_steps'";
+
+/// The most of a chat message's text that's synced. Tool output can be
+/// huge; the full text stays on the device that ran it.
+pub const MAX_SYNCED_CONTENT: usize = 64 * 1024;
+
+/// The tables synced before `hub_tables` started keeping track; a copy
+/// that was introduced then already sent them.
+const NEW_TABLES_BASELINE: &[&str] = &[
+    "projects",
+    "items",
+    "project_notes",
+    "item_context",
+    "entities",
+    "entity_blocks",
+    "item_entities",
+    "edges",
+    "item_activity",
+    "workflows",
+    "workflow_versions",
+    "workflow_runs",
 ];
 
 /// One row to send to the hub: its current contents, or `None` if it's gone.
@@ -103,13 +157,40 @@ impl Store {
             for (event, row) in [("INSERT", "new"), ("UPDATE", "new"), ("DELETE", "old")] {
                 let name = format!("hub_out_{table}_{}", event.to_lowercase());
                 sql += &format!(
-                    "CREATE TRIGGER IF NOT EXISTS {name} AFTER {event} ON {table} WHEN {quiet}
+                    "CREATE TRIGGER IF NOT EXISTS {name} AFTER {event} ON {table} WHEN {quiet}{}
                      BEGIN INSERT INTO hub_outbox (tbl, pk) VALUES ('{table}', {}); END;",
+                    synced_rows(table, row),
                     key_expr(pk, row)
                 );
             }
         }
         conn.execute_batch(&sql)?;
+        // Tables added to SYNCED after this copy was introduced to its hub
+        // send what they already hold.
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS hub_tables (name TEXT PRIMARY KEY);")?;
+        let backfilled: bool =
+            conn.query_row("SELECT backfilled FROM hub_sync WHERE id = 1", [], |r| {
+                r.get::<_, i64>(0).map(|n| n != 0)
+            })?;
+        let known: i64 = conn.query_row("SELECT COUNT(*) FROM hub_tables", [], |r| r.get(0))?;
+        for (table, pk) in SYNCED {
+            let new = conn.execute(
+                "INSERT OR IGNORE INTO hub_tables (name) VALUES (?1)",
+                [table],
+            )? > 0;
+            // A copy from before this table existed (it has a hub, and
+            // either knew other tables or predates the list) catches up.
+            if new && backfilled && (known > 0 || !NEW_TABLES_BASELINE.contains(table)) {
+                conn.execute(
+                    &format!(
+                        "INSERT INTO hub_outbox (tbl, pk) SELECT '{table}', {} FROM {table} AS r WHERE 1{}",
+                        key_expr(pk, "r"),
+                        synced_rows(table, "r")
+                    ),
+                    [],
+                )?;
+            }
+        }
         // Added after the first release of this table.
         let has_pulled: bool = conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('hub_sync') WHERE name = 'pulled_to'",
@@ -177,7 +258,11 @@ impl Store {
         let mut out = vec![];
         for (table, pk) in SYNCED {
             let keys: Vec<String> = conn
-                .prepare(&format!("SELECT {} FROM {table} AS r", key_expr(pk, "r")))?
+                .prepare(&format!(
+                    "SELECT {} FROM {table} AS r WHERE 1{}",
+                    key_expr(pk, "r"),
+                    synced_rows(table, "r")
+                ))?
                 .query_map([], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             out.extend(keys.into_iter().map(|k| (table.to_string(), k)));
@@ -224,8 +309,9 @@ impl Store {
         for (table, pk) in SYNCED {
             n += tx.execute(
                 &format!(
-                    "INSERT INTO hub_outbox (tbl, pk) SELECT '{table}', {} FROM {table} AS r",
-                    key_expr(pk, "r")
+                    "INSERT INTO hub_outbox (tbl, pk) SELECT '{table}', {} FROM {table} AS r WHERE 1{}",
+                    key_expr(pk, "r"),
+                    synced_rows(table, "r")
                 ),
                 [],
             )?;
@@ -476,7 +562,27 @@ fn read_row(conn: &rusqlite::Connection, table: &str, key: &str) -> anyhow::Resu
         .prepare_cached(&format!("SELECT name FROM pragma_table_info('{table}')"))?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    let object: Vec<String> = cols.iter().map(|c| format!("'{c}', {c}")).collect();
+    let object: Vec<String> = cols
+        .iter()
+        .filter(|c| !LOCAL_ONLY.contains(&(table, c.as_str())))
+        .map(|c| match (table, c.as_str()) {
+            ("session_messages", "content") => format!(
+                "'{c}', CASE WHEN length({c}) > {MAX_SYNCED_CONTENT} \
+                 THEN substr({c}, 1, {MAX_SYNCED_CONTENT}) || '\n… (cut off; the full text is on the device that ran it)' \
+                 ELSE {c} END"
+            ),
+            // A tool call travels as its summary (`content`) and tool name;
+            // its input (whole files, for an edit) stays here. Except the
+            // tools whose input is what the person reads: the step list and
+            // questions for them.
+            ("session_messages", "meta") => format!(
+                "'{c}', CASE WHEN kind = 'tool' AND NOT ({PERSON_FACING_TOOL}) \
+                 THEN '{{\"tool\":' || coalesce(json_quote(json_extract({c}, '$.tool')), 'null') || '}}' \
+                 ELSE {c} END"
+            ),
+            _ => format!("'{c}', {c}"),
+        })
+        .collect();
     let wheres: Vec<String> = pk
         .iter()
         .enumerate()

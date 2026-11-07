@@ -197,6 +197,7 @@
 .msg-tool pre.msg-tool-cmd { max-height: 160px; color: var(--fg); }
 .msg-tool-empty { margin-top: var(--space-1); color: var(--fg-subtle); font-size: var(--text-xs); }
 .msg-note { text-align: center; color: var(--fg-subtle); font-size: var(--text-xs); }
+.steer-wait { display: flex; align-items: center; justify-content: center; gap: 6px; flex-wrap: wrap; }
 .msg-error { display: flex; gap: var(--space-2); align-items: flex-start; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--tone-danger-bg); color: var(--tone-danger-fg); white-space: pre-wrap; font-size: var(--text-sm); }
 .msg-working { display: flex; align-items: center; gap: var(--space-2); color: var(--fg-subtle); font-size: var(--text-sm); }
 .dots { display: inline-flex; gap: 3px; }

@@ -82,6 +82,8 @@ export const api = {
   setAgentMode: (mode: string) => call<TabConfig>("set_agent_mode", { mode }),
   connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),
   chatStop: (sessionId: string) => call<void>("chat_stop", { sessionId }),
+  /** Stop the tool the turn is waiting on so steering already sent is read now. */
+  chatInterrupt: (sessionId: string) => call<void>("chat_interrupt", { sessionId }),
   approvalResolve: (id: string, decision: "allow" | "always" | "deny" | "answer", message?: string, answers?: Record<string, string>) =>
     call<boolean>("approval_resolve", { id, decision, message: message ?? null, answers: answers ?? null }),
   detectAgents: () => call<AgentProbe[]>("detect_agents"),

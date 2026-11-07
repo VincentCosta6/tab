@@ -18,12 +18,22 @@
 //! hub refuses anything else until then. It keeps track of who is connected
 //! and how far each one has synced, for the Hub page ([`Hub::status`]).
 //!
+//! Agent sessions are watched and steered from any device through the
+//! [live channel](live): the device running a session publishes what it
+//! streams, the hub relays it to watchers without storing it, and routes
+//! steering back to the runner.
+//!
+//! Files live beside the records in a [`tab_store::blob::BlobStore`] the
+//! host holds; [`blobs::collect`] deletes the ones nothing refers to.
+//!
 //! Moving between local and cloud is [`migrate::copy`]: replay one hub's log
 //! into another.
 
+pub mod blobs;
+pub mod live;
 pub mod migrate;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
 use tab_domain::ops::Op;
@@ -43,6 +53,18 @@ pub struct Handled {
     pub reply: ServerEnvelope,
     /// Send to every other connected device.
     pub push: Option<ServerEnvelope>,
+    /// Send to these connections only (live events, steering).
+    pub direct: Vec<(ConnId, ServerEnvelope)>,
+}
+
+impl Handled {
+    fn reply(reply: ServerEnvelope) -> Self {
+        Self {
+            reply,
+            push: None,
+            direct: vec![],
+        }
+    }
 }
 
 /// The host's id for one connection (a socket, or the desktop app itself).
@@ -55,6 +77,8 @@ struct Conn {
     address: String,
     connected_at: DateTime<Utc>,
     synced_to: u64,
+    /// Sessions it wants live events for.
+    watching: BTreeSet<String>,
 }
 
 pub struct Hub<S> {
@@ -97,12 +121,21 @@ impl<S: HubStore> Hub<S> {
                 address: address.to_string(),
                 connected_at: now,
                 synced_to: 0,
+                watching: BTreeSet::new(),
             },
         );
     }
 
-    pub fn disconnect(&mut self, conn: ConnId) {
-        self.conns.remove(&conn);
+    /// A connection closed. Returns what to tell the runners of sessions it
+    /// was watching.
+    pub fn disconnect(&mut self, conn: ConnId) -> Vec<(ConnId, ServerEnvelope)> {
+        let Some(c) = self.conns.remove(&conn) else {
+            return vec![];
+        };
+        c.watching
+            .iter()
+            .flat_map(|s| self.watched_notice(s))
+            .collect()
     }
 
     /// Connections that have said hello: the ones the host sends pushes to.
@@ -155,7 +188,7 @@ impl<S: HubStore> Hub<S> {
     pub fn handle_frame(&mut self, conn: ConnId, frame: &[u8], now: DateTime<Utc>) -> Handled {
         match tab_protocol::decode_client(frame) {
             Ok((id, req)) => self.handle(conn, id, req, now),
-            Err(reply) => Handled { reply, push: None },
+            Err(reply) => Handled::reply(reply),
         }
     }
 
@@ -163,7 +196,7 @@ impl<S: HubStore> Hub<S> {
     pub fn handle(&mut self, conn: ConnId, id: u64, req: Req, now: DateTime<Utc>) -> Handled {
         match self.answer(conn, id, req, now) {
             Ok(h) => h,
-            Err(reply) => Handled { reply, push: None },
+            Err(reply) => Handled::reply(reply),
         }
     }
 
@@ -177,10 +210,7 @@ impl<S: HubStore> Hub<S> {
         now: DateTime<Utc>,
     ) -> Result<Handled, ServerEnvelope> {
         let err = |e| store_error(id, e);
-        let reply = |body| Handled {
-            reply: ServerEnvelope::new(id, body),
-            push: None,
-        };
+        let reply = |body| Handled::reply(ServerEnvelope::new(id, body));
         let Some(c) = self.conns.get_mut(&conn) else {
             return Err(ServerEnvelope::error(
                 id,
@@ -252,8 +282,12 @@ impl<S: HubStore> Hub<S> {
                         }),
                     ),
                     push,
+                    direct: vec![],
                 }
             }
+            Req::Watch(w) => self.watch(conn, id, w.sessions),
+            Req::Publish(p) => self.publish(conn, device, id, p).map_err(|e| e.reply(id))?,
+            Req::Steer(st) => self.steer(device, id, st).map_err(|e| e.reply(id))?,
             Req::GetChanges(g) => {
                 let limit = page(g.limit, DEFAULT_CHANGES_PER_PAGE, MAX_CHANGES_PER_PAGE);
                 // One extra tells us whether there's more.

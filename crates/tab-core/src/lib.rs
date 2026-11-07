@@ -28,6 +28,8 @@ pub mod embed;
 pub mod engine;
 pub mod gateway;
 pub mod gh;
+pub mod hub_tls;
+pub mod live;
 pub mod local_hub;
 pub mod lsp;
 pub mod mcp;

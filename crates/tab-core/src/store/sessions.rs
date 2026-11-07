@@ -7,7 +7,7 @@ use super::{Store, parse_ts, ts};
 use crate::model::{AgentKind, Session, SessionMessage, SessionStatus};
 
 const COLS: &str =
-    "id, item_id, agent, agent_session_id, title, status, cwd, created_at, updated_at";
+    "id, item_id, agent, agent_session_id, title, status, cwd, created_at, updated_at, device";
 
 fn row_to_session(r: &Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
@@ -20,6 +20,19 @@ fn row_to_session(r: &Row<'_>) -> rusqlite::Result<Session> {
         cwd: r.get(6)?,
         created_at: parse_ts(&r.get::<_, String>(7)?)?,
         updated_at: parse_ts(&r.get::<_, String>(8)?)?,
+        device: r.get(9)?,
+    })
+}
+
+fn row_to_message(r: &Row<'_>) -> rusqlite::Result<SessionMessage> {
+    Ok(SessionMessage {
+        id: r.get(0)?,
+        session_id: r.get(1)?,
+        role: r.get(2)?,
+        kind: r.get(3)?,
+        content: r.get(4)?,
+        meta: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
+        created_at: parse_ts(&r.get::<_, String>(6)?)?,
     })
 }
 
@@ -33,10 +46,11 @@ impl Store {
         now: DateTime<Utc>,
     ) -> anyhow::Result<Session> {
         let id = uuid::Uuid::new_v4().to_string();
+        let device = self.device_id()?;
         self.conn().execute(
-            "INSERT INTO sessions (id, item_id, agent, title, status, cwd, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?6)",
-            params![id, item_id, agent.as_str(), title, cwd, ts(now)],
+            "INSERT INTO sessions (id, item_id, agent, title, status, cwd, created_at, updated_at, device)
+             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?6, ?7)",
+            params![id, item_id, agent.as_str(), title, cwd, ts(now), device],
         )?;
         Ok(self.session_get(&id)?.expect("just written"))
     }
@@ -173,8 +187,17 @@ impl Store {
     ) -> anyhow::Result<SessionMessage> {
         let conn = self.conn();
         conn.execute(
-            "INSERT INTO session_messages (session_id, role, kind, content, meta, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![session_id, role, kind, content, serde_json::to_string(meta)?, ts(now)],
+            "INSERT INTO session_messages (session_id, role, kind, content, meta, created_at, uid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                session_id,
+                role,
+                kind,
+                content,
+                serde_json::to_string(meta)?,
+                ts(now),
+                uuid::Uuid::new_v4().simple().to_string()
+            ],
         )?;
         Ok(SessionMessage {
             id: conn.last_insert_rowid(),
@@ -187,6 +210,19 @@ impl Store {
         })
     }
 
+    /// A message by its synced key (see migration 013).
+    pub fn message_by_uid(&self, uid: &str) -> anyhow::Result<Option<SessionMessage>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT id, session_id, role, kind, content, meta, created_at FROM session_messages
+                 WHERE uid = ?1",
+                [uid],
+                row_to_message,
+            )
+            .optional()?)
+    }
+
     pub fn messages(&self, session_id: &str) -> anyhow::Result<Vec<SessionMessage>> {
         let conn = self.conn();
         let rows = conn
@@ -194,17 +230,7 @@ impl Store {
                 "SELECT id, session_id, role, kind, content, meta, created_at FROM session_messages
                  WHERE session_id = ?1 ORDER BY id",
             )?
-            .query_map([session_id], |r| {
-                Ok(SessionMessage {
-                    id: r.get(0)?,
-                    session_id: r.get(1)?,
-                    role: r.get(2)?,
-                    kind: r.get(3)?,
-                    content: r.get(4)?,
-                    meta: serde_json::from_str(&r.get::<_, String>(5)?).unwrap_or_default(),
-                    created_at: parse_ts(&r.get::<_, String>(6)?)?,
-                })
-            })?
+            .query_map([session_id], row_to_message)?
             .collect::<Result<_, _>>()?;
         Ok(rows)
     }

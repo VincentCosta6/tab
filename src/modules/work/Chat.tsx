@@ -303,9 +303,42 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
         </div>
       )}
       {chat?.approvals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
+      {chat?.running && chat.session && <SteerWait messages={messages} results={results} sessionId={chat.session.id} />}
       <ProgressBar messages={messages} results={results} running={!!chat?.running} />
     </div>
     </MarkdownFiles.Provider>
+  );
+}
+
+/**
+ * The agent reads a message sent mid-turn only between tool calls, as in
+ * Claude Code's terminal. While a long tool holds it, offer "Send now"
+ * (Esc there): stop that tool so the message is read right away.
+ */
+function SteerWait({ messages, results, sessionId }: { messages: SessionMessage[]; results: Map<number, SessionMessage>; sessionId: string }) {
+  const [sent, setSent] = useState<number | null>(null);
+  let steer = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "assistant") break; // the agent has moved on since
+    if (m.role === "user" && m.meta?.steer) { steer = i; break; }
+  }
+  if (steer < 0) return null;
+  // The agent's latest step before the message: a tool call still without output.
+  const tool = messages.slice(0, steer).reverse().find((m) => m.role === "assistant" && m.kind !== "suggestion");
+  if (tool?.kind !== "tool" || tool.meta?.tool === "AskUserQuestion" || results.has(tool.id)) return null;
+  const waiting = sent === messages[steer].id;
+  return (
+    <div className="msg-note steer-wait">
+      {waiting ? "Stopping " : "Waiting for "}
+      <span className="msg-tool-name">{toolName(tool.meta?.tool ?? "the tool")}</span>
+      {waiting ? "…" : " to finish before reading your message"}
+      {!waiting && (
+        <Button size="sm" variant="ghost" onClick={() => (setSent(messages[steer].id), void api.chatInterrupt(sessionId))} title="Stop the running tool so your message is read now (Esc in Claude Code)">
+          Send now
+        </Button>
+      )}
+    </div>
   );
 }
 
