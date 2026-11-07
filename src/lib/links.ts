@@ -14,7 +14,7 @@ import { api, openUrl } from "./api";
 export interface LinkPreview {
   title: string;
   /** The one badge that matters most, in the connector's own words. */
-  status?: { label: string; tone: import("./types").Tone } | null;
+  status?: import("./types").Status | null;
   author?: string | null;
   updated_at?: string | null;
   /** Labelled rows for the hover card: ["Checks", "Passing"]. */
