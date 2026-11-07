@@ -295,15 +295,15 @@ export function QueueRow({ item, agent, selected, onSelect, onAct, compact }: {
       <div className="row-main">
         <FlapTitle as="div" className="row-title" id={item.id} text={item.title} />
         <div className="row-meta">
-          <ProjectChip id={item.project_id} />
-          {agent && <SessionPill status={agent.status} title={`Chat ${sessionLook[agent.status].label.toLowerCase()} · updated ${timeAgo(agent.updated_at)}`} />}
-          {byline(item)}
+          <span className="row-meta-main">
+            {agent && <SessionPill status={agent.status} title={`Chat ${sessionLook[agent.status].label.toLowerCase()} · updated ${timeAgo(agent.updated_at)}`} />}
+            <ProjectChip id={item.project_id} />
+            <span className="row-byline">{byline(item)}</span>
+          </span>
+          {item.state === "snoozed" && item.snoozed_until && <Badge icon="clock">{timeUntil(item.snoozed_until)}</Badge>}
+          <span className="row-time">{timeAgo(item.occurred_at)}</span>
         </div>
         {!compact && item.body && <div className="row-snippet">{item.body}</div>}
-      </div>
-      <div className="row-side">
-        <span className="row-time">{timeAgo(item.occurred_at)}</span>
-        {item.state === "snoozed" && item.snoozed_until && <Badge icon="clock">{timeUntil(item.snoozed_until)}</Badge>}
       </div>
       {onAct && (
         <div className="row-actions" onClick={(e) => e.stopPropagation()}>
