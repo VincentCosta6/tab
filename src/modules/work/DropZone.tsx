@@ -97,15 +97,17 @@ export function DropOverlay() {
   const pad = 6;
   return (
     <div className="drop-overlay" aria-hidden>
-      {r ? (
-        <>
-          <div className="drop-spot" style={{ left: r.left - pad, top: r.top - pad, width: r.width + pad * 2, height: r.height + pad * 2 }} />
-          <div className="drop-pill" style={{ left: r.left + r.width / 2, top: Math.max(12, r.top - pad - 40) }}>
-            <Icon name="plus" size={14} /> Drop to attach to this chat
-          </div>
-        </>
-      ) : (
-        <div className="drop-pill drop-pill-center"><Icon name="x" size={14} /> Open a chat to drop files into it</div>
+      <div className="drop-frame" />
+      {r && <div className="drop-spot" style={{ left: r.left - pad, top: r.top - pad, width: r.width + pad * 2, height: r.height + pad * 2 }} />}
+      <div className="drop-card">
+        <span className="drop-card-icon"><Icon name={r ? "files" : "x"} size={28} /></span>
+        <strong>{r ? "Drop anywhere to attach" : "No chat to drop into"}</strong>
+        <span>{r ? "Files go to the highlighted chat" : "Open a chat first, then drop files anywhere"}</span>
+      </div>
+      {r && (
+        <div className="drop-tag" style={{ left: r.left + r.width / 2, top: Math.max(12, r.top - pad - 34) }}>
+          <Icon name="arrow-down" size={12} /> Goes here
+        </div>
       )}
     </div>
   );
