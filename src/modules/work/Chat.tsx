@@ -98,7 +98,7 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
  * What protects this chat: green "Sandboxed" where the OS enforces it, amber
  * "Limited sandbox" where it can't (Windows), nothing when it's off.
  */
-function SandboxPill() {
+export function SandboxPill() {
   const { data } = useQuery({ queryKey: ["sandbox"], queryFn: api.sandboxStatus, staleTime: 60_000 });
   if (!data?.enabled) return null;
   const github = "gh and git reach GitHub through tab with your GitHub connection; force pushes, merges and deletes ask you first.";
@@ -291,7 +291,7 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
   return (
     <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null }}>
     <div className="transcript" ref={box} onScroll={(e) => { const el = e.currentTarget; stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}>
-      <div className="transcript-head"><SandboxPill /><AgentStatus chat={chat} /></div>
+      <div className="transcript-head"><AgentStatus chat={chat} /></div>
       {groupTools(messages, paired).map((g) =>
         Array.isArray(g)
           ? <ToolGroup key={g[0].id} calls={g} results={results} />

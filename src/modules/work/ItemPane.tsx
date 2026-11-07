@@ -12,7 +12,7 @@ import { useChat, useItem } from "../../lib/hooks";
 import { keys } from "../../lib/query";
 import type { QueueItem } from "../../lib/types";
 import { parsePullUrl } from "../github/pulls";
-import { ChatView } from "./Chat";
+import { ChatView, SandboxPill } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
 import { ContextRail } from "./ContextRail";
 import { confirmDone } from "./doneGuard";
@@ -93,7 +93,10 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         <div className="item-head-main">
           <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={34} />
           <div className="item-head-text">
-            <ItemTitle item={item} />
+            <div className="item-title-row">
+              <SandboxPill />
+              <ItemTitle item={item} />
+            </div>
             <div className="item-meta">
               <Badge tone={k.tone}>{k.label}</Badge>
               {r && <UrgencyLabel urgency={r.urgency} />}

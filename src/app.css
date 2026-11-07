@@ -123,6 +123,10 @@
 .item-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); padding: var(--space-4) var(--space-6) var(--space-3); border-bottom: 1px solid var(--border); background: var(--bg-raised); }
 .item-head-main { display: flex; gap: var(--space-3); min-width: 0; }
 .item-head-text { min-width: 0; display: grid; gap: 4px; }
+/* The chat's sandbox state, pinned left of the title. */
+.item-title-row { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.item-title-row > .sandbox-pill { flex: none; }
+.item-title-row > .item-title { min-width: 0; }
 .item-title { margin: 0; font-size: var(--text-lg); font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .item-title-renamable { cursor: text; border-radius: var(--radius-sm); }
 .item-title-renamable:hover { background: var(--bg-hover); box-shadow: 0 0 0 3px var(--bg-hover); }
