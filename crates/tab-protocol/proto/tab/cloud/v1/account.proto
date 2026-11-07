@@ -1,0 +1,117 @@
+// The tab cloud account API: what the apps and the edge Worker
+// (api.tabqueue.com, in the private tab-infra repo) exchange over HTTPS.
+//
+// This file is the source of truth for both sides. tab-infra builds against
+// this crate, so the cloud and the apps share these exact types: prost
+// generates the Rust, protobuf-es the TypeScript. Bodies are binary Protobuf
+// (`content-type: application/x-protobuf`), success and error alike; the
+// HTTP status says which message the body holds (2xx: the route's message,
+// otherwise Error).
+//
+// Routes, all with `authorization: Bearer <Supabase access token>`:
+//   GET  /v1/hub            HubStatus  your personal hub
+//   POST /v1/hub            HubStatus  set up your personal hub (idempotent)
+//   GET  /v1/hubs           HubList    every hub you belong to
+//   GET  /v1/hubs/{hub_id}  HubStatus  one of them, if you're a member
+//
+// Same compatibility rules as hub.proto: only add; never renumber or reuse a
+// field; reserve removed ones. `buf breaking` checks this.
+syntax = "proto3";
+
+package tab.cloud.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Where a hub is in being set up.
+enum HubState {
+  HUB_STATE_UNSPECIFIED = 0;
+  // No hub yet. POST /v1/hub creates your personal one.
+  HUB_STATE_NONE = 1;
+  // Being created. Poll until it's ready.
+  HUB_STATE_PROVISIONING = 2;
+  HUB_STATE_READY = 3;
+  // Setting up failed. POST /v1/hub tries again.
+  HUB_STATE_FAILED = 4;
+}
+
+enum HubKind {
+  HUB_KIND_UNSPECIFIED = 0;
+  // A person's own hub.
+  HUB_KIND_PERSONAL = 1;
+  // A hub shared by a team.
+  HUB_KIND_TEAM = 2;
+}
+
+// Your role on a hub.
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  // Everything, including deleting the hub.
+  ROLE_OWNER = 1;
+  // Manages members and settings.
+  ROLE_ADMIN = 2;
+  // Reads and writes.
+  ROLE_MEMBER = 3;
+  // Reads only.
+  ROLE_GUEST = 4;
+}
+
+// Your plan. Cloud features work while `active`.
+message Plan {
+  // "trial", "pro" or "none". A string so new plans don't need a new client.
+  string name = 1;
+  // When it ends. Unset for a plan that renews.
+  google.protobuf.Timestamp ends_at = 2;
+  bool active = 3;
+}
+
+message Hub {
+  // A Durable Object id, 64 lowercase hex characters. Empty while state is NONE.
+  string hub_id = 1;
+  HubKind kind = 2;
+  // What to call it. Empty for a personal hub.
+  string name = 3;
+  Role role = 4;
+  HubState state = 5;
+  // Cloudflare's region hint it was placed with, e.g. "wnam". May be empty.
+  string region = 6;
+  google.protobuf.Timestamp ready_at = 7;
+  // Why the last setup failed, said for a person.
+  string error = 8;
+}
+
+message HubStatus {
+  Hub hub = 1;
+  Plan plan = 2;
+}
+
+message HubList {
+  // Personal hub first, then the rest by name.
+  repeated Hub hubs = 1;
+  Plan plan = 2;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  // No token, or one that didn't verify. Sign in again.
+  ERROR_CODE_UNAUTHENTICATED = 1;
+  // The trial or plan has ended.
+  ERROR_CODE_PLAN_REQUIRED = 2;
+  // The account is locked.
+  ERROR_CODE_LOCKED = 3;
+  // Too many requests. See the retry-after header.
+  ERROR_CODE_RATE_LIMITED = 4;
+  // No such hub, or not one you belong to. The two are never told apart.
+  ERROR_CODE_NOT_FOUND = 5;
+  // You belong to the hub but your role doesn't allow this.
+  ERROR_CODE_FORBIDDEN = 6;
+  ERROR_CODE_BAD_REQUEST = 7;
+  // Our side. Try again.
+  ERROR_CODE_INTERNAL = 8;
+}
+
+// The body of every non-2xx answer.
+message Error {
+  ErrorCode code = 1;
+  // Said for a person; safe to show as is.
+  string message = 2;
+}
