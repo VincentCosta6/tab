@@ -2737,6 +2737,7 @@ pub fn run() {
             account::account_cancel_sign_in,
             account::account_sign_out,
             account::cloud_hub_status,
+            account::cloud_hubs,
             account::cloud_hub_set_up,
             gh_status,
             usage_summary,

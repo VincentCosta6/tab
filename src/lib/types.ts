@@ -462,23 +462,6 @@ export interface TabConfig {
 
 export type HubMode = "cloud" | "local";
 
-/** Where the person's private cloud hub is in being set up. Mirrors tab_core::cloud::CloudHub. */
-export interface CloudHub {
-  state: "none" | "provisioning" | "ready" | "failed";
-  hub_id: string | null;
-  /** Cloudflare's region hint, e.g. "wnam". */
-  region: string | null;
-  ready_at: number | null;
-  error: string | null;
-  plan: { plan: "none" | "trial" | "pro" | string; ends_at: number | null; active: boolean };
-}
-
-/** Why a tab cloud call failed: `code` to branch on, `message` to show. */
-export interface CloudFailure {
-  code: "not_signed_in" | "plan_required" | "locked" | "rate_limited" | "network" | "server";
-  message: string;
-}
-
 /** The signed-in tab account, without its tokens. Mirrors tab_core::account::AccountView. */
 export interface Account {
   user_id: string;

@@ -1,5 +1,8 @@
 fn main() {
-    let protos = ["proto/tab/hub/v1/hub.proto", "proto/tab/cloud/v1/account.proto"];
+    let protos = [
+        "proto/tab/hub/v1/hub.proto",
+        "proto/tab/cloud/v1/account.proto",
+    ];
     for p in protos {
         println!("cargo:rerun-if-changed={p}");
     }

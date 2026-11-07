@@ -107,6 +107,8 @@ enum ErrorCode {
   ERROR_CODE_BAD_REQUEST = 7;
   // Our side. Try again.
   ERROR_CODE_INTERNAL = 8;
+  // Set by the apps, never sent: tab cloud couldn't be reached.
+  ERROR_CODE_UNREACHABLE = 9;
 }
 
 // The body of every non-2xx answer.

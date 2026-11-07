@@ -1,20 +1,21 @@
-//! tab cloud: setting up a person's private hub.
+//! tab cloud: setting up and listing a person's cloud hubs.
 //!
 //! The cloud side lives in the private `tab-infra` repo. Its edge Worker
-//! (`api.tabqueue.com`) answers two calls this module makes, both with the
-//! signed-in person's Supabase access token:
+//! (`api.tabqueue.com`) is the only way to reach a cloud hub; hubs have no
+//! public address. Every call carries the signed-in person's Supabase access
+//! token, and every body is binary Protobuf from [`tab_protocol::cloud`]
+//! (`account.proto`), the same types the Worker is built from:
 //!
-//! - `POST /v1/hub` creates their account (and trial) and sets up their hub,
-//!   a Durable Object of their own. Idempotent: calling again retries a
-//!   failed setup and leaves a ready hub alone.
+//! - `POST /v1/hub` sets up their personal hub (a Durable Object of their
+//!   own) and creates the account and trial. Idempotent: calling again
+//!   retries a failed setup and leaves a ready hub alone.
 //! - `GET /v1/hub` says where that is.
-//!
-//! The JSON mirrors `tab-infra`'s `crates/accounts/src/api.rs`. Fields are
-//! only ever added there, and unknown ones are ignored here.
+//! - `GET /v1/hubs` lists every hub they belong to (personal, and teams').
 
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use prost::Message;
+pub use tab_protocol::cloud as pb;
 
 /// How long [`set_up_hub`] waits for a hub another request is setting up.
 const WAIT_FOR: Duration = Duration::from_secs(30);
@@ -41,98 +42,71 @@ impl CloudConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CloudHubState {
-    None,
-    Provisioning,
-    Ready,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CloudPlan {
-    /// `trial`, `pro` or `none`.
-    pub plan: String,
-    /// Unix seconds.
-    pub ends_at: Option<i64>,
-    pub active: bool,
-}
-
-/// The person's cloud hub, as the edge Worker reports it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CloudHub {
-    pub state: CloudHubState,
-    pub hub_id: Option<String>,
-    /// Cloudflare's region hint, e.g. `wnam`.
-    pub region: Option<String>,
-    pub ready_at: Option<i64>,
-    pub error: Option<String>,
-    pub plan: CloudPlan,
-}
-
+/// A failed call: the cloud's [`pb::Error`], or one the app made up for a
+/// failure that never reached the cloud (`Unreachable`, `Unauthenticated`).
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
-pub enum CloudError {
-    #[error("sign in to use tab cloud")]
-    NotSignedIn,
-    /// The trial or plan has ended. Carries the cloud's message.
-    #[error("{0}")]
-    PlanRequired(String),
-    #[error("{0}")]
-    Locked(String),
-    #[error("tab cloud is busy. Try again in a minute.")]
-    RateLimited,
-    #[error("couldn't reach tab cloud: {0}")]
-    Network(String),
-    #[error("{0}")]
-    Server(String),
+#[error("{message}")]
+pub struct CloudError {
+    pub code: pb::ErrorCode,
+    pub message: String,
 }
 
 impl CloudError {
-    /// A stable name for the UI to branch on.
-    pub fn code(&self) -> &'static str {
-        match self {
-            CloudError::NotSignedIn => "not_signed_in",
-            CloudError::PlanRequired(_) => "plan_required",
-            CloudError::Locked(_) => "locked",
-            CloudError::RateLimited => "rate_limited",
-            CloudError::Network(_) => "network",
-            CloudError::Server(_) => "server",
+    pub fn new(code: pb::ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn not_signed_in() -> Self {
+        Self::new(pb::ErrorCode::Unauthenticated, "Sign in to use tab cloud.")
+    }
+
+    pub fn unreachable(detail: impl std::fmt::Display) -> Self {
+        Self::new(
+            pb::ErrorCode::Unreachable,
+            format!("Couldn't reach tab cloud: {detail}"),
+        )
+    }
+
+    pub fn to_pb(&self) -> pb::Error {
+        pb::Error {
+            code: self.code as i32,
+            message: self.message.clone(),
         }
     }
 }
 
-#[derive(Deserialize)]
-struct ApiError {
-    code: String,
-    message: String,
-}
-
-/// Reads one answer from the edge Worker. A failed setup comes back as a
-/// hub in `failed` (with a 502), not as an error, so the UI can offer a retry.
-pub fn interpret(status: u16, body: &str) -> Result<CloudHub, CloudError> {
-    if let Ok(hub) = serde_json::from_str::<CloudHub>(body) {
-        return Ok(hub);
+/// Reads one answer from the edge Worker: `M` on a 2xx, else its
+/// [`pb::Error`]. A personal hub whose setup failed comes back as a hub in
+/// `Failed` (with a 502), not as an error, so the app can offer a retry.
+pub fn interpret<M: Message + Default>(status: u16, body: &[u8]) -> Result<M, CloudError> {
+    if ((200..300).contains(&status) || status == 502)
+        && let Ok(m) = M::decode(body)
+    {
+        return Ok(m);
     }
-    let err = serde_json::from_str::<ApiError>(body).ok();
-    let message = err.as_ref().map(|e| e.message.clone());
-    Err(match (status, err.as_ref().map(|e| e.code.as_str())) {
-        (401, _) => CloudError::NotSignedIn,
-        (402, _) | (_, Some("plan_required")) => {
-            CloudError::PlanRequired(message.unwrap_or_else(|| "tab cloud needs a plan.".into()))
-        }
-        (403, _) => CloudError::Locked(message.unwrap_or_else(|| "This account is locked.".into())),
-        (429, _) => CloudError::RateLimited,
-        _ => CloudError::Server(
-            message
-                .unwrap_or_else(|| format!("tab cloud answered {status}. Try again in a moment.")),
-        ),
-    })
+    match pb::Error::decode(body) {
+        Ok(e) if e.code != 0 => Err(CloudError {
+            code: pb::ErrorCode::try_from(e.code).unwrap_or(pb::ErrorCode::Internal),
+            message: e.message,
+        }),
+        _ => Err(CloudError::new(
+            pb::ErrorCode::Internal,
+            format!("tab cloud answered {status}. Try again in a moment."),
+        )),
+    }
 }
 
-async fn call(cfg: &CloudConfig, token: &str, post: bool) -> Result<CloudHub, CloudError> {
+async fn call<M: Message + Default>(
+    cfg: &CloudConfig,
+    token: &str,
+    post: bool,
+    path: &str,
+) -> Result<M, CloudError> {
     let client = reqwest::Client::new();
-    let url = format!("{}/v1/hub", cfg.api);
+    let url = format!("{}{path}", cfg.api);
     let req = if post {
         client.post(url)
     } else {
@@ -140,51 +114,45 @@ async fn call(cfg: &CloudConfig, token: &str, post: bool) -> Result<CloudHub, Cl
     };
     let res = req
         .bearer_auth(token)
+        .header("accept", pb::CONTENT_TYPE)
         .header("user-agent", concat!("tab/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(20))
         .send()
         .await
-        .map_err(|e| CloudError::Network(e.without_url().to_string()))?;
+        .map_err(|e| CloudError::unreachable(e.without_url()))?;
     let status = res.status().as_u16();
-    let body = res
-        .text()
-        .await
-        .map_err(|e| CloudError::Network(e.to_string()))?;
+    let body = res.bytes().await.map_err(CloudError::unreachable)?;
     interpret(status, &body)
 }
 
-/// Where the person's cloud hub is.
-pub async fn hub_status(cfg: &CloudConfig, token: &str) -> Result<CloudHub, CloudError> {
-    call(cfg, token, false).await
+fn state(s: &pb::HubStatus) -> pb::HubState {
+    s.hub
+        .as_ref()
+        .and_then(|h| pb::HubState::try_from(h.state).ok())
+        .unwrap_or(pb::HubState::None)
+}
+
+/// The person's personal hub, and their plan.
+pub async fn hub_status(cfg: &CloudConfig, token: &str) -> Result<pb::HubStatus, CloudError> {
+    call(cfg, token, false, "/v1/hub").await
+}
+
+/// Every hub the person belongs to, personal first.
+pub async fn list_hubs(cfg: &CloudConfig, token: &str) -> Result<pb::HubList, CloudError> {
+    call(cfg, token, false, "/v1/hubs").await
 }
 
 /// Sets up the person's hub, or retries a failed setup, and waits until it's
 /// ready or failed. A hub already ready comes straight back.
-pub async fn set_up_hub(cfg: &CloudConfig, token: &str) -> Result<CloudHub, CloudError> {
-    let mut hub = call(cfg, token, true).await?;
+pub async fn set_up_hub(cfg: &CloudConfig, token: &str) -> Result<pb::HubStatus, CloudError> {
+    let mut hub: pb::HubStatus = call(cfg, token, true, "/v1/hub").await?;
     let deadline = tokio::time::Instant::now() + WAIT_FOR;
     // Another request (another device, an earlier click) is setting it up.
-    while hub.state == CloudHubState::Provisioning && tokio::time::Instant::now() < deadline {
+    while state(&hub) == pb::HubState::Provisioning && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(POLL_EVERY).await;
-        hub = call(cfg, token, false).await?;
+        hub = hub_status(cfg, token).await?;
     }
     Ok(hub)
-}
-
-/// How the app names a region hint.
-pub fn region_name(hint: &str) -> &'static str {
-    match hint {
-        "wnam" => "Western North America",
-        "enam" => "Eastern North America",
-        "sam" => "South America",
-        "weur" => "Western Europe",
-        "eeur" => "Eastern Europe",
-        "afr" => "Africa",
-        "me" => "Middle East",
-        "apac" => "Asia-Pacific",
-        "oc" => "Oceania",
-        _ => "the nearest region",
-    }
 }
 
 #[cfg(test)]
@@ -192,74 +160,91 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    const READY: &str = r#"{"state":"ready","hub_id":"5e7e","region":"wnam","ready_at":1794084725,"error":null,"plan":{"plan":"trial","ends_at":1795294325,"active":true},"later_field":1}"#;
+    fn status(state: pb::HubState) -> pb::HubStatus {
+        pb::HubStatus {
+            hub: Some(pb::Hub {
+                hub_id: "5e7e".into(),
+                kind: pb::HubKind::Personal as i32,
+                role: pb::Role::Owner as i32,
+                state: state as i32,
+                region: "wnam".into(),
+                ..Default::default()
+            }),
+            plan: Some(pb::Plan {
+                name: "trial".into(),
+                ends_at: Some(prost_types::Timestamp {
+                    seconds: 1_795_294_325,
+                    nanos: 0,
+                }),
+                active: true,
+            }),
+        }
+    }
+
+    fn err(code: pb::ErrorCode, message: &str) -> Vec<u8> {
+        pb::Error {
+            code: code as i32,
+            message: message.into(),
+        }
+        .encode_to_vec()
+    }
 
     #[test]
-    fn reads_a_hub_and_ignores_new_fields() {
-        let hub = interpret(200, READY).unwrap();
-        assert_eq!(hub.state, CloudHubState::Ready);
-        assert_eq!(hub.region.as_deref(), Some("wnam"));
-        assert_eq!(hub.plan.plan, "trial");
-        assert!(hub.plan.active);
+    fn reads_a_hub() {
+        let body = status(pb::HubState::Ready).encode_to_vec();
+        let hub: pb::HubStatus = interpret(200, &body).unwrap();
+        assert_eq!(state(&hub), pb::HubState::Ready);
+        assert_eq!(hub.hub.unwrap().region, "wnam");
+        assert_eq!(hub.plan.unwrap().name, "trial");
     }
 
     #[test]
     fn a_failed_setup_is_a_hub_not_an_error() {
-        let body = r#"{"state":"failed","hub_id":"h","region":null,"ready_at":null,"error":"tab couldn't finish setting up your hub. Try again in a moment.","plan":{"plan":"trial","ends_at":1,"active":true}}"#;
-        let hub = interpret(502, body).unwrap();
-        assert_eq!(hub.state, CloudHubState::Failed);
-        assert!(hub.error.unwrap().contains("Try again"));
+        let mut s = status(pb::HubState::Failed);
+        s.hub.as_mut().unwrap().error = "tab couldn't finish setting up your hub.".into();
+        let hub: pb::HubStatus = interpret(502, &s.encode_to_vec()).unwrap();
+        assert_eq!(state(&hub), pb::HubState::Failed);
     }
 
     #[test]
-    fn errors_map_to_what_the_ui_does() {
-        let e = |s, b: &str| interpret(s, b).unwrap_err();
-        assert_eq!(
-            e(
-                401,
-                r#"{"code":"unauthenticated","message":"the token has expired"}"#
-            ),
-            CloudError::NotSignedIn
-        );
-        let plan = e(
+    fn errors_carry_the_clouds_code_and_message() {
+        let e = interpret::<pb::HubStatus>(
             402,
-            r#"{"code":"plan_required","message":"Your tab cloud trial has ended."}"#,
-        );
-        assert_eq!(plan.code(), "plan_required");
-        assert_eq!(plan.to_string(), "Your tab cloud trial has ended.");
-        assert_eq!(
-            e(
-                403,
-                r#"{"code":"locked","message":"This account is locked. Contact support."}"#
-            )
-            .code(),
-            "locked"
-        );
-        assert_eq!(
-            e(429, r#"{"code":"rate_limited","message":"x"}"#),
-            CloudError::RateLimited
-        );
-        assert_eq!(
-            e(
-                500,
-                r#"{"code":"internal","message":"Something went wrong on our side."}"#
+            &err(
+                pb::ErrorCode::PlanRequired,
+                "Your tab cloud trial has ended.",
             ),
-            CloudError::Server("Something went wrong on our side.".into())
-        );
-        assert!(
-            matches!(e(503, "<html>bad gateway</html>"), CloudError::Server(m) if m.contains("503"))
-        );
+        )
+        .unwrap_err();
+        assert_eq!(e.code, pb::ErrorCode::PlanRequired);
+        assert_eq!(e.to_string(), "Your tab cloud trial has ended.");
+        let e = interpret::<pb::HubList>(404, &err(pb::ErrorCode::NotFound, "no")).unwrap_err();
+        assert_eq!(e.code, pb::ErrorCode::NotFound);
+        // A gateway's HTML page, or an error code from a newer cloud.
+        let e = interpret::<pb::HubStatus>(503, b"<html>bad gateway</html>").unwrap_err();
+        assert_eq!(e.code, pb::ErrorCode::Internal);
+        assert!(e.message.contains("503"));
+        let e = interpret::<pb::HubStatus>(
+            400,
+            &pb::Error {
+                code: 999,
+                message: "new".into(),
+            }
+            .encode_to_vec(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, pb::ErrorCode::Internal);
     }
 
     #[test]
-    fn config_default_and_trailing_slash() {
-        // Not touching the process env (tests run in parallel): just the rules.
-        let c = CloudConfig {
-            api: "https://api.tabqueue.com".into(),
-        };
-        assert_eq!(c.api, "https://api.tabqueue.com");
-        assert_eq!(region_name("weur"), "Western Europe");
-        assert_eq!(region_name("??"), "the nearest region");
+    fn app_made_errors() {
+        assert_eq!(
+            CloudError::not_signed_in().code,
+            pb::ErrorCode::Unauthenticated
+        );
+        let e = CloudError::unreachable("dns error");
+        assert_eq!(e.code, pb::ErrorCode::Unreachable);
+        assert_eq!(e.to_pb().code, pb::ErrorCode::Unreachable as i32);
     }
 
     /// A stand-in for the edge Worker: the first POST finds another request
@@ -268,16 +253,21 @@ mod tests {
     async fn set_up_waits_for_a_hub_being_set_up() {
         use axum::{Router, extract::State, http::HeaderMap, routing::get};
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
-        let provisioning = READY.replace(r#""state":"ready""#, r#""state":"provisioning""#);
+        let provisioning = status(pb::HubState::Provisioning).encode_to_vec();
+        let ready = status(pb::HubState::Ready).encode_to_vec();
         let app = Router::new()
             .route(
                 "/v1/hub",
                 get({
-                    let p = provisioning.clone();
+                    let (p, r) = (provisioning.clone(), ready.clone());
                     move |State(c): State<Arc<Mutex<Vec<String>>>>, h: HeaderMap| async move {
                         let mut c = c.lock().unwrap();
-                        c.push(format!("GET {}", h["authorization"].to_str().unwrap()));
-                        if c.len() < 3 { p } else { READY.to_string() }
+                        c.push(format!(
+                            "GET {} {}",
+                            h["authorization"].to_str().unwrap(),
+                            h["accept"].to_str().unwrap()
+                        ));
+                        if c.len() < 3 { p } else { r }
                     }
                 })
                 .post({
@@ -297,10 +287,15 @@ mod tests {
             api: format!("http://{addr}"),
         };
         let hub = set_up_hub(&cfg, "tok").await.unwrap();
-        assert_eq!(hub.state, CloudHubState::Ready);
+        assert_eq!(state(&hub), pb::HubState::Ready);
+        let accept = "Bearer tok application/x-protobuf";
         assert_eq!(
             *calls.lock().unwrap(),
-            vec!["POST", "GET Bearer tok", "GET Bearer tok"]
+            vec![
+                "POST".to_string(),
+                format!("GET {accept}"),
+                format!("GET {accept}")
+            ]
         );
     }
 }

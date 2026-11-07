@@ -985,3 +985,8 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
   .settings-page { padding: var(--space-4); }
   .settings-savebar { margin: 0 var(--space-4) var(--space-4); }
 }
+
+.cloud-hubs ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
