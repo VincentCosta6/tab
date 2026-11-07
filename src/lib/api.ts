@@ -3,7 +3,7 @@
 // and screenshotted without the desktop shell.
 
 import type {
-  AgentProbe, AuditEntry, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
+  AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun,
@@ -78,7 +78,8 @@ export const api = {
   reviewChatOpen: (repo: string, number: number) => call<Chat>("review_chat_open", { repo, number }),
   reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string, attachments: string[] = []) =>
     call<Session>("review_chat_send", { target, text, attachments }),
-  setAgentModel: (model: string | null) => call<TabConfig>("set_agent_model", { model }),
+  /** Sets `agent`'s model. Before a chat starts, `forNewChats` also makes `agent` the harness new chats use. */
+  setAgentModel: (model: string | null, agent?: AgentKind, forNewChats = false) => call<TabConfig>("set_agent_model", { model, agent: agent ?? null, forNewChats }),
   setAgentMode: (mode: string) => call<TabConfig>("set_agent_mode", { mode }),
   connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),
   chatStop: (sessionId: string) => call<void>("chat_stop", { sessionId }),
@@ -87,6 +88,10 @@ export const api = {
   approvalResolve: (id: string, decision: "allow" | "always" | "deny" | "answer", message?: string, answers?: Record<string, string>) =>
     call<boolean>("approval_resolve", { id, decision, message: message ?? null, answers: answers ?? null }),
   detectAgents: () => call<AgentProbe[]>("detect_agents"),
+  agentHarnesses: () => call<Harness[]>("agent_harnesses"),
+  agentModels: () => call<ModelOption[]>("agent_models"),
+  /** Installs a harness; its output arrives through `onAgentUpgrade`. */
+  agentInstall: (kind: AgentKind) => call<void>("agent_install", { kind }),
   agentHealth: () => call<AgentProbe | null>("agent_health"),
   /** Runs the agent's own update command; its output arrives through `onAgentUpgrade`. */
   agentUpgrade: () => call<void>("agent_upgrade"),

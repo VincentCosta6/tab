@@ -12,6 +12,7 @@
 //! * Agents reach back into tab through the MCP server ([`crate::mcp`]) to
 //!   search the queue, attach context, file what they find and create tasks.
 
+pub mod catalog;
 mod claude;
 mod opencode;
 mod small;
@@ -69,6 +70,8 @@ pub struct AgentProbe {
     pub upgrade: Option<String>,
     /// The newest release, when tab could look it up.
     pub latest: Option<String>,
+    /// When it isn't installed: what tab's Install button runs.
+    pub install_command: Option<String>,
 }
 
 /// How an agent CLI at `path` was installed, and the command that updates it.
@@ -81,17 +84,18 @@ pub fn install_method(kind: AgentKind, path: &str) -> (&'static str, &'static st
     let p = real.replace('\\', "/").to_lowercase();
     let npm = p.contains("node_modules") || p.contains("/npm/") || p.contains("/.nvm/");
     let brew = p.contains("/homebrew/") || p.contains("/cellar/") || p.contains("/caskroom/");
-    match kind {
-        AgentKind::ClaudeCode if p.contains("/winget/") => {
-            ("winget", "winget upgrade Anthropic.ClaudeCode")
-        }
-        AgentKind::ClaudeCode if npm => ("npm", "npm install -g @anthropic-ai/claude-code@latest"),
-        AgentKind::ClaudeCode if brew => ("brew", "brew upgrade --cask claude-code"),
-        AgentKind::ClaudeCode => ("native", "claude update"),
-        AgentKind::OpenCode if npm => ("npm", "npm install -g opencode-ai@latest"),
-        AgentKind::OpenCode if brew => ("brew", "brew upgrade opencode"),
-        AgentKind::OpenCode => ("native", "opencode upgrade"),
-    }
+    let u = &catalog::harness(kind).upgrade;
+    let winget = p.contains("/winget/");
+    let pick = |name: &'static str, cmd: &'static Option<String>| cmd.as_deref().map(|c| (name, c));
+    (if winget {
+        pick("winget", &u.winget)
+    } else {
+        None
+    })
+    .or(if npm { pick("npm", &u.npm) } else { None })
+    .or(if brew { pick("brew", &u.brew) } else { None })
+    .or(pick("native", &u.native))
+    .unwrap_or(("unknown", ""))
 }
 
 /// The newest published version of an agent CLI, from npm. Cached for six
@@ -106,10 +110,7 @@ pub async fn latest_version(kind: AgentKind) -> Option<String> {
     {
         return Some(v.clone());
     }
-    let package = match kind {
-        AgentKind::ClaudeCode => "@anthropic-ai/claude-code",
-        AgentKind::OpenCode => "opencode-ai",
-    };
+    let package = catalog::harness(kind).install.npm.as_deref()?;
     let v: serde_json::Value = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -157,9 +158,11 @@ pub async fn run_upgrade(
     path: &str,
     on_line: impl Fn(String) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
-    use tokio::io::AsyncReadExt;
-    use tokio::sync::mpsc;
     let (_, cmdline) = install_method(kind, path);
+    anyhow::ensure!(
+        !cmdline.is_empty(),
+        "tab doesn't know how to update this install."
+    );
     let mut words = cmdline.split_whitespace();
     let program = words.next().unwrap_or_default();
     // The agent updating itself runs the binary we found, not whatever PATH has first.
@@ -175,6 +178,50 @@ pub async fn run_upgrade(
     if program == "winget" {
         cmd.args(["--accept-source-agreements", "--accept-package-agreements"]);
     }
+    run_streaming(cmd, cmdline, on_line).await
+}
+
+/// Installs `kind` the way its metadata says (npm when it's on PATH, else
+/// its installer script), passing each line it prints to `on_line`.
+pub async fn run_install(
+    kind: AgentKind,
+    on_line: impl Fn(String) + Send + Sync + 'static,
+) -> anyhow::Result<()> {
+    let h = catalog::harness(kind);
+    let cmdline = h.install_command().ok_or_else(|| {
+        anyhow::anyhow!("tab can't install {} on this computer by itself. Install Node.js (for npm), then try again.", h.name)
+    })?;
+    let cmd = if let Some(args) = cmdline.strip_prefix("npm ") {
+        let npm = which::which("npm").map_err(|_| anyhow::anyhow!("`npm` isn't on PATH."))?;
+        let mut c = command(&npm);
+        c.args(args.split_whitespace());
+        c
+    } else if cfg!(windows) {
+        let mut c = command(Path::new("powershell"));
+        c.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &cmdline,
+        ]);
+        c
+    } else {
+        let mut c = command(Path::new("sh"));
+        c.args(["-c", &cmdline]);
+        c
+    };
+    run_streaming(cmd, &cmdline, on_line).await
+}
+
+/// Runs an installer or updater, a line of its output at a time.
+async fn run_streaming(
+    mut cmd: tokio::process::Command,
+    cmdline: &str,
+    on_line: impl Fn(String) + Send + Sync + 'static,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncReadExt;
+    use tokio::sync::mpsc;
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -1266,7 +1313,7 @@ impl AgentHub {
     pub async fn detect(&self) -> Vec<AgentProbe> {
         let cfg = self.config();
         let mut out = Vec::new();
-        for kind in [AgentKind::OpenCode, AgentKind::ClaudeCode] {
+        for kind in catalog::harnesses().iter().filter_map(|h| h.kind()) {
             let custom = (cfg.kind == Some(kind))
                 .then(|| cfg.command.clone())
                 .flatten();
@@ -1298,10 +1345,23 @@ fn with_attachments(text: &str, attachments: &[String]) -> String {
 }
 
 pub(crate) fn default_command(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::ClaudeCode => "claude",
-        AgentKind::OpenCode => "opencode",
-    }
+    &catalog::harness(kind).command
+}
+
+/// `kind`'s executable: the configured command for the harness in use, else
+/// PATH, else where its installer puts it.
+pub(crate) fn agent_exe(cfg: &AgentConfig, kind: AgentKind) -> anyhow::Result<PathBuf> {
+    let custom = cfg
+        .command
+        .as_deref()
+        .filter(|c| !c.trim().is_empty() && cfg.kind == Some(kind));
+    resolve(custom.unwrap_or(default_command(kind))).or_else(|e| {
+        custom
+            .is_none()
+            .then(|| catalog::installed_elsewhere(kind))
+            .flatten()
+            .ok_or(e)
+    })
 }
 
 /// Finds an executable on PATH (including `.cmd` shims on Windows).
@@ -1330,6 +1390,14 @@ pub fn command(exe: &std::path::Path) -> tokio::process::Command {
 
 async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
     let name = custom.unwrap_or(default_command(kind));
+    let found = resolve(name).or_else(|e| {
+        // Just installed: the app's PATH may not have its folder yet.
+        custom
+            .is_none()
+            .then(|| catalog::installed_elsewhere(kind))
+            .flatten()
+            .ok_or(e)
+    });
     let mut p = AgentProbe {
         kind,
         found: false,
@@ -1339,11 +1407,13 @@ async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
         install: None,
         upgrade: None,
         latest: None,
+        install_command: None,
     };
-    let exe = match resolve(name) {
+    let exe = match found {
         Ok(e) => e,
         Err(e) => {
             p.error = Some(e.to_string());
+            p.install_command = catalog::harness(kind).install_command();
             return p;
         }
     };

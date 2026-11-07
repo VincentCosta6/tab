@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-use super::{AgentHub, Steer, default_command, resolve};
+use super::{AgentHub, Steer};
 use crate::model::{AgentKind, Session, SessionStatus};
 use crate::sandbox::Trust;
 
@@ -46,12 +46,7 @@ pub(super) async fn run_turn(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let cfg = hub.config();
-    let exe = resolve(
-        cfg.command
-            .as_deref()
-            .filter(|c| !c.trim().is_empty() && cfg.kind == Some(AgentKind::ClaudeCode))
-            .unwrap_or(default_command(AgentKind::ClaudeCode)),
-    )?;
+    let exe = super::agent_exe(&cfg, AgentKind::ClaudeCode)?;
     let dir = hub.session_dir(&session.id)?;
     let system_file = dir.join("system.md");
     std::fs::write(&system_file, system)?;
@@ -107,7 +102,7 @@ pub(super) async fn run_turn(
         cmd.args(["--permission-prompt-tool", "mcp__tab__approve"]);
         cmd.args(["--allowedTools", "mcp__tab"]);
     }
-    if let Some(m) = cfg.model.as_deref().filter(|m| !m.trim().is_empty()) {
+    if let Some(m) = cfg.model_for(AgentKind::ClaudeCode) {
         cmd.args(["--model", m]);
     }
     if let Some(cap) = cfg.budget.per_turn_usd.filter(|c| *c > 0.0) {

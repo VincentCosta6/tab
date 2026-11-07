@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use super::{AgentHub, Decision, default_command, resolve};
+use super::{AgentHub, Decision};
 use crate::model::{AgentKind, Session, SessionStatus};
 use crate::sandbox::Trust;
 
@@ -219,12 +219,7 @@ async fn server(hub: &Arc<AgentHub>, session: Option<&Session>) -> anyhow::Resul
     let (base, child) = match cfg.opencode_url.as_deref().filter(|u| !u.trim().is_empty()) {
         Some(url) => (url.to_string(), None),
         None => {
-            let exe = resolve(
-                cfg.command
-                    .as_deref()
-                    .filter(|c| !c.trim().is_empty() && cfg.kind == Some(AgentKind::OpenCode))
-                    .unwrap_or(default_command(AgentKind::OpenCode)),
-            )?;
+            let exe = super::agent_exe(&cfg, AgentKind::OpenCode)?;
             let port = free_port();
             let policy = match session {
                 Some(s) => hub.policy(s),
@@ -610,8 +605,7 @@ pub(super) async fn run_turn(
     });
     if let Some((provider, model)) = hub
         .config()
-        .model
-        .as_deref()
+        .model_for(AgentKind::OpenCode)
         .and_then(|m| m.split_once('/'))
     {
         body["model"] = json!({ "providerID": provider, "modelID": model });
@@ -678,6 +672,7 @@ pub(super) async fn complete(
     hub: &Arc<AgentHub>,
     system: &str,
     prompt: &str,
+    model: Option<&str>,
 ) -> anyhow::Result<String> {
     let s = server(hub, None).await?;
     let v: Value = s
@@ -699,12 +694,7 @@ pub(super) async fn complete(
         "system": system,
         "tools": {},
     });
-    if let Some((provider, model)) = hub
-        .config()
-        .model
-        .as_deref()
-        .and_then(|m| m.split_once('/'))
-    {
+    if let Some((provider, model)) = model.and_then(|m| m.split_once('/')) {
         body["model"] = json!({ "providerID": provider, "modelID": model });
     }
     let out = tokio::time::timeout(Duration::from_secs(60), async {

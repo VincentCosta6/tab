@@ -1,0 +1,132 @@
+[
+  {
+    "id": "claude_code",
+    "name": "Claude Code",
+    "icon": {
+      "brand": "claude"
+    },
+    "command": "claude",
+    "pitch": "If you use Claude, tab drives the official Claude Code CLI with your own login, so your usage stays within Anthropic's terms.",
+    "capabilities": {
+      "strict": true,
+      "permission_modes": [
+        {
+          "value": "default",
+          "label": "Ask first",
+          "help": "Asks before edits and commands"
+        },
+        {
+          "value": "acceptEdits",
+          "label": "Accept edits",
+          "help": "Edits files freely, asks before commands"
+        },
+        {
+          "value": "auto",
+          "label": "Auto",
+          "help": "Claude decides what's safe and asks about the rest"
+        },
+        {
+          "value": "plan",
+          "label": "Plan only",
+          "help": "Reads and plans, changes nothing"
+        }
+      ],
+      "external_server": false,
+      "budget_cap": true
+    },
+    "model_hint": "e.g. sonnet or opus",
+    "small_model": "claude-haiku-5-5",
+    "models": [
+      {
+        "id": "claude-opus-5-5",
+        "label": "Opus 5.5",
+        "common": true
+      },
+      {
+        "id": "claude-sonnet-5-5",
+        "label": "Sonnet 5.5",
+        "common": true
+      },
+      {
+        "id": "claude-haiku-5-5",
+        "label": "Haiku 5.5",
+        "common": true
+      },
+      {
+        "id": "claude-fable-5-1",
+        "label": "Fable 5.1",
+        "common": true
+      },
+      {
+        "id": "claude-opus-5",
+        "label": "Opus 5"
+      },
+      {
+        "id": "claude-opus-4-8",
+        "label": "Opus 4.8"
+      }
+    ],
+    "list_models": null,
+    "common_models": [],
+    "install": {
+      "npm": "@anthropic-ai/claude-code",
+      "unix": "curl -fsSL https://claude.ai/install.sh | bash",
+      "windows": "irm https://claude.ai/install.ps1 | iex"
+    },
+    "upgrade": {
+      "winget": "winget upgrade Anthropic.ClaudeCode",
+      "npm": "npm install -g @anthropic-ai/claude-code@latest",
+      "brew": "brew upgrade --cask claude-code",
+      "native": "claude update"
+    },
+    "bin_dirs": [
+      ".local/bin",
+      ".claude/local"
+    ]
+  },
+  {
+    "id": "opencode",
+    "name": "OpenCode",
+    "icon": {
+      "brand": "opencode"
+    },
+    "command": "opencode",
+    "pitch": "Open source and works with any model provider. tab starts its server and streams every session.",
+    "capabilities": {
+      "strict": true,
+      "permission_modes": [],
+      "external_server": true,
+      "budget_cap": false
+    },
+    "model_hint": "provider/model, e.g. anthropic/claude-sonnet-5-5",
+    "small_model": null,
+    "models": [],
+    "list_models": {
+      "args": [
+        "models"
+      ],
+      "format": "provider_slash_model_lines"
+    },
+    "common_models": [
+      "anthropic/claude-opus-5-5",
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-haiku-5-5",
+      "anthropic/claude-fable-5-1"
+    ],
+    "install": {
+      "npm": "opencode-ai",
+      "unix": "curl -fsSL https://opencode.ai/install | bash",
+      "windows": null
+    },
+    "upgrade": {
+      "winget": null,
+      "npm": "npm install -g opencode-ai@latest",
+      "brew": "brew upgrade opencode",
+      "native": "opencode upgrade"
+    },
+    "bin_dirs": [
+      ".opencode/bin",
+      ".local/bin"
+    ]
+  }
+]

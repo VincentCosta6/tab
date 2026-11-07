@@ -11,7 +11,8 @@ import { AgentNotice } from "./AgentNotice";
 import { Dictation } from "./Dictation";
 import { useDropTarget } from "./DropZone";
 import { api } from "../../lib/api";
-import { useChat, useConfig, useStream } from "../../lib/hooks";
+import { useChat, useConfig, useHarnesses, useStream } from "../../lib/hooks";
+import { ModelMenu, modelFor } from "./ModelMenu";
 import { keys } from "../../lib/query";
 import type { AgentKind, Approval, Chat, QueueItem, SessionMessage, SessionStatus } from "../../lib/types";
 
@@ -114,13 +115,16 @@ export function SandboxPill() {
  * "Not strict" when strict is on but this agent can't be held to it (an
  * OpenCode server you run yourself), nothing when it's off.
  */
-export function StrictPill() {
+export function StrictPill({ kind }: { kind?: AgentKind | null }) {
   const { data: config } = useConfig();
+  const { data: harnesses } = useHarnesses();
   const agent = config?.agent;
-  if (!agent?.kind || agent.strict === false) return null;
-  const remote = agent.kind === "opencode" && !!agent.opencode_url?.trim();
+  const harness = harnesses?.find((h) => h.id === (kind ?? agent?.kind));
+  if (!agent || !harness || agent.strict === false) return null;
+  // Its adapter can't keep your setup out, or it's attached to a server you run.
+  const remote = !harness.capabilities.strict || (harness.capabilities.external_server && !!agent.opencode_url?.trim());
   const title = remote
-    ? "Strict mode is on, but tab connects to an OpenCode server you started, so it can't control what that server loads."
+    ? `Strict mode is on, but tab can't control what ${harness.name} loads here${harness.capabilities.external_server ? " (it's attached to a server you started)" : ""}.`
     : "Strict mode: this chat loads only tab's connections. Your personal MCP servers, connectors, plugins, hooks and user settings stay out; the repo's own config still loads. If anything else loads, tab stops the turn.";
   return (
     <span className={cx("strict-pill", remote && "limited")} title={title}>
@@ -821,20 +825,6 @@ function ToolApproval({ approval }: { approval: Approval }) {
   );
 }
 
-const modelChoices: Record<AgentKind, { value: string; label: string }[]> = {
-  claude_code: [
-    { value: "claude-opus-5-5", label: "Opus 5.5" },
-    { value: "claude-sonnet-5-5", label: "Sonnet 5.5" },
-    { value: "claude-haiku-5-5", label: "Haiku 5.5" },
-    { value: "claude-fable-5-1", label: "Fable 5.1" },
-  ],
-  opencode: [
-    { value: "anthropic/claude-opus-5-5", label: "Opus 5.5" },
-    { value: "anthropic/claude-sonnet-5-5", label: "Sonnet 5.5" },
-    { value: "anthropic/claude-haiku-5-5", label: "Haiku 5.5" },
-  ],
-};
-
 /** A compact picker for the composer bar: as wide as its label, menu above. */
 function BarPicker({ value, options, onChange, title, className }: { value: string; options: { value: string; label: string; help?: string }[]; onChange: (v: string) => void; title: string; className?: string }) {
   const [open, setOpen] = useState(false);
@@ -869,31 +859,36 @@ function BarPicker({ value, options, onChange, title, className }: { value: stri
   );
 }
 
-/** Which model chats run on. Applies from the next message, in every chat. */
-function ModelPicker() {
+/**
+ * Which model this chat runs on, from every installed harness. Before the
+ * chat starts any harness can be picked (and becomes the one new chats use);
+ * after, it stays on its harness, and the pick applies from the next message
+ * to that harness's chats.
+ */
+function ChatModelPicker({ chat }: { chat: Chat | undefined }) {
   const { data: config } = useConfig();
   const qc = useQueryClient();
-  const kind = config?.agent.kind;
-  if (!kind) return null;
-  const current = config.agent.model ?? "";
-  const choices = modelChoices[kind];
-  const options = [{ value: "", label: "Default model" }, ...choices];
-  if (current && !choices.some((c) => c.value === current)) options.push({ value: current, label: current });
-  return <BarPicker value={current} options={options} title="Model for chats, from the next message" onChange={async (v) => qc.setQueryData(keys.config, await api.setAgentModel(v || null))} />;
+  const agent = chat?.session?.agent ?? config?.agent.kind;
+  if (!config || !agent) return null;
+  const started = !!chat?.session;
+  return (
+    <ModelMenu
+      value={{ agent, model: modelFor(config.agent, agent) }}
+      lock={started ? agent : undefined}
+      title="Model for this chat, from the next message"
+      onChange={async (p) => qc.setQueryData(keys.config, await api.setAgentModel(p.model, p.agent, !started))}
+    />
+  );
 }
 
-const modes = [
-  { value: "default", label: "Ask first", help: "Asks before edits and commands" },
-  { value: "acceptEdits", label: "Accept edits", help: "Edits files freely, asks before commands" },
-  { value: "auto", label: "Auto", help: "Claude decides what's safe and asks about the rest" },
-  { value: "plan", label: "Plan only", help: "Reads and plans, changes nothing" },
-];
-
-/** Claude Code's permission mode, saved at once. Applies from the next message. */
-function ModePicker() {
+/** The harness's permission mode (from its metadata), saved at once. Applies from the next message. */
+function ModePicker({ chat }: { chat: Chat | undefined }) {
   const { data: config } = useConfig();
+  const { data: harnesses } = useHarnesses();
   const qc = useQueryClient();
-  if (config?.agent.kind !== "claude_code") return null;
+  const agent = chat?.session?.agent ?? config?.agent.kind;
+  const modes = harnesses?.find((h) => h.id === agent)?.capabilities.permission_modes.map((m) => ({ ...m, help: m.help ?? undefined })) ?? [];
+  if (!config || !modes.length) return null;
   const current = config.agent.permission_mode || "default";
   const options = modes.some((m) => m.value === current) ? modes : [...modes, { value: current, label: current }];
   return <BarPicker value={current} options={options} title="Permission mode" className={cx(current === "auto" && "mode-auto")} onChange={async (v) => qc.setQueryData(keys.config, await api.setAgentMode(v))} />;
@@ -1074,7 +1069,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
           <button className="bar-icon" onClick={() => file.current?.click()} title="Attach files or images (or paste or drop them)" aria-label="Attach files"><Icon name="plus" size={14} /></button>
           <input ref={file} type="file" multiple hidden onChange={(e) => (void add([...(e.target.files ?? [])]), (e.target.value = ""))} />
           <Dictation onText={(t) => setText((cur) => (cur && !/\s$/.test(cur) ? `${cur} ${t}` : cur + t))} target={ref} />
-          {config?.agent.kind && <><span className="composer-brand" title={agentLabel[config.agent.kind]}><Brand name={agentBrand[config.agent.kind]} size={11} /></span><ModelPicker /><ModePicker /></>}
+          {config?.agent.kind && <><ChatModelPicker chat={chat} /><ModePicker chat={chat} /></>}
           {extra}
           {chat?.messages && <ContextMeter messages={chat.messages} />}
         </span>

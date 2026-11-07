@@ -275,7 +275,29 @@ export interface GhStatus {
 
 export interface GhLoginCode { code: string; url: string }
 
-export interface AgentProbe { kind: AgentKind; found: boolean; path: string | null; version: string | null; error: string | null; install?: string | null; upgrade?: string | null; latest?: string | null }
+export interface AgentProbe { kind: AgentKind; found: boolean; path: string | null; version: string | null; error: string | null; install?: string | null; upgrade?: string | null; latest?: string | null; install_command?: string | null }
+
+/** What tab knows about a harness, from its metadata (`harnesses.json`). */
+export interface Harness {
+  id: AgentKind;
+  name: string;
+  icon: { brand: string | null; svg?: string | null };
+  command: string;
+  pitch: string;
+  capabilities: {
+    strict: boolean;
+    permission_modes: { value: string; label: string; help?: string | null }[];
+    external_server: boolean;
+    budget_cap: boolean;
+  };
+  model_hint: string;
+  /** What background helpers use when no model is set; null is the harness's own default. */
+  small_model: string | null;
+  install: { npm: string | null; unix: string | null; windows: string | null };
+}
+
+/** One model a harness can run. */
+export interface ModelOption { agent: AgentKind; id: string; label: string; common: boolean }
 
 export interface Pressure {
   provider: string;
@@ -454,6 +476,8 @@ export interface AgentConfig {
   kind: AgentKind | null;
   command: string | null;
   model: string | null;
+  /** The model each harness's chats use, by harness id. Missing is the harness's default. */
+  models?: Record<string, string>;
   workdir: string | null;
   permission_mode: string;
   suggest_replies?: boolean;
@@ -467,6 +491,8 @@ export interface AgentConfig {
 /** Names chats started in tab with a small model as the work comes into focus. */
 export interface TitlerConfig {
   enabled: boolean;
+  /** The harness it runs on; null is the one chats use. */
+  agent?: AgentKind | null;
   model: string | null;
   instructions: string;
 }

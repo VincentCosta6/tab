@@ -77,7 +77,8 @@ async fn run(hub: &Arc<AgentHub>, session_id: &str) -> anyhow::Result<()> {
         hub,
         &cfg,
         Ask {
-            model: small::DEFAULT_MODEL,
+            agent: None,
+            model: None,
             system: SYSTEM,
             prompt: &prompt,
             schema: None,

@@ -137,7 +137,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
             </div>
             <div className="pane-pills">
               <SandboxPill />
-              <StrictPill />
+              <StrictPill kind={chat?.session?.agent} />
             </div>
           </>
         }

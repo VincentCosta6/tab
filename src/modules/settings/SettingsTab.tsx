@@ -5,6 +5,8 @@ import { keys } from "../../lib/query";
 import { Badge, Button, Card, FormRow, Meter, PageHeader, Section, StatusDot, TextArea, TextInput, Toggle } from "../../design/components";
 import { api } from "../../lib/api";
 import type { TabConfig } from "../../lib/types";
+import { useHarnesses, useModels } from "../../lib/hooks";
+import { ModelMenu, modelFor } from "../work/ModelMenu";
 import { bytes, timeAgo } from "../../lib/format";
 
 const lines = (s: string) => s.split("\n").map((l) => l.trim()).filter(Boolean);
@@ -16,6 +18,8 @@ export function SettingsTab() {
   const [note, setNote] = useState<string | null>(null);
   const qc = useQueryClient();
   const mcp = useQuery({ queryKey: ["mcp"], queryFn: api.mcpInfo });
+  const { data: harnesses = [] } = useHarnesses();
+  const { data: models = [] } = useModels();
   const titlerRules = useQuery({ queryKey: ["titler-rules"], queryFn: api.titlerDefaultRules, staleTime: Infinity });
 
   useEffect(() => {
@@ -33,6 +37,8 @@ export function SettingsTab() {
   const rules = draft.ranking.rules;
   const ai = draft.ranking.ai;
   const titler = draft.agent.titler ?? { enabled: true, model: null, instructions: "" };
+  const titlerAgent = titler.agent ?? draft.agent.kind;
+  const harness = harnesses.find((h) => h.id === draft.agent.kind);
   const setTitler = (patch: Partial<typeof titler>) => set((c) => void (c.agent.titler = { ...titler, ...patch }));
 
   const save = async () => {
@@ -102,36 +108,39 @@ export function SettingsTab() {
       <Section title="Agent" description="The coding agent tab runs for chats. Tool approvals come to you in the chat; nothing runs with permissions bypassed." actions={<Button size="sm" onClick={openOnboarding}>Run setup again</Button>}>
         <Card>
           <FormRow label="Agent">
-            <select className="select" value={draft.agent.kind ?? ""} onChange={(e) => set((c) => void (c.agent.kind = (e.target.value || null) as typeof c.agent.kind))}>
+            <select className="select" value={draft.agent.kind ?? ""} onChange={(e) => set((c) => void ((c.agent.kind = (e.target.value || null) as typeof c.agent.kind), (c.agent.model = c.agent.kind ? c.agent.models?.[c.agent.kind] ?? null : null)))}>
               <option value="">Not set up</option>
-              <option value="opencode">OpenCode</option>
-              <option value="claude_code">Claude Code</option>
+              {harnesses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
             </select>
           </FormRow>
           <FormRow label="Command" help="Leave empty to find it on PATH, or give a full path.">
-            <TextInput placeholder={draft.agent.kind === "opencode" ? "opencode" : "claude"} value={draft.agent.command ?? ""} onChange={(e) => set((c) => void (c.agent.command = e.target.value || null))} />
+            <TextInput placeholder={harness?.command ?? ""} value={draft.agent.command ?? ""} onChange={(e) => set((c) => void (c.agent.command = e.target.value || null))} />
           </FormRow>
           <FormRow label="Work folder" help="Where sessions start.">
             <TextInput value={draft.agent.workdir ?? ""} onChange={(e) => set((c) => void (c.agent.workdir = e.target.value || null))} />
           </FormRow>
-          <FormRow label="Model" help={draft.agent.kind === "opencode" ? "provider/model" : "e.g. sonnet, opus"}>
-            <TextInput placeholder="Agent default" value={draft.agent.model ?? ""} onChange={(e) => set((c) => void (c.agent.model = e.target.value || null))} />
-          </FormRow>
+          {draft.agent.kind && (
+            <FormRow label="Model" help="For new chats on this agent. Each chat can switch too.">
+              <ModelMenu
+                variant="field"
+                only={[draft.agent.kind]}
+                value={{ agent: draft.agent.kind, model: modelFor(draft.agent, draft.agent.kind) }}
+                onChange={(p) => set((c) => void ((c.agent.models = { ...(c.agent.models ?? {}) }), p.model ? (c.agent.models[p.agent] = p.model) : delete c.agent.models[p.agent], (c.agent.model = p.model)))}
+              />
+            </FormRow>
+          )}
           <FormRow label="Strict mode" help="Chats load only tab's connections, never your personal MCP servers, connectors, plugins, hooks or user settings. The repo's own config still loads, and review chats are always strict.">
             <Toggle label="Strict mode" checked={draft.agent.strict !== false} onChange={(v) => set((c) => void (c.agent.strict = v))} />
           </FormRow>
-          {draft.agent.kind === "claude_code" && (
+          {!!harness?.capabilities.permission_modes.length && (
             <FormRow label="Permission mode" help="Anything that still needs approval is asked in the chat.">
               <select className="select" value={draft.agent.permission_mode} onChange={(e) => set((c) => void (c.agent.permission_mode = e.target.value))}>
-                <option value="default">Ask for edits and commands</option>
-                <option value="acceptEdits">Accept file edits, ask for commands</option>
-                <option value="plan">Plan only</option>
-                <option value="auto">Auto (Claude decides what's safe)</option>
+                {harness.capabilities.permission_modes.map((m) => <option key={m.value} value={m.value}>{m.label}{m.help ? ` (${m.help})` : ""}</option>)}
               </select>
             </FormRow>
           )}
-          {draft.agent.kind === "opencode" && (
-            <FormRow label="Server URL" help="Leave empty and tab starts its own OpenCode server.">
+          {harness?.capabilities.external_server && (
+            <FormRow label="Server URL" help="Leave empty and tab starts its own server.">
               <TextInput placeholder="http://127.0.0.1:4096" value={draft.agent.opencode_url ?? ""} onChange={(e) => set((c) => void (c.agent.opencode_url = e.target.value || null))} />
             </FormRow>
           )}
@@ -143,8 +152,13 @@ export function SettingsTab() {
           <FormRow label="Enabled">
             <Toggle label="Title chats" checked={titler.enabled} onChange={(v) => setTitler({ enabled: v })} />
           </FormRow>
-          <FormRow label="Model" help={draft.agent.kind === "opencode" ? "OpenCode uses its own configured model." : "Runs through your agent. Defaults to claude-haiku-5-5."}>
-            <TextInput placeholder="claude-haiku-5-5" disabled={draft.agent.kind === "opencode"} value={titler.model ?? ""} onChange={(e) => setTitler({ model: e.target.value || null })} />
+          <FormRow label="Model" help="Any model on any installed agent, whichever agent the chat runs on.">
+            <ModelMenu
+              variant="field"
+              value={titlerAgent ? { agent: titlerAgent, model: titler.model ?? null } : null}
+              defaultLabel={(h) => (h.small_model ? models.find((m) => m.agent === h.id && m.id === h.small_model)?.label ?? h.small_model : "its own default")}
+              onChange={(p) => setTitler({ agent: p.agent, model: p.model })}
+            />
           </FormRow>
           <FormRow label="Your rules" help="Plain language. Added after the built-in rules, and yours win.">
             <div className="titler-rules">
