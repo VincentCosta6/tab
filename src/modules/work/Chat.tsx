@@ -226,13 +226,19 @@ export function AgentStatus({ chat }: { chat: Chat | undefined }) {
 
 export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { chat: Chat | undefined; suggestions?: string[]; onSuggest?: (s: string) => void; onSend?: (text: string) => void; intro?: React.ReactNode }) {
   const stream = useStream(chat?.session?.id);
-  const end = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLDivElement>(null);
+  const stuck = useRef(true); // following the bottom; off once the person scrolls up to read
   const messages = chat?.messages ?? [];
   const results = new Map<number, SessionMessage>();
-  // Pair each tool call with the result that follows it.
+  // Pair each tool call with its result: by id when the agent ran several at once, else the one that follows it.
+  const byUseId = new Map<string, SessionMessage>();
+  messages.forEach((m) => m.kind === "tool_result" && m.meta?.tool_use_id && byUseId.set(m.meta.tool_use_id, m));
   messages.forEach((m, i) => {
-    if (m.kind === "tool" && messages[i + 1]?.kind === "tool_result") results.set(m.id, messages[i + 1]);
+    if (m.kind !== "tool") return;
+    const r = (m.meta?.id && byUseId.get(m.meta.id)) || (messages[i + 1]?.kind === "tool_result" && !messages[i + 1].meta?.tool_use_id ? messages[i + 1] : undefined);
+    if (r) results.set(m.id, r);
   });
+  const paired = new Set(results.values());
   // Several password cards for one connection: show only the newest.
   const newestCard = new Map<string, number>();
   messages.forEach((m) => m.kind === "secret_request" && newestCard.set(m.meta?.connector_id, m.id));
@@ -240,9 +246,15 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
     if (m.kind === "secret_request" && newestCard.get(m.meta?.connector_id) !== m.id) m.meta = { ...m.meta, superseded: true };
   });
 
+  // Follow new output while the person is at the bottom; leave them be once they scroll up.
+  // Their own message always brings them back down.
+  const last = messages[messages.length - 1];
   useLayoutEffect(() => {
-    end.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, stream, chat?.approvals.length]);
+    const el = box.current;
+    if (!el) return;
+    if (last?.role === "user") stuck.current = true;
+    if (stuck.current) el.scrollTop = el.scrollHeight;
+  }, [messages.length, stream, chat?.approvals.length, chat?.running, last?.role]);
 
   if (!messages.length && !stream)
     return (
@@ -262,16 +274,15 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
 
   return (
     <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null }}>
-    <div className="transcript">
+    <div className="transcript" ref={box} onScroll={(e) => { const el = e.currentTarget; stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}>
       <div className="transcript-head"><AgentStatus chat={chat} /></div>
-      {messages.map((m) => (m.kind === "tool_result" && [...results.values()].includes(m) ? null : <MessageView key={m.id} m={m} result={results.get(m.id)} onSend={onSend} />))}
+      {messages.map((m) => (m.kind === "tool_result" && paired.has(m) ? null : <MessageView key={m.id} m={m} result={results.get(m.id)} onSend={onSend} />))}
       {stream && (
         <div className="msg msg-assistant streaming">
           <Markdown text={stream} />
         </div>
       )}
       {chat?.approvals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
-      <div ref={end} />
       <ProgressBar messages={messages} results={results} running={!!chat?.running} />
     </div>
     </MarkdownFiles.Provider>
@@ -325,7 +336,11 @@ function agentSteps(messages: SessionMessage[], results: Map<number, SessionMess
  * with each step's status, and the tool it's running right now.
  */
 function ProgressBar({ messages, results, running }: { messages: SessionMessage[]; results: Map<number, SessionMessage>; running: boolean }) {
-  const [collapsed, setCollapsed] = useState(false); // steps are shown by default
+  // Open while the agent works, folded to one line once it's done (click to open either way).
+  const [toggled, setToggled] = useState<boolean | null>(null);
+  useEffect(() => setToggled(null), [running]);
+  const collapsed = toggled ?? !running;
+  const setCollapsed = setToggled;
   const todos = agentSteps(messages, results);
   let step = "";
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -363,6 +378,29 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
   );
 }
 
+/**
+ * One tool call: a single line (first line of the command, cut to fit),
+ * opening to the full command and its output, each scrolling on its own.
+ */
+function ToolRow({ m, result }: { m: SessionMessage; result?: SessionMessage }) {
+  const tool: string = m.meta?.tool ?? "";
+  const label = m.content.replace(/^mcp__tab__/, "tab: ");
+  const [first, ...more] = label.split("\n");
+  const command: string | undefined = typeof m.meta?.input?.command === "string" ? m.meta.input.command : undefined;
+  const long = !!command && (command.includes("\n") || command.length > 120);
+  return (
+    <details className={cx("msg-tool", result?.meta?.is_error && "failed")}>
+      <summary title={label.length > 300 ? label.slice(0, 300) + "…" : label}>
+        <Icon name={tool.startsWith("mcp__tab") || tool.startsWith("tab_") ? "graph" : "terminal"} size={12} />
+        <span className="msg-tool-name">{first}{more.length > 0 && " …"}</span>
+        {result?.meta?.is_error && <span className="msg-tool-flag">failed</span>}
+      </summary>
+      {long && <pre className="msg-tool-cmd">{command}</pre>}
+      {result?.content ? <pre>{result.content}</pre> : !long && <div className="msg-tool-empty">No output</div>}
+    </details>
+  );
+}
+
 function MessageView({ m, result, onSend }: { m: SessionMessage; result?: SessionMessage; onSend?: (text: string) => void }) {
   if (m.kind === "suggestion") return null;
   if (m.role === "user") {
@@ -381,17 +419,13 @@ function MessageView({ m, result, onSend }: { m: SessionMessage; result?: Sessio
     if (!result || !result.meta?.is_error) return null;
     return <QuestionCard m={m} answered={false} onSend={onSend} />;
   }
+  // Step-list updates show in the pinned step card, not as rows.
+  if (m.kind === "tool" && (TODO_TOOLS.has(m.meta?.tool) || TASK_TOOLS.has(m.meta?.tool) || m.meta?.tool === "TaskList" || m.meta?.tool === "TaskGet")) return null;
   if (m.kind === "tool")
     return (
-      <details className={cx("msg-tool", result?.meta?.is_error && "failed")}>
-        <summary>
-          <Icon name={m.meta?.tool?.startsWith("mcp__tab") || m.meta?.tool?.startsWith("tab_") ? "graph" : "terminal"} size={12} />
-          <span>{m.content.replace(/^mcp__tab__/, "tab: ")}</span>
-        </summary>
-        {result?.content && <pre>{result.content}</pre>}
-      </details>
+      <ToolRow m={m} result={result} />
     );
-  if (m.kind === "tool_result") return <details className="msg-tool"><summary><Icon name="terminal" size={12} />Output</summary><pre>{m.content}</pre></details>;
+  if (m.kind === "tool_result") return <details className="msg-tool"><summary><Icon name="terminal" size={12} /><span className="msg-tool-name">Output</span></summary><pre>{m.content}</pre></details>;
   if (m.kind === "error") return <div className="msg-error"><Icon name="x-circle" size={14} /><span>{m.content}</span></div>;
   if (m.kind === "result") {
     const cost = m.meta?.cost_usd;
