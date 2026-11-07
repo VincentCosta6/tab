@@ -205,9 +205,32 @@ impl Prepared {
     /// whole tree.
     pub fn spawn(mut self) -> std::io::Result<Guarded> {
         tree::prepare(&mut self.cmd);
-        let child = self.cmd.spawn()?;
+        let child = self.cmd.spawn().map_err(|e| explain_spawn(&self.cmd, e))?;
         Ok(Guarded::new(child, self.proxy.take()))
     }
+}
+
+/// "No such file or directory" from a spawn can mean the program or the
+/// folder it starts in; say which.
+fn explain_spawn(cmd: &tokio::process::Command, e: std::io::Error) -> std::io::Error {
+    if e.kind() != std::io::ErrorKind::NotFound {
+        return e;
+    }
+    let std = cmd.as_std();
+    if let Some(dir) = std.get_current_dir().filter(|d| !d.is_dir()) {
+        return std::io::Error::new(
+            e.kind(),
+            format!("the folder it starts in, {}, doesn't exist ({e})", dir.display()),
+        );
+    }
+    let program = Path::new(std.get_program());
+    if program.components().count() > 1 && !program.exists() {
+        return std::io::Error::new(
+            e.kind(),
+            format!("{} doesn't exist ({e})", program.display()),
+        );
+    }
+    e
 }
 
 pub struct Sandbox {
