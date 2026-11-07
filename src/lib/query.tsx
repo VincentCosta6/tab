@@ -106,7 +106,11 @@ function LiveEvents() {
         case "item_changed": {
           qc.setQueryData<QueueItem>(keys.item(e.item.id), e.item);
           if (e.change !== "ranked") qc.invalidateQueries({ queryKey: ["activity", e.item.id] });
-          qc.setQueriesData<ItemContext | null>({ queryKey: keys.context(e.item.id) }, (c) => (c ? { ...c, item: e.item } : c));
+          // Patch the item into its cached context, unless that context is
+          // already due a refetch: writing to it would mark it fresh and
+          // drop entries attached since (staleTime is Infinity).
+          if (!qc.getQueryState(keys.context(e.item.id))?.isInvalidated)
+            qc.setQueriesData<ItemContext | null>({ queryKey: keys.context(e.item.id) }, (c) => (c ? { ...c, item: e.item } : c));
           // Lists are local SQLite reads; coalesce bursts into one refetch.
           clearTimeout(reload);
           reload = window.setTimeout(() => qc.invalidateQueries({ queryKey: keys.allItems }), 120);

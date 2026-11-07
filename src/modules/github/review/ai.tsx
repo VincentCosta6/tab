@@ -181,7 +181,7 @@ export function FixBanner({ ai, local }: { ai: Ai; local: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const queued = ai.fixes.filter((f) => f.state === "queued");
   const sent = ai.fixes.filter((f) => f.state === "sent");
-  if (!ai.fixes.length) return <div />;
+  if (!ai.fixes.length) return null;
   const running = !!ai.chat?.running;
   return (
     <div className="rv-fixbar">
