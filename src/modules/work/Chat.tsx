@@ -9,6 +9,7 @@ import { MarkdownFiles } from "../../design/markdown";
 import { saveAttachment } from "../../lib/images";
 import { AgentNotice } from "./AgentNotice";
 import { Dictation } from "./Dictation";
+import { useDropTarget } from "./DropZone";
 import { api } from "../../lib/api";
 import { useChat, useConfig, useStream } from "../../lib/hooks";
 import { keys } from "../../lib/query";
@@ -903,9 +904,6 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   const [text, setText] = useState("");
   const [images, setImages] = useState<string[]>([]);
   const [uploading, setUploading] = useState(0);
-  const [dragging, setDragging] = useState(false);
-  // A file is being dragged anywhere over the window: show where it can go.
-  const [armed, setArmed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const file = useRef<HTMLInputElement>(null);
@@ -926,28 +924,6 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
     if (autoFocus) ref.current?.focus();
   }, [autoFocus]);
 
-  useEffect(() => {
-    let depth = 0;
-    const hasFile = (e: DragEvent) => !!e.dataTransfer && [...e.dataTransfer.items].some((i) => i.kind === "file");
-    const enter = (e: DragEvent) => hasFile(e) && (depth++, setArmed(true));
-    const leave = (e: DragEvent) => hasFile(e) && --depth <= 0 && ((depth = 0), setArmed(false));
-    const end = () => ((depth = 0), setArmed(false), setDragging(false));
-    // Dropping outside a composer must not navigate the webview to the file.
-    const over = (e: DragEvent) => hasFile(e) && e.preventDefault();
-    window.addEventListener("dragenter", enter);
-    window.addEventListener("dragleave", leave);
-    window.addEventListener("dragover", over);
-    window.addEventListener("drop", end);
-    window.addEventListener("dragend", end);
-    return () => {
-      window.removeEventListener("dragenter", enter);
-      window.removeEventListener("dragleave", leave);
-      window.removeEventListener("dragover", over);
-      window.removeEventListener("drop", end);
-      window.removeEventListener("dragend", end);
-    };
-  }, []);
-
   const add = async (files: File[]) => {
     const big = files.filter((f) => f.size > 50 * 1024 * 1024);
     const ok = files.filter((f) => f.size <= 50 * 1024 * 1024);
@@ -964,6 +940,8 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
       }
     }
   };
+
+  const drop = useDropTarget((files) => void add(files));
 
   const submit = () => {
     const t = text.trim();
@@ -984,22 +962,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
     );
 
   return (
-    <div
-      className={cx("composer", armed && "drop-armed", dragging && "dragging")}
-      onDragOver={(e) => {
-        if (![...e.dataTransfer.items].some((i) => i.kind === "file")) return;
-        e.preventDefault();
-        setDragging(true);
-      }}
-      onDragLeave={(e) => !e.currentTarget.contains(e.relatedTarget as Node) && setDragging(false)}
-      onDrop={(e) => {
-        if (!e.dataTransfer.files.length) return;
-        e.preventDefault();
-        setDragging(false);
-        void add([...e.dataTransfer.files]);
-      }}
-    >
-      {armed && <div className="composer-drop"><Icon name="plus" size={14} /> Drop files to attach</div>}
+    <div ref={drop.ref} className={cx("composer", drop.armed && "drop-armed", drop.targeted && "dragging")}>
       <AgentNotice messages={chat?.messages} />
       {(images.length > 0 || uploading > 0) && (
         <div className="composer-images">

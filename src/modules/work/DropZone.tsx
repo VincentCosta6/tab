@@ -1,0 +1,130 @@
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { cx } from "../../design/components";
+import { Icon } from "../../design/icons";
+
+/**
+ * Files dragged anywhere over the window go to a chat composer: the one under
+ * the cursor, else the visible one nearest to it. Composers register here; one
+ * set of window listeners does the routing and drives the app-wide overlay.
+ */
+type Target = { el: HTMLElement; add: (files: File[]) => void };
+
+const targets = new Set<Target>();
+/** `count`: visible chats; `over`: the cursor is on the target chat itself. */
+type State = { active: boolean; target: Target | null; rect: DOMRect | null; count: number; over: boolean };
+const idle: State = { active: false, target: null, rect: null, count: 0, over: false };
+let state: State = idle;
+const subs = new Set<() => void>();
+const set = (next: State) => {
+  if (next.active === state.active && next.target === state.target && next.count === state.count && next.over === state.over && sameRect(next.rect, state.rect)) return;
+  state = next;
+  subs.forEach((f) => f());
+};
+const sameRect = (a: DOMRect | null, b: DOMRect | null) => a === b || (!!a && !!b && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height);
+
+const visible = (el: HTMLElement) => {
+  const r = el.getBoundingClientRect();
+  if (!r.width || !r.height || r.bottom <= 0 || r.right <= 0 || r.top >= innerHeight || r.left >= innerWidth) return false;
+  return el.checkVisibility ? el.checkVisibility({ visibilityProperty: true, opacityProperty: true } as CheckVisibilityOptions) : true;
+};
+
+const distance = (r: DOMRect, x: number, y: number) => Math.hypot(Math.max(r.left - x, 0, x - r.right), Math.max(r.top - y, 0, y - r.bottom));
+
+function nearest(x: number, y: number) {
+  let best: Target | null = null;
+  let d = Infinity;
+  let count = 0;
+  for (const t of targets) {
+    if (!visible(t.el)) continue;
+    count++;
+    const dt = distance(t.el.getBoundingClientRect(), x, y);
+    if (dt < d) (best = t), (d = dt);
+  }
+  return { target: best, count, over: d === 0 };
+}
+
+const hasFile = (e: DragEvent) => !!e.dataTransfer && [...e.dataTransfer.items].some((i) => i.kind === "file");
+
+let listening = false;
+function listen() {
+  if (listening) return;
+  listening = true;
+  let depth = 0;
+  const reset = () => ((depth = 0), set(idle));
+  const aim = (e: DragEvent) => {
+    const n = nearest(e.clientX, e.clientY);
+    set({ active: true, ...n, rect: n.target?.el.getBoundingClientRect() ?? null });
+    return n.target;
+  };
+  window.addEventListener("dragenter", (e) => hasFile(e) && (depth++, aim(e)));
+  window.addEventListener("dragleave", (e) => hasFile(e) && --depth <= 0 && reset());
+  window.addEventListener("dragover", (e) => {
+    if (!hasFile(e)) return;
+    // Always claim the drag, so a drop never navigates the webview to the file.
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = aim(e) ? "copy" : "none";
+  });
+  window.addEventListener("drop", (e) => {
+    const files = [...(e.dataTransfer?.files ?? [])];
+    if (files.length) {
+      e.preventDefault();
+      nearest(e.clientX, e.clientY).target?.add(files);
+    }
+    reset();
+  });
+  window.addEventListener("dragend", reset);
+}
+
+/** Make a composer a drop target: attach the returned ref; `add` receives dropped files. */
+export function useDropTarget(add: (files: File[]) => void) {
+  const latest = useRef(add);
+  latest.current = add;
+  const [el, setEl] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!el) return;
+    listen();
+    const t: Target = { el, add: (f) => latest.current(f) };
+    targets.add(t);
+    return () => void targets.delete(t);
+  }, [el]);
+  const s = useSyncExternalStore(subscribe, snapshot);
+  return { ref: setEl, armed: s.active, targeted: s.active && !!el && s.target?.el === el };
+}
+
+const subscribe = (f: () => void) => (subs.add(f), () => void subs.delete(f));
+const snapshot = () => state;
+
+/**
+ * Dims the whole app while a file is dragged and spotlights the chat it will
+ * land in. Over the chat itself, the spotlight fills in to confirm the drop.
+ * The "Attaching here" tag only shows when there's more than one chat to pick from.
+ */
+export function DropOverlay() {
+  const s = useSyncExternalStore(subscribe, snapshot);
+  if (!s.active) return null;
+  const r = s.rect;
+  const pad = 6;
+  const many = s.count > 1;
+  return (
+    <div className={cx("drop-overlay", s.over && "over")} aria-hidden>
+      <div className="drop-frame" />
+      {r && (
+        <div className="drop-spot" style={{ left: r.left - pad, top: r.top - pad, width: r.width + pad * 2, height: r.height + pad * 2 }}>
+          {s.over && <span><Icon name="upload" size={16} /> Release to attach</span>}
+        </div>
+      )}
+      {!s.over && (
+        <div className="drop-card">
+          <Icon name="upload" size={32} />
+          <strong>{r ? "Drop files to attach" : "No chat to attach to"}</strong>
+          {(!r || many) && <span>{r ? "Drop anywhere. They'll be added to the highlighted chat." : "Open a chat, then drop files anywhere."}</span>}
+        </div>
+      )}
+      {r && many && !s.over && (
+        <div className="drop-tag" style={{ left: r.left + r.width / 2, top: Math.max(12, r.top - pad - 34) }}>
+          <Icon name="arrow-down" size={12} /> Attaching here
+        </div>
+      )}
+    </div>
+  );
+}

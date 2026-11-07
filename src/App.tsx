@@ -1,6 +1,7 @@
 import { setReviewsOpener } from "./modules/github/pulls";
 import { BrowserDock } from "./design/BrowserDock";
 import { ImageViewer } from "./design/ImageViewer";
+import { DropOverlay } from "./modules/work/DropZone";
 import { useEffect, useState } from "react";
 import { Icon } from "./design/icons";
 import { TabMark } from "./design/brands";
@@ -98,6 +99,7 @@ function Shell() {
         </ErrorBoundary>
       </main>
       <BrowserDock />
+      <DropOverlay />
       {onboarding && <Onboarding onClose={() => setOnboarding(false)} />}
     </div>
   );
