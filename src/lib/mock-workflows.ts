@@ -138,7 +138,13 @@ function execute(w: Workflow, item: QueueItem | null, dry: boolean, connectors: 
   };
 }
 
-let chat: Chat = { session: null, messages: [], approvals: [], running: false };
+// One builder chat per workflow, like the app ("new" for an unsaved draft).
+const chats = new Map<string, Chat>();
+const chatFor = (id: string | null | undefined): Chat => {
+  const k = id || "new";
+  if (!chats.has(k)) chats.set(k, { session: null, messages: [], approvals: [], running: false });
+  return chats.get(k)!;
+};
 
 export function workflowMock(cmd: string, args: Record<string, any>, env: { items: () => QueueItem[]; connectors: () => ConnectorInfo[]; emit: (e: EngineEvent) => void }): unknown {
   const connectors = env.connectors();
@@ -181,19 +187,20 @@ export function workflowMock(cmd: string, args: Record<string, any>, env: { item
       env.emit({ type: "workflow_run", run });
       return run;
     }
-    case "workflow_chat_open": return clone(chat);
+    case "workflow_chat_open": return clone(chatFor(args.workflowId));
     case "workflow_chat_send": {
       const now = new Date().toISOString();
-      const session: Session = chat.session ?? { id: "wf-chat", item_id: null, agent: "claude_code", agent_session_id: null, title: "Workflow builder", status: "idle", cwd: "~", created_at: now, updated_at: now };
+      const chat = chatFor(args.open?.id);
+      const session: Session = chat.session ?? { id: `wf-chat-${args.open?.id || "new"}`, item_id: null, agent: "claude_code", agent_session_id: null, title: "Workflow builder", status: "idle", cwd: "~", created_at: now, updated_at: now };
       const id = chat.messages.length + 1;
-      chat = {
+      chats.set(args.open?.id || "new", {
         session, approvals: [], running: false,
         messages: [
           ...chat.messages,
           { id, session_id: session.id, role: "user", kind: "text", content: args.text, meta: null, created_at: now },
           { id: id + 1, session_id: session.id, role: "assistant", kind: "text", content: "In the desktop app I'd build this with your connections' actions, save it turned off, and dry-run it on a real item so you can check it before turning it on.", meta: null, created_at: now },
         ],
-      };
+      });
       return session;
     }
     case "item_activity": {

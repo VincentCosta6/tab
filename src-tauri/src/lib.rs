@@ -1808,14 +1808,14 @@ async fn item_activity(
     state.store.activity_for(&id, 200).map_err(err)
 }
 
-const WORKFLOW_CHAT_KEY: &str = "workflows";
-
+/// The builder assistant's chat for one workflow (`None` or "" for a new draft).
 #[tauri::command]
-async fn workflow_chat_open(state: State<'_, AppState>) -> CmdResult<Chat> {
-    let session = state
-        .store
-        .session_for_key(WORKFLOW_CHAT_KEY)
-        .map_err(err)?;
+async fn workflow_chat_open(
+    state: State<'_, AppState>,
+    workflow_id: Option<String>,
+) -> CmdResult<Chat> {
+    let key = tab_core::workflow::chat_key(workflow_id.as_deref().unwrap_or(""));
+    let session = state.store.session_for_key(&key).map_err(err)?;
     let (messages, approvals, running) = match &session {
         Some(s) => (
             state.store.messages(&s.id).map_err(err)?,
@@ -1839,24 +1839,27 @@ async fn workflow_chat_send(
     text: String,
     open: Option<Workflow>,
 ) -> CmdResult<Session> {
-    let mut text = text.trim().to_string();
+    let text = text.trim().to_string();
     if text.is_empty() {
         return Err("message is empty".into());
     }
     if state.hub.config().kind.is_none() {
         return Err("Set up an agent first (Settings → Agent).".into());
     }
-    if let Some(w) = &open {
-        let saved = if w.id.is_empty() {
-            "a new draft, not saved yet"
-        } else {
-            "saved"
-        };
-        text = format!(
-            "(Open in the builder, {saved}:\n```json\n{}\n```)\n\n{text}",
+    // The open workflow goes in the brief (refreshed every turn), not in the
+    // person's message, so the transcript shows only what they typed.
+    let open_now = match &open {
+        Some(w) => format!(
+            "\n\nOpen in the builder now ({}):\n```json\n{}\n```",
+            if w.id.is_empty() {
+                "a new draft, not saved yet; leave id out when you save it"
+            } else {
+                "saved; pass its id to change it"
+            },
             serde_json::to_string_pretty(w).map_err(err)?
-        );
-    }
+        ),
+        None => "\n\nNothing is open yet: this is a new workflow.".into(),
+    };
     let brief = "This chat is the assistant in tab's workflow builder. The person describes what they want \
         automated and you build it as a tab workflow: a trigger and ordered steps that call connection actions. \
         Start with tab_list_actions to see what each connection can start on and do; never invent actions or \
@@ -1865,11 +1868,22 @@ async fn workflow_chat_send(
         tab_search when one fits, and say in a sentence or two what it does and what the dry run showed. \
         Prefer deterministic steps: filters and conditions on fields over anything vague. Keep triggers narrow \
         (a connection and kinds) so workflows can't feed each other. You can't turn workflows on or allow \
-        destructive steps (merge, close, move mail); the person does that in the builder, so tell them when it's needed.";
+        destructive steps (merge, close, move mail); the person does that in the builder, so tell them when it's needed. \
+        This chat is about the one workflow open below; work on others only if the person asks.";
+    let brief = format!("{brief}{open_now}");
+    let title = match open.as_ref().map(|w| w.name.trim()).filter(|n| !n.is_empty()) {
+        Some(n) => format!("Workflow builder: {n}"),
+        None => "Workflow builder".into(),
+    };
     let cwd = state.hub.workdir();
     let session = state
         .hub
-        .session_for_key(WORKFLOW_CHAT_KEY, "Workflow builder", &cwd, brief)
+        .session_for_key(
+            &tab_core::workflow::chat_key(open.as_ref().map_or("", |w| w.id.as_str())),
+            &title,
+            &cwd,
+            &brief,
+        )
         .map_err(err)?;
     state.hub.send_with(&session.id, &text, &[]).map_err(err)?;
     Ok(session)

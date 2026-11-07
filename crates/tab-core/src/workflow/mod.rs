@@ -6,6 +6,17 @@ pub use tab_domain::workflow::*;
 
 pub mod runtime;
 
+/// The builder assistant's chat key for one workflow: each workflow gets its
+/// own conversation, and an unsaved draft uses `workflows:new` until the
+/// assistant saves it (then that chat moves to the new id).
+pub fn chat_key(workflow_id: &str) -> String {
+    if workflow_id.is_empty() {
+        "workflows:new".into()
+    } else {
+        format!("workflows:{workflow_id}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
