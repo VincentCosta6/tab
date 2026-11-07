@@ -229,6 +229,15 @@ pub async fn run_upgrade(
     Ok(())
 }
 
+/// What the person sends a running turn.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Steer {
+    /// More to say; the agent reads it at its next step.
+    Message(String),
+    /// Don't wait for the running tool: stop it and read what's queued now.
+    Interrupt,
+}
+
 pub struct AgentHub {
     pub(crate) store: Arc<Store>,
     events: broadcast::Sender<EngineEvent>,
@@ -239,11 +248,11 @@ pub struct AgentHub {
     running: Mutex<HashMap<String, CancellationToken>>,
     /// Live turns that take more messages while they run: Claude Code's stdin,
     /// or more prompts to the same OpenCode session.
-    steering: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
+    steering: Mutex<HashMap<String, mpsc::UnboundedSender<Steer>>>,
     /// The receiving end of a turn's steering channel, parked from the moment
     /// the turn is marked running until its runner picks it up, so messages
     /// sent while the agent is still starting wait in the queue.
-    steering_rx: Mutex<HashMap<String, mpsc::UnboundedReceiver<String>>>,
+    steering_rx: Mutex<HashMap<String, mpsc::UnboundedReceiver<Steer>>>,
     /// Messages that arrived after a turn stopped taking steering (its result
     /// is in, the process hasn't exited). They run as the next turn.
     followups: Mutex<HashMap<String, Vec<String>>>,
@@ -602,7 +611,7 @@ impl AgentHub {
         self.check_attachments(attachments)?;
         let prompt = with_attachments(text, attachments);
         let tx = self.steering.lock().unwrap().get(session_id).cloned();
-        let sent = tx.is_some_and(|tx| tx.send(prompt.clone()).is_ok());
+        let sent = tx.is_some_and(|tx| tx.send(Steer::Message(prompt.clone())).is_ok());
         if !sent {
             // Held under the running lock so a turn that is finishing either
             // sees this message or has already finished (and we return false).
@@ -630,6 +639,14 @@ impl AgentHub {
         Ok(true)
     }
 
+    /// "Send now": cuts short the tool the running turn is waiting on, like
+    /// Esc in Claude Code's terminal, so steering already sent is read right
+    /// away instead of when the tool ends. False when no turn takes steering.
+    pub fn interrupt(&self, session_id: &str) -> bool {
+        let tx = self.steering.lock().unwrap().get(session_id).cloned();
+        tx.is_some_and(|tx| tx.send(Steer::Interrupt).is_ok())
+    }
+
     /// Attachments must be files in [`Self::attachments_dir`].
     fn check_attachments(&self, attachments: &[String]) -> anyhow::Result<()> {
         let dir = self.attachments_dir();
@@ -653,7 +670,7 @@ impl AgentHub {
     }
 
     /// The turn runner's end of the channel opened by `steering_prepare`.
-    pub(crate) fn steering_open(&self, session_id: &str) -> mpsc::UnboundedReceiver<String> {
+    pub(crate) fn steering_open(&self, session_id: &str) -> mpsc::UnboundedReceiver<Steer> {
         if let Some(rx) = self.steering_rx.lock().unwrap().remove(session_id) {
             return rx;
         }

@@ -943,6 +943,27 @@ async fn chat_stop(state: State<'_, AppState>, session_id: String) -> CmdResult<
     Ok(())
 }
 
+/// "Send now": stop the tool a turn is waiting on, so the messages the
+/// person already sent are read right away.
+#[tauri::command]
+async fn chat_interrupt(state: State<'_, AppState>, session_id: String) -> CmdResult<()> {
+    let remote = state
+        .store
+        .session_get(&session_id)
+        .map_err(err)?
+        .is_some_and(|s| !state.hub.runs_here(&s));
+    match (&state.work_hub, remote) {
+        (Some(h), true) => {
+            h.steer_remote(&session_id, &SteerCommand::Interrupt)
+                .map_err(err)?;
+        }
+        _ => {
+            state.hub.interrupt(&session_id);
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn approval_resolve(
     state: State<'_, AppState>,
@@ -2566,6 +2587,7 @@ pub fn run() {
             chat_open,
             chat_send,
             chat_stop,
+            chat_interrupt,
             projects_list,
             project_save,
             project_delete,

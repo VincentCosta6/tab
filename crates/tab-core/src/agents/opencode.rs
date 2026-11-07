@@ -489,7 +489,11 @@ pub(super) async fn run_turn(
     let steer = {
         let (s, oc_id, mut body) = (s.clone(), oc_id.clone(), body.clone());
         tokio::spawn(async move {
-            while let Some(text) = steer_rx.recv().await {
+            while let Some(steer) = steer_rx.recv().await {
+                // OpenCode has no way to cut a single tool short.
+                let super::Steer::Message(text) = steer else {
+                    continue;
+                };
                 body["parts"] = json!([{ "type": "text", "text": text }]);
                 let sent = s
                     .client

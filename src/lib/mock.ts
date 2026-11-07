@@ -349,6 +349,7 @@ export const mockApi = {
         }
         case "set_agent_mode": config = { ...config, agent: { ...config.agent, permission_mode: args.mode } }; return config;
         case "chat_stop": return null;
+        case "chat_interrupt": return null;
         case "approval_resolve": return true;
         case "agent_health": return { kind: "claude_code", found: true, path: "/Users/you/.local/bin/claude", version: mockUpgraded ? "2.1.318 (Claude Code)" : "2.1.91 (Claude Code)", error: null, install: "native", upgrade: "claude update", latest: "2.1.318" };
         case "agent_upgrade": {

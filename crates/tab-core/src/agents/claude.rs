@@ -1,47 +1,40 @@
 //! Claude Code adapter: one `claude -p` process per turn, resumed by session id,
 //! read as `stream-json`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio_util::sync::CancellationToken;
 
-use super::{AgentHub, default_command, resolve};
+use super::{AgentHub, Steer, default_command, resolve};
 use crate::model::{AgentKind, Session, SessionStatus};
 
 /// Claude Code permission modes tab passes through. `bypassPermissions` is
 /// deliberately not offered: approvals belong to the person.
 const MODES: &[&str] = &["default", "acceptEdits", "plan", "auto", "dontAsk"];
 
-/// Claude Code reads a queued message only between tool calls, so a message
-/// sent during a long command (a build, `gh pr checks --watch`) would wait for
-/// it to end. Once a tool has run this long, steering interrupts it first,
-/// like pressing Esc in the terminal, so the message is read right away.
-const INTERRUPT_AFTER: Duration = Duration::from_secs(2);
+/// Tool calls in flight, by id. Claude Code reads a steering message only
+/// between tool calls, so "Send now" interrupts while one is running.
+type OpenTools = Arc<Mutex<HashSet<String>>>;
 
-/// Tool calls in flight, by id, with when each started.
-type OpenTools = Arc<Mutex<HashMap<String, Instant>>>;
-
-/// The stdin lines that deliver a steering message: an interrupt first if a
-/// tool has been running for `INTERRUPT_AFTER` or longer, then the message.
-fn steer_lines(text: &str, open: &HashMap<String, Instant>, now: Instant, n: u64) -> Vec<Value> {
-    let mut lines = Vec::new();
-    if open
-        .values()
-        .any(|since| now.saturating_duration_since(*since) >= INTERRUPT_AFTER)
-    {
-        lines.push(json!({
+/// The stdin line for a steering command, if it needs one: a message is
+/// queued as a user turn; an interrupt (Esc in the terminal) is sent only
+/// while a tool runs, since otherwise the message is read at the next step.
+fn steer_line(steer: Steer, tools_running: bool, n: u64) -> Option<Value> {
+    match steer {
+        Steer::Message(text) => {
+            Some(json!({ "type": "user", "message": { "role": "user", "content": text } }))
+        }
+        Steer::Interrupt if tools_running => Some(json!({
             "type": "control_request",
-            "request_id": format!("tab-steer-{n}"),
+            "request_id": format!("tab-interrupt-{n}"),
             "request": { "subtype": "interrupt" },
-        }));
+        })),
+        Steer::Interrupt => None,
     }
-    lines.push(json!({ "type": "user", "message": { "role": "user", "content": text } }));
-    lines
 }
 
 pub(super) async fn run_turn(
@@ -144,14 +137,17 @@ pub(super) async fn run_turn(
     let tools = open_tools.clone();
     tokio::spawn(async move {
         let mut n = 0;
-        while let Some(text) = steer_rx.recv().await {
+        while let Some(steer) = steer_rx.recv().await {
             n += 1;
-            let lines = steer_lines(&text, &tools.lock().unwrap(), Instant::now(), n);
-            let mut out = String::new();
-            for l in lines {
-                out.push_str(&format!("{l}\n"));
-            }
-            if stdin.write_all(out.as_bytes()).await.is_err() {
+            let running = !tools.lock().unwrap().is_empty();
+            let Some(line) = steer_line(steer, running, n) else {
+                continue;
+            };
+            if stdin
+                .write_all(format!("{line}\n").as_bytes())
+                .await
+                .is_err()
+            {
                 break;
             }
         }
@@ -248,10 +244,10 @@ struct Parser {
     first_call: Option<Value>,
     last_call: Option<Value>,
     tab_context_tokens: i64,
-    /// Shared with the steering task, which interrupts long-running tools.
+    /// Shared with the steering task, which interrupts only while one runs.
     open_tools: OpenTools,
-    /// The person interrupted the turn to steer it: the next result only
-    /// closes the interrupted part, and the turn goes on with their message.
+    /// The person pressed "Send now": the next result only closes the
+    /// interrupted part, and the turn goes on with their queued message.
     interrupted: bool,
 }
 
@@ -375,10 +371,7 @@ impl Parser {
                         Some("tool_use") => {
                             let id = block["id"].as_str().unwrap_or_default().to_string();
                             if self.once(format!("tool:{id}")) {
-                                self.open_tools
-                                    .lock()
-                                    .unwrap()
-                                    .insert(id.clone(), Instant::now());
+                                self.open_tools.lock().unwrap().insert(id.clone());
                                 let name = block["name"].as_str().unwrap_or("tool");
                                 if crate::links::is_creator(name, &block["input"]) {
                                     self.create_calls.insert(id.clone());
@@ -458,8 +451,8 @@ impl Parser {
                 }
             }
             "result" if std::mem::take(&mut self.interrupted) => {
-                // Interrupted to read a steering message, which is already
-                // queued: count the cost and keep going.
+                // Interrupted to read steering that is already queued:
+                // count the cost and keep going.
                 self.open_tools.lock().unwrap().clear();
                 crate::usage::record_claude_result(
                     &hub.store,
@@ -599,25 +592,17 @@ mod tests {
     }
 
     #[test]
-    fn steering_interrupts_only_a_tool_that_has_been_running_a_while() {
-        let now = Instant::now();
-        let kinds = |open: &HashMap<String, Instant>| -> Vec<String> {
-            steer_lines("hi", open, now, 1)
-                .iter()
-                .map(|l| l["type"].as_str().unwrap().to_string())
-                .collect()
-        };
-        assert_eq!(kinds(&HashMap::new()), ["user"]);
-        let quick = HashMap::from([("t1".to_string(), now - Duration::from_millis(300))]);
-        assert_eq!(kinds(&quick), ["user"]);
-        let long = HashMap::from([
-            ("t1".to_string(), now - Duration::from_millis(300)),
-            ("t2".to_string(), now - Duration::from_secs(90)),
-        ]);
-        let lines = steer_lines("hi", &long, now, 7);
-        assert_eq!(lines[0]["request"]["subtype"], "interrupt");
-        assert_eq!(lines[0]["request_id"], "tab-steer-7");
-        assert_eq!(lines[1]["message"]["content"], "hi");
+    fn messages_queue_and_send_now_interrupts_only_a_running_tool() {
+        let msg = steer_line(Steer::Message("hi".into()), true, 1).unwrap();
+        assert_eq!(
+            (msg["type"].as_str(), msg["message"]["content"].as_str()),
+            (Some("user"), Some("hi"))
+        );
+        let stop = steer_line(Steer::Interrupt, true, 7).unwrap();
+        assert_eq!(stop["request"]["subtype"], "interrupt");
+        assert_eq!(stop["request_id"], "tab-interrupt-7");
+        // Between tool calls the queued message is read anyway.
+        assert_eq!(steer_line(Steer::Interrupt, false, 8), None);
     }
 
     #[tokio::test]
@@ -640,7 +625,7 @@ mod tests {
             &mut p,
             r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"gh pr checks --watch"}}]}}"#,
         );
-        assert!(p.open_tools.lock().unwrap().contains_key("t1"));
+        assert!(p.open_tools.lock().unwrap().contains("t1"));
         // What Claude Code prints after an interrupt mid-tool.
         feed(
             &mut p,

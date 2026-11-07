@@ -89,6 +89,9 @@ pub enum SteerCommand {
         #[serde(default)]
         answers: Option<Value>,
     },
+    /// "Send now": stop the tool the turn is waiting on so the steering
+    /// already sent is read right away.
+    Interrupt,
     Stop,
 }
 
@@ -228,6 +231,8 @@ mod tests {
         );
         let c: SteerCommand = serde_json::from_value(json!({"type": "stop"})).unwrap();
         assert_eq!(c, SteerCommand::Stop);
+        let c: SteerCommand = serde_json::from_value(json!({"type": "interrupt"})).unwrap();
+        assert_eq!(c, SteerCommand::Interrupt);
         assert_eq!(
             Decision::from_parts("nope", None, None),
             Decision::Deny("The person declined.".into())

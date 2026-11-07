@@ -960,6 +960,10 @@ impl LocalHub {
                 agents.resolve_approval(&id, Decision::from_parts(&decision, message, answers));
                 Ok(())
             }
+            SteerCommand::Interrupt => {
+                agents.interrupt(&session.id);
+                Ok(())
+            }
             SteerCommand::Stop => {
                 agents.stop(&session.id);
                 Ok(())
