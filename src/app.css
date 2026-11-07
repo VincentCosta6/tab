@@ -274,7 +274,7 @@
 
 /* Connector updates (bottom left, above the usage meter) */
 .updater { position: relative; min-width: 0; margin-bottom: var(--space-2); }
-.updater-card { min-width: 0; overflow: hidden; display: grid; gap: 4px; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); font-size: 10px; color: var(--fg-muted); }
+.updater-card { min-width: 0; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); font-size: 10px; color: var(--fg-muted); }
 .updater-card.failed { border-color: var(--tone-danger-fg); }
 .updater-head { display: flex; align-items: center; gap: 4px; color: var(--tone-info-fg); }
 .updater-card.done .updater-head { color: var(--tone-success-fg); }
