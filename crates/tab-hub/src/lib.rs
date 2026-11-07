@@ -8,18 +8,26 @@
 //! - **In the cloud**, one per person or team inside a Cloudflare Durable
 //!   Object on its built-in SQLite (the `cloud/worker` crate, to come).
 //!
-//! It holds no sockets and reads no clock. Its host hands it decoded frames
-//! with the current time and sends back what it returns: a reply to the
-//! caller, and sometimes a push for every other connected device. That keeps
-//! it building for Wasm and makes it easy to test.
+//! It holds no sockets and reads no clock. Its host tells it when a
+//! connection opens or closes ([`Hub::connect`], [`Hub::disconnect`]), hands
+//! it each frame with the current time, and sends back what it returns: a
+//! reply to the caller, and sometimes a push for every other connection.
+//! That keeps it building for Wasm and makes it easy to test.
+//!
+//! Every connection says [`Hello`](pb::Hello) first, naming its device; the
+//! hub refuses anything else until then. It keeps track of who is connected
+//! and how far each one has synced, for the Hub page ([`Hub::status`]).
 //!
 //! Moving between local and cloud is [`migrate::copy`]: replay one hub's log
 //! into another.
 
 pub mod migrate;
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Duration, Utc};
 use tab_domain::ops::Op;
+use tab_protocol::convert::timestamp;
 use tab_protocol::pb::{self, client_envelope::Body as Req, server_envelope::Body as Res};
 use tab_protocol::{
     DEFAULT_CHANGES_PER_PAGE, DEFAULT_RESULTS, MAX_CHANGES_PER_PAGE, MAX_RESULTS, PROTOCOL_VERSION,
@@ -37,8 +45,23 @@ pub struct Handled {
     pub push: Option<ServerEnvelope>,
 }
 
+/// The host's id for one connection (a socket, or the desktop app itself).
+pub type ConnId = u64;
+
+#[derive(Debug, Clone, PartialEq)]
+struct Conn {
+    device: Option<String>,
+    client: String,
+    address: String,
+    connected_at: DateTime<Utc>,
+    synced_to: u64,
+}
+
 pub struct Hub<S> {
     store: S,
+    runs_on: String,
+    started_at: DateTime<Utc>,
+    conns: BTreeMap<ConnId, Conn>,
 }
 
 fn page(asked: u32, default: u32, max: u32) -> usize {
@@ -54,8 +77,69 @@ fn store_error(id: u64, e: StoreError) -> ServerEnvelope {
 }
 
 impl<S: HubStore> Hub<S> {
-    pub fn new(store: S) -> Self {
-        Self { store }
+    /// A hub on `store`. `runs_on` is `"local"` or `"cloud"`, for status.
+    pub fn new(store: S, runs_on: &str, now: DateTime<Utc>) -> Self {
+        Self {
+            store,
+            runs_on: runs_on.to_string(),
+            started_at: now,
+            conns: BTreeMap::new(),
+        }
+    }
+
+    /// A connection opened. `address` is for display only.
+    pub fn connect(&mut self, conn: ConnId, address: &str, now: DateTime<Utc>) {
+        self.conns.insert(
+            conn,
+            Conn {
+                device: None,
+                client: String::new(),
+                address: address.to_string(),
+                connected_at: now,
+                synced_to: 0,
+            },
+        );
+    }
+
+    pub fn disconnect(&mut self, conn: ConnId) {
+        self.conns.remove(&conn);
+    }
+
+    /// Connections that have said hello: the ones the host sends pushes to.
+    pub fn subscribers(&self) -> impl Iterator<Item = ConnId> + '_ {
+        self.conns
+            .iter()
+            .filter(|(_, c)| c.device.is_some())
+            .map(|(id, _)| *id)
+    }
+
+    /// What the hub holds and who's connected. The host adds what only it
+    /// can measure (CPU, memory) to `resources`.
+    pub fn status(&self, now: DateTime<Utc>) -> Result<pb::HubStatus, StoreError> {
+        let stats = self.store.stats(now)?;
+        Ok(pb::HubStatus {
+            runs_on: self.runs_on.clone(),
+            protocol_version: PROTOCOL_VERSION,
+            started_at: Some(timestamp(self.started_at)),
+            head: self.store.head()?,
+            records: stats.records,
+            edges: stats.edges,
+            live_leases: stats.live_leases,
+            storage_bytes: stats.bytes,
+            connections: self
+                .conns
+                .iter()
+                .map(|(id, c)| pb::Connection {
+                    id: *id,
+                    device: c.device.clone().unwrap_or_default(),
+                    client: c.client.clone(),
+                    address: c.address.clone(),
+                    connected_at: Some(timestamp(c.connected_at)),
+                    synced_to: c.synced_to,
+                })
+                .collect(),
+            resources: None,
+        })
     }
 
     pub fn store(&self) -> &S {
@@ -66,26 +150,28 @@ impl<S: HubStore> Hub<S> {
         self.store
     }
 
-    /// Handles one binary frame from `device`. Undecodable frames get an
-    /// error reply.
-    pub fn handle_frame(&mut self, device: &str, frame: &[u8], now: DateTime<Utc>) -> Handled {
+    /// Handles one binary frame from connection `conn`. Undecodable frames
+    /// get an error reply.
+    pub fn handle_frame(&mut self, conn: ConnId, frame: &[u8], now: DateTime<Utc>) -> Handled {
         match tab_protocol::decode_client(frame) {
-            Ok((id, req)) => self.handle(device, id, req, now),
+            Ok((id, req)) => self.handle(conn, id, req, now),
             Err(reply) => Handled { reply, push: None },
         }
     }
 
-    /// Handles one request from `device`.
-    pub fn handle(&mut self, device: &str, id: u64, req: Req, now: DateTime<Utc>) -> Handled {
-        match self.answer(device, id, req, now) {
+    /// Handles one request from connection `conn`.
+    pub fn handle(&mut self, conn: ConnId, id: u64, req: Req, now: DateTime<Utc>) -> Handled {
+        match self.answer(conn, id, req, now) {
             Ok(h) => h,
             Err(reply) => Handled { reply, push: None },
         }
     }
 
+    // The error is the reply to send, so its size doesn't matter.
+    #[allow(clippy::result_large_err)]
     fn answer(
         &mut self,
-        device: &str,
+        conn: ConnId,
         id: u64,
         req: Req,
         now: DateTime<Utc>,
@@ -95,11 +181,39 @@ impl<S: HubStore> Hub<S> {
             reply: ServerEnvelope::new(id, body),
             push: None,
         };
+        let Some(c) = self.conns.get_mut(&conn) else {
+            return Err(ServerEnvelope::error(
+                id,
+                pb::error::Code::BadRequest,
+                "unknown connection",
+            ));
+        };
+        if let Req::Hello(h) = &req {
+            if h.device.is_empty() {
+                return Err(ServerEnvelope::error(
+                    id,
+                    pb::error::Code::BadRequest,
+                    "hello needs a device id",
+                ));
+            }
+            c.device = Some(h.device.clone());
+            c.client = h.client.clone();
+            c.synced_to = h.since;
+        }
+        let Some(device) = c.device.clone() else {
+            return Err(ServerEnvelope::error(
+                id,
+                pb::error::Code::BadRequest,
+                "say hello first",
+            ));
+        };
+        let device = device.as_str();
         Ok(match req {
             Req::Hello(_) => reply(Res::Welcome(pb::Welcome {
                 protocol_version: PROTOCOL_VERSION,
                 head: self.store.head().map_err(err)?,
             })),
+            Req::GetHubStatus(_) => reply(Res::HubStatus(self.status(now).map_err(err)?)),
             Req::Apply(a) => {
                 let ops = a
                     .ops
@@ -109,8 +223,16 @@ impl<S: HubStore> Hub<S> {
                     .map_err(|e| {
                         ServerEnvelope::error(id, pb::error::Code::BadRequest, e.to_string())
                     })?;
+                let before = self.store.head().map_err(err)?;
                 let applied = self.store.apply(device, &ops, now).map_err(err)?;
                 let head = self.store.head().map_err(err)?;
+                // Everyone gets the push; the writer, if it was caught up,
+                // is still caught up.
+                for (other, c) in self.conns.iter_mut() {
+                    if *other != conn || c.synced_to == before {
+                        c.synced_to = head;
+                    }
+                }
                 let push = (!applied.is_empty()).then(|| {
                     ServerEnvelope::new(
                         0,
@@ -138,6 +260,9 @@ impl<S: HubStore> Hub<S> {
                 let mut changes = self.store.changes_since(g.since, limit + 1).map_err(err)?;
                 let more = changes.len() > limit;
                 changes.truncate(limit);
+                if let (Some(c), Some(last)) = (self.conns.get_mut(&conn), changes.last()) {
+                    c.synced_to = c.synced_to.max(last.seq);
+                }
                 reply(Res::Changes(pb::Changes {
                     changes: changes.iter().map(Into::into).collect(),
                     head: self.store.head().map_err(err)?,

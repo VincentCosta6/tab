@@ -52,7 +52,14 @@ scripts/storage-tests.sh  The full storage suite, outside CI (see Storage tests)
 
 Coming next (designed): `apps/mobile/`, `cloud/worker/` (workers-rs host for tab-hub on Durable Objects), `crates/tab-hub-org/` (org features).
 
-**Where things run today.** The desktop app still runs entirely on tab-core's engine and its own SQLite file, exactly as before this split. tab-hub is built and tested but not wired into the desktop yet; moving the engine's writes onto the hub's change log is the next step.
+**Where things run today.** The desktop app runs its own hub (`tab_core::local_hub::LocalHub`): a `tab-hub` on SQLite in `hub.db` next to `tab.db`. The engine still reads and writes `tab.db` as before, and a sync layer keeps the two in step:
+
+- **Outbox.** Triggers on every synced table (`store::hub_sync::SYNCED`: projects, items, notes, context, entities, graph edges, activity, workflows and runs) record each changed key in `hub_outbox`. A loop drains it every 150ms and sends the current rows to the hub as `Put`/`Delete` ops in one `Apply`, skipping rows the hub already has unchanged. Rows are keyed by table, so a record is `kind = <table>`, `id = <JSON array of the primary key>`, body = the row as JSON.
+- **Backfill.** On first launch every existing row is queued once, so the hub starts with everything already in `tab.db`.
+- **Other devices.** The hub listens on `ws://127.0.0.1:47850/hub?token=<MCP token>` (binary Protobuf frames, the next free port if taken). Changes another device applies are written back into `tab.db` with the triggers switched off (no echo) and announced to the UI as item changes, and pushed to every other connected device.
+- **Status.** Settings → Hub shows where the hub runs, its address, the app process's CPU and memory, the size of the log and store, changes still waiting to sync, and each connected device with how far behind it is.
+
+So `tab.db` is still where a write lands first, and the hub has it moments later. Making the hub the only writer (the engine reading through it) is the step after this, and the one that lets the same app point at a cloud hub instead.
 
 ### Hub protocol (built)
 

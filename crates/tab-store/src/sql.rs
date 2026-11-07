@@ -352,6 +352,28 @@ pub fn expire_leases(now: &str) -> sea_query::DeleteStatement {
         .to_owned()
 }
 
+pub fn count_records() -> SelectStatement {
+    Query::select()
+        .expr(Expr::col(HubRecords::Rid).count())
+        .from(HubRecords::Table)
+        .to_owned()
+}
+
+pub fn count_edges() -> SelectStatement {
+    Query::select()
+        .expr(Expr::col(HubEdges::Rel).count())
+        .from(HubEdges::Table)
+        .to_owned()
+}
+
+pub fn count_live_leases(now: &str) -> SelectStatement {
+    Query::select()
+        .expr(Expr::col(HubLeases::Key).count())
+        .from(HubLeases::Table)
+        .and_where(Expr::col(HubLeases::ExpiresAt).gt(now))
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use tab_domain::lease::{Claim, MAX_TTL, MIN_TTL};
 use tab_domain::ops::{Edge, MAX_BATCH, MAX_BODY_BYTES, Op, SearchHit};
 
-use crate::{HubStore, StoreError};
+use crate::{HubStore, StoreError, StoreStats};
 
 /// Makes one `#[test]` per conformance check, each on a fresh store from
 /// `$make` (an expression evaluated once per test).
@@ -117,7 +117,13 @@ macro_rules! conformance_tests {
             expire_is_idempotent,
             leases_are_per_key,
             leases_do_not_touch_the_log,
-            stale_tokens_lose_after_takeover
+            stale_tokens_lose_after_takeover,
+            // Stats
+            stats_of_an_empty_store_are_zero,
+            stats_count_records_and_edges,
+            stats_count_only_live_leases,
+            stats_bytes_grow_with_data,
+            stats_do_not_count_the_log_as_records
         );
     };
     (@each $make:expr; $($name:ident),* $(,)?) => {
@@ -1166,4 +1172,65 @@ pub fn stale_tokens_lose_after_takeover<S: HubStore>(s: &mut S) {
     assert!(new.token > old.token);
     assert!(!fence_ok(Some(&new), old.token, t(TTL + 2)));
     assert!(fence_ok(Some(&new), new.token, t(TTL + 2)));
+}
+
+// ---- stats ----
+
+pub fn stats_of_an_empty_store_are_zero<S: HubStore>(s: &mut S) {
+    let st = s.stats(t(0)).unwrap();
+    assert_eq!((st.records, st.edges, st.live_leases), (0, 0, 0), "{st:?}");
+}
+
+pub fn stats_count_records_and_edges<S: HubStore>(s: &mut S) {
+    apply(
+        s,
+        &[
+            item("1", "a"),
+            item("2", "b"),
+            put("note", "1", json!({})),
+            link("item:1", "p", "in"),
+            link("item:2", "p", "in"),
+            link("item:2", "p", "in"),
+        ],
+        t(0),
+    );
+    let st = s.stats(t(0)).unwrap();
+    assert_eq!((st.records, st.edges), (3, 2));
+    apply(s, &[del("item", "1"), item("2", "rewritten")], t(1));
+    let st = s.stats(t(1)).unwrap();
+    assert_eq!((st.records, st.edges), (2, 1));
+}
+
+pub fn stats_count_only_live_leases<S: HubStore>(s: &mut S) {
+    claim(s, "a", "mac", 0);
+    claim(s, "b", "mac", 10);
+    claim(s, "c", "mac", 10);
+    s.release_lease("c", "mac", t(11)).unwrap();
+    assert_eq!(s.stats(t(11)).unwrap().live_leases, 2);
+    // "a" lapsed at TTL even though nothing expired it yet.
+    assert_eq!(s.stats(t(TTL)).unwrap().live_leases, 1);
+    assert_eq!(s.stats(t(10 + TTL)).unwrap().live_leases, 0);
+}
+
+pub fn stats_bytes_grow_with_data<S: HubStore>(s: &mut S) {
+    let before = s.stats(t(0)).unwrap().bytes;
+    let ops: Vec<_> = (0..300)
+        .map(|i| put("item", &i.to_string(), json!({ "title": "x".repeat(500) })))
+        .collect();
+    apply(s, &ops, t(0));
+    let after = s.stats(t(0)).unwrap().bytes;
+    assert!(after > before, "{before} -> {after}");
+    assert!(
+        after >= 300 * 500,
+        "{after} bytes can't hold 150 KB of bodies"
+    );
+}
+
+pub fn stats_do_not_count_the_log_as_records<S: HubStore>(s: &mut S) {
+    for i in 0..5 {
+        apply(s, &[item("same", &i.to_string())], t(i));
+    }
+    let st: StoreStats = s.stats(t(5)).unwrap();
+    assert_eq!(st.records, 1);
+    assert_eq!(s.head().unwrap(), 5);
 }

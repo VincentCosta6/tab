@@ -19,6 +19,11 @@ tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 tab-domain = { path = "../tab-domain" }
+tab-protocol = { path = "../tab-protocol" }
+prost-types = "0.14"
+tab-store = { path = "../tab-store", features = ["sqlite"] }
+tab-hub = { path = "../tab-hub" }
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 sha2.workspace = true
 axum.workspace = true
 futures-util.workspace = true
@@ -31,4 +36,5 @@ sqlite-vec = "0.1.6"
 model2vec-rs = { version = "0.4", default-features = false, features = ["fancy-regex", "local-only"] }
 
 [dev-dependencies]
+tokio-tungstenite = "0.28"
 tokio = { workspace = true, features = ["test-util"] }

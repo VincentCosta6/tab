@@ -63,6 +63,18 @@ impl From<OpError> for StoreError {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// Sizes, for the Hub page in Settings and for monitoring.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoreStats {
+    pub records: u64,
+    pub edges: u64,
+    /// Leases still live at the time asked.
+    pub live_leases: u64,
+    /// Roughly how much space the data takes. Each backend measures its
+    /// own way (file pages for SQLite), so compare it only with itself.
+    pub bytes: u64,
+}
+
 /// Where a hub keeps its state. See the crate docs.
 pub trait HubStore {
     /// The latest sequence number, 0 when empty.
@@ -98,6 +110,9 @@ pub trait HubStore {
 
     /// Edges from or to `node`, sorted.
     fn graph_neighbors(&self, node: &str, limit: usize) -> Result<Vec<Edge>>;
+
+    /// How much the store holds right now.
+    fn stats(&self, now: DateTime<Utc>) -> Result<StoreStats>;
 }
 
 #[cfg(test)]

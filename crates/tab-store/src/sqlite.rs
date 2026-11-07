@@ -16,7 +16,7 @@ use tab_domain::lease::{self, Claim, Lease};
 use tab_domain::ops::{self, Applied, Edge, Op, Record, SearchHit, Seq};
 
 use crate::sql;
-use crate::{HubStore, Result, StoreError};
+use crate::{HubStore, Result, StoreError, StoreStats};
 
 /// SQLite-only: the trigram index over each record's lowercased text,
 /// keyed by the record's row id.
@@ -329,10 +329,29 @@ impl HubStore for SqliteStore {
             })
         })
     }
+
+    fn stats(&self, now: DateTime<Utc>) -> Result<StoreStats> {
+        let count = |q: &sea_query::SelectStatement| -> Result<u64> {
+            Ok(one(&self.conn, q, |r| r.get::<_, i64>(0))?.unwrap_or(0) as u64)
+        };
+        // SQLite-specific: the file's size in pages.
+        let bytes: i64 = self
+            .conn
+            .query_row(
+                "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(db)?;
+        Ok(StoreStats {
+            records: count(&sql::count_records())?,
+            edges: count(&sql::count_edges())?,
+            live_leases: count(&sql::count_live_leases(&ts(now)))?,
+            bytes: bytes as u64,
+        })
+    }
 }
 
-/// SQLite-specific behavior the shared suite can't reach: what happens when
-/// the file holds something this code didn't write.
 #[cfg(test)]
 mod tests {
     use super::*;

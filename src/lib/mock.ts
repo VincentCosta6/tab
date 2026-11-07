@@ -366,6 +366,19 @@ export const mockApi = {
           checkouts: mockCheckouts,
         };
         case "storage_clean": return { removed: 3, bytes: 2_200_000 };
+        case "hub_status": {
+          const started = new Date(Date.now() - 3 * 3600_000).toISOString();
+          return {
+            runs_on: "local", protocol_version: 1, started_at: started,
+            url: "ws://127.0.0.1:47850/hub", path: "C:\\Users\\vince\\AppData\\Roaming\\dev.tab.app\\hub.db",
+            head: 18_422, records: 6_310, edges: 0, live_leases: 1, storage_bytes: 41_943_040,
+            cpu_percent: 2.4 + Math.random() * 3, memory_bytes: 186_000_000 + Math.round(Math.random() * 4_000_000), cpus: 12, pending: 0,
+            connections: [
+              { id: 0, device: "this-computer", client: "tab-desktop/0.1.0", address: "this app", connected_at: started, synced_to: 18_422, behind: 0, this_app: true },
+              { id: 3, device: "pixel-8", client: "tab-mobile/0.1.0", address: "127.0.0.1:53122", connected_at: new Date(Date.now() - 600_000).toISOString(), synced_to: 18_410, behind: 12, this_app: false },
+            ],
+          };
+        }
         case "storage_remove_checkouts": {
           const gone = mockCheckouts.filter((c) => !args.repo || (c.repo === args.repo && c.number === args.number));
           mockCheckouts = mockCheckouts.filter((c) => !gone.includes(c));

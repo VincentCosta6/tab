@@ -21,6 +21,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and the phased p
 - **Cached rich previews**: previews live in SQLite and in a persisted React Query cache, so rendering never waits on an API. A background refresher updates stale previews only when budgets allow.
 - **GitHub module**: a Reviews tab and a built-in VS Code (Monaco) side-by-side diff with line comments posted to the PR. Sample PRs work without a token.
 - **Onboarding**: first launch walks through picking and checking an agent, then connections.
+- **Hub**: the app runs its own hub (`hub.db`) and keeps it in step with `tab.db`; other devices can sync over a local WebSocket. Settings → Hub shows CPU, memory, storage, pending changes and connected devices.
 - **Settings**: profile, deterministic ranking rules, the AI layer, agent, and MCP details.
 
 ## Develop

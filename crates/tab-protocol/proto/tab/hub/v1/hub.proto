@@ -31,6 +31,7 @@ message ClientEnvelope {
     ReleaseLease release_lease = 15;
     Search search = 16;
     GetNeighbors get_neighbors = 17;
+    GetHubStatus get_hub_status = 18;
   }
 }
 
@@ -49,6 +50,7 @@ message ServerEnvelope {
     SearchResults search_results = 17;
     Neighbors neighbors = 18;
     Error error = 19;
+    HubStatus hub_status = 20;
   }
 }
 
@@ -174,6 +176,9 @@ message GetNeighbors {
   uint32 limit = 2;
 }
 
+// What the hub is doing: for the Hub page in Settings.
+message GetHubStatus {}
+
 // ---- Replies and pushes ----
 
 message Welcome {
@@ -244,4 +249,41 @@ message Error {
   }
   Code code = 1;
   string message = 2;
+}
+
+message HubStatus {
+  // Where this hub runs: "local" (inside the desktop app) or "cloud".
+  string runs_on = 1;
+  uint32 protocol_version = 2;
+  google.protobuf.Timestamp started_at = 3;
+  // Latest change.
+  uint64 head = 4;
+  uint64 records = 5;
+  uint64 edges = 6;
+  uint64 live_leases = 7;
+  // Storage used, as the backend measures it.
+  uint64 storage_bytes = 8;
+  repeated Connection connections = 9;
+  // Filled in by the host when it can measure them. Unset in the cloud,
+  // where a Durable Object can't see its own CPU or memory.
+  Resources resources = 10;
+}
+
+// A device or runner connected to the hub.
+message Connection {
+  uint64 id = 1;
+  // Empty until it says hello.
+  string device = 2;
+  string client = 3;
+  // Where it connected from, as the host sees it.
+  string address = 4;
+  google.protobuf.Timestamp connected_at = 5;
+  // The last change the hub has sent it; head minus this is how far behind it is.
+  uint64 synced_to = 6;
+}
+
+message Resources {
+  // Of one core, so a busy multi-threaded process can exceed 100.
+  double cpu_percent = 1;
+  uint64 memory_bytes = 2;
 }

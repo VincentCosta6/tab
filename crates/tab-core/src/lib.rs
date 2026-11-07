@@ -28,6 +28,7 @@ pub mod embed;
 pub mod engine;
 pub mod gateway;
 pub mod gh;
+pub mod local_hub;
 pub mod lsp;
 pub mod mcp;
 pub mod ranker;

@@ -8,6 +8,7 @@ mod activity;
 mod context;
 mod graph;
 mod http;
+pub mod hub_sync;
 mod items;
 mod previews;
 mod projects;

@@ -22,14 +22,25 @@ fn put(id: &str, title: &str) -> pb::Op {
 }
 
 /// Sends a request as a binary frame, the way a socket would.
+const MAC: ConnId = 1;
+const PHONE: ConnId = 2;
+
 fn send<S: HubStore>(
     hub: &mut Hub<S>,
-    device: &str,
+    conn: ConnId,
     id: u64,
     req: Req,
     now: DateTime<Utc>,
 ) -> Handled {
-    hub.handle_frame(device, &encode(&ClientEnvelope::new(id, req)), now)
+    hub.handle_frame(conn, &encode(&ClientEnvelope::new(id, req)), now)
+}
+
+fn hello(device: &str, since: u64) -> Req {
+    Req::Hello(pb::Hello {
+        device: device.into(),
+        client: "test/1".into(),
+        since,
+    })
 }
 
 fn body(h: &Handled) -> &Res {
@@ -37,13 +48,27 @@ fn body(h: &Handled) -> &Res {
 }
 
 fn session<S: HubStore>(mut hub: Hub<S>) {
-    let h = send(&mut hub, "mac", 1, Req::Hello(pb::Hello::default()), t(0));
+    hub.connect(MAC, "in-process", t(0));
+    hub.connect(PHONE, "192.168.1.20", t(0));
+    // Nothing but hello until a connection says who it is.
+    let h = send(
+        &mut hub,
+        MAC,
+        1,
+        Req::GetChanges(pb::GetChanges::default()),
+        t(0),
+    );
+    assert!(matches!(body(&h), Res::Error(e) if e.message.contains("hello")));
+    let h = send(&mut hub, MAC, 1, Req::Hello(pb::Hello::default()), t(0));
+    assert!(matches!(body(&h), Res::Error(e) if e.message.contains("device")));
+    assert_eq!(hub.subscribers().count(), 0);
+    let h = send(&mut hub, MAC, 1, hello("mac", 0), t(0));
     assert!(matches!(body(&h), Res::Welcome(w) if w.head == 0 && w.protocol_version == 1));
 
     // A write replies with its sequence numbers and pushes the changes.
     let h = send(
         &mut hub,
-        "mac",
+        MAC,
         2,
         Req::Apply(pb::Apply {
             ops: vec![put("1", "Fix login"), put("2", "Review docs")],
@@ -58,10 +83,12 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
         matches!(&push.body, Some(Res::Changes(c)) if c.changes.len() == 2 && c.head == 2 && c.changes[0].by == "mac")
     );
 
+    send(&mut hub, PHONE, 30, hello("phone", 0), t(2));
+    assert_eq!(hub.subscribers().collect::<Vec<_>>(), [MAC, PHONE]);
     // Catching up pages.
     let h = send(
         &mut hub,
-        "phone",
+        PHONE,
         3,
         Req::GetChanges(pb::GetChanges { since: 0, limit: 1 }),
         t(2),
@@ -69,7 +96,7 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
     assert!(matches!(body(&h), Res::Changes(c) if c.changes.len() == 1 && c.more));
     let h = send(
         &mut hub,
-        "phone",
+        PHONE,
         4,
         Req::GetChanges(pb::GetChanges { since: 1, limit: 0 }),
         t(2),
@@ -78,7 +105,7 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
 
     let h = send(
         &mut hub,
-        "phone",
+        PHONE,
         5,
         Req::Search(pb::Search {
             query: "login".into(),
@@ -90,7 +117,7 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
 
     let h = send(
         &mut hub,
-        "phone",
+        PHONE,
         6,
         Req::GetRecord(pb::GetRecord {
             kind: "item".into(),
@@ -107,10 +134,10 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
     );
 
     // Leases belong to the device that asked.
-    let claim = |hub: &mut Hub<S>, device: &str, now| {
+    let claim = |hub: &mut Hub<S>, conn: ConnId, now| {
         let h = send(
             hub,
-            device,
+            conn,
             7,
             Req::ClaimLease(pb::ClaimLease {
                 key: "item:1".into(),
@@ -124,10 +151,10 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
         }
     };
     assert_eq!(
-        claim(&mut hub, "mac", t(3)).outcome,
+        claim(&mut hub, MAC, t(3)).outcome,
         pb::lease_claim::Outcome::Granted as i32
     );
-    let held = claim(&mut hub, "phone", t(4));
+    let held = claim(&mut hub, PHONE, t(4));
     assert_eq!(held.outcome, pb::lease_claim::Outcome::Held as i32);
     assert_eq!(held.lease.unwrap().holder, "mac");
     assert_eq!(hub.tick(t(10)).unwrap(), None);
@@ -144,7 +171,7 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
     };
     let h = send(
         &mut hub,
-        "mac",
+        MAC,
         8,
         Req::Apply(pb::Apply {
             ops: vec![put("3", "ok"), bad],
@@ -156,7 +183,7 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
     assert!(h.push.is_none());
     let h = send(
         &mut hub,
-        "mac",
+        MAC,
         9,
         Req::Apply(pb::Apply {
             ops: vec![put("", "no id")],
@@ -165,18 +192,49 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
     );
     assert!(matches!(body(&h), Res::Error(e) if e.code == pb::error::Code::BadRequest as i32));
     assert_eq!(hub.store().head().unwrap(), 2);
-    let h = hub.handle_frame("mac", b"\xff\xff", t(5));
+    let h = hub.handle_frame(MAC, b"\xff\xff", t(5));
     assert!(matches!(body(&h), Res::Error(_)));
+    let h = send(&mut hub, 99, 10, hello("ghost", 0), t(5));
+    assert!(matches!(body(&h), Res::Error(e) if e.message.contains("unknown connection")));
+
+    // Status: what's stored and who's connected, and how far along.
+    let h = send(
+        &mut hub,
+        PHONE,
+        11,
+        Req::GetHubStatus(pb::GetHubStatus {}),
+        t(6),
+    );
+    let Res::HubStatus(st) = body(&h) else {
+        panic!("{h:?}")
+    };
+    assert_eq!(st.runs_on, "local");
+    assert_eq!(
+        (st.head, st.records, st.edges, st.live_leases),
+        (2, 2, 0, 0)
+    );
+    assert!(st.storage_bytes > 0);
+    let devices: Vec<_> = st
+        .connections
+        .iter()
+        .map(|c| (c.device.as_str(), c.address.as_str(), c.synced_to))
+        .collect();
+    assert_eq!(
+        devices,
+        [("mac", "in-process", 2), ("phone", "192.168.1.20", 2)]
+    );
+    hub.disconnect(PHONE);
+    assert_eq!(hub.status(t(7)).unwrap().connections.len(), 1);
 }
 
 #[test]
 fn a_session_in_memory() {
-    session(Hub::new(MemStore::new()));
+    session(Hub::new(MemStore::new(), "local", t(0)));
 }
 
 #[test]
 fn a_session_on_sqlite() {
-    session(Hub::new(SqliteStore::in_memory().unwrap()));
+    session(Hub::new(SqliteStore::in_memory().unwrap(), "local", t(0)));
 }
 
 fn history<S: HubStore>(s: &mut S) {
@@ -247,4 +305,69 @@ fn migrating_local_to_cloud_and_back_keeps_everything() {
         migrate::copy(&cloud, &mut back, |_| {}),
         Err(migrate::MigrateError::NotEmpty { head: 5 })
     ));
+}
+
+#[test]
+fn sync_positions_follow_what_each_connection_was_sent() {
+    let mut hub = Hub::new(MemStore::new(), "cloud", t(0));
+    for (conn, name) in [(1, "mac"), (2, "phone"), (3, "runner")] {
+        hub.connect(conn, "", t(0));
+        send(&mut hub, conn, 1, hello(name, 0), t(0));
+    }
+    let synced = |hub: &Hub<MemStore>| -> Vec<u64> {
+        hub.status(t(9))
+            .unwrap()
+            .connections
+            .iter()
+            .map(|c| c.synced_to)
+            .collect()
+    };
+    // A write is pushed to everyone, so everyone is at the new head.
+    send(
+        &mut hub,
+        1,
+        2,
+        Req::Apply(pb::Apply {
+            ops: vec![put("1", "a"), put("2", "b")],
+        }),
+        t(1),
+    );
+    assert_eq!(synced(&hub), [2, 2, 2]);
+    // A device that reconnects says where it was, then catches up by paging.
+    hub.disconnect(3);
+    send(
+        &mut hub,
+        1,
+        3,
+        Req::Apply(pb::Apply {
+            ops: vec![put("3", "c")],
+        }),
+        t(2),
+    );
+    hub.connect(4, "", t(3));
+    send(&mut hub, 4, 1, hello("runner", 2), t(3));
+    assert_eq!(synced(&hub), [3, 3, 2]);
+    send(
+        &mut hub,
+        4,
+        2,
+        Req::GetChanges(pb::GetChanges { since: 2, limit: 0 }),
+        t(3),
+    );
+    assert_eq!(synced(&hub), [3, 3, 3]);
+    // A writer that was behind stays behind until it catches up.
+    send(&mut hub, 4, 3, hello("runner", 0), t(4));
+    send(
+        &mut hub,
+        4,
+        4,
+        Req::Apply(pb::Apply {
+            ops: vec![put("4", "d")],
+        }),
+        t(4),
+    );
+    assert_eq!(synced(&hub), [4, 4, 0]);
+    let st = hub.status(t(9)).unwrap();
+    assert_eq!(st.runs_on, "cloud");
+    assert_eq!(st.started_at.unwrap().seconds, t(0).timestamp());
 }

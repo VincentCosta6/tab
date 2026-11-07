@@ -86,6 +86,9 @@ pub fn encode<M: Message>(msg: &M) -> Vec<u8> {
 /// Decodes one client frame, or gives the error reply to send back.
 /// A frame with no body (a newer client's message this hub doesn't know)
 /// is answered as unsupported rather than dropped.
+// The error is the reply itself, sent once per bad frame, so its size
+// doesn't matter.
+#[allow(clippy::result_large_err)]
 pub fn decode_client(frame: &[u8]) -> Result<(u64, client_envelope::Body), ServerEnvelope> {
     let env = ClientEnvelope::decode(frame)
         .map_err(|e| ServerEnvelope::error(0, pb::error::Code::BadRequest, e.to_string()))?;

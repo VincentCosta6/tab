@@ -7,7 +7,7 @@ use chrono::{DateTime, Duration, Utc};
 use tab_domain::lease::{self, Claim, Lease};
 use tab_domain::ops::{self, Applied, Edge, Op, Record, SearchHit, Seq};
 
-use crate::{HubStore, Result};
+use crate::{HubStore, Result, StoreStats};
 
 #[derive(Debug, Default, Clone)]
 pub struct MemStore {
@@ -165,5 +165,25 @@ impl HubStore for MemStore {
             .take(limit)
             .cloned()
             .collect())
+    }
+
+    fn stats(&self, now: DateTime<Utc>) -> Result<StoreStats> {
+        let records: usize = self
+            .records
+            .values()
+            .map(|r| r.kind.len() + r.id.len() + r.body.to_string().len())
+            .sum();
+        let edges: usize = self
+            .edges
+            .iter()
+            .map(|e| e.from.len() + e.to.len() + e.rel.len())
+            .sum();
+        let log: usize = self.log.len() * std::mem::size_of::<Applied>();
+        Ok(StoreStats {
+            records: self.records.len() as u64,
+            edges: self.edges.len() as u64,
+            live_leases: self.leases.values().filter(|l| l.is_live(now)).count() as u64,
+            bytes: (records + edges + log) as u64,
+        })
     }
 }
