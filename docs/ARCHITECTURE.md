@@ -52,14 +52,17 @@ scripts/storage-tests.sh  The full storage suite, outside CI (see Storage tests)
 
 Coming next (designed): `apps/mobile/`, `cloud/worker/` (workers-rs host for tab-hub on Durable Objects), `crates/tab-hub-org/` (org features).
 
-**Where things run today.** The desktop app runs its own hub (`tab_core::local_hub::LocalHub`): a `tab-hub` on SQLite in `hub.db` next to `tab.db`. The engine still reads and writes `tab.db` as before, and a sync layer keeps the two in step:
+**Where things run today.** The desktop app runs its own hub (`tab_core::local_hub::LocalHub`): a `tab-hub` on SQLite in `hub.db` next to `tab.db`. The hub's change log is the source of truth; `tab.db` is this device's copy, kept because it holds the indexes, full-text search and vectors every screen reads. The engine keeps its SQL, and `store::hub_sync` keeps the copy and the hub in step:
 
-- **Outbox.** Triggers on every synced table (`store::hub_sync::SYNCED`: projects, items, notes, context, entities, graph edges, activity, workflows and runs) record each changed key in `hub_outbox`. A loop drains it every 150ms and sends the current rows to the hub as `Put`/`Delete` ops in one `Apply`, skipping rows the hub already has unchanged. Rows are keyed by table, so a record is `kind = <table>`, `id = <JSON array of the primary key>`, body = the row as JSON.
-- **Backfill.** On first launch every existing row is queued once, so the hub starts with everything already in `tab.db`.
-- **Other devices.** The hub listens on `ws://127.0.0.1:47850/hub?token=<MCP token>` (binary Protobuf frames, the next free port if taken). Changes another device applies are written back into `tab.db` with the triggers switched off (no echo) and announced to the UI as item changes, and pushed to every other connected device.
+- **Out, as each change commits.** Triggers on every synced table (`store::hub_sync::SYNCED`: projects, items, notes, context, entities, graph edges, activity, workflows and runs) record each changed key in `hub_outbox`, in the same transaction. A SQLite commit hook wakes the sync loop, which sends the current rows to the hub as `Put`/`Delete` ops in one `Apply` (skipping rows the hub already has unchanged). A record is `kind = <table>`, `id = <JSON array of the primary key>`, body = the row as JSON.
+- **The hub decides.** If the hub refuses a change (validation, size limits), that row is put back to the hub's version locally. The rest of the batch still goes through.
+- **In, from the log.** The app then reads the hub's log with `GetChanges` from where this copy last got to (`hub_sync.pulled_to`) and writes the hub's rows into `tab.db` with the triggers off, so nothing echoes. Rows changed here that the hub hasn't seen yet keep the local change. Rows already identical are skipped, and the UI is told about the rest. Other devices' changes arrive this way, and a fresh or deleted `tab.db` is rebuilt from the hub.
+- **Twins.** Two devices can ingest the same thing (one GitHub notification) under different ids. When a hub row collides with a local row on a natural key, the one later in the log wins. Every device replays the same order, so they keep the same one.
+- **First meeting.** An empty hub gets everything in `tab.db`. A `tab.db` meeting a hub that already has data takes the hub's rows, then sends only what the hub lacked. If `hub.db` is replaced by one that's behind this copy, they're introduced again.
+- **Other devices.** The hub listens on `ws://127.0.0.1:47850/hub?token=<MCP token>` (binary Protobuf frames; the next free port if taken), and their changes wake the same sync loop.
 - **Status.** Settings → Hub shows where the hub runs, its address, the app process's CPU and memory, the size of the log and store, changes still waiting to sync, and each connected device with how far behind it is.
 
-So `tab.db` is still where a write lands first, and the hub has it moments later. Making the hub the only writer (the engine reading through it) is the step after this, and the one that lets the same app point at a cloud hub instead.
+The sync speaks only the hub protocol (`Apply`, `GetChanges`), so pointing the app at a cloud hub replaces the in-process call with the WebSocket and nothing else. Not synced, on purpose: caches (HTTP, AI, previews, embeddings), the API audit log, usage counters, and agent chats, which belong to the machine running the agent.
 
 ### Hub protocol (built)
 

@@ -2,12 +2,21 @@
 //!
 //! This is the "free" setup from the plan: [`tab_hub::Hub`] on a local
 //! SQLite file (`hub.db`, next to `tab.db`). The hub's change log is the
-//! record every device syncs from, and `tab.db` is this device's copy (see
-//! [`crate::store::hub_sync`]): every change to a synced table is queued in
-//! the same transaction and sent to the hub moments later as a whole-row
-//! `Put` or `Delete`, and changes other devices send are written back into
-//! `tab.db` and announced to the UI. The first launch copies everything
-//! already in `tab.db` into the hub.
+//! source of truth, and `tab.db` is this device's copy (see
+//! [`crate::store::hub_sync`]):
+//!
+//! - Every change to a synced table is queued in the same transaction and
+//!   sent to the hub as soon as it commits, as a whole-row `Put` or
+//!   `Delete`. A change the hub refuses is rolled back to the hub's version.
+//! - The app then reads the hub's log from where it last got to, so other
+//!   devices' changes land in `tab.db` (and the UI) the same way, and a
+//!   fresh `tab.db` is rebuilt from the hub.
+//! - The first launch copies everything already in `tab.db` into an empty
+//!   hub; a `tab.db` meeting a hub that already has data takes the hub's
+//!   rows and adds only what the hub doesn't have.
+//!
+//! The sync speaks the hub protocol (`Apply`, `GetChanges`), so the same
+//! loop can later point at a hub in the cloud.
 //!
 //! The hub also listens for other devices on a localhost WebSocket
 //! (`ws://127.0.0.1:<port>/hub?token=…`, binary Protobuf frames from
@@ -30,8 +39,8 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tab_domain::ops::Op;
 use tab_hub::{ConnId, Handled, Hub};
+use tab_protocol::encode;
 use tab_protocol::pb::{self, client_envelope::Body as Req};
-use tab_protocol::{ServerEnvelope, encode};
 use tab_store::HubStore;
 use tab_store::sqlite::SqliteStore;
 use tokio::sync::broadcast;
@@ -43,8 +52,10 @@ use crate::store::Store;
 const APP: ConnId = 0;
 /// How often lapsed leases are expired.
 const TICK: Duration = Duration::from_secs(5);
-/// How often the outbox is checked when it was empty.
-const DRAIN: Duration = Duration::from_millis(150);
+/// How often sync runs when nothing woke it, as a backstop.
+const IDLE: Duration = Duration::from_secs(5);
+/// Changes read from the hub per request.
+const PULL: u32 = 500;
 
 pub struct LocalHub {
     hub: Mutex<Hub<SqliteStore>>,
@@ -58,6 +69,8 @@ pub struct LocalHub {
     local: OnceLock<(Arc<Store>, broadcast::Sender<EngineEvent>)>,
     /// None where the OS won't say.
     sys: Mutex<Option<sysinfo::System>>,
+    /// Woken when another device changes something.
+    remote: tokio::sync::Notify,
 }
 
 /// What the Hub page in Settings shows.
@@ -124,88 +137,239 @@ impl LocalHub {
             url: OnceLock::new(),
             local: OnceLock::new(),
             sys: Mutex::new(sysinfo::System::new().ok()),
+            remote: tokio::sync::Notify::new(),
         }))
     }
 
     /// Runs one request as the app, sending any push to other devices.
-    fn request(&self, req: Req) -> anyhow::Result<()> {
+    fn request(&self, req: Req) -> anyhow::Result<pb::server_envelope::Body> {
         let id = self.next_request.fetch_add(1, Ordering::Relaxed);
         let handled = self.hub.lock().unwrap().handle(APP, id, req, Utc::now());
         if let Some(push) = &handled.push {
             let _ = self.pushes.send((APP, Arc::new(encode(push))));
         }
-        reply_ok(handled)
+        match handled.reply.body {
+            Some(pb::server_envelope::Body::Error(e)) => Err(anyhow::anyhow!("hub: {}", e.message)),
+            Some(body) => Ok(body),
+            None => Err(anyhow::anyhow!("hub: empty reply")),
+        }
+    }
+
+    fn apply(&self, ops: &[Op]) -> anyhow::Result<()> {
+        self.request(Req::Apply(pb::Apply {
+            ops: ops.iter().map(Into::into).collect(),
+        }))
+        .map(|_| ())
+    }
+
+    fn hub_record(&self, kind: &str, id: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        Ok(self
+            .hub
+            .lock()
+            .unwrap()
+            .store()
+            .get(kind, id)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .map(|r| r.body))
+    }
+
+    fn head(&self) -> anyhow::Result<u64> {
+        self.hub
+            .lock()
+            .unwrap()
+            .store()
+            .head()
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Sends one batch from the outbox. Returns how many rows it handled.
-    fn drain_once(&self, store: &Store) -> anyhow::Result<usize> {
+    fn push_once(&self, store: &Store) -> anyhow::Result<usize> {
         let rows = store.hub_outbox_take(tab_domain::ops::MAX_BATCH)?;
         let Some(last) = rows.last().map(|r| r.seq) else {
             return Ok(0);
         };
         let mut ops = Vec::with_capacity(rows.len());
-        {
-            let hub = self.hub.lock().unwrap();
-            let mut seen = std::collections::HashSet::new();
-            for r in rows.iter().rev() {
-                // The same row queued twice carries the same contents: send it once.
-                if !seen.insert((r.table.as_str(), r.key.as_str())) {
-                    continue;
-                }
-                let stored = hub
-                    .store()
-                    .get(&r.table, &r.key)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?
-                    .map(|rec| rec.body);
-                match (&r.row, stored) {
-                    (Some(row), Some(old)) if *row == old => {}
-                    (None, None) => {}
-                    (Some(row), _) => ops.push(Op::Put {
-                        kind: r.table.clone(),
-                        id: r.key.clone(),
-                        body: row.clone(),
-                    }),
-                    (None, Some(_)) => ops.push(Op::Delete {
-                        kind: r.table.clone(),
-                        id: r.key.clone(),
-                    }),
-                }
+        let mut seen = std::collections::HashSet::new();
+        for r in rows.iter().rev() {
+            // The same row queued twice carries the same contents: send it once.
+            if !seen.insert((r.table.as_str(), r.key.as_str())) {
+                continue;
+            }
+            match (&r.row, self.hub_record(&r.table, &r.key)?) {
+                (Some(row), Some(old)) if *row == old => {}
+                (None, None) => {}
+                (Some(row), _) => ops.push(Op::Put {
+                    kind: r.table.clone(),
+                    id: r.key.clone(),
+                    body: row.clone(),
+                }),
+                (None, Some(_)) => ops.push(Op::Delete {
+                    kind: r.table.clone(),
+                    id: r.key.clone(),
+                }),
             }
         }
         ops.reverse();
-        if !ops.is_empty() {
-            self.request(Req::Apply(pb::Apply {
-                ops: ops.iter().map(Into::into).collect(),
-            }))?;
+        let mut refused = vec![];
+        if !ops.is_empty() && self.apply(&ops).is_err() {
+            // Find which ones the hub won't take; the rest go through.
+            for op in &ops {
+                if let Err(e) = self.apply(std::slice::from_ref(op)) {
+                    let (kind, id) = match op {
+                        Op::Put { kind, id, .. } | Op::Delete { kind, id } => (kind, id),
+                        _ => continue,
+                    };
+                    tracing::warn!(error = %e, table = %kind, key = %id, "hub: refused a change; undoing it here");
+                    refused.push((kind.clone(), id.clone()));
+                }
+            }
         }
         store.hub_outbox_done(last)?;
+        // The hub is the source of truth: a change it refused is undone here.
+        if !refused.is_empty() {
+            let mut undo = Vec::with_capacity(refused.len());
+            for (kind, id) in refused {
+                let body = self.hub_record(&kind, &id)?;
+                undo.push((kind, id, body));
+            }
+            let changed = store.hub_apply_remote(&undo)?;
+            self.announce(store, &changed);
+        }
         Ok(rows.len())
     }
 
-    /// Starts syncing `tab.db` with the hub: copies what's there the first
-    /// time, sends local changes as they happen, and expires leases.
+    /// Reads one page of the hub's log into `tab.db`. Returns whether
+    /// there's more.
+    fn pull_once(&self, store: &Store) -> anyhow::Result<bool> {
+        let since = store.hub_pulled_to()?;
+        let pb::server_envelope::Body::Changes(page) =
+            self.request(Req::GetChanges(pb::GetChanges { since, limit: PULL }))?
+        else {
+            anyhow::bail!("hub: unexpected reply to GetChanges");
+        };
+        let Some(last) = page.changes.last().map(|c| c.seq) else {
+            return Ok(false);
+        };
+        // Only the latest version of each row matters.
+        let mut latest: Vec<(String, String, Option<serde_json::Value>)> = vec![];
+        let mut at = std::collections::HashMap::new();
+        for c in page.changes {
+            let row = match c.op.and_then(|o| Op::try_from(o).ok()) {
+                Some(Op::Put { kind, id, body }) => (kind, id, Some(body)),
+                Some(Op::Delete { kind, id }) => (kind, id, None),
+                _ => continue,
+            };
+            match at.get(&(row.0.clone(), row.1.clone())) {
+                Some(&i) => latest[i] = row,
+                None => {
+                    at.insert((row.0.clone(), row.1.clone()), latest.len());
+                    latest.push(row);
+                }
+            }
+        }
+        let changed = store.hub_apply_remote(&latest)?;
+        store.hub_set_pulled_to(last)?;
+        self.announce(store, &changed);
+        Ok(page.more)
+    }
+
+    /// Tells the UI about rows the hub changed here.
+    fn announce(&self, store: &Store, changed: &[(String, String)]) {
+        let Some((_, events)) = self.local.get() else {
+            return;
+        };
+        for (table, key) in changed {
+            let first = || {
+                serde_json::from_str::<Vec<serde_json::Value>>(key)
+                    .ok()
+                    .and_then(|k| k.into_iter().next())
+                    .and_then(|v| v.as_str().map(str::to_string))
+            };
+            match table.as_str() {
+                "items" => {
+                    if let Some(item) = first().and_then(|id| store.get(&id).ok().flatten()) {
+                        let _ = events.send(EngineEvent::ItemChanged {
+                            change: Change::Updated,
+                            item,
+                        });
+                    }
+                }
+                "item_context" => {
+                    let item = store
+                        .hub_row(table, key)
+                        .ok()
+                        .flatten()
+                        .and_then(|r| r["item_id"].as_str().map(str::to_string));
+                    if let Some(item_id) = item {
+                        let _ = events.send(EngineEvent::ContextChanged { item_id });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Sends everything waiting, then reads everything new.
+    fn sync(&self, store: &Store) -> anyhow::Result<()> {
+        while self.push_once(store)? > 0 {}
+        while self.pull_once(store)? {}
+        Ok(())
+    }
+
+    /// Introduces `tab.db` to the hub the first time they meet.
+    fn introduce(&self, store: &Store) -> anyhow::Result<()> {
+        store.hub_sync_install()?;
+        let head = self.head()?;
+        if store.hub_pulled_to()? > head {
+            tracing::warn!("hub: hub.db is behind this copy (replaced or reset); syncing again");
+            store.hub_forget()?;
+        }
+        if store.hub_backfilled()? {
+            return Ok(());
+        }
+        if head == 0 {
+            // An empty hub: it starts with everything here.
+            let n = store.hub_backfill_once()?;
+            tracing::info!(rows = n, "hub: copying tab.db into the hub");
+            return Ok(());
+        }
+        // The hub already has data: take its rows, then add what it lacks.
+        while self.pull_once(store)? {}
+        let mut missing = vec![];
+        for (table, key) in store.hub_local_keys()? {
+            if self.hub_record(&table, &key)?.is_none() {
+                missing.push((table, key));
+            }
+        }
+        tracing::info!(
+            rows = missing.len(),
+            "hub: joined a hub with data; adding what it lacked"
+        );
+        store.hub_queue(&missing)?;
+        store.hub_mark_backfilled()?;
+        Ok(())
+    }
+
+    /// Starts syncing `tab.db` with the hub: introduces them, then sends
+    /// each local change as it commits and reads each change the hub gets.
     pub fn follow(self: &Arc<Self>, store: Arc<Store>, events: broadcast::Sender<EngineEvent>) {
         let _ = self.local.set((store.clone(), events));
         let me = self.clone();
         tokio::spawn(async move {
-            let setup = store
-                .hub_sync_install()
-                .and_then(|_| store.hub_backfill_once());
-            match setup {
-                Ok(0) => {}
-                Ok(n) => tracing::info!(rows = n, "hub: copying tab.db into the hub"),
-                Err(e) => {
-                    tracing::error!(error = %e, "hub: couldn't set up sync; staying local");
-                    return;
-                }
+            if let Err(e) = me.introduce(&store) {
+                tracing::error!(error = %e, "hub: couldn't set up sync; staying local");
+                return;
             }
+            let commits = store.commits();
             loop {
-                match me.drain_once(&store) {
-                    Ok(n) if n > 0 => continue,
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error = %e, "hub: sending changes failed; will retry"),
+                if let Err(e) = me.sync(&store) {
+                    tracing::warn!(error = %e, "hub: sync failed; will retry");
                 }
-                tokio::time::sleep(DRAIN).await;
+                tokio::select! {
+                    _ = commits.notified() => {}
+                    _ = me.remote.notified() => {}
+                    _ = tokio::time::sleep(IDLE) => {}
+                }
             }
         });
         let me = self.clone();
@@ -222,45 +386,6 @@ impl LocalHub {
                 }
             }
         });
-    }
-
-    /// Writes changes another device made into `tab.db` and tells the UI.
-    fn apply_remote(&self, push: &ServerEnvelope) {
-        let Some(pb::server_envelope::Body::Changes(c)) = &push.body else {
-            return;
-        };
-        let Some((store, events)) = self.local.get() else {
-            return;
-        };
-        let mut rows = vec![];
-        for a in &c.changes {
-            let Some(op) = a.op.clone().and_then(|o| Op::try_from(o).ok()) else {
-                continue;
-            };
-            match op {
-                Op::Put { kind, id, body } => rows.push((kind, id, Some(body))),
-                Op::Delete { kind, id } => rows.push((kind, id, None)),
-                _ => {}
-            }
-        }
-        if let Err(e) = store.hub_apply_remote(&rows) {
-            tracing::warn!(error = %e, "hub: couldn't apply another device's changes");
-            return;
-        }
-        for (table, key, _) in &rows {
-            if table != "items" {
-                continue;
-            }
-            let id: Option<String> = serde_json::from_str::<Vec<String>>(key)
-                .ok()
-                .and_then(|k| k.into_iter().next());
-            if let Some(item) = id.and_then(|id| store.get(&id).ok().flatten()) {
-                let _ = events.send(EngineEvent::ItemChanged {
-                    change: Change::Updated,
-                    item,
-                });
-            }
-        }
     }
 
     /// Listens for other devices on localhost. Returns the URL (without
@@ -400,7 +525,7 @@ async fn connection(hub: Arc<LocalHub>, mut socket: WebSocket, addr: SocketAddr)
                 };
                 let handled = hub.hub.lock().unwrap().handle_frame(conn, &frame, Utc::now());
                 if let Some(push) = &handled.push {
-                    hub.apply_remote(push);
+                    hub.remote.notify_one();
                     let _ = hub.pushes.send((conn, Arc::new(encode(push))));
                 }
                 if socket.send(Message::Binary(encode(&handled.reply).into())).await.is_err() {

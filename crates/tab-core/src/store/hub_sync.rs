@@ -1,17 +1,21 @@
 //! Replicating `tab.db` through the hub.
 //!
-//! The hub's change log is the record every device syncs from; `tab.db` is
-//! this device's copy, with the indexes, full-text search and vectors the
-//! app reads. Replication is per row, for the tables in [`SYNCED`]:
+//! The hub's change log is the source of truth every device syncs from;
+//! `tab.db` is this device's copy, with the indexes, full-text search and
+//! vectors the app reads. Replication is per row, for the tables in
+//! [`SYNCED`]:
 //!
 //! - **Out:** triggers on each synced table note every changed row in
 //!   `hub_outbox`, in the same transaction as the change, so nothing is
 //!   missed even if the app quits right after. The hub host drains the
 //!   outbox ([`Store::hub_outbox_take`]) into the hub as `Put`/`Delete` ops
-//!   carrying the whole row, then acknowledges ([`Store::hub_outbox_done`]).
-//! - **In:** changes other devices made arrive as the same ops and are
-//!   written back with [`Store::hub_apply_remote`], with the triggers
-//!   switched off so they don't echo.
+//!   carrying the whole row as soon as the transaction commits
+//!   ([`Store::commits`]), then acknowledges ([`Store::hub_outbox_done`]).
+//! - **In:** the hub's log is read from where this copy last got to
+//!   ([`Store::hub_pulled_to`]) and written back with
+//!   [`Store::hub_apply_remote`], with the triggers switched off so they
+//!   don't echo. That covers other devices' changes, and rebuilds a fresh
+//!   or deleted `tab.db` from the hub.
 //!
 //! What isn't synced stays on this device on purpose: caches (HTTP, AI,
 //! previews, embeddings), the API audit log, usage counters, and agent
@@ -88,7 +92,8 @@ impl Store {
              CREATE TABLE IF NOT EXISTS hub_sync (
                  id         INTEGER PRIMARY KEY CHECK (id = 1),
                  applying   INTEGER NOT NULL DEFAULT 0,
-                 backfilled INTEGER NOT NULL DEFAULT 0
+                 backfilled INTEGER NOT NULL DEFAULT 0,
+                 pulled_to  INTEGER NOT NULL DEFAULT 0
              );
              INSERT OR IGNORE INTO hub_sync (id) VALUES (1);
              UPDATE hub_sync SET applying = 0;",
@@ -105,7 +110,103 @@ impl Store {
             }
         }
         conn.execute_batch(&sql)?;
+        // Added after the first release of this table.
+        let has_pulled: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('hub_sync') WHERE name = 'pulled_to'",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has_pulled {
+            conn.execute_batch(
+                "ALTER TABLE hub_sync ADD COLUMN pulled_to INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
         Ok(())
+    }
+
+    /// How far into the hub's log this copy has read.
+    pub fn hub_pulled_to(&self) -> anyhow::Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        Ok(
+            conn.query_row("SELECT pulled_to FROM hub_sync WHERE id = 1", [], |r| {
+                r.get::<_, i64>(0)
+            })? as u64,
+        )
+    }
+
+    pub fn hub_set_pulled_to(&self, seq: u64) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE hub_sync SET pulled_to = ?1 WHERE id = 1",
+            [seq as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Whether this copy has been introduced to its hub (see
+    /// [`Store::hub_backfill_once`]).
+    pub fn hub_backfilled(&self) -> anyhow::Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(
+            conn.query_row("SELECT backfilled FROM hub_sync WHERE id = 1", [], |r| {
+                r.get::<_, i64>(0)
+            })? != 0,
+        )
+    }
+
+    pub fn hub_mark_backfilled(&self) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE hub_sync SET backfilled = 1 WHERE id = 1", [])?;
+        Ok(())
+    }
+
+    /// Forgets the hub this copy synced with, for when it was replaced by an
+    /// empty or different one: the next start introduces them again.
+    pub fn hub_forget(&self) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE hub_sync SET backfilled = 0, pulled_to = 0 WHERE id = 1",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Every synced row's table and key.
+    pub fn hub_local_keys(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut out = vec![];
+        for (table, pk) in SYNCED {
+            let keys: Vec<String> = conn
+                .prepare(&format!("SELECT {} FROM {table} AS r", key_expr(pk, "r")))?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            out.extend(keys.into_iter().map(|k| (table.to_string(), k)));
+        }
+        Ok(out)
+    }
+
+    /// Queues these rows to be sent to the hub as they are now.
+    pub fn hub_queue(&self, keys: &[(String, String)]) -> anyhow::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for (table, key) in keys {
+            tx.execute(
+                "INSERT INTO hub_outbox (tbl, pk) VALUES (?1, ?2)",
+                [table, key],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Rows changed here that haven't reached the hub yet.
+    pub fn hub_pending_keys(&self) -> anyhow::Result<std::collections::HashSet<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let keys = conn
+            .prepare_cached("SELECT DISTINCT tbl, pk FROM hub_outbox")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(keys)
     }
 
     /// The first time, queues every existing synced row, so a hub starting
@@ -145,35 +246,24 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?;
         let mut out = Vec::with_capacity(pending.len());
         for (seq, table, key) in pending {
-            let Some(pk) = pk_of(&table) else {
+            if pk_of(&table).is_none() {
                 continue;
-            };
-            let cols: Vec<String> = conn
-                .prepare_cached(&format!("SELECT name FROM pragma_table_info('{table}')"))?
-                .query_map([], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            let object: Vec<String> = cols.iter().map(|c| format!("'{c}', {c}")).collect();
-            let wheres: Vec<String> = pk
-                .iter()
-                .enumerate()
-                .map(|(i, c)| format!("{c} = json_extract(?1, '$[{i}]')"))
-                .collect();
-            let row: Option<String> = conn
-                .prepare_cached(&format!(
-                    "SELECT json_object({}) FROM {table} WHERE {}",
-                    object.join(", "),
-                    wheres.join(" AND ")
-                ))?
-                .query_row([&key], |r| r.get(0))
-                .optional()?;
+            }
+            let row = read_row(&conn, &table, &key)?;
             out.push(OutRow {
                 seq,
                 table,
                 key,
-                row: row.map(|r| serde_json::from_str(&r)).transpose()?,
+                row,
             });
         }
         Ok(out)
+    }
+
+    /// A synced row as the hub would store it, or `None` if it isn't here.
+    pub fn hub_row(&self, table: &str, key: &str) -> anyhow::Result<Option<Value>> {
+        let conn = self.conn.lock().unwrap();
+        read_row(&conn, table, key)
     }
 
     /// Drops outbox rows up to and including `seq`: the hub has them.
@@ -190,71 +280,217 @@ impl Store {
         })? as u64)
     }
 
-    /// Writes changes another device made: `row` is the whole row, or
-    /// `None` to delete it. Unknown tables are ignored (a newer device may
-    /// sync more). Doesn't echo back into the outbox.
+    /// Writes the hub's version of rows: `row` is the whole row, or `None`
+    /// to delete it. Rows already the same here are left alone, rows
+    /// changed here that the hub hasn't seen yet keep the local change
+    /// (it's on its way, and the hub will order it after this), and
+    /// unknown tables are ignored (a newer device may sync more). Doesn't
+    /// echo back into the outbox. Returns the rows it changed.
     pub fn hub_apply_remote(
         &self,
         changes: &[(String, String, Option<Value>)],
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let mut changed = vec![];
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        // Children can arrive before parents within a batch.
-        tx.pragma_update(None, "defer_foreign_keys", "ON")?;
+        let mut tx = conn.transaction()?;
         tx.execute("UPDATE hub_sync SET applying = 1 WHERE id = 1", [])?;
-        for (table, key, row) in changes {
-            let Some(pk) = pk_of(table) else {
-                continue;
-            };
-            let keys: Vec<Value> = serde_json::from_str(key)?;
-            match row {
-                None => {
-                    let wheres: Vec<String> = pk
-                        .iter()
-                        .enumerate()
-                        .map(|(i, c)| format!("{c} = ?{}", i + 1))
-                        .collect();
-                    tx.execute(
-                        &format!("DELETE FROM {table} WHERE {}", wheres.join(" AND ")),
-                        params_from_iter(keys.iter().map(to_sql)),
-                    )?;
+        // A row whose parent comes later in the batch is tried again after
+        // the rest, for as long as that gets anywhere; one that still can't
+        // be written is skipped rather than holding up everything after it.
+        let mut todo: Vec<&(String, String, Option<Value>)> = changes.iter().collect();
+        let mut last_try = false;
+        while !todo.is_empty() {
+            let before = todo.len();
+            let mut retry = vec![];
+            for change in todo {
+                let (table, key, row) = change;
+                let Some(pk) = pk_of(table) else {
+                    continue;
+                };
+                let pending: bool = tx
+                    .prepare_cached(
+                        "SELECT EXISTS (SELECT 1 FROM hub_outbox WHERE tbl = ?1 AND pk = ?2)",
+                    )?
+                    .query_row([table, key], |r| r.get(0))?;
+                if pending || read_row(&tx, table, key)? == *row {
+                    continue;
                 }
-                Some(Value::Object(fields)) => {
-                    let known: Vec<String> = tx
-                        .prepare_cached(&format!("SELECT name FROM pragma_table_info('{table}')"))?
-                        .query_map([], |r| r.get(0))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    let cols: Vec<&String> =
-                        known.iter().filter(|c| fields.contains_key(*c)).collect();
-                    let names: Vec<&str> = cols.iter().map(|c| c.as_str()).collect();
-                    let marks: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
-                    let sets: Vec<String> = names
-                        .iter()
-                        .filter(|c| !pk.contains(c))
-                        .map(|c| format!("{c} = excluded.{c}"))
-                        .collect();
-                    let conflict = if sets.is_empty() {
-                        "DO NOTHING".to_string()
-                    } else {
-                        format!("DO UPDATE SET {}", sets.join(", "))
-                    };
-                    tx.execute(
-                        &format!(
-                            "INSERT INTO {table} ({}) VALUES ({}) ON CONFLICT ({}) {conflict}",
-                            names.join(", "),
-                            marks.join(", "),
-                            pk.join(", ")
-                        ),
-                        params_from_iter(cols.iter().map(|c| to_sql(&fields[c.as_str()]))),
-                    )?;
+                let sp = tx.savepoint()?;
+                let mut wrote = write_row(&sp, table, pk, key, row.as_ref());
+                if wrote.as_ref().is_err_and(is_unique_conflict) {
+                    // Another row here has the same natural key (the same
+                    // GitHub notification ingested on two devices, say).
+                    // The row later in the hub's log wins. Every device
+                    // reads the log in the same order, so they all keep
+                    // the same one.
+                    wrote = drop_twins(&sp, table, pk, key, row.as_ref())
+                        .and_then(|_| write_row(&sp, table, pk, key, row.as_ref()));
                 }
-                Some(other) => anyhow::bail!("row for {table} isn't an object: {other}"),
+                match wrote {
+                    Ok(()) => {
+                        sp.commit()?;
+                        changed.push((table.clone(), key.clone()));
+                    }
+                    Err(e) if last_try => {
+                        drop(sp);
+                        tracing::warn!(error = %e, table = %table, key = %key, "hub: couldn't write a row from the hub; skipped");
+                    }
+                    Err(_) => {
+                        drop(sp);
+                        retry.push(change);
+                    }
+                }
             }
+            // No progress: one more pass, giving up on what still fails.
+            last_try = retry.len() == before;
+            todo = retry;
         }
         tx.execute("UPDATE hub_sync SET applying = 0 WHERE id = 1", [])?;
         tx.commit()?;
-        Ok(())
+        if changed.iter().any(|(t, _)| t.starts_with("workflow")) {
+            self.workflows_bump();
+        }
+        Ok(changed)
     }
+}
+
+fn is_unique_conflict(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(f, _))
+            if f.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+    )
+}
+
+/// Writes (or deletes) one row as the hub has it.
+fn write_row(
+    conn: &rusqlite::Connection,
+    table: &str,
+    pk: &[&str],
+    key: &str,
+    row: Option<&Value>,
+) -> anyhow::Result<()> {
+    let keys: Vec<Value> = serde_json::from_str(key)?;
+    match row {
+        None => {
+            let wheres: Vec<String> = pk
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("{c} = ?{}", i + 1))
+                .collect();
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE {}", wheres.join(" AND ")),
+                params_from_iter(keys.iter().map(to_sql)),
+            )?;
+        }
+        Some(Value::Object(fields)) => {
+            let known = columns(conn, table)?;
+            let cols: Vec<&String> = known.iter().filter(|c| fields.contains_key(*c)).collect();
+            let names: Vec<&str> = cols.iter().map(|c| c.as_str()).collect();
+            let marks: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
+            let sets: Vec<String> = names
+                .iter()
+                .filter(|c| !pk.contains(c))
+                .map(|c| format!("{c} = excluded.{c}"))
+                .collect();
+            let conflict = if sets.is_empty() {
+                "DO NOTHING".to_string()
+            } else {
+                format!("DO UPDATE SET {}", sets.join(", "))
+            };
+            conn.execute(
+                &format!(
+                    "INSERT INTO {table} ({}) VALUES ({}) ON CONFLICT ({}) {conflict}",
+                    names.join(", "),
+                    marks.join(", "),
+                    pk.join(", ")
+                ),
+                params_from_iter(cols.iter().map(|c| to_sql(&fields[c.as_str()]))),
+            )?;
+        }
+        Some(other) => anyhow::bail!("row for {table} isn't an object: {other}"),
+    }
+    Ok(())
+}
+
+fn columns(conn: &rusqlite::Connection, table: &str) -> anyhow::Result<Vec<String>> {
+    Ok(conn
+        .prepare_cached(&format!("SELECT name FROM pragma_table_info('{table}')"))?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Deletes local rows that share a unique key with `row` but aren't it.
+/// Only here: the hub keeps its log, and a device replaying it ends up
+/// with the same survivor.
+fn drop_twins(
+    conn: &rusqlite::Connection,
+    table: &str,
+    pk: &[&str],
+    key: &str,
+    row: Option<&Value>,
+) -> anyhow::Result<()> {
+    let Some(Value::Object(fields)) = row else {
+        return Ok(());
+    };
+    let indexes: Vec<String> = conn
+        .prepare(&format!(
+            "SELECT name FROM pragma_index_list('{table}') WHERE \"unique\" = 1 AND origin != 'pk'"
+        ))?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for index in indexes {
+        let cols: Vec<String> = conn
+            .prepare(&format!("SELECT name FROM pragma_index_info('{index}')"))?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        if cols.is_empty() || cols.iter().any(|c| !fields.contains_key(c)) {
+            continue;
+        }
+        let wheres: Vec<String> = cols
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{c} = ?{}", i + 1))
+            .collect();
+        let mut args: Vec<Sql> = cols.iter().map(|c| to_sql(&fields[c.as_str()])).collect();
+        args.push(Sql::Text(key.to_string()));
+        conn.execute(
+            &format!(
+                "DELETE FROM {table} WHERE {} AND {} != ?{}",
+                wheres.join(" AND "),
+                key_expr(pk, table),
+                cols.len() + 1
+            ),
+            params_from_iter(args),
+        )?;
+    }
+    Ok(())
+}
+
+/// A synced row as a JSON object of its columns, or `None` if it's gone.
+fn read_row(conn: &rusqlite::Connection, table: &str, key: &str) -> anyhow::Result<Option<Value>> {
+    let Some(pk) = pk_of(table) else {
+        return Ok(None);
+    };
+    let cols: Vec<String> = conn
+        .prepare_cached(&format!("SELECT name FROM pragma_table_info('{table}')"))?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let object: Vec<String> = cols.iter().map(|c| format!("'{c}', {c}")).collect();
+    let wheres: Vec<String> = pk
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{c} = json_extract(?1, '$[{i}]')"))
+        .collect();
+    let row: Option<String> = conn
+        .prepare_cached(&format!(
+            "SELECT json_object({}) FROM {table} WHERE {}",
+            object.join(", "),
+            wheres.join(" AND ")
+        ))?
+        .query_row([key], |r| r.get(0))
+        .optional()?;
+    Ok(row.map(|r| serde_json::from_str(&r)).transpose()?)
 }
 
 #[cfg(test)]

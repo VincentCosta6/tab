@@ -101,10 +101,10 @@ async fn repeated_writes_of_the_same_row_are_sent_once() {
             .set_state(&it.id, ItemState::Snoozed, None, when())
             .unwrap();
     }
-    hub.drain_once(&store).unwrap();
+    hub.push_once(&store).unwrap();
     // One put for the item; nothing else in the outbox touched items.
     let head = hub.status().unwrap().head;
-    hub.drain_once(&store).unwrap();
+    hub.push_once(&store).unwrap();
     assert_eq!(hub.status().unwrap().head, head);
     assert_eq!(store.hub_outbox_len().unwrap(), 0);
     let _ = std::fs::remove_dir_all(dir);
@@ -235,5 +235,149 @@ async fn another_device_syncs_both_ways() {
         hub.status().unwrap().connections.len() == 1
     })
     .await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn title_in(store: &Store, id: &str) -> Option<String> {
+    store.get(id).unwrap().map(|i| i.event.title)
+}
+
+#[test]
+fn a_fresh_tab_db_is_rebuilt_from_the_hub() {
+    let (hub, dir) = temp_hub("rebuild");
+    let first = Store::in_memory().unwrap();
+    hub.introduce(&first).unwrap();
+    let a = add(&first, "1", "One");
+    let b = add(&first, "2", "Two");
+    first
+        .set_state(&b.id, ItemState::Done, None, when())
+        .unwrap();
+    hub.sync(&first).unwrap();
+
+    // tab.db lost (or a new install pointed at the same hub).
+    let fresh = Store::in_memory().unwrap();
+    hub.introduce(&fresh).unwrap();
+    hub.sync(&fresh).unwrap();
+    assert_eq!(title_in(&fresh, &a.id).as_deref(), Some("One"));
+    assert_eq!(fresh.get(&b.id).unwrap().unwrap().state, ItemState::Done);
+    // Rebuilding didn't send anything back.
+    assert_eq!(fresh.hub_outbox_len().unwrap(), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn joining_a_hub_with_data_takes_its_rows_and_adds_the_rest() {
+    let (hub, dir) = temp_hub("join");
+    let first = Store::in_memory().unwrap();
+    hub.introduce(&first).unwrap();
+    let shared = add(&first, "1", "Hub's title");
+    hub.sync(&first).unwrap();
+
+    // The same notification, ingested here under its own id.
+    let other = Store::in_memory().unwrap();
+    let twin = add(&other, "1", "Local title");
+    assert_ne!(twin.id, shared.id);
+    let only_here = add(&other, "9", "Only here");
+    hub.introduce(&other).unwrap();
+    hub.sync(&other).unwrap();
+
+    assert_eq!(title_in(&other, &shared.id).as_deref(), Some("Hub's title"));
+    assert_eq!(title_in(&other, &twin.id), None);
+    assert_eq!(hub_item(&hub, &shared.id).unwrap()["title"], "Hub's title");
+    assert_eq!(hub_item(&hub, &twin.id), None);
+    assert_eq!(hub_item(&hub, &only_here.id).unwrap()["title"], "Only here");
+    assert_eq!(other.hub_outbox_len().unwrap(), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_replaced_hub_gets_everything_again() {
+    let (old, dir) = temp_hub("replaced-old");
+    let store = Store::in_memory().unwrap();
+    old.introduce(&store).unwrap();
+    let a = add(&store, "1", "Keep me");
+    old.sync(&store).unwrap();
+    assert!(store.hub_pulled_to().unwrap() > 0);
+
+    let (new, dir2) = temp_hub("replaced-new");
+    new.introduce(&store).unwrap();
+    new.sync(&store).unwrap();
+    assert_eq!(hub_item(&new, &a.id).unwrap()["title"], "Keep me");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
+#[test]
+fn a_change_the_hub_refuses_is_undone_here() {
+    let (hub, dir) = temp_hub("refused");
+    let store = Store::in_memory().unwrap();
+    hub.introduce(&store).unwrap();
+    let a = add(&store, "1", "Fine");
+    let b = add(&store, "2", "Also fine");
+    hub.sync(&store).unwrap();
+
+    // Over the hub's size limit for one record.
+    let huge = "x".repeat(tab_domain::ops::MAX_BODY_BYTES + 1);
+    store
+        .item_set_title(&a.id, &huge, &json!({}), when())
+        .unwrap();
+    store
+        .set_state(&b.id, ItemState::Done, None, when())
+        .unwrap();
+    hub.sync(&store).unwrap();
+
+    assert_eq!(title_in(&store, &a.id).as_deref(), Some("Fine"));
+    assert_eq!(hub_item(&hub, &a.id).unwrap()["title"], "Fine");
+    // The rest of the batch still went through.
+    assert_eq!(hub_item(&hub, &b.id).unwrap()["state"], "done");
+    assert_eq!(store.hub_outbox_len().unwrap(), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_same_item_ingested_on_two_devices_ends_up_once() {
+    let (hub, dir) = temp_hub("twins");
+    let mac = Store::in_memory().unwrap();
+    let pc = Store::in_memory().unwrap();
+    hub.introduce(&mac).unwrap();
+    hub.introduce(&pc).unwrap();
+    let first = add(&mac, "42", "From the Mac");
+    hub.sync(&mac).unwrap();
+    let second = add(&pc, "42", "From the PC");
+    hub.sync(&pc).unwrap();
+    hub.sync(&mac).unwrap();
+    hub.sync(&pc).unwrap();
+
+    // Whichever the hub ordered last wins, and both devices agree.
+    let on_mac: Vec<_> = [&first.id, &second.id]
+        .iter()
+        .filter_map(|id| mac.get(id).unwrap())
+        .map(|i| (i.id, i.event.title))
+        .collect();
+    let on_pc: Vec<_> = [&first.id, &second.id]
+        .iter()
+        .filter_map(|id| pc.get(id).unwrap())
+        .map(|i| (i.id, i.event.title))
+        .collect();
+    assert_eq!(on_mac.len(), 1, "{on_mac:?}");
+    assert_eq!(on_mac, on_pc);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn changes_reach_the_hub_as_they_commit() {
+    let (hub, dir) = temp_hub("prompt");
+    let store = Arc::new(Store::in_memory().unwrap());
+    let (events, _) = broadcast::channel(16);
+    hub.follow(store.clone(), events);
+    until("setup", || store.hub_backfilled().unwrap_or(false)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let started = std::time::Instant::now();
+    let it = add(&store, "1", "Quick");
+    while hub_item(&hub, &it.id).is_none() {
+        assert!(started.elapsed() < IDLE / 2, "waited for the idle backstop");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
     let _ = std::fs::remove_dir_all(dir);
 }

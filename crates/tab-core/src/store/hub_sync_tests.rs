@@ -240,12 +240,34 @@ fn remote_rows_tolerate_unknown_tables_and_extra_columns() {
         .unwrap();
     assert!(s.projects().unwrap().is_empty());
     assert_eq!(s.hub_outbox_len().unwrap(), 0);
-    assert!(
-        s.hub_apply_remote(&[(
-            "projects".into(),
-            json!(["p2"]).to_string(),
-            Some(json!("nope"))
-        )])
-        .is_err()
-    );
+    // A row that can't be written is skipped, not a reason to stop syncing.
+    let changed = s
+        .hub_apply_remote(&[
+            (
+                "projects".into(),
+                json!(["p2"]).to_string(),
+                Some(json!("nope")),
+            ),
+            (
+                "projects".into(),
+                json!(["p3"]).to_string(),
+                Some(json!({"id": "p3"})),
+            ),
+        ])
+        .unwrap();
+    assert!(changed.is_empty(), "{changed:?}");
+}
+
+#[test]
+fn children_arriving_before_their_parents_still_land() {
+    let (a, b) = (store(), store());
+    populate(&a);
+    let mut rows = a.hub_outbox_take(10_000).unwrap();
+    // Dedupe to the latest of each row, then send children first.
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|r| seen.insert((r.table.clone(), r.key.clone())));
+    rows.reverse();
+    let changes: Vec<_> = rows.into_iter().map(|r| (r.table, r.key, r.row)).collect();
+    b.hub_apply_remote(&changes).unwrap();
+    assert_eq!(dump(&a), dump(&b));
 }
