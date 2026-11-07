@@ -21,7 +21,11 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**/*.mp4", "**/*.m4v", "**/*.mov", "**/*.webm", "**/*.ogv", "**/*.mp3", "**/*.m4a", "**/*.wav", "**/*.ogg", "**/*.oga", "**/*.opus", "**/*.flac", "**/*.aac", "**/*.MP4", "**/*.M4V", "**/*.MOV", "**/*.WEBM", "**/*.OGV", "**/*.MP3", "**/*.M4A", "**/*.WAV", "**/*.OGG", "**/*.OGA", "**/*.OPUS", "**/*.FLAC", "**/*.AAC"]
+      }
     }
   },
   "bundle": {
