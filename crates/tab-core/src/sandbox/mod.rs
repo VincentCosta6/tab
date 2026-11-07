@@ -220,7 +220,10 @@ fn explain_spawn(cmd: &tokio::process::Command, e: std::io::Error) -> std::io::E
     if let Some(dir) = std.get_current_dir().filter(|d| !d.is_dir()) {
         return std::io::Error::new(
             e.kind(),
-            format!("the folder it starts in, {}, doesn't exist ({e})", dir.display()),
+            format!(
+                "the folder it starts in, {}, doesn't exist ({e})",
+                dir.display()
+            ),
         );
     }
     let program = Path::new(std.get_program());
