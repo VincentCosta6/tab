@@ -1087,6 +1087,19 @@ type LinkCache = std::collections::HashMap<String, (std::time::Instant, LinkSumm
 static LINK_CACHE: std::sync::LazyLock<std::sync::Mutex<LinkCache>> =
     std::sync::LazyLock::new(Default::default);
 
+/// Drops cached link summaries after something changed them (an agent
+/// merged the pull request through `gh`, or pushed to its branch): one pull
+/// request with `number`, or every one in `repo` without it.
+pub fn forget_links(repo: &str, number: Option<u64>) {
+    let mut cache = LINK_CACHE.lock().unwrap();
+    match number {
+        Some(n) => {
+            cache.remove(&format!("{repo}#{n}"));
+        }
+        None => cache.retain(|k, _| !k.starts_with(&format!("{repo}#"))),
+    }
+}
+
 /// `what` is `pull`, `issues` or `commit`, as in the github.com path.
 pub async fn link_summary(
     gw: &Gateway,

@@ -183,6 +183,20 @@ async fn handle_cli(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: S
     axum::Json(reply).into_response()
 }
 
+/// What tab cached about what a CLI just changed, so the app's next look
+/// is fresh (link summaries keep a pull request for two minutes).
+fn forget_cached(change: &tab_domain::CliChange) {
+    if change.connector != "github" {
+        return;
+    }
+    if let Some(repo) = &change.repo {
+        let number = (change.resource == "pull")
+            .then_some(change.number)
+            .flatten();
+        crate::connectors::github_review::forget_links(repo, number);
+    }
+}
+
 fn upstream_client() -> &'static reqwest::Client {
     static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     C.get_or_init(|| {
@@ -394,17 +408,19 @@ async fn handle_git(
             (!ok).then(|| status.to_string()),
         );
         if ok && !pushed.is_empty() {
+            let change = tab_domain::CliChange {
+                connector: tool.connector.clone(),
+                command: label,
+                effect,
+                resource: "branch".into(),
+                repo: Some(repo.clone()),
+                number: None,
+                url: None,
+            };
+            forget_cached(&change);
             let _ = s.events.send(EngineEvent::CliChanged {
                 session_id: session.id.clone(),
-                change: tab_domain::CliChange {
-                    connector: tool.connector.clone(),
-                    command: label,
-                    effect,
-                    resource: "branch".into(),
-                    repo: Some(repo.clone()),
-                    number: None,
-                    url: None,
-                },
+                change,
             });
         }
     }
@@ -985,6 +1001,7 @@ impl McpServer {
         if reply.code == 0 && matches!(m.effect, CliEffect::Write | CliEffect::Destructive) {
             let repo = broker::repo_of(&req.cwd).await;
             let change = broker::change(&tool, &m, &req.args, repo);
+            forget_cached(&change);
             if let Some(url) = &change.url {
                 self.engine.refresh_url(url).await;
             }
