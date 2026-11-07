@@ -52,14 +52,17 @@ pub(super) async fn run_turn(
     std::fs::write(&system_file, system)?;
 
     let policy = hub.policy(session);
-    let settings_file = dir.join("settings.json");
+    let settings = crate::sandbox::current().claude_settings(&policy);
+    // A copy to look at when debugging; Claude Code gets the JSON itself.
+    // Given a file, it vets every folder on the path first and refuses the
+    // file when one can't be examined, which happens under the sandbox.
     std::fs::write(
-        &settings_file,
-        serde_json::to_vec_pretty(&crate::sandbox::current().claude_settings(&policy))?,
+        dir.join("settings.json"),
+        serde_json::to_vec_pretty(&settings)?,
     )?;
     let strict = strict(cfg.strict, policy.trust);
     let mut cmd = super::Args::default();
-    cmd.arg("--settings").arg(&settings_file);
+    cmd.arg("--settings").arg(serde_json::to_string(&settings)?);
     cmd.args(isolation_args(cfg.strict, policy.trust));
     cmd.args([
         "-p",
