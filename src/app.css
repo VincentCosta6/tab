@@ -157,6 +157,9 @@
 
 .chat { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
 .transcript { flex: 1; min-height: 0; overflow: auto; padding: var(--space-4) var(--space-6); display: flex; flex-direction: column; gap: var(--space-3); }
+/* The chat scrolls without a visible bar, so the context rail beside it reads as floating over one surface. */
+.transcript { scrollbar-width: none; }
+.transcript::-webkit-scrollbar { display: none; }
 .transcript > * { max-width: 780px; width: 100%; margin-left: auto; margin-right: auto; }
 .transcript-head { display: flex; justify-content: center; }
 .empty-chat { justify-content: center; align-items: center; }
@@ -790,10 +793,9 @@ body.resizing .stage-pdf { pointer-events: none; }
 .stage-other-actions { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
 .stage-resize { position: absolute; top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; z-index: 5; }
 .stage-resize:hover, body.resizing .stage-resize { background: var(--tone-accent-fg); opacity: 0.35; }
-.ctx-rail { display: none; flex: none; width: 340px; overflow: auto; padding: var(--space-4); border-left: 1px solid var(--border); background: var(--bg-raised); gap: var(--space-5); align-content: start; }
+.ctx-rail { display: none; flex: none; width: 340px; overflow: auto; padding: var(--space-4); background: var(--bg); gap: var(--space-5); align-content: start; }
 .ctx-rail-group { display: grid; gap: var(--space-2); }
 .ctx-rail-head { display: flex; align-items: center; gap: 6px; margin: 0; font-size: var(--text-xs); font-weight: 600; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
-.ctx-rail .cc-list { background: var(--bg); }
 /* Hover actions float over the row's right edge instead of taking a column (or a wrapped line) of their own. */
 .ctx-rail .cc-row { position: relative; align-items: flex-start; padding-block: var(--space-2); min-height: 0; }
 .ctx-rail .cc-row > .source-glyph, .ctx-rail .cc-row > .status-icon { margin-top: 1px; }
