@@ -26,10 +26,10 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::NewContext;
 use crate::config::AgentConfig;
 use crate::engine::EngineEvent;
 use crate::model::{AgentKind, Approval, ContextSection, Session, SessionStatus};
-use crate::NewContext;
 use crate::store::Store;
 
 /// How long an approval waits for the person before it is denied.
@@ -177,8 +177,14 @@ pub async fn run_upgrade(
     let mut child = cmd.spawn()?;
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     for stream in [
-        child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
-        child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
     ]
     .into_iter()
     .flatten()
@@ -230,6 +236,13 @@ pub struct AgentHub {
     /// Live turns that take more messages while they run: Claude Code's stdin,
     /// or more prompts to the same OpenCode session.
     steering: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
+    /// The receiving end of a turn's steering channel, parked from the moment
+    /// the turn is marked running until its runner picks it up, so messages
+    /// sent while the agent is still starting wait in the queue.
+    steering_rx: Mutex<HashMap<String, mpsc::UnboundedReceiver<String>>>,
+    /// Messages that arrived after a turn stopped taking steering (its result
+    /// is in, the process hasn't exited). They run as the next turn.
+    followups: Mutex<HashMap<String, Vec<String>>>,
     approvals: Mutex<HashMap<String, (Approval, oneshot::Sender<Decision>)>>,
     opencode: tokio::sync::Mutex<Option<Arc<opencode::Server>>>,
 }
@@ -263,6 +276,8 @@ impl AgentHub {
             dir,
             running: Mutex::new(HashMap::new()),
             steering: Mutex::new(HashMap::new()),
+            steering_rx: Mutex::new(HashMap::new()),
+            followups: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             opencode: tokio::sync::Mutex::new(None),
         })
@@ -442,9 +457,20 @@ impl AgentHub {
         let text = text.trim();
         anyhow::ensure!(!text.is_empty(), "message is empty");
         let tx = self.steering.lock().unwrap().get(session_id).cloned();
-        let Some(tx) = tx else { return Ok(false) };
-        if tx.send(text.to_string()).is_err() {
-            return Ok(false);
+        let sent = tx.is_some_and(|tx| tx.send(text.to_string()).is_ok());
+        if !sent {
+            // Held under the running lock so a turn that is finishing either
+            // sees this message or has already finished (and we return false).
+            let running = self.running.lock().unwrap();
+            if !running.contains_key(session_id) {
+                return Ok(false);
+            }
+            self.followups
+                .lock()
+                .unwrap()
+                .entry(session_id.into())
+                .or_default()
+                .push(text.to_string());
         }
         self.post(
             session_id,
@@ -456,7 +482,21 @@ impl AgentHub {
         Ok(true)
     }
 
+    /// Opens the steering channel as soon as the turn is marked running.
+    fn steering_prepare(&self, session_id: &str) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.steering.lock().unwrap().insert(session_id.into(), tx);
+        self.steering_rx
+            .lock()
+            .unwrap()
+            .insert(session_id.into(), rx);
+    }
+
+    /// The turn runner's end of the channel opened by `steering_prepare`.
     pub(crate) fn steering_open(&self, session_id: &str) -> mpsc::UnboundedReceiver<String> {
+        if let Some(rx) = self.steering_rx.lock().unwrap().remove(session_id) {
+            return rx;
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         self.steering.lock().unwrap().insert(session_id.into(), tx);
         rx
@@ -565,6 +605,7 @@ impl AgentHub {
                 "the agent is still working on the last message"
             );
             running.insert(session_id.into(), cancel.clone());
+            self.steering_prepare(session_id);
         }
         if visible {
             let meta = if attachments.is_empty() {
@@ -603,8 +644,17 @@ impl AgentHub {
                     opencode::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
                 }
             };
-            hub.running.lock().unwrap().remove(&session.id);
-            hub.steering_close(&session.id);
+            let followups = {
+                let mut running = hub.running.lock().unwrap();
+                running.remove(&session.id);
+                hub.steering_close(&session.id);
+                hub.steering_rx.lock().unwrap().remove(&session.id);
+                hub.followups
+                    .lock()
+                    .unwrap()
+                    .remove(&session.id)
+                    .unwrap_or_default()
+            };
             // Anything still waiting on the person is moot now.
             hub.drop_approvals(&session.id);
             match result {
@@ -617,6 +667,20 @@ impl AgentHub {
                         serde_json::Value::Null,
                     );
                     hub.update(&session.id, Some(SessionStatus::Idle), None);
+                }
+                Ok(()) if !followups.is_empty() => {
+                    // Already shown in the chat when they were sent.
+                    if let Err(e) = hub.start_turn(&session.id, &followups.join("\n\n"), false, &[])
+                    {
+                        hub.post(
+                            &session.id,
+                            "system",
+                            "error",
+                            &format!("{e:#}"),
+                            serde_json::Value::Null,
+                        );
+                        hub.update(&session.id, Some(SessionStatus::Failed), None);
+                    }
                 }
                 Ok(()) => suggest::spawn(hub.clone(), session.id.clone()),
                 Err(e) => {
@@ -909,12 +973,18 @@ impl AgentHub {
     }
 
     /// Updates the configured agent the way it was installed.
-    pub async fn upgrade(&self, on_line: impl Fn(String) + Send + Sync + 'static) -> anyhow::Result<()> {
+    pub async fn upgrade(
+        &self,
+        on_line: impl Fn(String) + Send + Sync + 'static,
+    ) -> anyhow::Result<()> {
         let p = self
             .health_probe()
             .await
             .ok_or_else(|| anyhow::anyhow!("No agent is set up."))?;
-        let path = p.path.filter(|_| p.found).ok_or_else(|| anyhow::anyhow!("The agent wasn't found."))?;
+        let path = p
+            .path
+            .filter(|_| p.found)
+            .ok_or_else(|| anyhow::anyhow!("The agent wasn't found."))?;
         run_upgrade(p.kind, &path, on_line).await
     }
 
