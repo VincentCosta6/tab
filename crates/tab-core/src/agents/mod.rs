@@ -649,6 +649,9 @@ impl AgentHub {
             };
             self.post(session_id, "user", "text", text, meta);
             self.attach_pasted_links(session_id, text);
+            // Name a new chat from its opening message now, rather than
+            // after a first turn that can run for minutes.
+            titler::spawn(self.clone(), session_id.into(), titler::Pass::Early);
         }
         self.update(session_id, Some(SessionStatus::Working), None);
 
@@ -692,6 +695,8 @@ impl AgentHub {
             };
             // Anything still waiting on the person is moot now.
             hub.drop_approvals(&session.id);
+            // However the turn ended, the thread now says more about the work.
+            titler::spawn(hub.clone(), session.id.clone(), titler::Pass::TurnEnded);
             match result {
                 Ok(()) if cancel.is_cancelled() => {
                     hub.post(
@@ -719,7 +724,6 @@ impl AgentHub {
                 }
                 Ok(()) => {
                     suggest::spawn(hub.clone(), session.id.clone());
-                    titler::spawn(hub.clone(), session.id.clone());
                 }
                 Err(e) => {
                     tracing::warn!(session = %session.id, error = %e, "agent turn failed");

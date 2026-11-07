@@ -1,8 +1,11 @@
 //! The titler: names chats started in tab as the work comes into focus.
 //!
 //! A new chat's task starts out titled with the first line of the message.
-//! After turns 1, 2, 3, 5 and 10 a small model reads the thread and proposes
-//! a short title with a confidence. It is told to keep the current title
+//! As soon as the first turn starts, a small model names it from the opening
+//! message alone, so a long first turn doesn't leave the chat on a truncated
+//! line. That early guess never counts as confident. After turns 1, 2, 3, 5
+//! and 10 the model reads the thread again and proposes a short title with a
+//! confidence. It is told to keep the current title
 //! unless it is clearly wrong, so titles settle instead of flickering, and
 //! it stops once it is confident twice in a row.
 //!
@@ -58,12 +61,23 @@ struct Reply {
     confidence: String,
 }
 
+/// When the titler looks at a chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Pass {
+    /// The first turn just started: only the opening message is there.
+    Early,
+    /// A turn ended, however it ended.
+    TurnEnded,
+}
+
 /// The titler's own bookkeeping, kept in the item's metadata under `titler`.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 struct Progress {
     last_turn: u32,
     high_streak: u32,
     settled: bool,
+    /// The early, opening-message-only guess has been made.
+    early: bool,
 }
 
 impl Progress {
@@ -73,6 +87,7 @@ impl Progress {
             last_turn: t["last_turn"].as_u64().unwrap_or(0) as u32,
             high_streak: t["high_streak"].as_u64().unwrap_or(0) as u32,
             settled: t["settled"].as_bool().unwrap_or(false),
+            early: t["early"].as_bool().unwrap_or(false),
         }
     }
 
@@ -81,26 +96,35 @@ impl Progress {
             "last_turn": self.last_turn,
             "high_streak": self.high_streak,
             "settled": self.settled,
+            "early": self.early,
         });
     }
 }
 
-pub(super) fn spawn(hub: Arc<AgentHub>, session_id: String) {
+pub(super) fn spawn(hub: Arc<AgentHub>, session_id: String, pass: Pass) {
     tokio::spawn(async move {
-        if let Err(e) = run(&hub, &session_id).await {
+        if let Err(e) = run(&hub, &session_id, pass).await {
             tracing::debug!(session = %session_id, error = %e, "titling the chat failed");
         }
     });
 }
 
-/// Whether this item is the titler's to name, and this turn one to look at.
-fn due(item: &QueueItem, turns: u32) -> bool {
+/// Whether this item is the titler's to name, and this pass one to run.
+fn due(item: &QueueItem, turns: u32, pass: Pass) -> bool {
     let meta = &item.event.metadata;
-    if !matches!(meta["title_source"].as_str(), Some("auto" | "titler")) {
-        return false;
-    }
     let p = Progress::read(meta);
-    !p.settled && turns > p.last_turn && CHECKPOINTS.contains(&turns)
+    match pass {
+        // Only a chat nobody has named yet, before anything else ran.
+        Pass::Early => meta["title_source"] == "auto" && turns == 1 && !p.early && p.last_turn == 0,
+        // Follow-ups sent mid-turn can carry the count past a checkpoint,
+        // so any checkpoint crossed since the last look counts.
+        Pass::TurnEnded => {
+            matches!(meta["title_source"].as_str(), Some("auto" | "titler"))
+                && !p.settled
+                && turns > p.last_turn
+                && CHECKPOINTS.iter().any(|&c| c > p.last_turn && c <= turns)
+        }
+    }
 }
 
 fn user_turns(messages: &[SessionMessage]) -> u32 {
@@ -110,7 +134,7 @@ fn user_turns(messages: &[SessionMessage]) -> u32 {
         .count() as u32
 }
 
-async fn run(hub: &Arc<AgentHub>, session_id: &str) -> anyhow::Result<()> {
+async fn run(hub: &Arc<AgentHub>, session_id: &str, pass: Pass) -> anyhow::Result<()> {
     let cfg = hub.config();
     if cfg.kind.is_none() || !cfg.titler.enabled {
         return Ok(());
@@ -129,7 +153,7 @@ async fn run(hub: &Arc<AgentHub>, session_id: &str) -> anyhow::Result<()> {
     };
     let messages = hub.store.messages(session_id)?;
     let turns = user_turns(&messages);
-    if !due(&item, turns) {
+    if !due(&item, turns, pass) {
         return Ok(());
     }
     if cfg.kind == Some(AgentKind::ClaudeCode)
@@ -168,10 +192,10 @@ async fn run(hub: &Arc<AgentHub>, session_id: &str) -> anyhow::Result<()> {
     let Some(item) = hub.store.get(&item.id)? else {
         return Ok(());
     };
-    if !due(&item, turns) {
+    if !due(&item, turns, pass) {
         return Ok(());
     }
-    if let Some(item) = apply(&hub.store, &item, &reply, turns)? {
+    if let Some(item) = apply(&hub.store, &item, &reply, turns, pass)? {
         hub.emit(EngineEvent::ItemChanged {
             change: Change::Updated,
             item,
@@ -305,15 +329,25 @@ fn apply(
     item: &QueueItem,
     reply: &Reply,
     turns: u32,
+    pass: Pass,
 ) -> anyhow::Result<Option<QueueItem>> {
     let mut meta = item.event.metadata.clone();
     let mut p = Progress::read(&meta);
-    p.last_turn = turns;
-    let high = reply.confidence == "high";
-    p.high_streak = if high { p.high_streak + 1 } else { 0 };
-    p.settled = p.high_streak >= 2 || turns >= *CHECKPOINTS.last().unwrap();
+    // The early guess saw only the opening message, so the first full look
+    // may still replace it even when unsure.
+    let first_time = meta["title_source"] == "auto" || (p.early && p.last_turn == 0);
+    match pass {
+        // A guess from one message is never a confident one, and turn 1
+        // still gets its full look when it ends.
+        Pass::Early => p.early = true,
+        Pass::TurnEnded => {
+            p.last_turn = turns;
+            let high = reply.confidence == "high";
+            p.high_streak = if high { p.high_streak + 1 } else { 0 };
+            p.settled = p.high_streak >= 2 || turns >= *CHECKPOINTS.last().unwrap();
+        }
+    }
 
-    let first_time = meta["title_source"] == "auto";
     let title = clean(&reply.title)
         // Once titled, a guess the model isn't sure of doesn't replace it.
         .filter(|_| first_time || reply.confidence != "low")
@@ -390,12 +424,30 @@ mod tests {
     fn only_titles_its_own_items_at_checkpoints() {
         let store = Store::in_memory().unwrap();
         let auto = task(&store, "can we make the…", "auto");
-        assert!(due(&auto, 1));
-        assert!(!due(&auto, 4), "4 is not a checkpoint");
+        assert!(due(&auto, 1, Pass::TurnEnded));
+        let looked = apply(
+            &store,
+            &auto,
+            &reply("Make the thing", "low"),
+            3,
+            Pass::TurnEnded,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            !due(&looked, 4, Pass::TurnEnded),
+            "4 is not a checkpoint once 3 was seen"
+        );
         let mine = task(&store, "My name for it", "user");
-        assert!(!due(&mine, 1), "a title the person chose is theirs");
+        assert!(
+            !due(&mine, 1, Pass::TurnEnded),
+            "a title the person chose is theirs"
+        );
         let gh = task(&store, "PR title", "");
-        assert!(!due(&gh, 1), "items not started as chats keep their title");
+        assert!(
+            !due(&gh, 1, Pass::TurnEnded),
+            "items not started as chats keep their title"
+        );
     }
 
     #[test]
@@ -407,34 +459,135 @@ mod tests {
             "auto",
         );
 
-        let item = apply(&store, &item, &reply("Design chat titler", "low"), 1)
-            .unwrap()
-            .expect("first guess replaces the truncated line, even when unsure");
+        let item = apply(
+            &store,
+            &item,
+            &reply("Design chat titler", "low"),
+            1,
+            Pass::TurnEnded,
+        )
+        .unwrap()
+        .expect("first guess replaces the truncated line, even when unsure");
         assert_eq!(item.event.title, "Design chat titler");
         assert_eq!(item.event.metadata["title_source"], "titler");
-        assert!(!due(&item, 1), "turn 1 is done");
-        assert!(due(&item, 2));
+        assert!(!due(&item, 1, Pass::TurnEnded), "turn 1 is done");
+        assert!(due(&item, 2, Pass::TurnEnded));
 
         // Unsure guesses no longer replace a real title.
         assert!(
-            apply(&store, &item, &reply("Something else", "low"), 2)
-                .unwrap()
-                .is_none()
+            apply(
+                &store,
+                &item,
+                &reply("Something else", "low"),
+                2,
+                Pass::TurnEnded
+            )
+            .unwrap()
+            .is_none()
         );
         let item = store.get(&item.id).unwrap().unwrap();
         assert_eq!(item.event.title, "Design chat titler");
 
-        let item = apply(&store, &item, &reply("Design Haiku chat titler", "high"), 3)
-            .unwrap()
-            .unwrap();
+        let item = apply(
+            &store,
+            &item,
+            &reply("Design Haiku chat titler", "high"),
+            3,
+            Pass::TurnEnded,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(item.event.title, "Design Haiku chat titler");
-        assert!(due(&item, 5));
+        assert!(due(&item, 5, Pass::TurnEnded));
         assert!(
-            apply(&store, &item, &reply("Design Haiku chat titler", "high"), 5)
-                .unwrap()
-                .is_none()
+            apply(
+                &store,
+                &item,
+                &reply("Design Haiku chat titler", "high"),
+                5,
+                Pass::TurnEnded
+            )
+            .unwrap()
+            .is_none()
         );
         let item = store.get(&item.id).unwrap().unwrap();
-        assert!(!due(&item, 10), "two confident answers in a row settle it");
+        assert!(
+            !due(&item, 10, Pass::TurnEnded),
+            "two confident answers in a row settle it"
+        );
+    }
+
+    #[test]
+    fn early_guess_runs_once_and_turn_one_still_gets_its_look() {
+        let store = Store::in_memory().unwrap();
+        let item = task(
+            &store,
+            "how does the titler work? does it wait for…",
+            "auto",
+        );
+        assert!(due(&item, 1, Pass::Early));
+        assert!(!due(&item, 2, Pass::Early), "only the first turn");
+
+        let item = apply(
+            &store,
+            &item,
+            &reply("Explain titler timing", "high"),
+            1,
+            Pass::Early,
+        )
+        .unwrap()
+        .expect("the early guess replaces the first line");
+        assert_eq!(item.event.title, "Explain titler timing");
+        assert!(!due(&item, 1, Pass::Early), "the early guess runs once");
+        assert!(
+            due(&item, 1, Pass::TurnEnded),
+            "turn 1 still gets a full look"
+        );
+
+        // The full look may replace the early guess even when unsure, and the
+        // early guess's confidence doesn't count toward settling.
+        let item = apply(
+            &store,
+            &item,
+            &reply("Make titler run async", "low"),
+            1,
+            Pass::TurnEnded,
+        )
+        .unwrap()
+        .expect("the first full look replaces the early guess");
+        assert_eq!(item.event.title, "Make titler run async");
+        let p = Progress::read(&item.event.metadata);
+        assert_eq!((p.last_turn, p.high_streak, p.settled), (1, 0, false));
+    }
+
+    #[test]
+    fn early_guess_is_dropped_once_the_turn_has_been_looked_at() {
+        let store = Store::in_memory().unwrap();
+        let item = task(&store, "short question…", "auto");
+        let item = apply(
+            &store,
+            &item,
+            &reply("Answer short question", "low"),
+            1,
+            Pass::TurnEnded,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!due(&item, 1, Pass::Early), "a late early guess is stale");
+        let renamed = task(&store, "Mine", "user");
+        assert!(!due(&renamed, 1, Pass::Early));
+    }
+
+    #[test]
+    fn follow_ups_that_skip_a_checkpoint_still_count() {
+        let store = Store::in_memory().unwrap();
+        let item = task(&store, "first line…", "auto");
+        // Follow-ups sent during turn 1 mean it ends with 2 user messages.
+        assert!(due(&item, 2, Pass::TurnEnded));
+        let item = apply(&store, &item, &reply("Fix it", "low"), 4, Pass::TurnEnded)
+            .unwrap()
+            .unwrap();
+        assert!(!due(&item, 4, Pass::TurnEnded));
+        assert!(due(&item, 7, Pass::TurnEnded), "crossed checkpoint 5");
     }
 }
