@@ -113,7 +113,11 @@ function LiveEvents() {
             qc.setQueriesData<ItemContext | null>({ queryKey: keys.context(e.item.id) }, (c) => (c ? { ...c, item: e.item } : c));
           // Lists are local SQLite reads; coalesce bursts into one refetch.
           clearTimeout(reload);
-          reload = window.setTimeout(() => qc.invalidateQueries({ queryKey: keys.allItems }), 120);
+          // Agent activity skips done items, so a state change moves the badge.
+          reload = window.setTimeout(() => {
+            qc.invalidateQueries({ queryKey: keys.allItems });
+            qc.invalidateQueries({ queryKey: keys.agentActivity });
+          }, 120);
           break;
         }
         case "connector_changed":
