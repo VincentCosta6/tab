@@ -6,7 +6,7 @@ A modular work queue for engineers, designers and PMs. Connectors bring in every
 
 Built with [Tauri 2](https://tauri.app) (Rust core) and React.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and the phased plan.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and the phased plan, and [docs/RELEASING.md](docs/RELEASING.md) for cutting a release and setting up signing.
 
 ## What works today
 

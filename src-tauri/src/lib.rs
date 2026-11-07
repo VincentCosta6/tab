@@ -1104,7 +1104,7 @@ async fn agent_activity(state: State<'_, AppState>) -> CmdResult<Vec<serde_json:
         if matches!(state.store.get(&item), Ok(Some(i)) if i.state == ItemState::Done) {
             continue;
         }
-        let waiting =!state.hub.pending_approvals(&s.id).is_empty();
+        let waiting = !state.hub.pending_approvals(&s.id).is_empty();
         let status = if waiting {
             "needs_input".to_string()
         } else {
