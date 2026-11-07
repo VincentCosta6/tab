@@ -32,6 +32,9 @@ message ClientEnvelope {
     Search search = 16;
     GetNeighbors get_neighbors = 17;
     GetHubStatus get_hub_status = 18;
+    Watch watch = 19;
+    Publish publish = 20;
+    Steer steer = 21;
   }
 }
 
@@ -51,6 +54,10 @@ message ServerEnvelope {
     Neighbors neighbors = 18;
     Error error = 19;
     HubStatus hub_status = 20;
+    Delivered delivered = 21;
+    Live live = 22;
+    Steered steered = 23;
+    Watched watched = 24;
   }
 }
 
@@ -179,6 +186,41 @@ message GetNeighbors {
 // What the hub is doing: for the Hub page in Settings.
 message GetHubStatus {}
 
+// ---- Live sessions (watch and steer) ----
+//
+// An agent session runs on one device: the holder of the lease
+// `session:<id>` if anyone holds it, otherwise the device named in the
+// `device` field of the session's record (kind `sessions`, id `["<id>"]`).
+// Its stored transcript syncs like any other record. What doesn't belong
+// in the change log (streamed text, tool progress, approval prompts) goes
+// over this live channel instead: the runner publishes it, and the hub
+// relays it to the connections watching that session without storing it.
+// The other way, any device can steer a session (send a message, answer an
+// approval, stop it); the hub routes that to the runner.
+
+// The sessions this connection wants live events for. Replaces the
+// previous set; empty stops watching. Each newly watched session's runner
+// is sent `Watched`, so it can publish a snapshot (text streamed so far,
+// open approvals) for the late joiner.
+message Watch {
+  repeated string sessions = 1;
+}
+
+// A live event from the device running `session`. Only that device may
+// publish for it. `event_json` is the app's own event (UTF-8 JSON), passed
+// through untouched.
+message Publish {
+  string session = 1;
+  bytes event_json = 2;
+}
+
+// A message for the device running `session`: steering text, an approval
+// answer, a stop. `body_json` is the app's own command (UTF-8 JSON).
+message Steer {
+  string session = 1;
+  bytes body_json = 2;
+}
+
 // ---- Replies and pushes ----
 
 message Welcome {
@@ -286,4 +328,34 @@ message Resources {
   // Of one core, so a busy multi-threaded process can exceed 100.
   double cpu_percent = 1;
   uint64 memory_bytes = 2;
+}
+
+// Reply to Watch, Publish and Steer: how many connections the hub passed
+// it to (for Watch, the runner connections told about the change).
+// Publishers can skip publishing while nobody watches.
+message Delivered {
+  uint32 connections = 1;
+}
+
+// Pushed to a session's watchers.
+message Live {
+  string session = 1;
+  // The device that published it.
+  string from = 2;
+  bytes event_json = 3;
+}
+
+// Pushed to the device running `session`.
+message Steered {
+  string session = 1;
+  // The device that sent it.
+  string from = 2;
+  bytes body_json = 3;
+}
+
+// Pushed to the device running `session` when its watchers change.
+message Watched {
+  string session = 1;
+  // Connections watching now.
+  uint32 watchers = 2;
 }

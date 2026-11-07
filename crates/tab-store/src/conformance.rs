@@ -123,7 +123,15 @@ macro_rules! conformance_tests {
             stats_count_records_and_edges,
             stats_count_only_live_leases,
             stats_bytes_grow_with_data,
-            stats_do_not_count_the_log_as_records
+            stats_do_not_count_the_log_as_records,
+            // File references
+            an_empty_store_refers_to_no_files,
+            records_refer_to_hashes_anywhere_in_their_body,
+            hashes_inside_json_text_count,
+            overwriting_drops_the_old_refs,
+            deleting_drops_the_refs,
+            a_file_stays_referenced_while_any_record_refers_to_it,
+            look_alike_strings_are_not_refs
         );
     };
     (@each $make:expr; $($name:ident),* $(,)?) => {
@@ -1233,4 +1241,87 @@ pub fn stats_do_not_count_the_log_as_records<S: HubStore>(s: &mut S) {
     let st: StoreStats = s.stats(t(5)).unwrap();
     assert_eq!(st.records, 1);
     assert_eq!(s.head().unwrap(), 5);
+}
+
+// ---- File references ----
+
+fn h(s: &str) -> String {
+    tab_domain::blob::hash(s.as_bytes())
+}
+
+fn refs<S: HubStore>(s: &S) -> Vec<String> {
+    s.blob_refs().unwrap().into_iter().collect()
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+pub fn an_empty_store_refers_to_no_files<S: HubStore>(s: &mut S) {
+    assert!(refs(s).is_empty());
+    s.apply("mac", &[item("1", "no files")], t(1)).unwrap();
+    assert!(refs(s).is_empty());
+}
+
+pub fn records_refer_to_hashes_anywhere_in_their_body<S: HubStore>(s: &mut S) {
+    let body = json!({ "file": h("a"), "nested": { "list": [1, h("b")] } });
+    s.apply("mac", &[put("message", "1", body)], t(1)).unwrap();
+    assert_eq!(refs(s), sorted(vec![h("a"), h("b")]));
+}
+
+pub fn hashes_inside_json_text_count<S: HubStore>(s: &mut S) {
+    // Rows synced from SQL tables keep nested JSON as text.
+    let meta = json!({ "files": [{ "hash": h("a"), "name": "x.png" }] }).to_string();
+    s.apply(
+        "mac",
+        &[put("session_messages", "1", json!({ "meta": meta }))],
+        t(1),
+    )
+    .unwrap();
+    assert_eq!(refs(s), vec![h("a")]);
+}
+
+pub fn overwriting_drops_the_old_refs<S: HubStore>(s: &mut S) {
+    s.apply("mac", &[put("m", "1", json!({ "f": h("old") }))], t(1))
+        .unwrap();
+    s.apply("mac", &[put("m", "1", json!({ "f": h("new") }))], t(2))
+        .unwrap();
+    assert_eq!(refs(s), vec![h("new")]);
+}
+
+pub fn deleting_drops_the_refs<S: HubStore>(s: &mut S) {
+    s.apply("mac", &[put("m", "1", json!({ "f": h("a") }))], t(1))
+        .unwrap();
+    s.apply("mac", &[del("m", "1")], t(2)).unwrap();
+    assert!(refs(s).is_empty());
+}
+
+pub fn a_file_stays_referenced_while_any_record_refers_to_it<S: HubStore>(s: &mut S) {
+    s.apply(
+        "mac",
+        &[
+            put("m", "1", json!({ "f": h("shared") })),
+            put("note", "2", json!({ "f": [h("shared"), h("own")] })),
+        ],
+        t(1),
+    )
+    .unwrap();
+    s.apply("mac", &[del("m", "1")], t(2)).unwrap();
+    assert_eq!(refs(s), sorted(vec![h("shared"), h("own")]));
+    s.apply("mac", &[put("note", "2", json!({}))], t(3))
+        .unwrap();
+    assert!(refs(s).is_empty());
+}
+
+pub fn look_alike_strings_are_not_refs<S: HubStore>(s: &mut S) {
+    let real = h("x");
+    let body = json!({
+        "upper": real.to_uppercase(),
+        "short": &real[..real.len() - 1],
+        "prose": format!("see {real}"),
+        "word": "sha256:",
+    });
+    s.apply("mac", &[put("m", "1", body)], t(1)).unwrap();
+    assert!(refs(s).is_empty());
 }

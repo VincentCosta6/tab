@@ -25,7 +25,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file tab/hub/v1/hub.proto.
  */
 export const file_tab_hub_v1_hub: GenFile = /*@__PURE__*/
-  fileDesc("ChR0YWIvaHViL3YxL2h1Yi5wcm90bxIKdGFiLmh1Yi52MSLZAwoOQ2xpZW50RW52ZWxvcGUSGAoQcHJvdG9jb2xfdmVyc2lvbhgBIAEoDRISCgpyZXF1ZXN0X2lkGAIgASgEEiIKBWhlbGxvGAogASgLMhEudGFiLmh1Yi52MS5IZWxsb0gAEiIKBWFwcGx5GAsgASgLMhEudGFiLmh1Yi52MS5BcHBseUgAEi0KC2dldF9jaGFuZ2VzGAwgASgLMhYudGFiLmh1Yi52MS5HZXRDaGFuZ2VzSAASKwoKZ2V0X3JlY29yZBgNIAEoCzIVLnRhYi5odWIudjEuR2V0UmVjb3JkSAASLQoLY2xhaW1fbGVhc2UYDiABKAsyFi50YWIuaHViLnYxLkNsYWltTGVhc2VIABIxCg1yZWxlYXNlX2xlYXNlGA8gASgLMhgudGFiLmh1Yi52MS5SZWxlYXNlTGVhc2VIABIkCgZzZWFyY2gYECABKAsyEi50YWIuaHViLnYxLlNlYXJjaEgAEjEKDWdldF9uZWlnaGJvcnMYESABKAsyGC50YWIuaHViLnYxLkdldE5laWdoYm9yc0gAEjIKDmdldF9odWJfc3RhdHVzGBIgASgLMhgudGFiLmh1Yi52MS5HZXRIdWJTdGF0dXNIAEIGCgRib2R5IqkECg5TZXJ2ZXJFbnZlbG9wZRIYChBwcm90b2NvbF92ZXJzaW9uGAEgASgNEhIKCnJlcXVlc3RfaWQYAiABKAQSJgoHd2VsY29tZRgKIAEoCzITLnRhYi5odWIudjEuV2VsY29tZUgAEiYKB2FwcGxpZWQYCyABKAsyEy50YWIuaHViLnYxLkFwcGxpZWRIABImCgdjaGFuZ2VzGAwgASgLMhMudGFiLmh1Yi52MS5DaGFuZ2VzSAASKQoGcmVjb3JkGA0gASgLMhcudGFiLmh1Yi52MS5SZWNvcmRSZXBseUgAEi0KC2xlYXNlX2NsYWltGA4gASgLMhYudGFiLmh1Yi52MS5MZWFzZUNsYWltSAASKAoIcmVsZWFzZWQYDyABKAsyFC50YWIuaHViLnYxLlJlbGVhc2VkSAASMwoObGVhc2VzX2V4cGlyZWQYECABKAsyGS50YWIuaHViLnYxLkxlYXNlc0V4cGlyZWRIABIzCg5zZWFyY2hfcmVzdWx0cxgRIAEoCzIZLnRhYi5odWIudjEuU2VhcmNoUmVzdWx0c0gAEioKCW5laWdoYm9ycxgSIAEoCzIVLnRhYi5odWIudjEuTmVpZ2hib3JzSAASIgoFZXJyb3IYEyABKAsyES50YWIuaHViLnYxLkVycm9ySAASKwoKaHViX3N0YXR1cxgUIAEoCzIVLnRhYi5odWIudjEuSHViU3RhdHVzSABCBgoEYm9keSKYAQoCT3ASHgoDcHV0GAEgASgLMg8udGFiLmh1Yi52MS5QdXRIABIkCgZkZWxldGUYAiABKAsyEi50YWIuaHViLnYxLkRlbGV0ZUgAEiAKBGxpbmsYAyABKAsyEC50YWIuaHViLnYxLkxpbmtIABIkCgZ1bmxpbmsYBCABKAsyEi50YWIuaHViLnYxLlVubGlua0gAQgQKAm9wIjIKA1B1dBIMCgRraW5kGAEgASgJEgoKAmlkGAIgASgJEhEKCWJvZHlfanNvbhgDIAEoDCIiCgZEZWxldGUSDAoEa2luZBgBIAEoCRIKCgJpZBgCIAEoCSItCgRMaW5rEgwKBGZyb20YASABKAkSCgoCdG8YAiABKAkSCwoDcmVsGAMgASgJIi8KBlVubGluaxIMCgRmcm9tGAEgASgJEgoKAnRvGAIgASgJEgsKA3JlbBgDIAEoCSJoCglBcHBsaWVkT3ASCwoDc2VxGAEgASgEEhoKAm9wGAIgASgLMg4udGFiLmh1Yi52MS5PcBIKCgJieRgDIAEoCRImCgJhdBgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAicgoGUmVjb3JkEgwKBGtpbmQYASABKAkSCgoCaWQYAiABKAkSEQoJYm9keV9qc29uGAMgASgMEgsKA3NlcRgEIAEoBBIuCgp1cGRhdGVkX2F0GAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCItCgRFZGdlEgwKBGZyb20YASABKAkSCgoCdG8YAiABKAkSCwoDcmVsGAMgASgJImMKBUxlYXNlEgsKA2tleRgBIAEoCRIOCgZob2xkZXIYAiABKAkSDQoFdG9rZW4YAyABKAQSLgoKZXhwaXJlc19hdBgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiMgoJU2VhcmNoSGl0EgwKBGtpbmQYASABKAkSCgoCaWQYAiABKAkSCwoDc2VxGAMgASgEIjYKBUhlbGxvEg4KBmRldmljZRgBIAEoCRIOCgZjbGllbnQYAiABKAkSDQoFc2luY2UYAyABKAQiJAoFQXBwbHkSGwoDb3BzGAEgAygLMg4udGFiLmh1Yi52MS5PcCIqCgpHZXRDaGFuZ2VzEg0KBXNpbmNlGAEgASgEEg0KBWxpbWl0GAIgASgNIiUKCUdldFJlY29yZBIMCgRraW5kGAEgASgJEgoKAmlkGAIgASgJIisKCkNsYWltTGVhc2USCwoDa2V5GAEgASgJEhAKCHR0bF9zZWNzGAIgASgNIhsKDFJlbGVhc2VMZWFzZRILCgNrZXkYASABKAkiJgoGU2VhcmNoEg0KBXF1ZXJ5GAEgASgJEg0KBWxpbWl0GAIgASgNIisKDEdldE5laWdoYm9ycxIMCgRub2RlGAEgASgJEg0KBWxpbWl0GAIgASgNIg4KDEdldEh1YlN0YXR1cyIxCgdXZWxjb21lEhgKEHByb3RvY29sX3ZlcnNpb24YASABKA0SDAoEaGVhZBgCIAEoBCImCgdBcHBsaWVkEg0KBWZpcnN0GAEgASgEEgwKBGxhc3QYAiABKAQiTQoHQ2hhbmdlcxImCgdjaGFuZ2VzGAEgAygLMhUudGFiLmh1Yi52MS5BcHBsaWVkT3ASDAoEaGVhZBgCIAEoBBIMCgRtb3JlGAMgASgIIjEKC1JlY29yZFJlcGx5EiIKBnJlY29yZBgBIAEoCzISLnRhYi5odWIudjEuUmVjb3JkIr8BCgpMZWFzZUNsYWltEi8KB291dGNvbWUYASABKA4yHi50YWIuaHViLnYxLkxlYXNlQ2xhaW0uT3V0Y29tZRIgCgVsZWFzZRgCIAEoCzIRLnRhYi5odWIudjEuTGVhc2UiXgoHT3V0Y29tZRIXChNPVVRDT01FX1VOU1BFQ0lGSUVEEAASEwoPT1VUQ09NRV9HUkFOVEVEEAESEwoPT1VUQ09NRV9SRU5FV0VEEAISEAoMT1VUQ09NRV9IRUxEEAMiHAoIUmVsZWFzZWQSEAoIcmVsZWFzZWQYASABKAgiMgoNTGVhc2VzRXhwaXJlZBIhCgZsZWFzZXMYASADKAsyES50YWIuaHViLnYxLkxlYXNlIjQKDVNlYXJjaFJlc3VsdHMSIwoEaGl0cxgBIAMoCzIVLnRhYi5odWIudjEuU2VhcmNoSGl0IiwKCU5laWdoYm9ycxIfCgVlZGdlcxgBIAMoCzIQLnRhYi5odWIudjEuRWRnZSKuAQoFRXJyb3ISJAoEY29kZRgBIAEoDjIWLnRhYi5odWIudjEuRXJyb3IuQ29kZRIPCgdtZXNzYWdlGAIgASgJIm4KBENvZGUSFAoQQ09ERV9VTlNQRUNJRklFRBAAEhQKEENPREVfQkFEX1JFUVVFU1QQARIUChBDT0RFX1VOU1VQUE9SVEVEEAISEQoNQ09ERV9DT05GTElDVBADEhEKDUNPREVfSU5URVJOQUwQBCKXAgoJSHViU3RhdHVzEg8KB3J1bnNfb24YASABKAkSGAoQcHJvdG9jb2xfdmVyc2lvbhgCIAEoDRIuCgpzdGFydGVkX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIMCgRoZWFkGAQgASgEEg8KB3JlY29yZHMYBSABKAQSDQoFZWRnZXMYBiABKAQSEwoLbGl2ZV9sZWFzZXMYByABKAQSFQoNc3RvcmFnZV9ieXRlcxgIIAEoBBIrCgtjb25uZWN0aW9ucxgJIAMoCzIWLnRhYi5odWIudjEuQ29ubmVjdGlvbhIoCglyZXNvdXJjZXMYCiABKAsyFS50YWIuaHViLnYxLlJlc291cmNlcyKOAQoKQ29ubmVjdGlvbhIKCgJpZBgBIAEoBBIOCgZkZXZpY2UYAiABKAkSDgoGY2xpZW50GAMgASgJEg8KB2FkZHJlc3MYBCABKAkSMAoMY29ubmVjdGVkX2F0GAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIRCglzeW5jZWRfdG8YBiABKAQiNgoJUmVzb3VyY2VzEhMKC2NwdV9wZXJjZW50GAEgASgBEhQKDG1lbW9yeV9ieXRlcxgCIAEoBGIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("ChR0YWIvaHViL3YxL2h1Yi5wcm90bxIKdGFiLmh1Yi52MSLJBAoOQ2xpZW50RW52ZWxvcGUSGAoQcHJvdG9jb2xfdmVyc2lvbhgBIAEoDRISCgpyZXF1ZXN0X2lkGAIgASgEEiIKBWhlbGxvGAogASgLMhEudGFiLmh1Yi52MS5IZWxsb0gAEiIKBWFwcGx5GAsgASgLMhEudGFiLmh1Yi52MS5BcHBseUgAEi0KC2dldF9jaGFuZ2VzGAwgASgLMhYudGFiLmh1Yi52MS5HZXRDaGFuZ2VzSAASKwoKZ2V0X3JlY29yZBgNIAEoCzIVLnRhYi5odWIudjEuR2V0UmVjb3JkSAASLQoLY2xhaW1fbGVhc2UYDiABKAsyFi50YWIuaHViLnYxLkNsYWltTGVhc2VIABIxCg1yZWxlYXNlX2xlYXNlGA8gASgLMhgudGFiLmh1Yi52MS5SZWxlYXNlTGVhc2VIABIkCgZzZWFyY2gYECABKAsyEi50YWIuaHViLnYxLlNlYXJjaEgAEjEKDWdldF9uZWlnaGJvcnMYESABKAsyGC50YWIuaHViLnYxLkdldE5laWdoYm9yc0gAEjIKDmdldF9odWJfc3RhdHVzGBIgASgLMhgudGFiLmh1Yi52MS5HZXRIdWJTdGF0dXNIABIiCgV3YXRjaBgTIAEoCzIRLnRhYi5odWIudjEuV2F0Y2hIABImCgdwdWJsaXNoGBQgASgLMhMudGFiLmh1Yi52MS5QdWJsaXNoSAASIgoFc3RlZXIYFSABKAsyES50YWIuaHViLnYxLlN0ZWVySABCBgoEYm9keSLHBQoOU2VydmVyRW52ZWxvcGUSGAoQcHJvdG9jb2xfdmVyc2lvbhgBIAEoDRISCgpyZXF1ZXN0X2lkGAIgASgEEiYKB3dlbGNvbWUYCiABKAsyEy50YWIuaHViLnYxLldlbGNvbWVIABImCgdhcHBsaWVkGAsgASgLMhMudGFiLmh1Yi52MS5BcHBsaWVkSAASJgoHY2hhbmdlcxgMIAEoCzITLnRhYi5odWIudjEuQ2hhbmdlc0gAEikKBnJlY29yZBgNIAEoCzIXLnRhYi5odWIudjEuUmVjb3JkUmVwbHlIABItCgtsZWFzZV9jbGFpbRgOIAEoCzIWLnRhYi5odWIudjEuTGVhc2VDbGFpbUgAEigKCHJlbGVhc2VkGA8gASgLMhQudGFiLmh1Yi52MS5SZWxlYXNlZEgAEjMKDmxlYXNlc19leHBpcmVkGBAgASgLMhkudGFiLmh1Yi52MS5MZWFzZXNFeHBpcmVkSAASMwoOc2VhcmNoX3Jlc3VsdHMYESABKAsyGS50YWIuaHViLnYxLlNlYXJjaFJlc3VsdHNIABIqCgluZWlnaGJvcnMYEiABKAsyFS50YWIuaHViLnYxLk5laWdoYm9yc0gAEiIKBWVycm9yGBMgASgLMhEudGFiLmh1Yi52MS5FcnJvckgAEisKCmh1Yl9zdGF0dXMYFCABKAsyFS50YWIuaHViLnYxLkh1YlN0YXR1c0gAEioKCWRlbGl2ZXJlZBgVIAEoCzIVLnRhYi5odWIudjEuRGVsaXZlcmVkSAASIAoEbGl2ZRgWIAEoCzIQLnRhYi5odWIudjEuTGl2ZUgAEiYKB3N0ZWVyZWQYFyABKAsyEy50YWIuaHViLnYxLlN0ZWVyZWRIABImCgd3YXRjaGVkGBggASgLMhMudGFiLmh1Yi52MS5XYXRjaGVkSABCBgoEYm9keSKYAQoCT3ASHgoDcHV0GAEgASgLMg8udGFiLmh1Yi52MS5QdXRIABIkCgZkZWxldGUYAiABKAsyEi50YWIuaHViLnYxLkRlbGV0ZUgAEiAKBGxpbmsYAyABKAsyEC50YWIuaHViLnYxLkxpbmtIABIkCgZ1bmxpbmsYBCABKAsyEi50YWIuaHViLnYxLlVubGlua0gAQgQKAm9wIjIKA1B1dBIMCgRraW5kGAEgASgJEgoKAmlkGAIgASgJEhEKCWJvZHlfanNvbhgDIAEoDCIiCgZEZWxldGUSDAoEa2luZBgBIAEoCRIKCgJpZBgCIAEoCSItCgRMaW5rEgwKBGZyb20YASABKAkSCgoCdG8YAiABKAkSCwoDcmVsGAMgASgJIi8KBlVubGluaxIMCgRmcm9tGAEgASgJEgoKAnRvGAIgASgJEgsKA3JlbBgDIAEoCSJoCglBcHBsaWVkT3ASCwoDc2VxGAEgASgEEhoKAm9wGAIgASgLMg4udGFiLmh1Yi52MS5PcBIKCgJieRgDIAEoCRImCgJhdBgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAicgoGUmVjb3JkEgwKBGtpbmQYASABKAkSCgoCaWQYAiABKAkSEQoJYm9keV9qc29uGAMgASgMEgsKA3NlcRgEIAEoBBIuCgp1cGRhdGVkX2F0GAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCItCgRFZGdlEgwKBGZyb20YASABKAkSCgoCdG8YAiABKAkSCwoDcmVsGAMgASgJImMKBUxlYXNlEgsKA2tleRgBIAEoCRIOCgZob2xkZXIYAiABKAkSDQoFdG9rZW4YAyABKAQSLgoKZXhwaXJlc19hdBgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiMgoJU2VhcmNoSGl0EgwKBGtpbmQYASABKAkSCgoCaWQYAiABKAkSCwoDc2VxGAMgASgEIjYKBUhlbGxvEg4KBmRldmljZRgBIAEoCRIOCgZjbGllbnQYAiABKAkSDQoFc2luY2UYAyABKAQiJAoFQXBwbHkSGwoDb3BzGAEgAygLMg4udGFiLmh1Yi52MS5PcCIqCgpHZXRDaGFuZ2VzEg0KBXNpbmNlGAEgASgEEg0KBWxpbWl0GAIgASgNIiUKCUdldFJlY29yZBIMCgRraW5kGAEgASgJEgoKAmlkGAIgASgJIisKCkNsYWltTGVhc2USCwoDa2V5GAEgASgJEhAKCHR0bF9zZWNzGAIgASgNIhsKDFJlbGVhc2VMZWFzZRILCgNrZXkYASABKAkiJgoGU2VhcmNoEg0KBXF1ZXJ5GAEgASgJEg0KBWxpbWl0GAIgASgNIisKDEdldE5laWdoYm9ycxIMCgRub2RlGAEgASgJEg0KBWxpbWl0GAIgASgNIg4KDEdldEh1YlN0YXR1cyIZCgVXYXRjaBIQCghzZXNzaW9ucxgBIAMoCSIuCgdQdWJsaXNoEg8KB3Nlc3Npb24YASABKAkSEgoKZXZlbnRfanNvbhgCIAEoDCIrCgVTdGVlchIPCgdzZXNzaW9uGAEgASgJEhEKCWJvZHlfanNvbhgCIAEoDCIxCgdXZWxjb21lEhgKEHByb3RvY29sX3ZlcnNpb24YASABKA0SDAoEaGVhZBgCIAEoBCImCgdBcHBsaWVkEg0KBWZpcnN0GAEgASgEEgwKBGxhc3QYAiABKAQiTQoHQ2hhbmdlcxImCgdjaGFuZ2VzGAEgAygLMhUudGFiLmh1Yi52MS5BcHBsaWVkT3ASDAoEaGVhZBgCIAEoBBIMCgRtb3JlGAMgASgIIjEKC1JlY29yZFJlcGx5EiIKBnJlY29yZBgBIAEoCzISLnRhYi5odWIudjEuUmVjb3JkIr8BCgpMZWFzZUNsYWltEi8KB291dGNvbWUYASABKA4yHi50YWIuaHViLnYxLkxlYXNlQ2xhaW0uT3V0Y29tZRIgCgVsZWFzZRgCIAEoCzIRLnRhYi5odWIudjEuTGVhc2UiXgoHT3V0Y29tZRIXChNPVVRDT01FX1VOU1BFQ0lGSUVEEAASEwoPT1VUQ09NRV9HUkFOVEVEEAESEwoPT1VUQ09NRV9SRU5FV0VEEAISEAoMT1VUQ09NRV9IRUxEEAMiHAoIUmVsZWFzZWQSEAoIcmVsZWFzZWQYASABKAgiMgoNTGVhc2VzRXhwaXJlZBIhCgZsZWFzZXMYASADKAsyES50YWIuaHViLnYxLkxlYXNlIjQKDVNlYXJjaFJlc3VsdHMSIwoEaGl0cxgBIAMoCzIVLnRhYi5odWIudjEuU2VhcmNoSGl0IiwKCU5laWdoYm9ycxIfCgVlZGdlcxgBIAMoCzIQLnRhYi5odWIudjEuRWRnZSKuAQoFRXJyb3ISJAoEY29kZRgBIAEoDjIWLnRhYi5odWIudjEuRXJyb3IuQ29kZRIPCgdtZXNzYWdlGAIgASgJIm4KBENvZGUSFAoQQ09ERV9VTlNQRUNJRklFRBAAEhQKEENPREVfQkFEX1JFUVVFU1QQARIUChBDT0RFX1VOU1VQUE9SVEVEEAISEQoNQ09ERV9DT05GTElDVBADEhEKDUNPREVfSU5URVJOQUwQBCKXAgoJSHViU3RhdHVzEg8KB3J1bnNfb24YASABKAkSGAoQcHJvdG9jb2xfdmVyc2lvbhgCIAEoDRIuCgpzdGFydGVkX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIMCgRoZWFkGAQgASgEEg8KB3JlY29yZHMYBSABKAQSDQoFZWRnZXMYBiABKAQSEwoLbGl2ZV9sZWFzZXMYByABKAQSFQoNc3RvcmFnZV9ieXRlcxgIIAEoBBIrCgtjb25uZWN0aW9ucxgJIAMoCzIWLnRhYi5odWIudjEuQ29ubmVjdGlvbhIoCglyZXNvdXJjZXMYCiABKAsyFS50YWIuaHViLnYxLlJlc291cmNlcyKOAQoKQ29ubmVjdGlvbhIKCgJpZBgBIAEoBBIOCgZkZXZpY2UYAiABKAkSDgoGY2xpZW50GAMgASgJEg8KB2FkZHJlc3MYBCABKAkSMAoMY29ubmVjdGVkX2F0GAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIRCglzeW5jZWRfdG8YBiABKAQiNgoJUmVzb3VyY2VzEhMKC2NwdV9wZXJjZW50GAEgASgBEhQKDG1lbW9yeV9ieXRlcxgCIAEoBCIgCglEZWxpdmVyZWQSEwoLY29ubmVjdGlvbnMYASABKA0iOQoETGl2ZRIPCgdzZXNzaW9uGAEgASgJEgwKBGZyb20YAiABKAkSEgoKZXZlbnRfanNvbhgDIAEoDCI7CgdTdGVlcmVkEg8KB3Nlc3Npb24YASABKAkSDAoEZnJvbRgCIAEoCRIRCglib2R5X2pzb24YAyABKAwiLAoHV2F0Y2hlZBIPCgdzZXNzaW9uGAEgASgJEhAKCHdhdGNoZXJzGAIgASgNYgZwcm90bzM", [file_google_protobuf_timestamp]);
 
 /**
  * Every frame on the wire is one of these.
@@ -104,6 +104,24 @@ export type ClientEnvelope = Message<"tab.hub.v1.ClientEnvelope"> & {
      */
     value: GetHubStatus;
     case: "getHubStatus";
+  } | {
+    /**
+     * @generated from field: tab.hub.v1.Watch watch = 19;
+     */
+    value: Watch;
+    case: "watch";
+  } | {
+    /**
+     * @generated from field: tab.hub.v1.Publish publish = 20;
+     */
+    value: Publish;
+    case: "publish";
+  } | {
+    /**
+     * @generated from field: tab.hub.v1.Steer steer = 21;
+     */
+    value: Steer;
+    case: "steer";
   } | { case: undefined; value?: undefined };
 };
 
@@ -199,6 +217,30 @@ export type ServerEnvelope = Message<"tab.hub.v1.ServerEnvelope"> & {
      */
     value: HubStatus;
     case: "hubStatus";
+  } | {
+    /**
+     * @generated from field: tab.hub.v1.Delivered delivered = 21;
+     */
+    value: Delivered;
+    case: "delivered";
+  } | {
+    /**
+     * @generated from field: tab.hub.v1.Live live = 22;
+     */
+    value: Live;
+    case: "live";
+  } | {
+    /**
+     * @generated from field: tab.hub.v1.Steered steered = 23;
+     */
+    value: Steered;
+    case: "steered";
+  } | {
+    /**
+     * @generated from field: tab.hub.v1.Watched watched = 24;
+     */
+    value: Watched;
+    case: "watched";
   } | { case: undefined; value?: undefined };
 };
 
@@ -720,6 +762,79 @@ export const GetHubStatusSchema: GenMessage<GetHubStatus> = /*@__PURE__*/
   messageDesc(file_tab_hub_v1_hub, 20);
 
 /**
+ * The sessions this connection wants live events for. Replaces the
+ * previous set; empty stops watching. Each newly watched session's runner
+ * is sent `Watched`, so it can publish a snapshot (text streamed so far,
+ * open approvals) for the late joiner.
+ *
+ * @generated from message tab.hub.v1.Watch
+ */
+export type Watch = Message<"tab.hub.v1.Watch"> & {
+  /**
+   * @generated from field: repeated string sessions = 1;
+   */
+  sessions: string[];
+};
+
+/**
+ * Describes the message tab.hub.v1.Watch.
+ * Use `create(WatchSchema)` to create a new message.
+ */
+export const WatchSchema: GenMessage<Watch> = /*@__PURE__*/
+  messageDesc(file_tab_hub_v1_hub, 21);
+
+/**
+ * A live event from the device running `session`. Only that device may
+ * publish for it. `event_json` is the app's own event (UTF-8 JSON), passed
+ * through untouched.
+ *
+ * @generated from message tab.hub.v1.Publish
+ */
+export type Publish = Message<"tab.hub.v1.Publish"> & {
+  /**
+   * @generated from field: string session = 1;
+   */
+  session: string;
+
+  /**
+   * @generated from field: bytes event_json = 2;
+   */
+  eventJson: Uint8Array;
+};
+
+/**
+ * Describes the message tab.hub.v1.Publish.
+ * Use `create(PublishSchema)` to create a new message.
+ */
+export const PublishSchema: GenMessage<Publish> = /*@__PURE__*/
+  messageDesc(file_tab_hub_v1_hub, 22);
+
+/**
+ * A message for the device running `session`: steering text, an approval
+ * answer, a stop. `body_json` is the app's own command (UTF-8 JSON).
+ *
+ * @generated from message tab.hub.v1.Steer
+ */
+export type Steer = Message<"tab.hub.v1.Steer"> & {
+  /**
+   * @generated from field: string session = 1;
+   */
+  session: string;
+
+  /**
+   * @generated from field: bytes body_json = 2;
+   */
+  bodyJson: Uint8Array;
+};
+
+/**
+ * Describes the message tab.hub.v1.Steer.
+ * Use `create(SteerSchema)` to create a new message.
+ */
+export const SteerSchema: GenMessage<Steer> = /*@__PURE__*/
+  messageDesc(file_tab_hub_v1_hub, 23);
+
+/**
  * @generated from message tab.hub.v1.Welcome
  */
 export type Welcome = Message<"tab.hub.v1.Welcome"> & {
@@ -743,7 +858,7 @@ export type Welcome = Message<"tab.hub.v1.Welcome"> & {
  * Use `create(WelcomeSchema)` to create a new message.
  */
 export const WelcomeSchema: GenMessage<Welcome> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 21);
+  messageDesc(file_tab_hub_v1_hub, 24);
 
 /**
  * @generated from message tab.hub.v1.Applied
@@ -765,7 +880,7 @@ export type Applied = Message<"tab.hub.v1.Applied"> & {
  * Use `create(AppliedSchema)` to create a new message.
  */
 export const AppliedSchema: GenMessage<Applied> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 22);
+  messageDesc(file_tab_hub_v1_hub, 25);
 
 /**
  * Reply to GetChanges, and pushed to other clients when something changes.
@@ -796,7 +911,7 @@ export type Changes = Message<"tab.hub.v1.Changes"> & {
  * Use `create(ChangesSchema)` to create a new message.
  */
 export const ChangesSchema: GenMessage<Changes> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 23);
+  messageDesc(file_tab_hub_v1_hub, 26);
 
 /**
  * @generated from message tab.hub.v1.RecordReply
@@ -815,7 +930,7 @@ export type RecordReply = Message<"tab.hub.v1.RecordReply"> & {
  * Use `create(RecordReplySchema)` to create a new message.
  */
 export const RecordReplySchema: GenMessage<RecordReply> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 24);
+  messageDesc(file_tab_hub_v1_hub, 27);
 
 /**
  * @generated from message tab.hub.v1.LeaseClaim
@@ -837,7 +952,7 @@ export type LeaseClaim = Message<"tab.hub.v1.LeaseClaim"> & {
  * Use `create(LeaseClaimSchema)` to create a new message.
  */
 export const LeaseClaimSchema: GenMessage<LeaseClaim> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 25);
+  messageDesc(file_tab_hub_v1_hub, 28);
 
 /**
  * @generated from enum tab.hub.v1.LeaseClaim.Outcome
@@ -870,7 +985,7 @@ export enum LeaseClaim_Outcome {
  * Describes the enum tab.hub.v1.LeaseClaim.Outcome.
  */
 export const LeaseClaim_OutcomeSchema: GenEnum<LeaseClaim_Outcome> = /*@__PURE__*/
-  enumDesc(file_tab_hub_v1_hub, 25, 0);
+  enumDesc(file_tab_hub_v1_hub, 28, 0);
 
 /**
  * @generated from message tab.hub.v1.Released
@@ -887,7 +1002,7 @@ export type Released = Message<"tab.hub.v1.Released"> & {
  * Use `create(ReleasedSchema)` to create a new message.
  */
 export const ReleasedSchema: GenMessage<Released> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 26);
+  messageDesc(file_tab_hub_v1_hub, 29);
 
 /**
  * Leases that lapsed, pushed so runners can pick the work up.
@@ -906,7 +1021,7 @@ export type LeasesExpired = Message<"tab.hub.v1.LeasesExpired"> & {
  * Use `create(LeasesExpiredSchema)` to create a new message.
  */
 export const LeasesExpiredSchema: GenMessage<LeasesExpired> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 27);
+  messageDesc(file_tab_hub_v1_hub, 30);
 
 /**
  * @generated from message tab.hub.v1.SearchResults
@@ -923,7 +1038,7 @@ export type SearchResults = Message<"tab.hub.v1.SearchResults"> & {
  * Use `create(SearchResultsSchema)` to create a new message.
  */
 export const SearchResultsSchema: GenMessage<SearchResults> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 28);
+  messageDesc(file_tab_hub_v1_hub, 31);
 
 /**
  * @generated from message tab.hub.v1.Neighbors
@@ -940,7 +1055,7 @@ export type Neighbors = Message<"tab.hub.v1.Neighbors"> & {
  * Use `create(NeighborsSchema)` to create a new message.
  */
 export const NeighborsSchema: GenMessage<Neighbors> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 29);
+  messageDesc(file_tab_hub_v1_hub, 32);
 
 /**
  * @generated from message tab.hub.v1.Error
@@ -962,7 +1077,7 @@ export type Error = Message<"tab.hub.v1.Error"> & {
  * Use `create(ErrorSchema)` to create a new message.
  */
 export const ErrorSchema: GenMessage<Error> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 30);
+  messageDesc(file_tab_hub_v1_hub, 33);
 
 /**
  * @generated from enum tab.hub.v1.Error.Code
@@ -1006,7 +1121,7 @@ export enum Error_Code {
  * Describes the enum tab.hub.v1.Error.Code.
  */
 export const Error_CodeSchema: GenEnum<Error_Code> = /*@__PURE__*/
-  enumDesc(file_tab_hub_v1_hub, 30, 0);
+  enumDesc(file_tab_hub_v1_hub, 33, 0);
 
 /**
  * @generated from message tab.hub.v1.HubStatus
@@ -1077,7 +1192,7 @@ export type HubStatus = Message<"tab.hub.v1.HubStatus"> & {
  * Use `create(HubStatusSchema)` to create a new message.
  */
 export const HubStatusSchema: GenMessage<HubStatus> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 31);
+  messageDesc(file_tab_hub_v1_hub, 34);
 
 /**
  * A device or runner connected to the hub.
@@ -1127,7 +1242,7 @@ export type Connection = Message<"tab.hub.v1.Connection"> & {
  * Use `create(ConnectionSchema)` to create a new message.
  */
 export const ConnectionSchema: GenMessage<Connection> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 32);
+  messageDesc(file_tab_hub_v1_hub, 35);
 
 /**
  * @generated from message tab.hub.v1.Resources
@@ -1151,5 +1266,114 @@ export type Resources = Message<"tab.hub.v1.Resources"> & {
  * Use `create(ResourcesSchema)` to create a new message.
  */
 export const ResourcesSchema: GenMessage<Resources> = /*@__PURE__*/
-  messageDesc(file_tab_hub_v1_hub, 33);
+  messageDesc(file_tab_hub_v1_hub, 36);
+
+/**
+ * Reply to Watch, Publish and Steer: how many connections the hub passed
+ * it to (for Watch, the runner connections told about the change).
+ * Publishers can skip publishing while nobody watches.
+ *
+ * @generated from message tab.hub.v1.Delivered
+ */
+export type Delivered = Message<"tab.hub.v1.Delivered"> & {
+  /**
+   * @generated from field: uint32 connections = 1;
+   */
+  connections: number;
+};
+
+/**
+ * Describes the message tab.hub.v1.Delivered.
+ * Use `create(DeliveredSchema)` to create a new message.
+ */
+export const DeliveredSchema: GenMessage<Delivered> = /*@__PURE__*/
+  messageDesc(file_tab_hub_v1_hub, 37);
+
+/**
+ * Pushed to a session's watchers.
+ *
+ * @generated from message tab.hub.v1.Live
+ */
+export type Live = Message<"tab.hub.v1.Live"> & {
+  /**
+   * @generated from field: string session = 1;
+   */
+  session: string;
+
+  /**
+   * The device that published it.
+   *
+   * @generated from field: string from = 2;
+   */
+  from: string;
+
+  /**
+   * @generated from field: bytes event_json = 3;
+   */
+  eventJson: Uint8Array;
+};
+
+/**
+ * Describes the message tab.hub.v1.Live.
+ * Use `create(LiveSchema)` to create a new message.
+ */
+export const LiveSchema: GenMessage<Live> = /*@__PURE__*/
+  messageDesc(file_tab_hub_v1_hub, 38);
+
+/**
+ * Pushed to the device running `session`.
+ *
+ * @generated from message tab.hub.v1.Steered
+ */
+export type Steered = Message<"tab.hub.v1.Steered"> & {
+  /**
+   * @generated from field: string session = 1;
+   */
+  session: string;
+
+  /**
+   * The device that sent it.
+   *
+   * @generated from field: string from = 2;
+   */
+  from: string;
+
+  /**
+   * @generated from field: bytes body_json = 3;
+   */
+  bodyJson: Uint8Array;
+};
+
+/**
+ * Describes the message tab.hub.v1.Steered.
+ * Use `create(SteeredSchema)` to create a new message.
+ */
+export const SteeredSchema: GenMessage<Steered> = /*@__PURE__*/
+  messageDesc(file_tab_hub_v1_hub, 39);
+
+/**
+ * Pushed to the device running `session` when its watchers change.
+ *
+ * @generated from message tab.hub.v1.Watched
+ */
+export type Watched = Message<"tab.hub.v1.Watched"> & {
+  /**
+   * @generated from field: string session = 1;
+   */
+  session: string;
+
+  /**
+   * Connections watching now.
+   *
+   * @generated from field: uint32 watchers = 2;
+   */
+  watchers: number;
+};
+
+/**
+ * Describes the message tab.hub.v1.Watched.
+ * Use `create(WatchedSchema)` to create a new message.
+ */
+export const WatchedSchema: GenMessage<Watched> = /*@__PURE__*/
+  messageDesc(file_tab_hub_v1_hub, 40);
 
