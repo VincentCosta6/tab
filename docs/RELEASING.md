@@ -5,7 +5,6 @@
 | Platform | What you get |
 |---|---|
 | macOS, Apple silicon | `tab_X.Y.Z_aarch64.dmg` |
-| macOS, Intel | `tab_X.Y.Z_x64.dmg` |
 | Windows x64 | `tab_X.Y.Z_x64-setup.exe` (NSIS) and `tab_X.Y.Z_x64_en-US.msi` |
 | iOS | not yet (see the end) |
 
@@ -18,7 +17,7 @@ Signing is optional. With no secrets set, the workflow still builds and publishe
 1. **Checks the version.** It must be strict `vMAJOR.MINOR.PATCH` (`v1.2.3`, not `1.2.3`, `v1.2`, `v01.2.3` or `v1.2.3-beta`). It must not match any existing tag or release, drafts included. A version lower than an existing one is allowed (a hotfix on an older line) with a warning, because installed copies only update to newer versions.
 2. **Runs the checks.** It runs the PR checks from `ci.yml` (UI typecheck and build, `tab-core` and shared crate tests, the Wasm build, proto lint and codegen). It also runs `cargo fmt --check`, clippy (correctness and suspicious lints fail the release, style lints only warn), and the full storage suite with `--perf`, which is too slow for every PR.
 3. **Creates a draft release** with generated notes. A draft has no tag yet, so a failed build leaves no tag behind.
-4. **Builds** macOS (both architectures) and Windows in parallel. It stamps the version into the app (there's no version bump commit; `tauri.conf.json` stays at `0.1.0`) and uploads the installers to the draft.
+4. **Builds** macOS (Apple silicon only) and Windows in parallel. It stamps the version into the app (there's no version bump commit; `tauri.conf.json` stays at `0.1.0`) and uploads the installers to the draft.
 5. **Publishes** the release and marks it latest. This happens only if every build passed.
 
 If a build fails, fix it and use **Re-run failed jobs**, which reuses the same draft. To start over instead, delete the draft first, or the version check will refuse the version as taken.
