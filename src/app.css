@@ -26,14 +26,18 @@
 .chip .count { font-variant-numeric: tabular-nums; opacity: 0.7; font-size: var(--text-xs); }
 .queue-list { flex: 1; overflow: auto; }
 .urgency-group { padding: var(--space-3) var(--space-4) var(--space-1); font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--u, var(--fg-subtle)); position: sticky; top: 0; background: var(--bg-raised); z-index: 1; }
-.row { position: relative; display: grid; grid-template-columns: auto 1fr auto; gap: var(--space-3); align-items: start; padding: var(--space-3) var(--space-4); cursor: pointer; border-left: 2px solid transparent; }
+.row { position: relative; display: grid; grid-template-columns: auto 1fr; gap: var(--space-3); align-items: start; padding: var(--space-3) var(--space-4); cursor: pointer; border-left: 2px solid transparent; }
 .row:hover { background: var(--bg-hover); }
 .row.selected { background: var(--bg-selected); border-left-color: var(--focus); }
 .row-main { min-width: 0; display: grid; gap: 2px; }
 .row-title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.row-meta { color: var(--fg-subtle); font-size: var(--text-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Second row: chat state, project and byline on the left, time pinned right. */
+.row-meta { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--fg-subtle); font-size: var(--text-sm); white-space: nowrap; }
+.row-meta-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; }
+.row-byline { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.row-meta .row-time { flex: none; margin-left: auto; }
+.row-meta .badge { flex: none; }
 .row-reason { color: var(--fg-muted); font-size: var(--text-sm); display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
-.row-side { display: grid; justify-items: end; gap: var(--space-1); }
 .row-time { color: var(--fg-subtle); font-size: var(--text-xs); }
 
 .detail { min-width: 0; overflow: auto; }
@@ -447,7 +451,7 @@ body.resizing iframe { pointer-events: none; }
 .pj-mark-none { width: 18px; height: 18px; color: var(--fg-subtle); background: var(--bg-sunken); }
 .pj-chip { display: inline-flex; align-items: center; gap: 3px; font-size: var(--text-xs); font-weight: 500; max-width: 140px; vertical-align: middle; }
 .pj-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-meta .pj-chip { margin-right: 6px; }
+.row-meta .pj-chip { flex: none; }
 .pj-trigger { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px 0 5px; font: inherit; font-size: var(--text-sm); color: var(--fg); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-md); cursor: pointer; max-width: 240px; }
 .pj-trigger.compact { height: 24px; padding: 0 6px 0 4px; font-size: var(--text-xs); }
 .pj-trigger.empty { color: var(--fg-muted); padding-left: 8px; }
@@ -575,7 +579,7 @@ body.resizing iframe { pointer-events: none; }
 .session-pill.is-monitoring .session-pulse::after { background: none; border: 1px solid currentColor; animation-duration: 2.6s; animation-timing-function: ease-out; }
 @keyframes session-ping { 0% { transform: scale(1); opacity: .7; } 100% { transform: scale(2.6); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .session-pulse, .session-pulse::after { animation: none !important; } }
-.row-meta .session-pill { height: 18px; margin-right: 6px; vertical-align: 1px; }
+.row-meta .session-pill { height: 18px; }
 .nav-icon { position: relative; display: inline-grid; }
 .nav-badge { position: absolute; top: -5px; right: -8px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 15px; text-align: center; color: #fff; }
 .nav-badge.needs { background: var(--tone-warning-fg); }
