@@ -77,6 +77,8 @@ export const keys = {
   projects: ["projects"] as const,
   agentActivity: ["agent-activity"] as const,
   notes: (projectId: string) => ["notes", projectId] as const,
+  repos: (projectId: string) => ["project-repos", projectId] as const,
+  projectItems: (projectId: string) => ["project-items", projectId] as const,
   pressure: ["pressure"] as const,
   pull: (repo: string, n: number) => ["pull", repo, n] as const,
   file: (repo: string, sha: string, path: string) => ["file", repo, sha, path] as const,
@@ -150,6 +152,8 @@ function LiveEvents() {
           break;
         case "project_changed":
           qc.invalidateQueries({ queryKey: keys.notes(e.project_id) });
+          qc.invalidateQueries({ queryKey: keys.repos(e.project_id) });
+          qc.invalidateQueries({ queryKey: keys.projects });
           break;
         case "workflows_changed":
           qc.invalidateQueries({ queryKey: ["workflows"] });

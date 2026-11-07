@@ -112,6 +112,14 @@ export function useProjectNotes(projectId: string | null | undefined) {
   return useQuery({ queryKey: keys.notes(projectId ?? ""), queryFn: () => api.projectNotes(projectId!), enabled: !!projectId, staleTime: 0 });
 }
 
+export function useProjectRepos(projectId: string | null | undefined) {
+  return useQuery({ queryKey: keys.repos(projectId ?? ""), queryFn: () => api.projectRepos(projectId!), enabled: !!projectId, staleTime: 0 });
+}
+
+export function useProjectItems(projectId: string | null | undefined) {
+  return useQuery({ queryKey: keys.projectItems(projectId ?? ""), queryFn: () => api.projectItems(projectId!), enabled: !!projectId, staleTime: 0 });
+}
+
 export function usePressure() {
   return useQuery({ queryKey: keys.pressure, queryFn: api.ratePressure, refetchInterval: 4000, staleTime: 0 });
 }

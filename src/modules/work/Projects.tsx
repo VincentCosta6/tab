@@ -242,7 +242,7 @@ export function ProjectEditor({ project, onClose, onSaved, onDeleted }: {
 }
 
 /** What agents (and the person) have written down about a project. */
-function ProjectNotes({ projectId }: { projectId: string }) {
+export function ProjectNotes({ projectId }: { projectId: string }) {
   const qc = useQueryClient();
   const { data: notes = [] } = useProjectNotes(projectId);
   const [adding, setAdding] = useState(false);

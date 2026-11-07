@@ -7,9 +7,44 @@ use rusqlite::{OptionalExtension, params};
 
 use super::items::get_item;
 use super::{Store, parse_ts, ts};
-use crate::model::{Entity, Project, ProjectNote, QueueItem};
+use crate::model::{Entity, Project, ProjectNote, ProjectRepo, QueueItem};
 
-const PROJECT_COLS: &str = "id, name, color, icon, created_at";
+const PROJECT_COLS: &str = "id, name, color, icon, about, rules, created_at";
+const REPO_COLS: &str = "id, project_id, repo, path, note, added_by, created_at, updated_at";
+
+fn repo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRepo> {
+    Ok(ProjectRepo {
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        repo: r.get("repo")?,
+        path: r.get("path")?,
+        note: r.get("note")?,
+        added_by: r.get("added_by")?,
+        created_at: parse_ts(&r.get::<_, String>("created_at")?)?,
+        updated_at: parse_ts(&r.get::<_, String>("updated_at")?)?,
+    })
+}
+
+/// `owner/name` for a GitHub URL or `git@github.com:` remote, so the same
+/// repo isn't listed twice under two spellings. Anything else is kept as is.
+pub fn normalize_repo(repo: &str) -> String {
+    let r = repo.trim().trim_end_matches('/');
+    let r = r.strip_suffix(".git").unwrap_or(r);
+    for prefix in [
+        "https://github.com/",
+        "http://github.com/",
+        "git@github.com:",
+        "github.com/",
+    ] {
+        if let Some(rest) = r.strip_prefix(prefix) {
+            let parts: Vec<_> = rest.split('/').take(2).collect();
+            if parts.len() == 2 && parts.iter().all(|p| !p.is_empty()) {
+                return parts.join("/");
+            }
+        }
+    }
+    r.to_string()
+}
 const NOTE_COLS: &str =
     "id, project_id, topic, text, added_by, session_id, sources, created_at, updated_at";
 
@@ -33,6 +68,8 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         name: r.get("name")?,
         color: r.get("color")?,
         icon: r.get("icon")?,
+        about: r.get("about")?,
+        rules: r.get("rules")?,
         created_at: parse_ts(&r.get::<_, String>("created_at")?)?,
     })
 }
@@ -82,6 +119,86 @@ impl Store {
         )?)
     }
 
+    /// Sets what a project is about and its rules. `None` leaves a field as
+    /// it is.
+    pub fn project_set_profile(
+        &self,
+        id: &str,
+        about: Option<&str>,
+        rules: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<Project>> {
+        let conn = self.conn();
+        Ok(conn
+            .query_row(
+                &format!(
+                    "UPDATE projects SET about = COALESCE(?2, about), rules = COALESCE(?3, rules), updated_at = ?4
+                     WHERE id = ?1 RETURNING {PROJECT_COLS}"
+                ),
+                params![id, about.map(str::trim), rules.map(str::trim), ts(now)],
+                row,
+            )
+            .optional()?)
+    }
+
+    pub fn project_repos(&self, project_id: &str) -> anyhow::Result<Vec<ProjectRepo>> {
+        let conn = self.conn();
+        let out = conn
+            .prepare(&format!(
+                "SELECT {REPO_COLS} FROM project_repos WHERE project_id = ?1 ORDER BY repo COLLATE NOCASE"
+            ))?
+            .query_map([project_id], repo_row)?
+            .collect::<Result<_, _>>()?;
+        Ok(out)
+    }
+
+    /// Adds a repo to a project, or updates it (same repo, any spelling of a
+    /// GitHub URL). A `None` path or note keeps what was there.
+    pub fn repo_save(
+        &self,
+        project_id: &str,
+        repo: &str,
+        path: Option<&str>,
+        note: Option<&str>,
+        added_by: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<ProjectRepo> {
+        let repo = normalize_repo(repo);
+        anyhow::ensure!(!repo.is_empty(), "a repo needs a name or URL");
+        let path = path.map(str::trim).filter(|p| !p.is_empty());
+        let conn = self.conn();
+        Ok(conn.query_row(
+            &format!(
+                "INSERT INTO project_repos (id, project_id, repo, path, note, added_by, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, COALESCE(?5, ''), ?6, ?7, ?7)
+                 ON CONFLICT (project_id, repo) DO UPDATE SET path = COALESCE(excluded.path, path),
+                     note = COALESCE(?5, note), updated_at = excluded.updated_at
+                 RETURNING {REPO_COLS}"
+            ),
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                project_id,
+                repo,
+                path,
+                note.map(str::trim),
+                added_by,
+                ts(now)
+            ],
+            repo_row,
+        )?)
+    }
+
+    /// Removes a repo from a project, by id or by repo name. Returns whether
+    /// one was removed.
+    pub fn repo_delete(&self, project_id: &str, id_or_repo: &str) -> anyhow::Result<bool> {
+        let conn = self.conn();
+        let n = conn.execute(
+            "DELETE FROM project_repos WHERE project_id = ?1 AND (id = ?2 OR repo = ?3)",
+            params![project_id, id_or_repo, normalize_repo(id_or_repo)],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Deletes a project. Its items stay, without a project.
     pub fn project_delete(&self, id: &str) -> anyhow::Result<()> {
         let mut conn = self.conn();
@@ -100,6 +217,7 @@ impl Store {
             [&key],
         )?;
         tx.execute("DELETE FROM project_notes WHERE project_id = ?1", [id])?;
+        tx.execute("DELETE FROM project_repos WHERE project_id = ?1", [id])?;
         tx.execute("DELETE FROM projects WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(())
@@ -434,12 +552,52 @@ mod tests {
         assert_eq!(s.project_items(&p.id, None, 5).unwrap().len(), 1);
         assert_eq!(s.project_find("payments").unwrap().unwrap().id, p.id);
 
+        // About, rules and repos.
+        let p2 = s
+            .project_set_profile(&p.id, Some(" Takes payments. "), None, now)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (p2.about.as_str(), p2.rules.as_str()),
+            ("Takes payments.", "")
+        );
+        s.project_set_profile(&p.id, None, Some("Never deploy on Fridays."), now)
+            .unwrap();
+        assert_eq!(
+            s.project_find(&p.id).unwrap().unwrap().about,
+            "Takes payments."
+        );
+        s.repo_save(
+            &p.id,
+            "https://github.com/acme/pay.git",
+            None,
+            Some("The API"),
+            "agent",
+            now,
+        )
+        .unwrap();
+        let r = s
+            .repo_save(&p.id, "acme/pay", Some("/src/pay"), None, "agent", now)
+            .unwrap();
+        assert_eq!(
+            (r.repo.as_str(), r.path.as_deref(), r.note.as_str()),
+            ("acme/pay", Some("/src/pay"), "The API")
+        );
+        assert_eq!(s.project_repos(&p.id).unwrap().len(), 1);
+        assert!(s.repo_delete(&p.id, "git@github.com:acme/pay.git").unwrap());
+        assert!(s.project_repos(&p.id).unwrap().is_empty());
+        s.repo_save(&p.id, "acme/web", None, None, "user", now)
+            .unwrap();
+
         s.project_save(Some(&p.id), "Billing", "#00aa88", "card", now)
             .unwrap();
+        // Renaming keeps the profile.
+        assert_eq!(s.projects().unwrap()[0].rules, "Never deploy on Fridays.");
         assert_eq!(s.projects().unwrap()[0].name, "Billing");
         s.project_delete(&p.id).unwrap();
         assert!(s.get(&item.id).unwrap().unwrap().project_id.is_none());
         assert!(s.projects().unwrap().is_empty());
         assert!(s.project_notes(&p.id).unwrap().is_empty());
+        assert!(s.project_repos(&p.id).unwrap().is_empty());
     }
 }

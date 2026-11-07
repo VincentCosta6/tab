@@ -919,6 +919,71 @@ async fn project_note_delete(state: State<'_, AppState>, id: String) -> CmdResul
     Ok(())
 }
 
+/// The person writing what a project is about and its rules.
+#[tauri::command]
+async fn project_set_profile(
+    state: State<'_, AppState>,
+    id: String,
+    about: Option<String>,
+    rules: Option<String>,
+) -> CmdResult<Option<tab_core::model::Project>> {
+    state
+        .store
+        .project_set_profile(&id, about.as_deref(), rules.as_deref(), Utc::now())
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn project_repos(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<tab_core::model::ProjectRepo>> {
+    state.store.project_repos(&project_id).map_err(err)
+}
+
+#[tauri::command]
+async fn project_repo_save(
+    state: State<'_, AppState>,
+    project_id: String,
+    repo: String,
+    path: Option<String>,
+    note: Option<String>,
+) -> CmdResult<tab_core::model::ProjectRepo> {
+    state
+        .store
+        .repo_save(
+            &project_id,
+            &repo,
+            path.as_deref(),
+            note.as_deref(),
+            "user",
+            Utc::now(),
+        )
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn project_repo_delete(
+    state: State<'_, AppState>,
+    project_id: String,
+    id: String,
+) -> CmdResult<()> {
+    state.store.repo_delete(&project_id, &id).map_err(err)?;
+    Ok(())
+}
+
+/// The project's recent items, open ones first.
+#[tauri::command]
+async fn project_items(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<QueueItem>> {
+    state
+        .store
+        .project_items(&project_id, None, 50)
+        .map_err(err)
+}
+
 #[tauri::command]
 async fn item_set_project(
     state: State<'_, AppState>,
@@ -2723,6 +2788,11 @@ pub fn run() {
             project_notes,
             project_note_save,
             project_note_delete,
+            project_set_profile,
+            project_repos,
+            project_repo_save,
+            project_repo_delete,
+            project_items,
             review_chat_open,
             review_chat_send,
             approval_resolve,

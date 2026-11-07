@@ -90,7 +90,31 @@ export type IndexStatus =
   | { state: "error"; model: string; message: string; retry_at: string };
 
 /** A group of work the person defines. Chats started in it belong to it. */
-export interface Project { id: string; name: string; color: string; icon: string; created_at: string }
+export interface Project {
+  id: string;
+  name: string;
+  color: string;
+  icon: string;
+  /** What the project is and does. */
+  about: string;
+  /** How to work in it. Agents follow these. */
+  rules: string;
+  created_at: string;
+}
+
+/** A repo a project's work happens in. */
+export interface ProjectRepo {
+  id: string;
+  project_id: string;
+  /** owner/name, or a URL. */
+  repo: string;
+  /** Where it's checked out, if known. */
+  path: string | null;
+  note: string;
+  added_by: string;
+  created_at: string;
+  updated_at: string;
+}
 
 /** A durable fact about a project, from an agent or the person. One per topic. */
 export interface ProjectNote {

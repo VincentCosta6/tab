@@ -96,6 +96,10 @@ fn populate(s: &Store) -> String {
     s.item_set_project(&item.id, Some(&p.id), now()).unwrap();
     s.note_save(&p.id, "Plan", "Ship Friday", "me", None, &[], now())
         .unwrap();
+    s.project_set_profile(&p.id, Some("The launch."), None, now())
+        .unwrap();
+    s.repo_save(&p.id, "acme/launch", None, None, "me", now())
+        .unwrap();
     s.context_add(
         &item.id,
         &NewContext {
@@ -126,6 +130,7 @@ fn every_synced_table_round_trips_through_the_outbox() {
         "items",
         "projects",
         "project_notes",
+        "project_repos",
         "item_context",
         "entities",
         "item_entities",

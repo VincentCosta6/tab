@@ -4,7 +4,7 @@
 
 import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
+  AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus,
 } from "./types";
@@ -75,6 +75,13 @@ export const api = {
   projectNoteSave: (projectId: string, note: { id?: string; topic: string; text: string }) =>
     call<void>("project_note_save", { projectId, id: note.id ?? null, topic: note.topic, text: note.text }),
   projectNoteDelete: (id: string) => call<void>("project_note_delete", { id }),
+  projectSetProfile: (id: string, p: { about?: string; rules?: string }) =>
+    call<Project | null>("project_set_profile", { id, about: p.about ?? null, rules: p.rules ?? null }),
+  projectRepos: (projectId: string) => call<ProjectRepo[]>("project_repos", { projectId }),
+  projectRepoSave: (projectId: string, r: { repo: string; path?: string | null; note?: string | null }) =>
+    call<ProjectRepo>("project_repo_save", { projectId, repo: r.repo, path: r.path ?? null, note: r.note ?? null }),
+  projectRepoDelete: (projectId: string, id: string) => call<void>("project_repo_delete", { projectId, id }),
+  projectItems: (projectId: string) => call<QueueItem[]>("project_items", { projectId }),
   reviewChatOpen: (repo: string, number: number) => call<Chat>("review_chat_open", { repo, number }),
   reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string, attachments: string[] = []) =>
     call<Session>("review_chat_send", { target, text, attachments }),

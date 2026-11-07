@@ -7,7 +7,7 @@ import harnessData from "../../crates/tab-core/src/agents/harnesses.json";
 import type {
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
-  Entity, GraphView, Project, ProjectNote, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
+  Entity, GraphView, Project, ProjectNote, ProjectRepo, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
 
 const harnesses = harnessData as unknown as Harness[];
@@ -218,7 +218,8 @@ export const mockApi = {
         }
         case "projects_list": return [...projects].sort((a, b) => a.name.localeCompare(b.name));
         case "project_save": {
-          const p: Project = { id: args.id ?? `p-${Date.now()}`, name: String(args.name).trim(), color: args.color, icon: args.icon, created_at: new Date().toISOString() };
+          const old = projects.find((x) => x.id === args.id);
+          const p: Project = { id: args.id ?? `p-${Date.now()}`, name: String(args.name).trim(), color: args.color, icon: args.icon, about: old?.about ?? "", rules: old?.rules ?? "", created_at: old?.created_at ?? new Date().toISOString() };
           if (!p.name) throw new Error("a project needs a name");
           projects = [...projects.filter((x) => x.id !== p.id), p];
           return p;
@@ -226,6 +227,7 @@ export const mockApi = {
         case "project_delete": {
           projects = projects.filter((x) => x.id !== args.id);
           notes = notes.filter((n) => n.project_id !== args.id);
+          repos = repos.filter((r) => r.project_id !== args.id);
           items = items.map((i) => (i.project_id === args.id ? { ...i, project_id: null } : i));
           return null;
         }
@@ -245,6 +247,26 @@ export const mockApi = {
           return i;
         }
         case "titler_default_rules": return "Name the thread the way a good engineer names a ticket: 3 to 7 words, at most 60 characters.";
+        case "project_set_profile": {
+          const p = projects.find((x) => x.id === args.id);
+          if (!p) return null;
+          if (args.about != null) p.about = String(args.about).trim();
+          if (args.rules != null) p.rules = String(args.rules).trim();
+          return { ...p };
+        }
+        case "project_repos": return repos.filter((r) => r.project_id === args.projectId).sort((a, b) => a.repo.localeCompare(b.repo));
+        case "project_repo_save": {
+          const now = new Date().toISOString();
+          const name = String(args.repo).trim().replace(/\.git$/, "").replace(/^(https?:\/\/)?github\.com\/|^git@github\.com:/, "");
+          if (!name) throw new Error("a repo needs a name or URL");
+          const old = repos.find((r) => r.project_id === args.projectId && r.repo.toLowerCase() === name.toLowerCase());
+          if (old) return Object.assign(old, { path: args.path ?? old.path, note: args.note ?? old.note, updated_at: now });
+          const r: ProjectRepo = { id: `r-${Date.now()}`, project_id: args.projectId, repo: name, path: args.path ?? null, note: args.note ?? "", added_by: "user", created_at: now, updated_at: now };
+          repos = [...repos, r];
+          return r;
+        }
+        case "project_repo_delete": repos = repos.filter((r) => !(r.project_id === args.projectId && (r.id === args.id || r.repo === args.id))); return null;
+        case "project_items": return items.filter((i) => i.project_id === args.projectId).sort((a, b) => Number(a.state === "done") - Number(b.state === "done") || b.occurred_at.localeCompare(a.occurred_at)).slice(0, 50);
         case "project_notes": return notes.filter((n) => n.project_id === args.projectId);
         case "project_note_save": {
           const now = new Date().toISOString();
@@ -532,8 +554,12 @@ let mockAppUpdated = false;
 // A link an agent attached, to show links rendered by what they point at.
 let contexts: ContextEntry[] = items.slice(0, 4).map((i) => ({ id: `ctx-seed-${i.id}`, item_id: i.id, section: "context", pinned: false, ref_item: null, url: "https://github.com/acme/payments/pull/491", title: "https://github.com/acme/payments/pull/491", summary: null, added_by: "agent", created_at: new Date().toISOString() }));
 let projects: Project[] = [
-  { id: "p-pay", name: "Payments", color: "#7c5cff", icon: "zap", created_at: ago(9000) },
-  { id: "p-sec", name: "SOC 2", color: "#e5484d", icon: "shield", created_at: ago(9000) },
+  { id: "p-pay", name: "Payments", color: "#7c5cff", icon: "zap", about: "Checkout, the ledger and refunds: everything that moves money for Acme's customers.", rules: "- Every change to the ledger needs a review from Priya.\n- Feature-flag anything customer-facing.", created_at: ago(9000) },
+  { id: "p-sec", name: "SOC 2", color: "#e5484d", icon: "shield", about: "", rules: "", created_at: ago(9000) },
+];
+let repos: ProjectRepo[] = [
+  { id: "r1", project_id: "p-pay", repo: "acme/payments", path: "~/src/payments", note: "Checkout API and ledger service", added_by: "agent", created_at: ago(3000), updated_at: ago(3000) },
+  { id: "r2", project_id: "p-pay", repo: "acme/web", path: null, note: "Checkout UI", added_by: "user", created_at: ago(900), updated_at: ago(900) },
 ];
 let notes: ProjectNote[] = [
   { id: "n1", project_id: "p-pay", topic: "deploys", text: "Payments deploys go through the staging branch; prod is cut on Tuesdays and Thursdays.", added_by: "agent", session_id: null, sources: [], created_at: ago(3000), updated_at: ago(3000) },
