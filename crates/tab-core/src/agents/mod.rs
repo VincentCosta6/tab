@@ -898,6 +898,11 @@ impl AgentHub {
              tab_configure_connection. Never ask for passwords or tokens in chat text: tab shows a card the \
              person types them into (tab_ask_for_secret shows it again). Once they say it's entered, run \
              tab_test_connection and explain any failure plainly, e.g. that their host needs an app password.\n\
+             - To show how something looks (a UI change, a mock, a chart), put an image in your reply: \
+             tab's chat renders markdown images inline, including local files, as ![alt](C:\\absolute\\path.png), \
+             and opens them in a viewer on click. Screenshot it (a headless browser works, or the running \
+             app) and embed the PNG rather than describing it or publishing a separate page. Say whether it \
+             is a real screenshot or a mock.\n\
              Keep replies short; the person reads them in a side panel.\n",
         );
         if let Some(root) = dev_checkout() {

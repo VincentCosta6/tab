@@ -430,6 +430,12 @@ async fn item_context(state: State<'_, AppState>, id: String) -> CmdResult<Optio
     state.store.item_context(&id).map_err(err)
 }
 
+/// Tasks that have this link (a PR, say) in their Context.
+#[tauri::command]
+async fn items_for_link(state: State<'_, AppState>, url: String) -> CmdResult<Vec<QueueItem>> {
+    state.store.items_with_context_link(&url).map_err(err)
+}
+
 #[tauri::command]
 async fn context_add(
     state: State<'_, AppState>,
@@ -1964,6 +1970,7 @@ pub fn run() {
             item_set_project,
             search_index_status,
             agent_activity,
+            items_for_link,
             agent_slash_commands,
             agent_health,
             agent_upgrade,
