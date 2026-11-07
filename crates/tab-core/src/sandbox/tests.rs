@@ -281,6 +281,17 @@ fn policies_protect_tab_and_hide_credentials() {
     assert!(iso.writable.contains(&data.join("run")));
 }
 
+#[test]
+fn a_dev_build_guards_the_installed_app_too() {
+    let (data, config, prod) = (tmp("data"), tmp("config"), tmp("prod"));
+    let s =
+        Sandbox::new(SandboxConfig::default(), Some(data), Some(config)).guarding([prod.clone()]);
+    let chat = s.chat_policy();
+    assert!(chat.protect.contains(&prod));
+    assert!(chat.hide.contains(&prod.join("config.json")));
+    assert!(chat.hide.contains(&prod.join("tab.db")));
+}
+
 #[cfg(unix)]
 async fn sh(
     s: &Sandbox,

@@ -217,6 +217,10 @@ pub struct Sandbox {
     /// tab's own data and config folders.
     data_dir: Option<PathBuf>,
     config_dir: Option<PathBuf>,
+    /// Another tab's data and config folders on this computer, guarded
+    /// like this one's: a dev build's agents can't change the installed
+    /// app's files or read its tokens.
+    others: Vec<PathBuf>,
 }
 
 static CURRENT: OnceLock<Arc<Sandbox>> = OnceLock::new();
@@ -344,7 +348,16 @@ impl Sandbox {
             home: home().map(|h| real(&h)),
             data_dir: data_dir.map(|d| real(&d)),
             config_dir: config_dir.map(|d| real(&d)),
+            others: Vec::new(),
         }
+    }
+
+    /// Also guards another tab's folders (see [`Sandbox::others`]).
+    pub fn guarding(mut self, dirs: impl IntoIterator<Item = PathBuf>) -> Self {
+        self.others.extend(dirs.into_iter().map(|d| real(&d)));
+        self.others.sort();
+        self.others.dedup();
+        self
     }
 
     pub fn set_config(&self, cfg: SandboxConfig) {
@@ -434,6 +447,17 @@ impl Sandbox {
                 out.push(d.join(f));
             }
         }
+        for d in &self.others {
+            for f in [
+                "config.json",
+                "tab.db",
+                "tab.db-wal",
+                "tab.db-shm",
+                "mcp-token",
+            ] {
+                out.push(d.join(f));
+            }
+        }
         out
     }
 
@@ -443,6 +467,7 @@ impl Sandbox {
         protect.extend(dev_checkout());
         protect.extend(self.data_dir.clone());
         protect.extend(self.config_dir.clone());
+        protect.extend(self.others.iter().cloned());
         protect.extend(self.under_home(STARTUP));
         protect.extend(Self::user_paths(&cfg.protected));
         let mut hide = self.under_home(SECRETS);

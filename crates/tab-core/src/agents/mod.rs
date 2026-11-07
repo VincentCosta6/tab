@@ -629,6 +629,12 @@ impl AgentHub {
         self.running.lock().unwrap().contains_key(session_id)
     }
 
+    /// How many agent turns are running right now. The dev runner waits
+    /// for this to reach zero before it restarts the app.
+    pub fn running_count(&self) -> usize {
+        self.running.lock().unwrap().len()
+    }
+
     /// Whether the running turn can take a message mid-flight.
     pub fn can_steer(&self, session_id: &str) -> bool {
         self.steering.lock().unwrap().contains_key(session_id)

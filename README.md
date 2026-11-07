@@ -44,13 +44,21 @@ UI-only iteration without the desktop shell: `pnpm dev` and open http://localhos
 
 ### Working on tab from inside tab
 
-`pnpm tauri dev` hot-reloads the UI and rebuilds the backend on every save, so an agent chat that edits the checkout tab is running from can blank the window or restart the app mid-turn. Dev builds tell agents which checkout that is and to use a worktree instead. To do it by hand:
+`pnpm dev:tab` runs a dev build that sits beside the installed app instead of sharing with it:
+
+- **Its own identity.** It's built with `src-tauri/tauri.dev.conf.json` merged in: app id `dev.tab.dev`, window "tab (dev)", so it has its own `tab.db`, `hub.db` and `config.json`. It listens on its own ports (MCP from 47921, hub from 47950; the installed app uses 47821 and 47850) and Vite on 1430. Its sandbox keeps agents out of the installed app's folders as well as its own. Pass `--copy-config` the first time to start from the installed app's connections.
+- **UI changes hot-reload.** The backend keeps running, so agent chats carry on.
+- **Rust changes rebuild in the background** while the last good build keeps running (a failed build leaves it running). The app restarts onto the new build once no agent turn is running, so saving never cuts an agent off mid-turn. Press `r` to restart now anyway: tab resumes the cut-off turns when it comes back (the conversation continues, and the agent redoes the tool call that was interrupted). `b` rebuilds, `q` quits.
+
+`pnpm tauri dev --config src-tauri/tauri.dev.conf.json` gives the same identity with Tauri's own watcher, which restarts on every Rust save. Plain `pnpm tauri dev` shares the installed app's folders, so quit one before starting the other.
+
+The dev build's agents still can't edit the checkout it runs from (a half-written edit can blank the window or break the next build), and are told to work in a worktree:
 
 ```sh
 git worktree add ../tab-<topic> -b <branch> origin/main
 ```
 
-For day-to-day use, run a built copy (`pnpm tauri build`, then install the bundle from `target/release/bundle`) and keep `pnpm tauri dev` for testing changes. Both use the same config and `tab.db`, so quit one before starting the other.
+The installed app's agents can edit the checkout directly; the dev build picks the changes up as above.
 
 ## Test
 
