@@ -614,6 +614,7 @@ impl AgentHub {
                 serde_json::json!({ "attachments": attachments })
             };
             self.post(session_id, "user", "text", text, meta);
+            self.attach_pasted_links(session_id, text);
         }
         self.update(session_id, Some(SessionStatus::Working), None);
 
@@ -788,6 +789,30 @@ impl AgentHub {
     /// Attaches the links in a creating call's result (a PR, an issue, a ticket) to the session's task
     /// as Context, so something the agent creates never depends on it remembering to.
     pub(crate) fn attach_created_links(&self, session_id: &str, output: &str) {
+        let links = crate::links::found(output)
+            .into_iter()
+            .map(|(url, label)| (url, Some(label)))
+            .collect();
+        self.attach_links(session_id, links, "agent");
+    }
+
+    /// Attaches the links the person pastes into a message: a PR or issue, or
+    /// anything that is itself in their queue. Other URLs are left to the agent.
+    fn attach_pasted_links(&self, session_id: &str, text: &str) {
+        let links = crate::links::urls(text)
+            .into_iter()
+            .map(|url| {
+                let label = crate::links::label(&url);
+                (url, label)
+            })
+            .collect();
+        self.attach_links(session_id, links, "user");
+    }
+
+    /// Adds each `(url, label)` to the session's task Context. A URL whose
+    /// queue item is known is attached as that item; one with no label is
+    /// attached only when it is exactly a queue item's URL.
+    fn attach_links(&self, session_id: &str, links: Vec<(String, Option<String>)>, by: &str) {
         let Some(item_id) = self
             .store
             .session_get(session_id)
@@ -797,25 +822,34 @@ impl AgentHub {
         else {
             return;
         };
-        for (url, label) in crate::links::found(output) {
-            let linked = self.store.item_by_url(&url).ok().flatten();
+        let mut changed = false;
+        for (url, label) in links {
+            let linked = self.store.item_by_url(&url).ok().flatten().filter(|i| {
+                label.is_some()
+                    || i.event.url.as_deref().map(|u| u.trim_end_matches('/'))
+                        == Some(url.trim_end_matches('/'))
+            });
             if linked.as_ref().is_some_and(|i| i.id == item_id) {
                 continue;
             }
+            let Some(title) = linked.as_ref().map(|i| i.event.title.clone()).or(label) else {
+                continue;
+            };
             let new = NewContext {
                 section: ContextSection::Context,
-                title: linked
-                    .as_ref()
-                    .map(|i| i.event.title.clone())
-                    .unwrap_or(label),
+                title,
                 ref_item_id: linked.map(|i| i.id),
                 url: Some(url),
                 summary: None,
-                added_by: "agent".into(),
+                added_by: by.into(),
             };
-            if let Err(e) = self.store.context_add(&item_id, &new, Utc::now()) {
-                tracing::warn!(error = %e, "couldn't attach the created link");
+            match self.store.context_add(&item_id, &new, Utc::now()) {
+                Ok(_) => changed = true,
+                Err(e) => tracing::warn!(error = %e, "couldn't attach a link"),
             }
+        }
+        if changed {
+            self.emit(EngineEvent::ContextChanged { item_id });
         }
     }
 
@@ -1155,6 +1189,69 @@ mod keyed_tests {
                 .iter()
                 .any(|m| m.content.contains("tab quit"))
         );
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+    use crate::model::IncomingEvent;
+    use crate::store::Upsert;
+
+    fn item(s: &Store, id: &str, url: &str) -> String {
+        let e = IncomingEvent {
+            source: "t".into(),
+            external_id: id.into(),
+            kind: "t.k".into(),
+            title: id.into(),
+            url: Some(url.into()),
+            occurred_at: Utc::now(),
+            ..Default::default()
+        };
+        match s.upsert(&e, Utc::now()).unwrap() {
+            Upsert::Inserted(i) => i.id,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn pasted_and_created_links_attach_and_refresh_the_rail() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, mut rx) = broadcast::channel(16);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let task = item(&store, "task", "https://tab.local/task");
+        let thread = item(&store, "thread", "https://slack.com/archives/C1/p1");
+        let s = store
+            .session_create(Some(&task), AgentKind::OpenCode, "t", ".", Utc::now())
+            .unwrap();
+
+        hub.attach_pasted_links(
+            &s.id,
+            "fix https://github.com/o/r/issues/4 from https://slack.com/archives/C1/p1, \
+             see https://docs.rs/x and https://tab.local/task",
+        );
+        hub.attach_created_links(&s.id, "https://github.com/o/r/pull/5\n");
+
+        let ctx = store.item_context(&task).unwrap().unwrap().entries;
+        let urls: Vec<_> = ctx.iter().filter_map(|c| c.url.as_deref()).collect();
+        assert_eq!(
+            urls.len(),
+            3,
+            "issue, queued thread and created PR; not the doc or the task itself: {urls:?}"
+        );
+        assert!(
+            ctx.iter()
+                .any(|c| c.ref_item.as_ref().is_some_and(|i| i.id == thread))
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(EngineEvent::ContextChanged { .. })
+        ));
     }
 }
 
