@@ -39,9 +39,11 @@ pub enum CliEffect {
 pub enum CliAuth {
     /// An environment variable, like `GH_TOKEN`.
     Env { var: String },
-    /// An HTTP header git sends to URLs under `url`, the way CI checkouts
-    /// authenticate (`x-access-token` basic auth).
-    GitHeader { url: String },
+    /// git reaches the host through tab: a chat's git rewrites `remotes`
+    /// (`https://github.com/`, `git@github.com:`) to a local endpoint, and
+    /// tab adds the token as it forwards each request to `url`. git itself
+    /// never holds the token, and tab checks every push's ref updates.
+    GitEndpoint { url: String, remotes: Vec<String> },
 }
 
 /// One rule. The first rule that matches decides.

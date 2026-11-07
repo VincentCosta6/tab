@@ -168,7 +168,12 @@ impl Core {
         let ranking_changed = next.ranking != current.ranking || next.profile != current.profile;
         *current = next.clone();
         drop(current);
-        tab_core::sandbox::current().set_config(next.sandbox.clone());
+        let sandbox = tab_core::sandbox::current();
+        if sandbox.config() != next.sandbox {
+            sandbox.set_config(next.sandbox.clone());
+            // OpenCode servers keep the policy they started with.
+            self.hub.stop_opencode().await;
+        }
         self.hub.set_config(next.agent.clone()).await;
         self.restart(&next).await;
         if ranking_changed && let Some(e) = self.engine.read().await.as_ref() {

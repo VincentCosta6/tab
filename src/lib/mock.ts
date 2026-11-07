@@ -130,7 +130,7 @@ let config: TabConfig = {
   mcp: { port: 47821, token: "mock-token" },
   storage: { keep_days: 7, max_gb: 5 },
   sandbox: {
-    enabled: true, protected: [], hidden: [], container_runtime: "",
+    enabled: true, protected: [], hidden: [], container_runtime: "", ssh_in_chats: true,
     lsp_domains: ["crates.io", "*.crates.io", "proxy.golang.org", "sum.golang.org", "pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com", "*.githubusercontent.com"],
   },
   onboarded: true,

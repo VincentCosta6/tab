@@ -125,6 +125,11 @@ pub struct SandboxConfig {
     /// `docker` or `podman`; empty picks whichever is installed.
     #[serde(default)]
     pub container_runtime: String,
+    /// Whether chats may use the person's SSH keys. On by default, since
+    /// people push to other hosts over SSH; off keeps `~/.ssh` and the SSH
+    /// agent out of chats, so GitHub is only reachable through tab.
+    #[serde(default = "yes")]
+    pub ssh_in_chats: bool,
 }
 
 fn yes() -> bool {
@@ -155,6 +160,7 @@ impl Default for SandboxConfig {
             hidden: Vec::new(),
             lsp_domains: default_lsp_domains(),
             container_runtime: String::new(),
+            ssh_in_chats: true,
         }
     }
 }
@@ -525,8 +531,22 @@ impl Sandbox {
                 p.block_exec.push(exe);
             }
         }
-        p.hide
-            .extend(self.under_home(&[".config/gh", "AppData/Roaming/GitHub CLI"]));
+        // git's own credential stores: GitHub goes through tab, and other
+        // hosts get their credentials through tab's helper (see
+        // `broker::credential`), so nothing in the chat reads them directly.
+        p.block_exec.extend(credential_helpers());
+        p.hide.extend(self.under_home(&[
+            ".config/gh",
+            "AppData/Roaming/GitHub CLI",
+            ".git-credentials",
+            ".config/git/credentials",
+            ".cache/git/credential",
+            ".git-credential-cache",
+        ]));
+        if !self.config().ssh_in_chats {
+            p.hide.extend(self.under_home(&[".ssh"]));
+            p.drop_env.push("SSH_AUTH_SOCK".into());
+        }
         p.drop_env
             .extend(env::GITHUB_KEYS.iter().map(|k| k.to_string()));
         p
@@ -635,6 +655,49 @@ fn claude_path(p: &Path) -> String {
     } else {
         format!("//{s}")
     }
+}
+
+/// git's credential helper programs, wherever this computer has them.
+fn credential_helpers() -> Vec<PathBuf> {
+    static FOUND: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            const NAMES: &[&str] = &[
+                "git-credential-osxkeychain",
+                "git-credential-libsecret",
+                "git-credential-gnome-keyring",
+                "git-credential-manager",
+                "git-credential-manager-core",
+                "git-credential-wincred",
+            ];
+            let exec_path = std::process::Command::new("git")
+                .arg("--exec-path")
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+                .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
+            let mut out = Vec::new();
+            for n in NAMES {
+                for p in exec_path
+                    .iter()
+                    .map(|d| d.join(n))
+                    .chain(which::which(n).ok())
+                {
+                    if p.is_file() {
+                        let r = real(&p);
+                        if r != p {
+                            out.push(r);
+                        }
+                        out.push(p);
+                    }
+                }
+            }
+            out.sort();
+            out.dedup();
+            out
+        })
+        .clone()
 }
 
 fn temp_dirs() -> Vec<PathBuf> {

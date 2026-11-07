@@ -257,6 +257,12 @@ function SandboxSection({ config, onChange }: { config: TabConfig["sandbox"]; on
         <FormRow label="On this computer">
           <span className="subtle">{s ? <>{s.summary}{s.fix && <> {s.fix}</>}</> : "Checking…"}</span>
         </FormRow>
+        <FormRow label="GitHub in chats" help="gh and git reach GitHub through tab, signed in with your GitHub connection. Force pushes, merges and deletes ask you first, and agents never see the token.">
+          <span className="subtle">Always on while the sandbox is on.</span>
+        </FormRow>
+        <FormRow label="SSH keys in chats" help="Off keeps ~/.ssh and your SSH agent out of chats, so GitHub is only reachable through tab. Leave on if agents push to other hosts over SSH.">
+          <Toggle label="SSH keys in chats" checked={config.ssh_in_chats ?? true} onChange={(v) => onChange({ ...config, ssh_in_chats: v })} />
+        </FormRow>
         <FormRow label="Also protect" help="Folders agents may read but not change, one per line. tab's own data and, in a dev build, its checkout are always protected.">
           <TextArea rows={3} placeholder={"~/code/production-config"} value={list(config.protected)}
             onChange={(e) => onChange({ ...config, protected: e.target.value.split("\n") })} />

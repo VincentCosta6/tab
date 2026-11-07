@@ -174,26 +174,16 @@ pub fn clis() -> Vec<tab_domain::CliInfo> {
     };
     let git = CliInfo {
         name: "git".into(),
-        description: "git's network commands, signed in to github.com as this connection. Everything else runs in the chat as usual.".into(),
-        auth: CliAuth::GitHeader {
+        description: "git, signed in to github.com as this connection. tab forwards fetches and pushes to GitHub and asks before force pushes and branch deletes.".into(),
+        auth: CliAuth::GitEndpoint {
             url: "https://github.com/".into(),
+            remotes: ["https://github.com/", "git@github.com:", "ssh://git@github.com/"]
+                .map(String::from)
+                .to_vec(),
         },
-        value_flags: [
-            "-C", "-c", "--git-dir", "--work-tree", "--namespace", "-o", "--push-option",
-            "--repo", "--receive-pack", "--exec", "-m", "-F",
-        ]
-        .map(String::from)
-        .to_vec(),
-        rules: vec![
-            R::new("fetch|pull|clone|ls-remote", E::Read),
-            R::new("push", E::Destructive)
-                .flags(&[
-                    "-f", "--force", "--force-with-lease", "--force-if-includes", "-d",
-                    "--delete", "--mirror", "--prune", "arg:+", "arg::",
-                ])
-                .resource("branch"),
-            R::new("push", E::Write).resource("branch"),
-        ],
+        value_flags: Vec::new(),
+        rules: Vec::new(),
+        // Runs in the chat; only its traffic to GitHub goes through tab.
         default: E::Local,
     };
     vec![gh, git]

@@ -461,3 +461,26 @@ async fn claude_starts_in_the_chat_sandbox() {
     .await;
     assert!(ok && out.contains("Claude Code"), "{out}");
 }
+
+/// A program tab runs for the agent (the real `gh`) can't be started from
+/// inside the sandbox, while everything else still runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn blocked_programs_cannot_start() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = Sandbox::new(SandboxConfig::default(), None, None);
+    if !s.enforced() {
+        return;
+    }
+    let dir = tmp("block-exec");
+    let prog = dir.join("fake-gh");
+    std::fs::write(&prog, "#!/bin/sh\necho ran\n").unwrap();
+    std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut p = s.chat_policy();
+    let script = format!("{} ; echo after", prog.display());
+    let (_, out) = sh(&s, &p, &dir, "/bin/sh", &script).await;
+    assert!(out.contains("ran"), "{out}");
+    p.block_exec.push(real(&prog));
+    let (_, out) = sh(&s, &p, &dir, "/bin/sh", &script).await;
+    assert!(!out.contains("ran") && out.contains("after"), "{out}");
+}

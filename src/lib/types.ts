@@ -419,6 +419,8 @@ export interface SandboxConfig {
   hidden: string[];
   lsp_domains: string[];
   container_runtime: string;
+  /** Chats may use the person's SSH keys (for hosts tab doesn't sign in). */
+  ssh_in_chats: boolean;
 }
 
 export interface SandboxStatus {

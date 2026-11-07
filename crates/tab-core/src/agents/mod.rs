@@ -248,7 +248,8 @@ pub struct AgentHub {
     /// is in, the process hasn't exited). They run as the next turn.
     followups: Mutex<HashMap<String, Vec<String>>>,
     approvals: Mutex<HashMap<String, (Approval, oneshot::Sender<Decision>)>>,
-    opencode: tokio::sync::Mutex<Option<Arc<opencode::Server>>>,
+    /// OpenCode servers by chat id (see `opencode::server`).
+    opencode: tokio::sync::Mutex<HashMap<String, Arc<opencode::Server>>>,
 }
 
 /// The checkout a dev build of tab runs from, so agents can be told not to
@@ -297,15 +298,25 @@ impl AgentHub {
             steering_rx: Mutex::new(HashMap::new()),
             followups: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
-            opencode: tokio::sync::Mutex::new(None),
+            opencode: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
     pub async fn set_config(&self, cfg: AgentConfig) {
         let changed = *self.cfg.read().unwrap() != cfg;
         *self.cfg.write().unwrap() = cfg;
-        if changed && let Some(old) = self.opencode.lock().await.take() {
-            old.shutdown();
+        if changed {
+            for (_, old) in self.opencode.lock().await.drain() {
+                old.shutdown();
+            }
+        }
+    }
+
+    /// Stops every OpenCode server; the next turn starts a fresh one with
+    /// the current sandbox settings.
+    pub async fn stop_opencode(&self) {
+        for (_, s) in self.opencode.lock().await.drain() {
+            s.shutdown();
         }
     }
 
@@ -391,11 +402,17 @@ impl AgentHub {
         let sb = crate::sandbox::current();
         let cwd = crate::sandbox::real(Path::new(&session.cwd));
         let workspaces = crate::sandbox::real(&self.dir.join("workspaces"));
-        let p = if cwd.starts_with(&workspaces) {
+        let mut p = if cwd.starts_with(&workspaces) {
             sb.review_policy(&cwd, Path::new(&self.workdir()))
         } else {
             sb.chat_policy()
         };
+        // Other chats' folders hold their tokens: each chat sees only its own
+        // (made now, so the sandbox can show it).
+        let _ = self.session_dir(&session.id);
+        p.hide.push(crate::sandbox::real(&self.sessions_dir()));
+        p.reveal
+            .push(crate::sandbox::real(&self.sessions_dir().join(&session.id)));
         // gh and git's network commands go through tab, which needs its
         // server to be up.
         if self.mcp().is_some() {
@@ -419,17 +436,15 @@ impl AgentHub {
             return false;
         };
         let url = mcp.url.trim_end_matches("/mcp").to_string() + "/cli";
+        let chat_token = crate::mcp::chat_token(&mcp.token, &session.id);
         let ep = crate::sandbox::broker::Endpoint {
             url: &url,
-            token: &mcp.token,
+            token: &chat_token,
             session: &session.id,
         };
         match crate::sandbox::broker::write_shims(&dir, &ep, &exe) {
             Ok(Some(shims)) => {
-                cmd.env("PATH", shims.path_var());
-                // Claude Code rebuilds PATH from the person's shell setup and
-                // then sources this, so the shims stay first.
-                cmd.env("CLAUDE_ENV_FILE", &shims.env_file);
+                shims.apply(cmd);
                 true
             }
             Ok(None) => false,
@@ -1066,13 +1081,13 @@ impl AgentHub {
                 "\ntab's own files and stored credentials are off limits to your file tools. If an edit is refused \
                  for that reason, tell the person what you needed instead of working around it.\n"
             });
-            if sb.config().enabled && self.mcp().is_some() && session.agent == AgentKind::ClaudeCode
-            {
+            if sb.config().enabled && self.mcp().is_some() {
                 out.push_str(
-                    "Use `gh` and `git` as usual: tab runs `gh` and git's network commands (fetch, pull, push, \
-                     clone) for you, signed in with the person's GitHub connection. There's no GitHub token in \
-                     your environment, so don't look for one. Force pushes, merges and deletes wait for the \
-                     person to allow them; if one is declined, say what you wanted to do instead of retrying.\n",
+                    "Use `gh` and `git` as usual: tab runs `gh` for you, and git reaches GitHub through tab, \
+                     both signed in with the person's GitHub connection. There's no GitHub token in your \
+                     environment, so don't look for one or change git's remote or credential settings. Force \
+                     pushes, branch deletes and merges wait for the person to allow them; if one is declined, \
+                     say what you wanted to do instead of retrying.\n",
                 );
             }
         }
@@ -1161,10 +1176,10 @@ impl AgentHub {
         for c in self.running.lock().unwrap().values() {
             c.cancel();
         }
-        if let Ok(mut oc) = self.opencode.try_lock()
-            && let Some(s) = oc.take()
-        {
-            s.shutdown();
+        if let Ok(mut oc) = self.opencode.try_lock() {
+            for (_, s) in oc.drain() {
+                s.shutdown();
+            }
         }
     }
 

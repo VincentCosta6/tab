@@ -139,12 +139,14 @@ pub struct Endpoint<'a> {
     pub session: &'a str,
 }
 
-/// A chat's shims: put `bin` first on PATH, and point `CLAUDE_ENV_FILE` at
-/// `env_file` so shells that rebuild PATH from the person's startup files
-/// still find them.
+/// A chat's shims: put `bin` first on PATH, set `git_env`, and point
+/// `CLAUDE_ENV_FILE` at `env_file` so shells that rebuild PATH from the
+/// person's startup files still find them.
 pub struct Shims {
     pub bin: PathBuf,
     pub env_file: PathBuf,
+    /// `GIT_CONFIG_*` for the chat's git (see [`git_config`]).
+    pub git_env: Vec<(String, String)>,
 }
 
 impl Shims {
@@ -156,25 +158,80 @@ impl Shims {
         }
         std::env::join_paths(parts).unwrap_or_default()
     }
+
+    pub fn apply(&self, cmd: &mut tokio::process::Command) {
+        cmd.env("PATH", self.path_var());
+        // Claude Code rebuilds PATH from the person's shell setup and then
+        // sources this, so the shims stay first.
+        cmd.env("CLAUDE_ENV_FILE", &self.env_file);
+        for (k, v) in &self.git_env {
+            cmd.env(k, v);
+        }
+    }
 }
 
-/// Writes shims for the tools that are installed into `dir`.
+/// The chat's git settings: remotes on hosts a connection signs in go to
+/// tab's endpoint (`git_base`, which names the chat), which knows the chat
+/// by tab's token; and credentials for every other host come from the
+/// person's own helpers through tab, which never hands out a connection's.
+pub fn git_config(git_base: &str, token: &str, helper: &Path) -> Vec<(String, String)> {
+    let mut cfg = Vec::new();
+    for b in all() {
+        if let CliAuth::GitEndpoint { remotes, .. } = &b.cli.auth {
+            for r in remotes {
+                cfg.push((
+                    format!("url.{git_base}{}/.insteadOf", b.connector),
+                    r.clone(),
+                ));
+            }
+        }
+    }
+    cfg.push((
+        format!("http.{git_base}.extraHeader"),
+        format!("Authorization: Bearer {token}"),
+    ));
+    // An empty value drops the helpers from the person's config.
+    cfg.push(("credential.helper".into(), String::new()));
+    cfg.push((
+        "credential.helper".into(),
+        helper.display().to_string().replace('\\', "/"),
+    ));
+    let mut env = vec![("GIT_CONFIG_COUNT".to_string(), cfg.len().to_string())];
+    for (i, (k, v)) in cfg.into_iter().enumerate() {
+        env.push((format!("GIT_CONFIG_KEY_{i}"), k));
+        env.push((format!("GIT_CONFIG_VALUE_{i}"), v));
+    }
+    env
+}
+
+/// Writes the chat's shims into `dir`: one per CLI tab runs (`gh`), and
+/// `git-credential-tab`.
 pub fn write_shims(dir: &Path, ep: &Endpoint, tab_exe: &Path) -> std::io::Result<Option<Shims>> {
-    let tools: Vec<(String, PathBuf)> = all()
+    let mut tools: Vec<(String, String)> = all()
         .into_iter()
-        .filter_map(|b| b.real().map(|p| (b.cli.name, p)))
+        .filter(|b| matches!(b.cli.auth, CliAuth::Env { .. }))
+        .filter_map(|b| b.real().map(|p| (b.cli.name, p.display().to_string())))
         .collect();
+    let git = which::which("git").ok();
+    if git.is_some() {
+        tools.push(("git-credential-tab".into(), String::new()));
+    }
     if tools.is_empty() {
         return Ok(None);
     }
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin)?;
     for (tool, real) in &tools {
+        let sub = if tool == "git-credential-tab" {
+            "git-credential"
+        } else {
+            tool
+        };
         let vars = [
             ("TAB_CLI_URL", ep.url.to_string()),
             ("TAB_CLI_TOKEN", ep.token.to_string()),
             ("TAB_CLI_SESSION", ep.session.to_string()),
-            ("TAB_CLI_REAL", real.display().to_string()),
+            ("TAB_CLI_REAL", real.clone()),
         ];
         // A POSIX script on every OS: Claude Code's shell on Windows is Git Bash.
         let mut sh = String::from("#!/bin/sh\n");
@@ -182,9 +239,8 @@ pub fn write_shims(dir: &Path, ep: &Endpoint, tab_exe: &Path) -> std::io::Result
             sh.push_str(&format!("{k}={}; export {k}\n", sh_quote(v)));
         }
         sh.push_str(&format!(
-            "exec {} __tab_cli {} \"$@\"\n",
+            "exec {} __tab_cli {sub} \"$@\"\n",
             sh_quote(&posix_path(tab_exe)),
-            tool
         ));
         let f = bin.join(tool);
         std::fs::write(&f, sh)?;
@@ -200,22 +256,38 @@ pub fn write_shims(dir: &Path, ep: &Endpoint, tab_exe: &Path) -> std::io::Result
                 cmd.push_str(&format!("set \"{k}={v}\"\r\n"));
             }
             cmd.push_str(&format!(
-                "\"{}\" __tab_cli {} %*\r\nexit /b %ERRORLEVEL%\r\n",
+                "\"{}\" __tab_cli {sub} %*\r\nexit /b %ERRORLEVEL%\r\n",
                 tab_exe.display(),
-                tool
             ));
             std::fs::write(bin.join(format!("{tool}.cmd")), cmd)?;
         }
     }
+    let git_env = match git {
+        Some(_) => {
+            let base = ep.url.trim_end_matches("/cli").to_string() + "/git/" + ep.session + "/";
+            let helper = bin.join(if cfg!(windows) {
+                "git-credential-tab.cmd"
+            } else {
+                "git-credential-tab"
+            });
+            git_config(&base, ep.token, &helper)
+        }
+        None => Vec::new(),
+    };
+    let mut env = format!(
+        "# Written by tab: CLIs your connections sign in go through tab.\nPATH={}:\"$PATH\"; export PATH\n",
+        sh_quote(&posix_path(&bin))
+    );
+    for (k, v) in &git_env {
+        env.push_str(&format!("{k}={}; export {k}\n", sh_quote(v)));
+    }
     let env_file = dir.join("shell-env.sh");
-    std::fs::write(
-        &env_file,
-        format!(
-            "# Written by tab: CLIs your connections sign in go through tab.\nPATH={}:\"$PATH\"; export PATH\n",
-            sh_quote(&posix_path(&bin))
-        ),
-    )?;
-    Ok(Some(Shims { bin, env_file }))
+    std::fs::write(&env_file, env)?;
+    Ok(Some(Shims {
+        bin,
+        env_file,
+        git_env,
+    }))
 }
 
 fn sh_quote(s: &str) -> String {
@@ -252,8 +324,11 @@ fn client(argv: Vec<OsString>) -> anyhow::Result<i32> {
     let tool = it
         .next()
         .and_then(|t| t.into_string().ok())
-        .and_then(|t| find(&t))
         .ok_or_else(|| anyhow::anyhow!("usage: tab __tab_cli <tool> <args>"))?;
+    if tool == "git-credential" {
+        return credential_client(it.map(|a| a.to_string_lossy().into_owned()).collect());
+    }
+    let tool = find(&tool).ok_or_else(|| anyhow::anyhow!("tab doesn't run {tool}"))?;
     let raw: Vec<OsString> = it.collect();
     let args: Vec<String> = raw
         .iter()
@@ -309,6 +384,94 @@ fn client(argv: Vec<OsString>) -> anyhow::Result<i32> {
     std::io::stdout().write_all(&B64.decode(reply.stdout).unwrap_or_default())?;
     std::io::stderr().write_all(&B64.decode(reply.stderr).unwrap_or_default())?;
     Ok(reply.code)
+}
+
+/// git's credential helper protocol (`get`, `store`, `erase` with
+/// `key=value` lines on stdin), answered by tab.
+fn credential_client(args: Vec<String>) -> anyhow::Result<i32> {
+    let var = |k: &str| std::env::var(k).unwrap_or_default();
+    let mut b = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::stdin(), &mut b)?;
+    let req = Request {
+        tool: "git-credential".into(),
+        args,
+        cwd: std::env::current_dir().unwrap_or_default(),
+        stdin: Some(B64.encode(b)),
+    };
+    let reply = send(
+        &var("TAB_CLI_URL"),
+        &var("TAB_CLI_TOKEN"),
+        &var("TAB_CLI_SESSION"),
+        &req,
+    )?;
+    use std::io::Write;
+    std::io::stdout().write_all(&B64.decode(reply.stdout).unwrap_or_default())?;
+    std::io::stderr().write_all(&B64.decode(reply.stderr).unwrap_or_default())?;
+    Ok(reply.code)
+}
+
+/// Answers a chat's git credential request. Hosts a connection signs in
+/// get nothing: their traffic goes through tab's endpoint, which adds the
+/// token itself. Other hosts get what the person's own helpers give, as
+/// they would outside tab.
+pub async fn credential(op: &str, input: &[u8]) -> Reply {
+    let text = String::from_utf8_lossy(input);
+    let host = text
+        .lines()
+        .find_map(|l| l.strip_prefix("host="))
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let host = host.split(':').next().unwrap_or("").to_string();
+    let owned = all().iter().any(|b| match &b.cli.auth {
+        CliAuth::GitEndpoint { url, remotes } => std::iter::once(url)
+            .chain(remotes)
+            .any(|r| host_of(r).is_some_and(|h| h == host)),
+        _ => false,
+    });
+    if owned || host.is_empty() {
+        return Reply::default();
+    }
+    let sub = match op {
+        "get" => "fill",
+        "store" => "approve",
+        "erase" => "reject",
+        _ => return Reply::default(),
+    };
+    let Ok(git) = which::which("git") else {
+        return Reply::default();
+    };
+    let mut cmd = crate::agents::command(&git);
+    cmd.args(["credential", sub])
+        .current_dir(std::env::temp_dir())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let Ok(mut child) = cmd.spawn() else {
+        return Reply::default();
+    };
+    if let Some(mut w) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        let _ = w.write_all(input).await;
+    }
+    match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await {
+        Ok(Ok(o)) if o.status.success() => Reply {
+            code: 0,
+            stdout: B64.encode(o.stdout),
+            stderr: String::new(),
+        },
+        _ => Reply::default(),
+    }
+}
+
+/// `github.com` from `https://github.com/`, `git@github.com:` or `ssh://git@github.com/`.
+fn host_of(remote: &str) -> Option<String> {
+    let rest = remote.split_once("://").map(|(_, r)| r).unwrap_or(remote);
+    let rest = rest.rsplit_once('@').map(|(_, r)| r).unwrap_or(rest);
+    let host = rest.split(['/', ':']).next()?;
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 /// Sends a command to tab's `/cli` and waits for it. Blocking.
@@ -494,34 +657,26 @@ async fn run(
     .env("GCM_INTERACTIVE", "never")
     .env("GIT_EDITOR", "true")
     .env("GIT_MERGE_AUTOEDIT", "no");
-    match &tool.cli.auth {
-        CliAuth::Env { var } => {
-            if let Some(t) = token {
-                cmd.env(var, t);
-            }
-            if tool.name() == "gh" {
-                // gh's own config (and its stored sign-in) stays out of it.
-                let d = std::env::temp_dir().join("tab-gh-config");
-                let _ = std::fs::create_dir_all(&d);
-                cmd.env("GH_CONFIG_DIR", d);
-            }
-        }
-        CliAuth::GitHeader { url } => {
-            let mut cfg = git_hardening(&exe, &req.cwd).await;
-            if let Some(t) = token {
-                cfg.push((
-                    format!("http.{url}.extraheader"),
-                    format!(
-                        "AUTHORIZATION: basic {}",
-                        B64.encode(format!("x-access-token:{t}"))
-                    ),
-                ));
-            }
-            cmd.env("GIT_CONFIG_COUNT", cfg.len().to_string());
-            for (i, (k, v)) in cfg.iter().enumerate() {
-                cmd.env(format!("GIT_CONFIG_KEY_{i}"), k);
-                cmd.env(format!("GIT_CONFIG_VALUE_{i}"), v);
-            }
+    let CliAuth::Env { var } = &tool.cli.auth else {
+        anyhow::bail!("{} runs in the chat, not through tab", tool.name());
+    };
+    if let Some(t) = token {
+        cmd.env(var, t);
+    }
+    if tool.name() == "gh" {
+        // gh's own config (and its stored sign-in) stays out of it.
+        let d = std::env::temp_dir().join("tab-gh-config");
+        let _ = std::fs::create_dir_all(&d);
+        cmd.env("GH_CONFIG_DIR", d);
+    }
+    // `gh pr checkout` and friends run git in the checkout with the token in
+    // their environment: the repository's own config can't name programs.
+    if let Ok(git) = which::which("git") {
+        let cfg = git_hardening(&git, &req.cwd).await;
+        cmd.env("GIT_CONFIG_COUNT", cfg.len().to_string());
+        for (i, (k, v)) in cfg.iter().enumerate() {
+            cmd.env(format!("GIT_CONFIG_KEY_{i}"), k);
+            cmd.env(format!("GIT_CONFIG_VALUE_{i}"), v);
         }
     }
     let mut child = prepared.spawn()?;
@@ -561,6 +716,114 @@ async fn run(
         stdout: B64.encode(o),
         stderr: B64.encode(e),
     })
+}
+
+/// One ref a push changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefUpdate {
+    pub old: String,
+    pub new: String,
+    pub name: String,
+}
+
+impl RefUpdate {
+    pub fn creates(&self) -> bool {
+        self.old.bytes().all(|b| b == b'0')
+    }
+
+    pub fn deletes(&self) -> bool {
+        self.new.bytes().all(|b| b == b'0')
+    }
+
+    /// `main` for `refs/heads/main`.
+    pub fn short(&self) -> &str {
+        self.name
+            .strip_prefix("refs/heads/")
+            .or_else(|| self.name.strip_prefix("refs/tags/"))
+            .unwrap_or(&self.name)
+    }
+}
+
+/// The ref updates at the start of a `git-receive-pack` request body, its
+/// capabilities, and where they end. None until the whole list (up to its
+/// flush packet) has arrived.
+pub fn parse_push(buf: &[u8]) -> Option<(Vec<RefUpdate>, String, usize)> {
+    let mut pos = 0;
+    let mut updates = Vec::new();
+    let mut caps = String::new();
+    loop {
+        let head = std::str::from_utf8(buf.get(pos..pos + 4)?).ok()?;
+        let len = usize::from_str_radix(head, 16).ok()?;
+        if len == 0 {
+            return Some((updates, caps, pos + 4));
+        }
+        if len < 4 {
+            return None;
+        }
+        let line = buf.get(pos + 4..pos + len)?;
+        pos += len;
+        let line = String::from_utf8_lossy(line);
+        let line = line.trim_end_matches('\n');
+        let line = match line.split_once('\0') {
+            Some((l, c)) => {
+                caps = c.to_string();
+                l
+            }
+            None => line,
+        };
+        let mut parts = line.split(' ');
+        if let (Some(old), Some(new), Some(name)) = (parts.next(), parts.next(), parts.next())
+            && old.len() >= 40
+            && new.len() >= 40
+        {
+            updates.push(RefUpdate {
+                old: old.into(),
+                new: new.into(),
+                name: name.into(),
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn tests_pkt(data: &[u8]) -> Vec<u8> {
+    pkt(data)
+}
+
+fn pkt(data: &[u8]) -> Vec<u8> {
+    let mut v = format!("{:04x}", data.len() + 4).into_bytes();
+    v.extend_from_slice(data);
+    v
+}
+
+/// A `git-receive-pack` answer that turns every update down with `why`, so
+/// git prints a clear `! [remote rejected] main (why)` instead of an HTTP
+/// error.
+pub fn push_refused(updates: &[RefUpdate], caps: &str, why: &str) -> Vec<u8> {
+    let mut report = pkt(b"unpack ok\n");
+    for u in updates {
+        report.extend(pkt(format!("ng {} {why}\n", u.name).as_bytes()));
+    }
+    report.extend_from_slice(b"0000");
+    let caps: Vec<&str> = caps.split(' ').collect();
+    let band = if caps.contains(&"side-band-64k") {
+        65515
+    } else if caps.contains(&"side-band") {
+        995
+    } else {
+        return report;
+    };
+    let mut out = Vec::new();
+    for chunk in report.chunks(band) {
+        let mut d = vec![1u8];
+        d.extend_from_slice(chunk);
+        out.extend(pkt(&d));
+    }
+    let mut msg = vec![2u8];
+    msg.extend_from_slice(format!("tab: {why}\n").as_bytes());
+    out.extend(pkt(&msg));
+    out.extend_from_slice(b"0000");
+    out
 }
 
 /// What a finished change touched, for the app to refresh. `repo` is the
@@ -688,22 +951,49 @@ mod tests {
     }
 
     #[test]
-    fn sorts_git_commands() {
-        use CliEffect::*;
-        assert_eq!(v("git", "status"), Local);
-        assert_eq!(v("git", "-C /x commit -m hi"), Local);
-        assert_eq!(v("git", "rebase -i main"), Local);
-        assert_eq!(v("git", ""), Local);
-        assert_eq!(v("git", "fetch origin"), Read);
-        assert_eq!(v("git", "-c a=b pull --rebase"), Read);
-        assert_eq!(v("git", "clone https://github.com/o/r"), Read);
-        assert_eq!(v("git", "push -u origin feature"), Write);
-        assert_eq!(v("git", "push origin HEAD:feature"), Write);
-        assert_eq!(v("git", "push --force-with-lease"), Destructive);
-        assert_eq!(v("git", "push -f origin x"), Destructive);
-        assert_eq!(v("git", "push origin +x"), Destructive);
-        assert_eq!(v("git", "push origin :old"), Destructive);
-        assert_eq!(v("git", "push --delete origin old"), Destructive);
+    fn git_runs_in_the_chat() {
+        assert_eq!(v("git", "push --force origin main"), CliEffect::Local);
+        assert_eq!(v("git", "status"), CliEffect::Local);
+    }
+
+    #[test]
+    fn git_reaches_github_only_through_tab() {
+        let env = git_config(
+            "http://127.0.0.1:9/git/s1/",
+            "tok",
+            Path::new("/x/git-credential-tab"),
+        );
+        let get = |k: &str| {
+            env.iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        };
+        let count: usize = get("GIT_CONFIG_COUNT").parse().unwrap();
+        let pairs: Vec<(String, String)> = (0..count)
+            .map(|i| {
+                (
+                    get(&format!("GIT_CONFIG_KEY_{i}")),
+                    get(&format!("GIT_CONFIG_VALUE_{i}")),
+                )
+            })
+            .collect();
+        assert!(pairs.contains(&(
+            "url.http://127.0.0.1:9/git/s1/github/.insteadOf".into(),
+            "git@github.com:".into()
+        )));
+        assert!(pairs.contains(&(
+            "http.http://127.0.0.1:9/git/s1/.extraHeader".into(),
+            "Authorization: Bearer tok".into()
+        )));
+        let helpers: Vec<&str> = pairs
+            .iter()
+            .filter(|(k, _)| k == "credential.helper")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(helpers, ["", "/x/git-credential-tab"]);
+        assert_eq!(host_of("git@github.com:"), Some("github.com".into()));
+        assert_eq!(host_of("ssh://git@github.com/"), Some("github.com".into()));
     }
 
     #[test]
@@ -777,6 +1067,36 @@ mod tests {
         ] {
             assert!(!runs_a_program(k), "{k}");
         }
+    }
+
+    #[test]
+    fn reads_pushes_and_refuses_them_the_way_git_expects() {
+        let z = "0".repeat(40);
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        let mut body =
+            pkt(format!("{a} {b} refs/heads/main\0report-status side-band-64k\n").as_bytes());
+        body.extend(pkt(format!("{a} {z} refs/heads/old\n").as_bytes()));
+        body.extend(pkt(format!("{z} {b} refs/heads/new\n").as_bytes()));
+        assert!(parse_push(&body).is_none(), "no flush yet");
+        body.extend_from_slice(b"0000PACK...");
+        let (u, caps, end) = parse_push(&body).unwrap();
+        assert_eq!(&body[end..], b"PACK...");
+        assert_eq!(caps, "report-status side-band-64k");
+        assert_eq!(u.len(), 3);
+        assert!(!u[0].creates() && !u[0].deletes());
+        assert!(u[1].deletes() && u[2].creates());
+        assert_eq!(u[0].short(), "main");
+
+        let r = push_refused(&u[..1], &caps, "not allowed");
+        let s = String::from_utf8_lossy(&r);
+        assert!(
+            s.contains("unpack ok") && s.contains("ng refs/heads/main not allowed"),
+            "{s}"
+        );
+        assert!(s.contains("tab: not allowed") && s.ends_with("0000"), "{s}");
+        // Without side-band, the bare report.
+        let r = push_refused(&u[..1], "report-status", "no");
+        assert!(r.starts_with(b"000eunpack ok\n"));
     }
 
     #[test]

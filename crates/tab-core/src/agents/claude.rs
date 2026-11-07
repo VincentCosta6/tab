@@ -71,7 +71,7 @@ pub(super) async fn run_turn(
                     "type": "http",
                     "url": mcp.url,
                     "headers": {
-                        "Authorization": format!("Bearer {}", mcp.token),
+                        "Authorization": format!("Bearer {}", crate::mcp::chat_token(&mcp.token, &session.id)),
                         "X-Tab-Session": session.id,
                     }
                 }
