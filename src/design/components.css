@@ -152,3 +152,15 @@
 .table .mono { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-muted); word-break: break-all; }
 .muted { color: var(--fg-muted); }
 .subtle { color: var(--fg-subtle); }
+
+/* FlapTitle: split-flap title changes. */
+.flap { white-space: nowrap; }
+.flap-slot { position: relative; display: inline-block; height: 1lh; overflow: hidden; vertical-align: top; transition-property: width; transition-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1); }
+.flap-reel { position: absolute; top: 0; left: 50%; display: flex; flex-direction: column; align-items: center; transform: translateX(-50%); transition-property: transform; transition-timing-function: cubic-bezier(0.3, 0.7, 0.2, 1); }
+.flap-reel > span { height: 1lh; white-space: pre; }
+.flap-go .flap-reel { transform: translateX(-50%) translateY(calc(var(--k) * -1lh)); }
+
+/* Settings → Chat titles */
+.titler-rules { display: grid; gap: var(--space-2); }
+.titler-defaults { margin: 0; color: var(--fg-subtle); font-size: var(--text-sm); line-height: 1.5; }
+.titler-defaults strong { color: var(--fg-muted); font-weight: 500; }

@@ -213,6 +213,15 @@ export const mockApi = {
           emit({ type: "item_changed", change: "updated", item: i });
           return i;
         }
+        case "rename_item": {
+          const i = items.find((x) => x.id === args.id);
+          if (!i) return null;
+          i.title = args.title;
+          i.metadata = { ...(i.metadata as object), title_source: "user" };
+          emit({ type: "item_changed", change: "updated", item: { ...i } });
+          return i;
+        }
+        case "titler_default_rules": return "Name the thread the way a good engineer names a ticket: 3 to 7 words, at most 60 characters.";
         case "project_notes": return notes.filter((n) => n.project_id === args.projectId);
         case "project_note_save": {
           const now = new Date().toISOString();

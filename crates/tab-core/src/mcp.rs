@@ -767,6 +767,7 @@ impl McpServer {
                         url: s("url"),
                         created_by: "agent".into(),
                         project_id,
+                        auto_title: false,
                     })
                     .await?;
                 Ok(text(format!(

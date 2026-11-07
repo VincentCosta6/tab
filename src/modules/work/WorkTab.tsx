@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, EmptyState, Tabs, TextInput, cx } from "../../design/components";
 import { Brand, SourceGlyph, hasBrand } from "../../design/brands";
+import { FlapTitle } from "../../design/FlapTitle";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
@@ -290,7 +291,7 @@ export function QueueRow({ item, agent, selected, onSelect, onAct, compact }: {
         <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={compact ? 24 : 28} />
       </span>
       <div className="row-main">
-        <div className="row-title">{item.title}</div>
+        <FlapTitle as="div" className="row-title" id={item.id} text={item.title} />
         <div className="row-meta">
           <ProjectChip id={item.project_id} />
           {agent && <SessionPill status={agent.status} title={`Chat ${sessionLook[agent.status].label.toLowerCase()} · updated ${timeAgo(agent.updated_at)}`} />}

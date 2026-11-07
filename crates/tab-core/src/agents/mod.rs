@@ -14,7 +14,11 @@
 
 mod claude;
 mod opencode;
+mod small;
 mod suggest;
+mod titler;
+
+pub use titler::DEFAULT_RULES as TITLER_DEFAULT_RULES;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -683,7 +687,10 @@ impl AgentHub {
                         hub.update(&session.id, Some(SessionStatus::Failed), None);
                     }
                 }
-                Ok(()) => suggest::spawn(hub.clone(), session.id.clone()),
+                Ok(()) => {
+                    suggest::spawn(hub.clone(), session.id.clone());
+                    titler::spawn(hub.clone(), session.id.clone());
+                }
                 Err(e) => {
                     tracing::warn!(session = %session.id, error = %e, "agent turn failed");
                     hub.post(

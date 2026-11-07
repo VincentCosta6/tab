@@ -398,8 +398,16 @@ export interface AgentConfig {
   workdir: string | null;
   permission_mode: string;
   suggest_replies?: boolean;
+  titler?: TitlerConfig;
   opencode_url: string | null;
   budget: BudgetConfig;
+}
+
+/** Names chats started in tab with a small model as the work comes into focus. */
+export interface TitlerConfig {
+  enabled: boolean;
+  model: string | null;
+  instructions: string;
 }
 
 export interface BudgetConfig {
