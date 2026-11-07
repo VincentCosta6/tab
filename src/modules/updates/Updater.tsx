@@ -83,7 +83,7 @@ export function Updater() {
     <div className="updater" ref={ref}>
       <div className={cx("updater-card", phase)} role="status" title={`${name}: you have ${have ?? "?"}, ${health?.latest ?? "?"} is out`}>
         <div className="updater-head">
-          <Icon name={phase === "done" ? "check" : phase === "failed" ? "alert" : "arrow-up"} size={13} />
+          <Icon name={phase === "done" ? "check" : phase === "failed" ? "alert" : "arrow-up"} size={11} />
           <span className="updater-name">{short}</span>
           {phase === "idle" && (
             <button className="updater-x" aria-label="Not now" title="Not now" onClick={() => health?.latest && setSkipped(health.latest)}>
