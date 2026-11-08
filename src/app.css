@@ -811,6 +811,7 @@ body.resizing iframe { pointer-events: none; }
    ring (numbers in its tooltip) and Stop becomes an icon. */
 @container (max-width: 480px) { .composer-foot .cw-used { display: none; } .composer-foot .cw-chip { padding: 2px 4px; } }
 @container (max-width: 400px) { .composer-stop > span { display: none; } }
+@container (max-width: 370px) { .composer-foot .bar-picker-btn > svg:last-child { display: none; } }
 .dictation { position: relative; display: inline-flex; flex: none; }
 .dictation-note { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 40; width: max-content; max-width: 260px; white-space: normal; padding: 6px 8px; border-radius: 8px; background: var(--bg-raised); border: 1px solid var(--border); box-shadow: var(--shadow-sm); color: var(--fg); font-size: var(--text-xs); }
 .composer-foot .cw-pop { white-space: normal; width: 320px; }
