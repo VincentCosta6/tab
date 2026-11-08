@@ -25,6 +25,9 @@
 // own, with `authorization: Runner <token>`, a token the hub gave it:
 //   GET  /v1/runner/secrets         Secrets       its hub's secrets, values
 //                                                 included
+// and syncs with its hub like any computer, at /v1/hubs/{hub_id}/sync with
+// `authorization: Bearer <token>`. A token is `tabrunner.<hub_id>.<secret>`;
+// only the hub can say it's valid, and each start of the runner gets a new one.
 //
 // Same compatibility rules as hub.proto: only add; never renumber or reuse a
 // field; reserve removed ones. `buf breaking` checks this.
