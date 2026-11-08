@@ -6,7 +6,7 @@ import { NOT_HANDLED, withActions, workflowMock } from "./mock-workflows";
 import harnessData from "../../crates/tab-core/src/agents/harnesses.json";
 import { create, toBinary } from "@bufbuild/protobuf";
 import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
-import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, type HubStatus } from "./protocol/cloud";
+import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, RunnerState, RunnerStatusSchema, type HubStatus } from "./protocol/cloud";
 import type {
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
@@ -163,6 +163,9 @@ let mockAccount: Account | null = typeof location !== "undefined" && new URLSear
 
 let mockHub: HubStatus | null = null;
 let mockHubFailed = false;
+// `?hub=cloud` starts the browser mock as if this computer moved to tab cloud.
+let mockMoved = typeof location !== "undefined" && new URLSearchParams(location.search).get("hub") === "cloud";
+let mockSecrets: string[] = ["harness/claude_code/ANTHROPIC_API_KEY"];
 const mockPlan = () => create(PlanSchema, { name: "trial", endsAt: timestampFromDate(new Date(Date.now() + 14 * 86400_000)), active: true });
 const mockCloudHub = (state: HubState): HubStatus =>
   create(HubStatusSchema, {
@@ -173,6 +176,7 @@ const mockCloudHub = (state: HubState): HubStatus =>
     },
     plan: mockPlan(),
   });
+if (mockMoved) mockHub = mockCloudHub(HubState.READY);
 
 const listeners = new Set<(e: EngineEvent) => void>();
 const emit = (e: EngineEvent) => listeners.forEach((l) => l(e));
@@ -506,11 +510,41 @@ export const mockApi = {
             url: "wss://127.0.0.1:47850/hub", fingerprint: "sha256/3f1c9a0e5d7b2c48e6a1f0b9d3c7e2a5b8f4d1c6e9a2b7f0c3d8e5a1b6f9c2d4", http3: true, path: "C:\\Users\\vince\\AppData\\Roaming\\dev.tab.app\\hub.db",
             head: 18_422, records: 6_310, edges: 0, live_leases: 1, storage_bytes: 41_943_040, files: 38, file_bytes: 12_582_912,
             cpu_percent: 2.4 + Math.random() * 3, memory_bytes: 186_000_000 + Math.round(Math.random() * 4_000_000), cpus: 12, pending: 0,
+            cloud_hub: mockMoved ? "5e7ecedf5a07a215de6ad0cc9d6ca7080b0e32c07931566c24ac88cdf129feee" : null, cloud_connected: mockMoved,
             connections: [
               { id: 0, device: "this-computer", client: "tab-desktop/0.1.0", address: "this app", connected_at: started, synced_to: 18_422, behind: 0, this_app: true },
               { id: 3, device: "pixel-8", client: "tab-mobile/0.1.0", address: "127.0.0.1:53122", connected_at: new Date(Date.now() - 600_000).toISOString(), synced_to: 18_410, behind: 12, this_app: false },
             ],
           };
+        }
+        case "hub_move_to_local": mockMoved = false; return 6_310;
+        case "hub_move_to_cloud": {
+          for (let done = 0; done <= 18_422; done += 6_000) await new Promise((r) => setTimeout(r, 300));
+          mockMoved = true;
+          return { kind: "moved", changes: 18_422 };
+        }
+        case "runners": {
+          const now = new Date().toISOString();
+          return [
+            { id: "this-computer", name: "This MacBook", kind: "computer", harnesses: ["claude_code", "codex"], repos: ["acme/api"], connections: ["github"], seen_at: now, awake: true, this_app: true },
+            { id: "desk-pc", name: "Desk PC", kind: "computer", harnesses: ["claude_code"], repos: [], connections: [], seen_at: new Date(Date.now() - 3 * 3600_000).toISOString(), awake: false, this_app: false },
+            ...(mockMoved ? [{ id: "cloud", name: "tab cloud", kind: "cloud", harnesses: ["claude_code", "opencode", "codex", "pi"], repos: [], connections: ["linear"], seen_at: now, awake: true, this_app: false }] : []),
+          ];
+        }
+        case "jobs_recent": return [];
+        case "cloud_runner_status":
+        case "cloud_runner_wake":
+          if (!mockMoved) throw { code: ErrorCode.NOT_FOUND, message: "This computer's work isn't in tab cloud yet." };
+          return toBinary(RunnerStatusSchema, create(RunnerStatusSchema, { state: RunnerState.RUNNING, seenAt: timestampNow(), detail: "Polling 1 connection." }));
+        case "cloud_secret_names": return mockSecrets;
+        case "cloud_secret_set":
+          mockSecrets = mockSecrets.filter((n) => n !== args.name).concat(args.value ? [args.name as string] : []);
+          return mockSecrets;
+        case "connection_runs_on": {
+          if (args.runsOn === "cloud" && !mockMoved) throw { code: ErrorCode.BAD_REQUEST, message: "Move your hub to tab cloud first (Settings → Hub), then a connection can run there." };
+          const c = config.connectors[args.connection as string];
+          if (c) config = { ...config, connectors: { ...config.connectors, [args.connection as string]: { ...c, runs_on: args.runsOn as "cloud" | "this_computer" } } };
+          return config;
         }
         case "storage_remove_checkouts": {
           const gone = mockCheckouts.filter((c) => !args.repo || (c.repo === args.repo && c.number === args.number));

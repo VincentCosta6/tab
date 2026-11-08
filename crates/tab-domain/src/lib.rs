@@ -9,6 +9,7 @@
 //! - [`blob`]: files, named by the hash of their bytes, that records point to.
 //! - [`workflow`]: workflow definitions, validation and templates.
 //! - [`links`]: recognizing links agents create or mention.
+//! - [`runner`]: runners, jobs, and the leases that decide who does what.
 //!
 //! Every place a hub runs uses this crate: the desktop engine (`tab-core`),
 //! the hub library (`tab-hub`), and later the Cloudflare Worker. So nothing
@@ -22,6 +23,7 @@ pub mod links;
 pub mod model;
 pub mod ops;
 pub mod rules;
+pub mod runner;
 pub mod workflow;
 
 pub use cli::*;

@@ -8,7 +8,43 @@
 .nav-item { display: grid; justify-items: center; gap: 2px; padding: var(--space-2) 0; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg-muted); cursor: pointer; font-size: var(--text-xs); }
 .nav-item:hover { background: var(--bg-hover); color: var(--fg); }
 .nav-item.active { background: var(--bg-raised); color: var(--fg); box-shadow: var(--shadow-sm); }
-.main { min-width: 0; min-height: 0; overflow: hidden; }
+.main { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.main-body { min-width: 0; min-height: 0; overflow: hidden; }
+
+/* The app header: where you are, the hub, the chat on screen, the account. */
+.app-header { display: flex; align-items: center; gap: var(--space-3); height: 40px; padding: 0 var(--space-3) 0 var(--space-4); border-bottom: 1px solid var(--border); background: var(--bg); min-width: 0; }
+.app-header-title { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); font-weight: 600; color: var(--fg); min-width: 0; }
+.app-header-title svg { color: var(--fg-subtle); flex: none; }
+.app-header-status { margin-left: auto; display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.header-chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg-raised); color: var(--fg-muted); font-size: var(--text-xs); white-space: nowrap; min-width: 0; }
+button.header-chip { cursor: pointer; }
+button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
+.header-chip > svg { flex: none; color: var(--fg-subtle); }
+.header-chip-place { overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
+.header-chip-state { display: inline-flex; align-items: center; gap: 4px; color: var(--tone-fg, var(--fg-muted)); }
+.header-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.header-chip-state.tone-success { color: var(--tone-success-fg); }
+.header-chip-state.tone-warning { color: var(--tone-warning-fg); }
+.header-chip-state.tone-danger { color: var(--tone-danger-fg); }
+.header-chip-state.tone-neutral { color: var(--fg-subtle); }
+.header-chip-state.tone-success .header-dot { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent); }
+.header-account { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
+.header-account img, .header-account .account-initial { width: 26px; height: 26px; border-radius: 50%; font-size: var(--text-xs); }
+.header-account:hover { box-shadow: 0 0 0 2px var(--border-strong); }
+@media (max-width: 760px) { .header-chip-place { display: none; } }
+
+/* Where a connection runs. */
+.runs-on { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+.runs-on-option { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-3); text-align: left; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); color: var(--fg); cursor: pointer; }
+.runs-on-option:hover:not(:disabled) { background: var(--bg-hover); }
+.runs-on-option.active { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
+.runs-on-option:disabled { opacity: 0.55; cursor: default; }
+.runs-on-option svg { flex: none; margin-top: 2px; color: var(--fg-subtle); }
+.runs-on-option span { display: grid; gap: 2px; }
+.runs-on-option small { color: var(--fg-muted); font-size: var(--text-xs); }
+.runs-on-note { margin-top: var(--space-3); font-size: var(--text-sm); }
+.wf-runners { display: flex; flex-wrap: wrap; gap: var(--space-1); margin: var(--space-2) 0; }
+.wf-runners .wf-chip { display: inline-flex; align-items: center; gap: 4px; }
 .page { height: 100%; overflow: auto; padding: var(--space-8) var(--space-8) var(--space-8); }
 .page-narrow { max-width: 980px; }
 
@@ -1051,3 +1087,5 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
   margin: 6px 0 0;
   padding-left: 18px;
 }
+.secret-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.secret-row .input { min-width: 220px; }

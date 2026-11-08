@@ -7,14 +7,18 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, cx, SourceIcon, Toggle } from "../../design/components";
+import { Badge, Button, cx, SourceIcon, StatusDot, Toggle } from "../../design/components";
 import { Icon } from "../../design/icons";
 import { api, onEngineEvent } from "../../lib/api";
 import { timeAgo } from "../../lib/format";
 import { useConnectors, useItems } from "../../lib/hooks";
 import type {
-  ActionField, ActionInfo, Change, Chat, Condition, ConnectorInfo, Effect, Issue, Op, Step, StepRun, StepStatus, Tone, Trigger, Workflow, WorkflowRun, RunStatus,
+  ActionField, ActionInfo, Change, Chat, Condition, ConnectorInfo, Effect, Issue, Op, Placement, Runner, Step, StepRun, StepStatus, Tone, Trigger, Workflow, WorkflowRun, RunStatus,
 } from "../../lib/types";
+import harnessData from "../../../crates/tab-core/src/agents/harnesses.json";
+
+/** Every harness a runner may have, by id and name (what an agent step can ask for). */
+const harnesses = (harnessData as { id: string; name: string }[]).map(({ id, name }) => ({ id, name }));
 import { AgentStatus, Composer, Transcript, openItem } from "../work/Chat";
 import "./workflows.css";
 
@@ -50,13 +54,13 @@ const effectTone: Record<Effect, Tone> = { read: "neutral", write: "info", destr
 const effectLabel: Record<Effect, string> = { read: "Reads", write: "Writes", destructive: "Destructive" };
 
 const runTone: Record<RunStatus, Tone> = {
-  running: "info", succeeded: "success", stopped: "neutral", failed: "danger", blocked: "warning", throttled: "warning", loop_stopped: "warning",
+  running: "info", waiting: "accent", succeeded: "success", stopped: "neutral", failed: "danger", blocked: "warning", throttled: "warning", loop_stopped: "warning",
 };
 const runLabel: Record<RunStatus, string> = {
-  running: "Running", succeeded: "Ran", stopped: "Stopped", failed: "Failed", blocked: "Needs your OK", throttled: "Held back", loop_stopped: "Loop stopped",
+  running: "Running", waiting: "Waiting on an agent", succeeded: "Ran", stopped: "Stopped", failed: "Failed", blocked: "Needs your OK", throttled: "Held back", loop_stopped: "Loop stopped",
 };
-const stepTone: Record<StepStatus, Tone> = { ok: "success", skipped: "neutral", stopped: "neutral", failed: "danger", blocked: "warning", throttled: "warning", dry: "accent" };
-const stepLabel: Record<StepStatus, string> = { ok: "Done", skipped: "Skipped", stopped: "Stopped here", failed: "Failed", blocked: "Blocked", throttled: "Held back", dry: "Would run" };
+const stepTone: Record<StepStatus, Tone> = { ok: "success", waiting: "accent", skipped: "neutral", stopped: "neutral", failed: "danger", blocked: "warning", throttled: "warning", dry: "accent" };
+const stepLabel: Record<StepStatus, string> = { ok: "Done", waiting: "Agent working", skipped: "Skipped", stopped: "Stopped here", failed: "Failed", blocked: "Blocked", throttled: "Held back", dry: "Would run" };
 
 function blank(): Workflow {
   return {
@@ -116,7 +120,9 @@ function variables(w: Workflow, upTo: number, connectors: ConnectorInfo[]): { pa
     if (s.type === "action") {
       for (const f of findAction(connectors, s.connector, s.action)?.outputs ?? []) out.push({ path: `steps.${s.id}.${f.key}`, label: `${s.id}: ${f.label}` });
     } else if (s.type === "set") for (const k of Object.keys(s.values)) out.push({ path: `steps.${s.id}.${k}`, label: `${s.id}: ${k}` });
-    else if (s.type === "command") {
+    else if (s.type === "agent") {
+      out.push({ path: `steps.${s.id}.summary`, label: `${s.id}: What the agent said` }, { path: `steps.${s.id}.branch`, label: `${s.id}: Branch` }, { path: `steps.${s.id}.pr_url`, label: `${s.id}: Pull request` });
+    } else if (s.type === "command") {
       out.push({ path: `steps.${s.id}.exit_code`, label: `${s.id}: Exit code` }, { path: `steps.${s.id}.stdout`, label: `${s.id}: Output` }, { path: `steps.${s.id}.stderr`, label: `${s.id}: Errors` });
     }
   }
@@ -428,7 +434,7 @@ export function WorkflowsTab() {
   );
 }
 
-type NewStep = { type: "action"; connector: string; action: string } | { type: "filter" | "set" | "emit" | "command" };
+type NewStep = { type: "action"; connector: string; action: string } | { type: "filter" | "set" | "emit" | "command" | "agent" };
 
 function insertStep(w: Workflow, at: number, kind: NewStep, connectors: ConnectorInfo[], select: (id: string) => void) {
   const base = { label: "", when: [] as Condition[], continue_on_error: false };
@@ -440,6 +446,7 @@ function insertStep(w: Workflow, at: number, kind: NewStep, connectors: Connecto
     step = { ...base, id: uniqueId(w, kind.action.split(".").pop() ?? "step"), type: "action", connector: kind.connector, action: kind.action, input };
   } else if (kind.type === "filter") step = { ...base, id: uniqueId(w, "only_if"), type: "filter", conditions: [{ field: "item.title", op: "contains", value: "" }] };
   else if (kind.type === "set") step = { ...base, id: uniqueId(w, "values"), type: "set", values: { name: "" } };
+  else if (kind.type === "agent") step = { ...base, id: uniqueId(w, "agent"), type: "agent", prompt: "", repo: "", harness: "", model: "", placement: { type: "computers" }, deadline_minutes: 0 };
   else if (kind.type === "command") step = { ...base, id: uniqueId(w, "run"), type: "command", program: "", args: [], folder: "", network: [], env: {}, image: "", timeout_secs: 0 };
   else step = { ...base, id: uniqueId(w, "signal"), type: "emit", signal: "", payload: {} };
   w.steps.splice(at, 0, step);
@@ -506,6 +513,10 @@ function StepNode({ step, connectors, selected, issues, result, unreached, onCli
   } else if (step.type === "set") {
     icon = "edit"; kicker = "Values"; title = step.label || "Set values";
     lines = Object.entries(step.values).map(([k, v]) => `${k} = ${text(v)}`);
+  } else if (step.type === "agent") {
+    icon = "bot"; tone = "accent"; kicker = `Agent · ${placementLabel(step.placement)}`;
+    title = step.label || step.prompt.split("\n")[0].slice(0, 60) || "Hand to an agent";
+    lines = [step.repo ? `In ${step.repo}` : "No repo", step.harness ? harnessName(step.harness) : "The runner's default harness"];
   } else if (step.type === "command") {
     icon = "terminal"; tone = "info"; kicker = step.image ? `Command · ${step.image}` : "Command";
     title = step.label || [step.program, ...step.args].join(" ").trim() || "Run a command";
@@ -580,6 +591,7 @@ function AddMenu({ connectors, workflow, onPick, onClose }: { connectors: Connec
             <button onClick={() => onPick({ type: "filter" })}><Icon name="filter" size={14} /> <span><strong>Only continue if</strong><small>Stop the run unless conditions hold</small></span></button>
             <button onClick={() => onPick({ type: "set" })}><Icon name="edit" size={14} /> <span><strong>Set values</strong><small>Compute text for later steps</small></span></button>
             <button onClick={() => onPick({ type: "emit" })}><Icon name="zap" size={14} /> <span><strong>Signal other workflows</strong><small>Start workflows listening for it</small></span></button>
+            <button onClick={() => onPick({ type: "agent" })}><Icon name="bot" size={14} /> <span><strong>Hand to an agent</strong><small>One of your computers or tab cloud runs it, then the run carries on</small></span></button>
             <button onClick={() => onPick({ type: "command" })}><Icon name="terminal" size={14} /> <span><strong>Run a command</strong><small>A program in tab's sandbox, or in a container</small></span></button>
           </div>
         )}
@@ -758,6 +770,93 @@ function TriggerEditor({ workflow: w, connectors, edit, issues, onAllowDestructi
   );
 }
 
+type AgentStep = Extract<Step, { type: "agent" }>;
+
+function placementLabel(p: Placement): string {
+  switch (p.type) {
+    case "anywhere": return "anywhere";
+    case "computers": return "your computers";
+    case "cloud": return "tab cloud";
+    case "prefer_computer": return `a computer, then tab cloud after ${p.minutes} min`;
+  }
+}
+
+function harnessName(id: string): string {
+  return harnesses.find((h) => h.id === id)?.name ?? id;
+}
+
+/**
+ * An agent step: what to ask, where, and who may take it. The run waits
+ * here (it shows as "Waiting on an agent") until a runner finishes the job.
+ */
+function AgentFields({ step, vars, set }: { step: AgentStep; vars: { path: string; label: string }[]; set: (f: (s: Step) => void) => void }) {
+  const ag = (f: (s: AgentStep) => void) => set((s) => s.type === "agent" && f(s));
+  const runners = useQuery({ queryKey: ["runners"], queryFn: api.runners, refetchInterval: 30_000 });
+  const cloud = runners.data?.some((r) => r.kind === "cloud");
+  const place = step.placement.type;
+  return (
+    <>
+      <Field label="Ask the agent" help="Templates like {{item.title}} and {{item.url}} are filled in when the step runs.">
+        <VarInput multiline value={step.prompt} vars={vars} placeholder="Fix the failing check on {{item.url}} and push to the PR's branch." onChange={(v) => ag((s) => (s.prompt = v))} />
+      </Field>
+      <div className="wf-row2">
+        <Field label="Repo" help="owner/name. A computer uses its checkout; tab cloud clones it.">
+          <VarInput mono value={step.repo} vars={vars} placeholder="{{item.metadata.repo}}" onChange={(v) => ag((s) => (s.repo = v))} />
+        </Field>
+        <Field label="Harness" help="Empty uses the runner's default.">
+          <select className="wf-select" value={step.harness} onChange={(e) => ag((s) => (s.harness = e.target.value))}>
+            <option value="">The runner's default</option>
+            {harnesses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="Where it may run" help={cloud ? undefined : "tab cloud runs agents on paid plans once your hub is in tab cloud."}>
+        <select className="wf-select" value={place} onChange={(e) => ag((s) => {
+          const t = e.target.value as Placement["type"];
+          s.placement = t === "prefer_computer" ? { type: t, minutes: 15 } : { type: t };
+        })}>
+          <option value="computers">Only my computers</option>
+          <option value="prefer_computer">A computer first, then tab cloud</option>
+          <option value="cloud">Only tab cloud</option>
+          <option value="anywhere">Whichever is free first</option>
+        </select>
+      </Field>
+      <div className="wf-row2">
+        {step.placement.type === "prefer_computer" && (
+          <Field label="Wait for a computer (min)">
+            <input className="wf-input" type="number" min={1} max={1440} value={step.placement.minutes} onChange={(e) => ag((s) => {
+              if (s.placement.type === "prefer_computer") s.placement.minutes = Math.max(1, Math.min(1440, Math.round(Number(e.target.value) || 1)));
+            })} />
+          </Field>
+        )}
+        <Field label="Give up after (min)" help="0 is a day. The run fails if no runner finishes by then.">
+          <input className="wf-input" type="number" min={0} max={10080} value={step.deadline_minutes} onChange={(e) => ag((s) => (s.deadline_minutes = Math.max(0, Math.min(10080, Math.round(Number(e.target.value) || 0)))))} />
+        </Field>
+      </div>
+      <RunnerList runners={runners.data ?? []} placement={step.placement} />
+      <p className="subtle wf-outputs">
+        Later steps can use <code>{`{{steps.${step.id}.summary}}`}</code><code>{`{{steps.${step.id}.branch}}`}</code><code>{`{{steps.${step.id}.pr_url}}`}</code>
+      </p>
+    </>
+  );
+}
+
+/** Who could take this step's job right now. */
+function RunnerList({ runners, placement }: { runners: Runner[]; placement: Placement }) {
+  const allowed = (r: Runner) => placement.type === "anywhere" || placement.type === "prefer_computer" || (placement.type === "cloud" ? r.kind === "cloud" : r.kind === "computer");
+  const shown = runners.filter(allowed);
+  if (!shown.length) return <p className="subtle">No runner can take it yet. {placement.type === "cloud" ? "Move your hub to tab cloud in Settings → Hub." : "Open tab on a computer."}</p>;
+  return (
+    <div className="wf-runners">
+      {shown.map((r) => (
+        <span key={r.id} className="wf-chip" title={r.harnesses.map(harnessName).join(", ")}>
+          <StatusDot tone={r.awake ? "success" : "neutral"} /> {r.this_app ? "This computer" : r.name || r.id}{!r.awake && " · asleep"}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 type CommandStep = Extract<Step, { type: "command" }>;
 
 /** A command step: what runs, where, and what it may reach. */
@@ -808,7 +907,7 @@ function StepEditor({ workflow: w, index, connectors, edit, issues, onSelect }: 
   return (
     <div className="wf-editor">
       <div className="wf-editor-head">
-        <h3>{step.type === "action" ? info?.label ?? step.action : step.type === "filter" ? "Only continue if" : step.type === "set" ? "Set values" : step.type === "command" ? "Run a command" : "Signal"}</h3>
+        <h3>{step.type === "action" ? info?.label ?? step.action : step.type === "filter" ? "Only continue if" : step.type === "set" ? "Set values" : step.type === "command" ? "Run a command" : step.type === "agent" ? "Hand to an agent" : "Signal"}</h3>
         <button className="icon-btn" onClick={() => move(-1)} disabled={index === 0} title="Move up" aria-label="Move up"><Icon name="arrow-up" size={13} /></button>
         <button className="icon-btn" onClick={() => move(1)} disabled={index === w.steps.length - 1} title="Move down" aria-label="Move down"><Icon name="arrow-down" size={13} /></button>
         <button className="icon-btn" onClick={() => { edit((x) => x.steps.splice(index, 1)); onSelect("trigger"); }} title="Remove step" aria-label="Remove step"><Icon name="trash" size={13} /></button>
@@ -854,6 +953,7 @@ function StepEditor({ workflow: w, index, connectors, edit, issues, onSelect }: 
       {step.type === "filter" && <Conditions value={step.conditions} vars={vars} onChange={(c) => set((s) => s.type === "filter" && (s.conditions = c))} />}
       {step.type === "set" && <Pairs value={step.values} vars={vars} keyLabel="Name" onChange={(v) => set((s) => s.type === "set" && (s.values = v))} />}
       {step.type === "command" && <CommandFields step={step} vars={vars} set={set} />}
+      {step.type === "agent" && <AgentFields step={step} vars={vars} set={set} />}
       {step.type === "emit" && (
         <>
           <Field label="Signal name" help="Workflows with a Signal trigger of this name start, with this payload.">

@@ -980,7 +980,7 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn moving_to_the_cloud_keeps_history_and_syncs_from_then_on() {
+async fn moving_to_the_cloud_keeps_history_syncs_from_then_on_and_can_come_back() {
     let (api, cloud) = fake_cloud().await;
 
     // This computer, with work in its own hub.
@@ -1059,6 +1059,28 @@ async fn moving_to_the_cloud_keeps_history_and_syncs_from_then_on() {
         blocking(move || h.move_to_cloud(link, &s, |_, _| {}))
             .await
             .is_err()
+    );
+
+    // Moving back: hub.db gets what changed in the cloud meanwhile, and
+    // from then on changes stay on this computer.
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    blocking(move || h.move_to_local(&s)).await.unwrap();
+    assert!(mac_hub.cloud_link().is_none());
+    assert!(hub_item(&mac_hub, &b.id).is_some());
+    assert_eq!(
+        hub_item(&mac_hub, &a.id).unwrap()["state"],
+        json!("done"),
+        "the newer change from the cloud wins over hub.db's older one"
+    );
+    let c = add(&mac, "3", "Back home");
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    blocking(move || h.sync(&s)).await.unwrap();
+    assert!(hub_item(&mac_hub, &c.id).is_some());
+    assert!(in_cloud(&c.id).is_none());
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    assert!(
+        blocking(move || h.move_to_local(&s)).await.is_err(),
+        "already local"
     );
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(dir2);

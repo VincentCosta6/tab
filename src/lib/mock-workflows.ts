@@ -120,6 +120,11 @@ function execute(w: Workflow, item: QueueItem | null, dry: boolean, connectors: 
       if (failed.length) { sr.status = "stopped"; sr.output = { failed: failed.map((c) => `${c.field} ${c.op} ${JSON.stringify(c.value)} (was ${JSON.stringify(lookup(ctx, c.field) ?? null)})`) }; status = "stopped"; }
     } else if (s.type === "set") sr.output = render(s.values, ctx);
     else if (s.type === "emit") { sr.input = { signal: s.signal, payload: render(s.payload, ctx) }; if (dry) sr.status = "dry"; }
+    else if (s.type === "agent") {
+      sr.input = { prompt: render(s.prompt, ctx), repo: render(s.repo, ctx), placement: s.placement };
+      if (dry) { sr.status = "dry"; sr.output = { summary: "<what the agent says>", branch: "<branch>", pr_url: "<pull request>" }; }
+      else { sr.status = "waiting"; status = "waiting"; }
+    }
     else if (s.type === "command") {
       sr.input = { program: s.program, args: s.args, folder: s.folder, network: s.network, image: s.image };
       if (dry) sr.status = "dry";
@@ -135,7 +140,7 @@ function execute(w: Workflow, item: QueueItem | null, dry: boolean, connectors: 
     }
     ctx.steps[s.id] = sr.output ?? {};
     steps.push(sr);
-    if (sr.status === "stopped" || sr.status === "blocked") break;
+    if (sr.status === "stopped" || sr.status === "blocked" || sr.status === "waiting") break;
   }
   return {
     id: `run-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, workflow_id: w.id, workflow_name: w.name, version: w.version, status, dry_run: dry,

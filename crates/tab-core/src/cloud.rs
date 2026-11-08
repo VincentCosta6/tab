@@ -105,15 +105,29 @@ async fn call<M: Message + Default>(
     post: bool,
     path: &str,
 ) -> Result<M, CloudError> {
+    let method = if post {
+        reqwest::Method::POST
+    } else {
+        reqwest::Method::GET
+    };
+    send(cfg, &format!("Bearer {token}"), method, path, None).await
+}
+
+async fn send<M: Message + Default>(
+    cfg: &CloudConfig,
+    authorization: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Vec<u8>>,
+) -> Result<M, CloudError> {
     let client = reqwest::Client::new();
     let url = format!("{}{path}", cfg.api);
-    let req = if post {
-        client.post(url)
-    } else {
-        client.get(url)
-    };
+    let mut req = client.request(method, url);
+    if let Some(b) = body {
+        req = req.header("content-type", pb::CONTENT_TYPE).body(b);
+    }
     let res = req
-        .bearer_auth(token)
+        .header("authorization", authorization)
         .header("accept", pb::CONTENT_TYPE)
         .header("user-agent", concat!("tab/", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(20))
@@ -153,6 +167,91 @@ pub async fn set_up_hub(cfg: &CloudConfig, token: &str) -> Result<pb::HubStatus,
         hub = hub_status(cfg, token).await?;
     }
     Ok(hub)
+}
+
+/// Stores (or replaces) secrets in a hub for its cloud runner, and removes
+/// the ones named in `remove`. Returns the names it now keeps.
+pub async fn put_secrets(
+    cfg: &CloudConfig,
+    token: &str,
+    hub_id: &str,
+    secrets: Vec<(String, String)>,
+    remove: Vec<String>,
+) -> Result<Vec<String>, CloudError> {
+    let body = pb::PutSecrets {
+        secrets: secrets
+            .into_iter()
+            .map(|(name, value)| pb::Secret { name, value })
+            .collect(),
+        remove,
+    };
+    let names: pb::SecretNames = send(
+        cfg,
+        &format!("Bearer {token}"),
+        reqwest::Method::PUT,
+        &format!("/v1/hubs/{hub_id}/secrets"),
+        Some(body.encode_to_vec()),
+    )
+    .await?;
+    Ok(names.names)
+}
+
+/// The names of the secrets a hub keeps. Never their values.
+pub async fn secret_names(
+    cfg: &CloudConfig,
+    token: &str,
+    hub_id: &str,
+) -> Result<Vec<String>, CloudError> {
+    let n: pb::SecretNames = call(cfg, token, false, &format!("/v1/hubs/{hub_id}/secrets")).await?;
+    Ok(n.names)
+}
+
+/// The hub's cloud runner: asleep, starting, running, or not on the plan.
+pub async fn runner_status(
+    cfg: &CloudConfig,
+    token: &str,
+    hub_id: &str,
+) -> Result<pb::RunnerStatus, CloudError> {
+    call(cfg, token, false, &format!("/v1/hubs/{hub_id}/runner")).await
+}
+
+/// Wakes the hub's cloud runner (paid plans).
+pub async fn wake_runner(
+    cfg: &CloudConfig,
+    token: &str,
+    hub_id: &str,
+) -> Result<pb::RunnerStatus, CloudError> {
+    call(cfg, token, true, &format!("/v1/hubs/{hub_id}/runner")).await
+}
+
+/// For the cloud runner itself: its hub's secrets, with values.
+pub async fn runner_secrets(
+    cfg: &CloudConfig,
+    runner_token: &str,
+) -> Result<Vec<(String, String)>, CloudError> {
+    let s: pb::Secrets = send(
+        cfg,
+        &format!("Runner {runner_token}"),
+        reqwest::Method::GET,
+        "/v1/runner/secrets",
+        None,
+    )
+    .await?;
+    Ok(s.secrets.into_iter().map(|s| (s.name, s.value)).collect())
+}
+
+/// The secret name a connection's field is kept under.
+pub fn connection_secret(connection: &str, field: &str) -> String {
+    format!("connection/{connection}/{field}")
+}
+
+/// The secret holding the person's agent setup (JSON `AgentConfig`, with
+/// this computer's paths left out) for the cloud runner's harnesses.
+pub const AGENT_SETUP_SECRET: &str = "setup/agent";
+
+/// The secret name a harness's environment variable is kept under.
+pub fn harness_secret(harness: &str, var: &str) -> String {
+    format!("harness/{harness}/{var}")
 }
 
 #[cfg(test)]

@@ -58,6 +58,15 @@ impl AccountState {
         }
     }
 
+    /// A current access token for the signed-in person.
+    pub async fn token(&self) -> Result<String, CloudFailure> {
+        cloud_token(self).await
+    }
+
+    pub fn cloud(&self) -> &CloudConfig {
+        &self.cloud
+    }
+
     pub fn new(config_dir: &std::path::Path) -> Self {
         Self {
             path: account::session_path(config_dir),
@@ -138,6 +147,10 @@ pub struct CloudFailure {
 }
 
 impl CloudFailure {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     pub fn internal(e: impl std::fmt::Display) -> Self {
         CloudError::new(cloud::pb::ErrorCode::Internal, e.to_string()).into()
     }
@@ -167,7 +180,7 @@ async fn cloud_token(state: &AccountState) -> Result<String, CloudFailure> {
 
 /// The message as Protobuf bytes, which the UI decodes with the types
 /// generated from the same account.proto.
-fn bytes(m: impl Message) -> Response {
+pub(crate) fn bytes(m: impl Message) -> Response {
     Response::new(m.encode_to_vec())
 }
 

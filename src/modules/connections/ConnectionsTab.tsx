@@ -5,7 +5,12 @@ import { Icon } from "../../design/icons";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useConfig, useSaveConfig, useSearchIndex } from "../../lib/hooks";
-import type { ConnectorInfo, ConnectorStatus, Tone } from "../../lib/types";
+import type { ConnectorInfo, ConnectorStatus, RunsOn, Tone } from "../../lib/types";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api } from "../../lib/api";
+import { keys } from "../../lib/query";
+import { asFailure } from "../../lib/protocol/cloud";
+import { openSettings } from "../settings/SettingsTab";
 import { startSetupChat } from "../work/Chat";
 import { ApiUsage } from "./ApiUsage";
 import { GhConnect } from "./GhConnect";
@@ -21,6 +26,7 @@ export function statusView(s: ConnectorStatus, available: boolean): { tone: Tone
     case "rate_limited": return { tone: "warning", text: `Rate limited, resumes in ${timeUntil(s.until)}` };
     case "error": return { tone: "danger", text: s.message };
     case "stopped": return { tone: "neutral", text: "Stopped" };
+    case "in_cloud": return { tone: "accent", text: "Runs in tab cloud" };
   }
 }
 
@@ -187,7 +193,7 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
     if (!config) return;
     setError(null);
     try {
-      await save.mutateAsync({ ...config, connectors: { ...config.connectors, [c.id]: { enabled, settings: draft } } });
+      await save.mutateAsync({ ...config, connectors: { ...config.connectors, [c.id]: { ...saved, enabled, settings: draft } } });
     } catch (e) {
       setError(String(e));
     }
@@ -240,6 +246,8 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
       )}
 
       {c.id === "tab" && <SearchIndexCard />}
+
+      {c.enabled && !c.builtin && <RunsOnCard c={c} />}
 
       {settings.length > 0 && (
         <Section title="Settings">
@@ -298,6 +306,56 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
         </Section>
       )}
     </div>
+  );
+}
+
+/**
+ * Where a connection runs: on this computer (it stops while the computer
+ * sleeps), or in tab cloud, where the hub's runner keeps it going. Each
+ * connection is set on its own, so one can stay on this machine.
+ */
+function RunsOnCard({ c }: { c: ConnectorInfo }) {
+  const qc = useQueryClient();
+  const { data: config } = useConfig();
+  const hub = useQuery({ queryKey: ["hub-status"], queryFn: api.hubStatus });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const runsOn: RunsOn = config?.connectors[c.id]?.runs_on ?? "this_computer";
+  const moved = !!hub.data?.cloud_hub;
+  const pick = async (next: RunsOn) => {
+    if (next === runsOn) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await api.connectionRunsOn(c.id, next);
+      qc.setQueryData(keys.config, saved);
+    } catch (e) {
+      setError(asFailure(e).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Section title="Where it runs" description="Each connection runs in one place, so nothing comes into your queue twice.">
+      <Card>
+        <div className="runs-on" role="radiogroup" aria-label="Where it runs">
+          <button role="radio" aria-checked={runsOn === "this_computer"} className={cx("runs-on-option", runsOn === "this_computer" && "active")} disabled={busy} onClick={() => void pick("this_computer")}>
+            <Icon name="monitor" size={18} />
+            <span><strong>This computer</strong><small>Its sign-in stays here. It pauses while this computer is off or asleep.</small></span>
+          </button>
+          <button role="radio" aria-checked={runsOn === "cloud"} className={cx("runs-on-option", runsOn === "cloud" && "active")} disabled={busy || !moved} onClick={() => void pick("cloud")}>
+            <Icon name="cloud" size={18} />
+            <span><strong>tab cloud</strong><small>Keeps running when every computer is off. Its sign-in is kept encrypted in your hub.</small></span>
+          </button>
+        </div>
+        {!moved && (
+          <p className="subtle runs-on-note">
+            To run it in tab cloud, move your work there first. <button className="link-btn" onClick={() => openSettings("hub")}>Settings → Hub</button>
+          </p>
+        )}
+        {error && <p className="chat-error">{error}</p>}
+      </Card>
+    </Section>
   );
 }
 

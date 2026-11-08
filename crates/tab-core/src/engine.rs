@@ -114,9 +114,17 @@ pub struct Engine {
     /// Every known connector type with its initial status, for the Connections tab.
     pub infos: Vec<ConnectorInfo>,
     pub events: broadcast::Sender<EngineEvent>,
+    /// The hub's leases. Without a hub, leases kept in memory.
+    pub leases: Arc<dyn crate::leases::Leases>,
 }
 
 impl Engine {
+    /// Uses the hub's leases, so runners sharing the hub split the work.
+    pub fn with_leases(mut self, leases: Arc<dyn crate::leases::Leases>) -> Self {
+        self.leases = leases;
+        self
+    }
+
     /// Builds an engine from config: enabled connectors, ranking pipeline, connector infos.
     pub fn from_config(
         cfg: &TabConfig,
@@ -137,6 +145,12 @@ impl Engine {
                     None if built.iter().any(|c| c.id() == descriptor.id) => {
                         ConnectorStatus::Starting
                     }
+                    None if cfg
+                        .connector(&descriptor.id)
+                        .is_some_and(|c| !c.runs_here()) =>
+                    {
+                        ConnectorStatus::InCloud
+                    }
                     None => ConnectorStatus::Disabled,
                 };
                 ConnectorInfo {
@@ -151,7 +165,9 @@ impl Engine {
             gateway.declare_limits(&f.descriptor().rate_limits);
         }
         let ranker = Arc::new(Pipeline::from_config(cfg, gateway.clone(), store.clone()));
+        let me = store.device_id().unwrap_or_else(|_| "this-computer".into());
         Self {
+            leases: crate::leases::InMemory::new(&me),
             store,
             gateway,
             ranker,
@@ -177,6 +193,7 @@ struct Core {
     rank_slots: Semaphore,
     connectors: HashMap<String, Arc<dyn Connector>>,
     infos: Arc<Mutex<Vec<ConnectorInfo>>>,
+    leases: Arc<dyn crate::leases::Leases>,
 }
 
 fn changed(core: &Core, change: Change, item: Option<QueueItem>) -> Option<QueueItem> {
@@ -617,7 +634,7 @@ impl Timeline {
                     RunStatus::Blocked => "is waiting for your OK",
                     RunStatus::Throttled => "was held back by a rate limit",
                     RunStatus::LoopStopped => "was stopped to prevent a loop",
-                    RunStatus::Running => return,
+                    RunStatus::Running | RunStatus::Waiting => return,
                 };
                 // A filter that didn't match on the first step is noise.
                 if run.status == RunStatus::Stopped && run.steps.len() <= 1 {
@@ -670,6 +687,9 @@ impl Host for WorkflowHost {
     }
     fn publish(&self, e: EngineEvent) {
         let _ = self.0.events.send(e);
+    }
+    fn leases(&self) -> Arc<dyn crate::leases::Leases> {
+        self.0.leases.clone()
     }
     async fn tab_action(
         &self,
@@ -772,11 +792,15 @@ impl Engine {
             rank_slots: Semaphore::new(MAX_CONCURRENT_RANKS),
             connectors: connector_map,
             infos: infos.clone(),
+            leases: self.leases,
         });
 
         // Workflows listen before anything can happen.
         let workflows = Runtime::new(Arc::new(WorkflowHost(core.clone())));
-        if let Err(e) = core.store.workflow_runs_abandon(Utc::now()) {
+        if let Err(e) = core
+            .store
+            .workflow_runs_abandon(&core.leases.holder(), Utc::now())
+        {
             tracing::warn!(error = %e, "couldn't close unfinished workflow runs");
         }
         {
@@ -1188,6 +1212,7 @@ mod tests {
             connectors: vec![Arc::new(OneShot)],
             infos: vec![],
             events,
+            leases: crate::leases::InMemory::new("test"),
         }
         .start();
 
@@ -1461,6 +1486,7 @@ mod tests {
             connectors: vec![acting.clone(), Arc::new(crate::connectors::TabConnector)],
             infos,
             events,
+            leases: crate::leases::InMemory::new("test"),
         }
         .start();
 
@@ -1578,6 +1604,7 @@ mod tests {
             connectors: vec![Arc::new(crate::connectors::TabConnector)],
             infos: Vec::new(),
             events,
+            leases: crate::leases::InMemory::new("test"),
         }
         .start();
         let step = |id: &str, kind: StepKind| Step {

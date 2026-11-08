@@ -33,6 +33,8 @@ pub mod engine;
 pub mod gateway;
 pub mod gh;
 pub mod hub_tls;
+pub mod jobs;
+pub mod leases;
 pub mod live;
 pub mod local_hub;
 pub mod lsp;
@@ -47,7 +49,7 @@ pub mod usage;
 pub mod workflow;
 pub mod workspace;
 
-pub use tab_domain::{links, model};
+pub use tab_domain::{links, model, runner};
 
 pub use config::TabConfig;
 pub use engine::{Change, Engine, EngineEvent, EngineHandle};

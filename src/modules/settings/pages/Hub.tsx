@@ -1,48 +1,28 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useState } from "react";
-import { Badge, Button, Card, FormRow, Meter, Section, StatusDot } from "../../../design/components";
+import { Badge, Button, Card, FormRow, Meter, Section, StatusDot, TextInput } from "../../../design/components";
 import { Icon } from "../../../design/icons";
 import { api, onHubMove } from "../../../lib/api";
 import { bytes, timeAgo } from "../../../lib/format";
-import { HubState, asFailure } from "../../../lib/protocol/cloud";
-import type { HubMode } from "../../../lib/types";
-import { AccountBadge, CloudHubLine, CloudHubSetup, SignInButtons, accountKey, localDrawbacks, useAccount, useCloudHub } from "../../account/Account";
+import { HubState, RunnerState, asFailure } from "../../../lib/protocol/cloud";
+import type { HubMode, Tone } from "../../../lib/types";
+import { CloudHubLine, CloudHubSetup, SignInButtons, localDrawbacks, useAccount, useCloudHub } from "../../account/Account";
 import { useDraft } from "../draft";
 
+/**
+ * The hub: where your work is kept (this computer or tab cloud, and moving
+ * between them), the devices and cloud runner on it, and what it holds.
+ */
 export function HubPage() {
+  const local = useQuery({ queryKey: ["hub-status"], queryFn: api.hubStatus, refetchInterval: 2000 });
+  const moved = !!local.data?.cloud_hub;
   return (
     <>
-      <AccountSection />
       <HubsSection />
+      <RunnersSection />
+      {moved && <CloudRunnerSection />}
       <LocalHubDetails />
     </>
-  );
-}
-
-/** The tab account the cloud hub belongs to. Signing in is step 1 below, so this shows only once signed in. */
-function AccountSection() {
-  const qc = useQueryClient();
-  const { data: status } = useAccount();
-  const [busy, setBusy] = useState(false);
-  if (!status?.account) return null;
-  const signOut = async () => {
-    setBusy(true);
-    try {
-      await api.accountSignOut();
-      qc.setQueryData(accountKey, { configured: status.configured, account: null });
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <Section title="Account" description="Your tab account. tab cloud keeps your hub under it.">
-      <Card>
-        <div className="hub-row">
-          <AccountBadge account={status.account} />
-          <Button size="sm" variant="ghost" disabled={busy} onClick={signOut}>{busy ? "Signing out…" : "Sign out"}</Button>
-        </div>
-      </Card>
-    </Section>
   );
 }
 
@@ -112,6 +92,7 @@ function HubsSection() {
         )}
 
         {moved && <CloudHubLine />}
+        {moved && <MoveToLocal />}
         {mode === "local" && !moved && (
           <ul className="hub-drawbacks hub-row-note">
             {localDrawbacks.map((d) => <li key={d}><Icon name="alert" size={13} /> <span>{d}</span></li>)}
@@ -172,6 +153,197 @@ function MoveToCloud({ changes }: { changes: number }) {
       </div>
       {state.kind === "moving" && state.total > 0 && <Meter value={state.done} max={state.total} />}
     </>
+  );
+}
+
+/** Bringing the work back onto this computer, after asking. */
+function MoveToLocal() {
+  const qc = useQueryClient();
+  const [state, setState] = useState<{ kind: "idle" | "asking" | "moving" } | { kind: "failed"; message: string }>({ kind: "idle" });
+  const move = async () => {
+    setState({ kind: "moving" });
+    try {
+      await api.hubMoveToLocal();
+      setState({ kind: "idle" });
+      void qc.invalidateQueries({ queryKey: ["hub-status"] });
+      void qc.invalidateQueries({ queryKey: ["config"] });
+    } catch (e) {
+      setState({ kind: "failed", message: String(e) });
+    }
+  };
+  if (state.kind === "idle") {
+    return (
+      <div className="hub-row">
+        <div className="hub-row-main subtle">Want it back on this computer only? Your work comes back with everything that changed in tab cloud.</div>
+        <Button size="sm" variant="ghost" icon="monitor" onClick={() => setState({ kind: "asking" })}>Move back to this computer</Button>
+      </div>
+    );
+  }
+  return (
+    <div className="hub-row">
+      <div className="hub-row-main">
+        <strong>Keep your work on this computer only?</strong>
+        <div className="subtle">
+          This computer stops syncing. Connections set to run in tab cloud run here again. tab cloud keeps its copy, and your other computers stay on it.
+        </div>
+        {state.kind === "failed" && <div className="text-danger">Couldn't move it back: {state.message}</div>}
+      </div>
+      <div className="hub-row-actions">
+        <Button size="sm" variant="ghost" disabled={state.kind === "moving"} onClick={() => setState({ kind: "idle" })}>Cancel</Button>
+        <Button size="sm" variant="primary" disabled={state.kind === "moving"} onClick={() => void move()}>{state.kind === "moving" ? "Moving…" : "Move it back"}</Button>
+      </div>
+    </div>
+  );
+}
+
+/** Every computer on this hub, and the cloud runner, with whether each is awake. */
+function RunnersSection() {
+  const runners = useQuery({ queryKey: ["runners"], queryFn: api.runners, refetchInterval: 15_000 });
+  const list = runners.data ?? [];
+  if (!list.length) return null;
+  return (
+    <Section title="Devices" description="Where chats, connections and workflow agents run. Each one picks up work it can do while it's awake.">
+      <Card>
+        {list.map((r) => (
+          <div key={r.id} className="hub-row">
+            <Icon name={r.kind === "cloud" ? "cloud" : "monitor"} size={18} />
+            <div className="hub-row-main">
+              <strong>{r.this_app ? `${r.name || "This computer"} (this one)` : r.kind === "cloud" ? "tab cloud runner" : r.name || r.id}</strong>
+              <div className="subtle">
+                {[
+                  r.harnesses.length ? r.harnesses.map(harnessName).join(", ") : "No harnesses",
+                  r.connections.length ? `${r.connections.length} connection${r.connections.length > 1 ? "s" : ""}` : null,
+                  r.repos.length ? `${r.repos.length} repo${r.repos.length > 1 ? "s" : ""} checked out` : null,
+                ].filter(Boolean).join(" · ")}
+              </div>
+            </div>
+            {r.awake ? <Badge tone="success">Awake</Badge> : <Badge>{r.seen_at ? `Seen ${timeAgo(r.seen_at)}` : "Asleep"}</Badge>}
+          </div>
+        ))}
+      </Card>
+    </Section>
+  );
+}
+
+const harnessKeys: { harness: string; name: string; vars: { name: string; help: string }[] }[] = [
+  { harness: "claude_code", name: "Claude Code", vars: [
+    { name: "CLAUDE_CODE_OAUTH_TOKEN", help: "Uses your Claude subscription. Make one with `claude setup-token`." },
+    { name: "ANTHROPIC_API_KEY", help: "Bills your Anthropic API account instead." },
+  ] },
+  { harness: "codex", name: "Codex", vars: [{ name: "OPENAI_API_KEY", help: "From platform.openai.com." }] },
+  { harness: "opencode", name: "OpenCode", vars: [
+    { name: "ANTHROPIC_API_KEY", help: "For Anthropic models." },
+    { name: "OPENAI_API_KEY", help: "For OpenAI models." },
+    { name: "OPENROUTER_API_KEY", help: "For any model on OpenRouter." },
+  ] },
+  { harness: "pi", name: "Pi", vars: [
+    { name: "ANTHROPIC_API_KEY", help: "For Anthropic models." },
+    { name: "OPENAI_API_KEY", help: "For OpenAI models." },
+  ] },
+];
+
+function harnessName(id: string): string {
+  return harnessKeys.find((h) => h.harness === id)?.name ?? id;
+}
+
+const runnerTone: Record<RunnerState, { tone: Tone; label: string }> = {
+  [RunnerState.UNSPECIFIED]: { tone: "neutral", label: "Unknown" },
+  [RunnerState.ASLEEP]: { tone: "neutral", label: "Asleep" },
+  [RunnerState.STARTING]: { tone: "info", label: "Starting" },
+  [RunnerState.RUNNING]: { tone: "success", label: "Running" },
+  [RunnerState.NOT_ON_PLAN]: { tone: "warning", label: "Not on your plan" },
+};
+
+/**
+ * The hub's cloud runner (paid plans): tab running in tab cloud, so
+ * connections set to run there and workflow agents keep going while every
+ * computer is off. It uses your own harnesses with the keys you give it here.
+ */
+function CloudRunnerSection() {
+  const qc = useQueryClient();
+  const status = useQuery({ queryKey: ["cloud-runner"], queryFn: api.cloudRunnerStatus, refetchInterval: 15_000, retry: false });
+  const names = useQuery({ queryKey: ["cloud-secrets"], queryFn: api.cloudSecretNames, retry: false });
+  const [waking, setWaking] = useState(false);
+  const wake = async () => {
+    setWaking(true);
+    try {
+      qc.setQueryData(["cloud-runner"], await api.cloudRunnerWake());
+    } catch {
+      void status.refetch();
+    } finally {
+      setWaking(false);
+    }
+  };
+  const st = status.data;
+  const look = st ? runnerTone[st.state] : null;
+  const has = new Set(names.data ?? []);
+  const setSecret = async (name: string, value: string | null) => {
+    qc.setQueryData(["cloud-secrets"], await api.cloudSecretSet(name, value));
+  };
+  return (
+    <Section title="Cloud runner" description="tab, running in tab cloud for you. It runs connections set to run there, and workflow agents allowed in the cloud, with your own harnesses and keys.">
+      <Card>
+        <div className="hub-row">
+          <Icon name="server" size={20} />
+          <div className="hub-row-main">
+            <strong>{look ? look.label : status.isLoading ? "Checking…" : "Unavailable"}</strong> {look && <StatusDot tone={look.tone} />}
+            <div className="subtle">
+              {status.error ? asFailure(status.error).message : st?.detail || (st?.state === RunnerState.ASLEEP ? "It starts by itself when there's work." : "")}
+            </div>
+          </div>
+          {st && st.state !== RunnerState.NOT_ON_PLAN && st.state !== RunnerState.RUNNING && (
+            <Button size="sm" variant="ghost" icon="zap" disabled={waking} onClick={() => void wake()}>{waking ? "Starting…" : "Start now"}</Button>
+          )}
+        </div>
+      </Card>
+      <Card>
+        <p className="subtle" style={{ margin: "0 0 var(--space-2)" }}>
+          Keys are kept encrypted in your hub and only its cloud runner can read them. You can't see them again here, only replace or remove them.
+        </p>
+        {harnessKeys.map((h) => h.vars.map((v) => (
+          <SecretRow key={`${h.harness}/${v.name}`} label={`${h.name} · ${v.name}`} help={v.help} set={has.has(`harness/${h.harness}/${v.name}`)}
+            onSave={(val) => setSecret(`harness/${h.harness}/${v.name}`, val)} />
+        )))}
+        <SecretRow label="GitHub access" help="A token that can push branches and open pull requests on the repos agents work on." set={has.has("git/token")} onSave={(val) => setSecret("git/token", val)} />
+      </Card>
+    </Section>
+  );
+}
+
+function SecretRow({ label, help, set, onSave }: { label: string; help: string; set: boolean; onSave: (value: string | null) => Promise<void> }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const save = async (v: string | null) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await onSave(v);
+      setEditing(false);
+      setValue("");
+    } catch (e) {
+      setError(asFailure(e).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <FormRow label={label} help={error ?? help}>
+      {editing ? (
+        <form className="secret-row" onSubmit={(e) => (e.preventDefault(), void save(value))}>
+          <TextInput type="password" autoComplete="off" autoFocus value={value} onChange={(e) => setValue(e.target.value)} />
+          <Button size="sm" variant="primary" type="submit" disabled={busy || !value.trim()}>Save</Button>
+          <Button size="sm" variant="ghost" type="button" onClick={() => setEditing(false)}>Cancel</Button>
+        </form>
+      ) : (
+        <div className="secret-row">
+          {set ? <Badge tone="success">Set</Badge> : <Badge>Not set</Badge>}
+          <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>{set ? "Replace" : "Add"}</Button>
+          {set && <Button size="sm" variant="ghost" disabled={busy} onClick={() => void save(null)}>Remove</Button>}
+        </div>
+      )}
+    </FormRow>
   );
 }
 

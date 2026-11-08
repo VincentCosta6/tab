@@ -403,6 +403,14 @@ pub struct ConnectorConfig {
     pub enabled: bool,
     #[serde(default)]
     pub settings: serde_json::Map<String, serde_json::Value>,
+    /// Where it runs: on this computer (its sign-in never leaves it), or in
+    /// tab cloud, which keeps it running while every computer is off.
+    #[serde(default, skip_serializing_if = "is_this_computer")]
+    pub runs_on: tab_domain::runner::RunsOn,
+}
+
+fn is_this_computer(r: &tab_domain::runner::RunsOn) -> bool {
+    *r == tab_domain::runner::RunsOn::ThisComputer
 }
 
 impl ConnectorConfig {
@@ -410,7 +418,13 @@ impl ConnectorConfig {
         Self {
             enabled: true,
             settings: Default::default(),
+            runs_on: Default::default(),
         }
+    }
+
+    /// Whether this computer runs it (rather than tab cloud).
+    pub fn runs_here(&self) -> bool {
+        self.enabled && self.runs_on == tab_domain::runner::RunsOn::ThisComputer
     }
     pub fn str(&self, key: &str) -> Option<&str> {
         self.settings.get(key)?.as_str().filter(|s| !s.is_empty())
@@ -487,6 +501,7 @@ impl TabConfig {
                 ConnectorConfig {
                     enabled: true,
                     settings,
+                    runs_on: Default::default(),
                 },
             );
         }

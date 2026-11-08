@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { setViewedSession } from "../../lib/viewing";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
@@ -56,6 +57,9 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
   const { data: chat } = useChat(item.id);
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
+  // The header says where this chat runs and whether it's connected.
+  useEffect(() => setViewedSession(chat?.session ?? null), [chat?.session]);
+  useEffect(() => () => setViewedSession(null), []);
 
   const send = async (text: string, attachments: string[] = []) => {
     setError(null);

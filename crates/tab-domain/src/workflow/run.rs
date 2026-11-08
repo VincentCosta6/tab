@@ -21,6 +21,8 @@ pub enum RunStatus {
     Throttled,
     /// Started inside its own chain, or the chain got too long.
     LoopStopped,
+    /// Paused at an agent step until a runner finishes its job.
+    Waiting,
 }
 
 impl RunStatus {
@@ -33,6 +35,7 @@ impl RunStatus {
             RunStatus::Blocked => "blocked",
             RunStatus::Throttled => "throttled",
             RunStatus::LoopStopped => "loop_stopped",
+            RunStatus::Waiting => "waiting",
         }
     }
     pub fn parse(s: &str) -> Self {
@@ -43,6 +46,7 @@ impl RunStatus {
             "blocked" => RunStatus::Blocked,
             "throttled" => RunStatus::Throttled,
             "loop_stopped" => RunStatus::LoopStopped,
+            "waiting" => RunStatus::Waiting,
             _ => RunStatus::Failed,
         }
     }
@@ -61,6 +65,18 @@ pub enum StepStatus {
     Throttled,
     /// Dry run: a write that would have happened with these inputs.
     Dry,
+    /// Handed to a runner as a job; the run carries on when it's done.
+    Waiting,
+}
+
+/// Where a paused run picks up: the step after the agent step, with the
+/// run's values as they were, once job `job` finishes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Resume {
+    pub job: String,
+    /// Index of the agent step in the workflow version that ran.
+    pub step: usize,
+    pub ctx: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -95,4 +111,11 @@ pub struct Run {
     pub error: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
+    /// The runner (device id) that started it, so only that runner closes
+    /// it if the app quits mid-run. Empty on runs from before runners.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runner: String,
+    /// Set while the run waits on an agent step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<Resume>,
 }

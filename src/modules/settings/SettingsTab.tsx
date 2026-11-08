@@ -8,7 +8,7 @@ import type { TabConfig } from "../../lib/types";
 import { useAppUpdate } from "../updates/appUpdate";
 import { DraftContext } from "./draft";
 import { AgentsPage } from "./pages/Agents";
-import { GeneralPage } from "./pages/General";
+import { AccountPage } from "./pages/Account";
 import { HubPage } from "./pages/Hub";
 import { McpPage } from "./pages/Mcp";
 import { RankingPage } from "./pages/Ranking";
@@ -27,12 +27,12 @@ interface Page {
 
 // A new settings page is one entry here and one file in pages/.
 const pages: Page[] = [
-  { id: "general", label: "General", icon: "user", component: GeneralPage, edits: (c) => c.profile },
+  { id: "account", label: "Account", icon: "user", component: AccountPage, edits: (c) => c.profile },
+  { id: "hub", label: "Hub", icon: "cloud", component: HubPage, edits: (c) => c.hub },
   { id: "agents", label: "Agents", icon: "bot", component: AgentsPage, edits: (c) => c.agent },
   { id: "ranking", label: "Ranking", icon: "filter", component: RankingPage, edits: (c) => c.ranking },
   { id: "sandbox", label: "Sandbox", icon: "shield", component: SandboxPage, edits: (c) => c.sandbox },
   { id: "storage", label: "Storage", icon: "folder", component: StoragePage, edits: (c) => c.storage },
-  { id: "hub", label: "Hub", icon: "cloud", component: HubPage, edits: (c) => c.hub },
   { id: "mcp", label: "MCP server", icon: "terminal", component: McpPage },
   { id: "updates", label: "Updates", icon: "refresh", component: UpdatesPage },
 ];
@@ -98,7 +98,7 @@ export function SettingsTab() {
 
   if (!draft || !saved || !ctx) return <div className="page"><div className="skeleton" /></div>;
 
-  const page = pages.find((p) => p.id === pageId) ?? pages[0];
+  const page = pages.find((p) => p.id === (pageId === "general" ? "account" : pageId)) ?? pages[0];
   const changed = (p: Page) => !!p.edits && JSON.stringify(p.edits(draft)) !== JSON.stringify(p.edits(saved));
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
 

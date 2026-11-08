@@ -53,6 +53,9 @@ pub const SYNCED: &[(&str, &[&str])] = &[
     ("workflows", &["id"]),
     ("workflow_versions", &["workflow_id", "version"]),
     ("workflow_runs", &["id"]),
+    ("jobs", &["id"]),
+    ("runners", &["id"]),
+    ("cloud_connections", &["id"]),
 ];
 
 /// Columns that only mean something in this copy, so they aren't sent and

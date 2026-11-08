@@ -38,7 +38,7 @@ use serde_json::{Map, Value};
 use crate::model::Change;
 use crate::model::{ActionInfo, ConnectorInfo, Effect};
 
-pub use run::{Run, RunStatus, StepRun, StepStatus};
+pub use run::{Resume, Run, RunStatus, StepRun, StepStatus};
 
 /// A run that was caused by another run stops after this many links.
 pub const MAX_CHAIN: usize = 3;
@@ -205,7 +205,34 @@ pub enum StepKind {
         #[serde(default)]
         timeout_secs: u32,
     },
+    /// Hand work to an agent on one of the person's runners (a computer,
+    /// or tab cloud on a paid plan) and wait for it. The run pauses here as
+    /// a job (see [`crate::runner`]) and carries on when a runner finishes
+    /// it: `{{steps.<id>.summary}}`, `.branch` and `.pr_url` read what came
+    /// of it.
+    Agent {
+        /// What to ask the agent. May hold templates.
+        prompt: String,
+        /// `owner/name` to work in. May hold templates. Empty: no repo.
+        #[serde(default)]
+        repo: String,
+        /// A harness id (`claude_code`, `opencode`, `codex`, `pi`). Empty:
+        /// the runner's default.
+        #[serde(default)]
+        harness: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        placement: crate::runner::Placement,
+        /// Fail the step if no runner finishes it within this long. 0 means
+        /// the default ([`crate::runner::DEFAULT_JOB_MINUTES`]).
+        #[serde(default)]
+        deadline_minutes: u32,
+    },
 }
+
+/// Agent steps per workflow.
+pub const MAX_AGENT_STEPS: usize = 3;
 
 /// Command steps per workflow.
 pub const MAX_COMMANDS: usize = 5;
@@ -451,6 +478,17 @@ pub fn validate(w: &Workflow, catalog: &[ConnectorInfo], others: &[Workflow]) ->
             format!("At most {MAX_COMMANDS} commands per workflow."),
         ));
     }
+    let agents = w
+        .steps
+        .iter()
+        .filter(|s| matches!(s.kind, StepKind::Agent { .. }))
+        .count();
+    if agents > MAX_AGENT_STEPS {
+        out.push(Issue::err(
+            None,
+            format!("At most {MAX_AGENT_STEPS} agent steps per workflow."),
+        ));
+    }
     if w.limits.max_runs_per_hour == 0 {
         out.push(Issue::err(None, "Allow at least one run per hour."));
     }
@@ -608,6 +646,32 @@ pub fn validate(w: &Workflow, catalog: &[ConnectorInfo], others: &[Workflow]) ->
                     out.push(Issue::warn(
                         at,
                         "Commands stay blocked until you allow commands on this workflow.",
+                    ));
+                }
+            }
+            StepKind::Agent {
+                prompt,
+                repo,
+                harness,
+                placement,
+                ..
+            } => {
+                if prompt.trim().is_empty() {
+                    out.push(Issue::err(at, "Say what the agent should do."));
+                }
+                refs.extend(template::refs(&Value::String(prompt.clone())));
+                refs.extend(template::refs(&Value::String(repo.clone())));
+                let known = ["claude_code", "opencode", "codex", "pi"];
+                if !harness.is_empty() && !known.contains(&harness.as_str()) {
+                    out.push(Issue::err(
+                        at,
+                        format!("{harness} isn't a harness tab knows."),
+                    ));
+                }
+                if matches!(placement, crate::runner::Placement::Cloud) {
+                    out.push(Issue::warn(
+                        at,
+                        "Only tab cloud runners take this step, which needs a paid plan.",
                     ));
                 }
             }

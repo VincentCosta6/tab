@@ -141,7 +141,8 @@ export type ConnectorStatus =
   | { state: "running"; last_sync: string | null }
   | { state: "rate_limited"; until: string }
   | { state: "error"; message: string }
-  | { state: "stopped" };
+  | { state: "stopped" }
+  | { state: "in_cloud" };
 
 export interface RateLimitSpec { provider: string; resource: string; requests: number; per_seconds: number; burst: number; note: string }
 
@@ -189,6 +190,11 @@ export type StepKind =
   | {
       type: "command"; program: string; args: string[]; folder: string; network: string[];
       env: Record<string, unknown>; image: string; timeout_secs: number;
+    }
+  | {
+      /** Hands work to an agent on a runner (one of the person's computers, or tab cloud) and waits for it. */
+      type: "agent"; prompt: string; repo: string; harness: string; model: string;
+      placement: Placement; deadline_minutes: number;
     };
 export type Step = { id: string; label: string; when: Condition[]; continue_on_error: boolean } & StepKind;
 
@@ -199,13 +205,39 @@ export interface Workflow {
 }
 export interface Issue { at: string | null; error: boolean; message: string }
 
-export type RunStatus = "running" | "succeeded" | "stopped" | "failed" | "blocked" | "throttled" | "loop_stopped";
-export type StepStatus = "ok" | "skipped" | "stopped" | "failed" | "blocked" | "throttled" | "dry";
+export type RunStatus = "running" | "waiting" | "succeeded" | "stopped" | "failed" | "blocked" | "throttled" | "loop_stopped";
+export type StepStatus = "ok" | "waiting" | "skipped" | "stopped" | "failed" | "blocked" | "throttled" | "dry";
 export interface StepRun { id: string; label: string; status: StepStatus; input: unknown; output: unknown; error: string | null; ms: number }
 export interface WorkflowRun {
   id: string; workflow_id: string; workflow_name: string; version: number; status: RunStatus; dry_run: boolean;
   trigger: string; trigger_key: string | null; item_id: string | null; chain: string[]; steps: StepRun[];
   error: string | null; started_at: string; finished_at: string | null;
+}
+
+// --- Runners and jobs (mirror tab_domain::runner) ---
+
+/** Where a connection runs: on this computer, or in tab cloud on the hub's cloud runner. */
+export type RunsOn = "this_computer" | "cloud";
+/** Which runners may take an agent step's job. */
+export type Placement =
+  | { type: "anywhere" }
+  | { type: "computers" }
+  | { type: "cloud" }
+  | { type: "prefer_computer"; minutes: number };
+export interface Runner {
+  id: string; name: string; kind: "computer" | "cloud";
+  harnesses: string[]; repos: string[]; connections: string[];
+  seen_at: string | null; awake: boolean; this_app: boolean;
+}
+export type JobState =
+  | { state: "waiting" }
+  | { state: "running"; runner: string; token: number; started_at: string; session: string | null }
+  | { state: "done"; runner: string; result: { summary: string; branch: string | null; pr_url: string | null }; finished_at: string }
+  | { state: "failed"; error: string; finished_at: string };
+export interface Job {
+  id: string; run_id: string; step_id: string; workflow_id: string;
+  spec: { prompt: string; repo: string; harness: string; model: string; placement: Placement };
+  state: JobState; attempts: number; max_attempts: number; created_at: string; deadline: string;
 }
 
 export interface Activity { id: number; item_id: string; at: string; kind: string; title: string; by: string | null; detail: Record<string, unknown>; via: string | null }
@@ -474,7 +506,7 @@ export interface TabConfig {
     rules: RankingRules;
     ai: { enabled: boolean; backend: "auto" | "api" | "claude_code"; api_key: string | null; model: string | null; instructions: string };
   };
-  connectors: Record<string, { enabled: boolean; settings: Record<string, unknown> }>;
+  connectors: Record<string, { enabled: boolean; settings: Record<string, unknown>; runs_on?: RunsOn }>;
   agent: AgentConfig;
   mcp: { port: number; token: string };
   storage: { keep_days: number; max_gb: number | null };
