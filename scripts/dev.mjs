@@ -10,6 +10,12 @@
 //   running, so a save never cuts an agent off mid-turn. Press r to restart
 //   now anyway: tab resumes the interrupted turns when it comes back.
 //
+// - Its own tab cloud: the local one tab-infra's scripts/dev.sh runs
+//   (Supabase in Docker plus both Workers on 127.0.0.1:8787), read from
+//   ~/.config/tab-dev/cloud.env, so a dev build never signs in to or syncs
+//   with production. Without it, sign-in is off. TAB_DEV_CLOUD=prod uses
+//   production instead.
+//
 // Keys: r restart now, b rebuild now, q quit.
 // Flags: --copy-config  start from the installed app's config.json
 //                        (connections and tokens), if the dev build has none.
@@ -173,6 +179,27 @@ let app = null;
 let running = null;
 let restarting = false;
 
+/** Where this dev build's tab cloud is. Variables already set win. */
+function cloudEnv() {
+  if (process.env.TAB_DEV_CLOUD === "prod") {
+    say("tab cloud: production (TAB_DEV_CLOUD=prod)");
+    return {};
+  }
+  const file = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "tab-dev", "cloud.env");
+  let vars = {};
+  try {
+    for (const line of fs.readFileSync(file, "utf8").split("\n")) {
+      const m = /^([A-Z_]+)=(.*)$/.exec(line.trim());
+      if (m) vars[m[1]] = m[2];
+    }
+  } catch {
+    say("tab cloud: none. Sign-in is off; run tab-infra's scripts/dev.sh for a local one, or TAB_DEV_CLOUD=prod");
+    vars = { TAB_SUPABASE_URL: "off" };
+  }
+  if (vars.TAB_CLOUD_URL) say(`tab cloud: local, ${vars.TAB_CLOUD_URL}`);
+  return Object.fromEntries(Object.entries(vars).filter(([k]) => !process.env[k]));
+}
+
 function launch() {
   if (!staged) return;
   running = staged;
@@ -184,7 +211,7 @@ function launch() {
   app = spawn(running, [], {
     cwd: path.join(root, "src-tauri"),
     stdio: "inherit",
-    env: { ...process.env, TAB_DEV_STATUS: statusFile },
+    env: { ...cloudEnv(), ...process.env, TAB_DEV_STATUS: statusFile },
   });
   const me = app;
   me.on("exit", (code, signal) => {

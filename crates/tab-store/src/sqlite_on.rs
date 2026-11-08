@@ -40,7 +40,7 @@ pub enum SqlValue {
 
 /// What [`SqliteOn`] needs from a SQLite driver.
 ///
-/// Statements use `?N` placeholders. Every statement inside
+/// Statements use plain `?` placeholders, bound in order. Every statement inside
 /// [`transaction`](SqliteConn::transaction) commits together or not at all.
 pub trait SqliteConn {
     /// Runs a statement, ignoring any rows.
@@ -234,11 +234,11 @@ fn apply_in<C: SqliteConn>(
                 let rid =
                     one(tx, &upsert, |r| r.int(0))?.ok_or_else(|| db("upsert returned no row"))?;
                 tx.execute(
-                    "DELETE FROM hub_search WHERE rowid = ?1",
+                    "DELETE FROM hub_search WHERE rowid = ?",
                     &[SqlValue::Int(rid)],
                 )?;
                 tx.execute(
-                    "INSERT INTO hub_search (rowid, text) VALUES (?1, ?2)",
+                    "INSERT INTO hub_search (rowid, text) VALUES (?, ?)",
                     &[
                         SqlValue::Int(rid),
                         SqlValue::Text(ops::search_text(body).to_lowercase()),
@@ -248,7 +248,7 @@ fn apply_in<C: SqliteConn>(
             Op::Delete { kind, id } => {
                 if let Some(rid) = one(tx, &sql::delete_record(kind, id), |r| r.int(0))? {
                     tx.execute(
-                        "DELETE FROM hub_search WHERE rowid = ?1",
+                        "DELETE FROM hub_search WHERE rowid = ?",
                         &[SqlValue::Int(rid)],
                     )?;
                 }
@@ -366,11 +366,11 @@ impl<C: SqliteConn> HubStore for SqliteOn<C> {
         let mut args: Vec<SqlValue> = Vec::new();
         if !long.is_empty() {
             args.push(SqlValue::Text(long.join(" AND ")));
-            q.push_str(&format!(" AND hub_search MATCH ?{}", args.len()));
+            q.push_str(" AND hub_search MATCH ?");
         }
         for t in &terms {
             args.push(SqlValue::Text(t.clone()));
-            q.push_str(&format!(" AND instr(s.text, ?{}) > 0", args.len()));
+            q.push_str(" AND instr(s.text, ?) > 0");
         }
         q.push_str(&format!(" ORDER BY r.seq DESC LIMIT {}", limit as i64));
         self.conn

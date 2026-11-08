@@ -48,6 +48,9 @@ mail-parser = "0.11"
 sqlite-vec = "0.1.6"
 model2vec-rs = { version = "0.4", default-features = false, features = ["fancy-regex", "local-only"] }
 
+# The cloud hub's sync socket.
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -55,5 +58,4 @@ libc = "0.2"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tokio = { workspace = true, features = ["test-util"] }

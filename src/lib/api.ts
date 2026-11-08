@@ -5,7 +5,7 @@
 import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
-  RateLimitState, ReviewAction, HubStatus, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
+  RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus,
 } from "./types";
 import { mockApi } from "./mock";
@@ -140,6 +140,8 @@ export const api = {
   cloudHubs: async () => decode(HubListSchema, await call<ArrayBuffer>("cloud_hubs")),
   /** Sets up (or retries) their personal hub; resolves once it's ready or failed. Rejects with a CloudFailure. */
   cloudHubSetUp: async () => decode(HubStatusSchema, await call<ArrayBuffer>("cloud_hub_set_up")),
+  /** Moves this computer's work into their private cloud hub and syncs with it from then on. Rejects with a CloudFailure. */
+  hubMoveToCloud: () => call<MoveOutcome>("hub_move_to_cloud"),
   storageClean: () => call<Swept>("storage_clean"),
   /** One checkout, or every one when no repo is given. */
   storageRemoveCheckouts: (repo?: string, number?: number) =>
@@ -203,6 +205,13 @@ export async function onAppUpdateProgress(cb: (p: AppUpdateProgress) => void): P
   if (!inTauri) return mockApi.onAppUpdate(cb);
   const { listen } = await import("@tauri-apps/api/event");
   return listen<AppUpdateProgress>("tab://app-update", (e) => cb(e.payload));
+}
+
+/** `[done, total]` changes while `hubMoveToCloud` runs. */
+export async function onHubMove(cb: (p: [number, number]) => void): Promise<() => void> {
+  if (!inTauri) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<[number, number]>("tab://hub-move", (e) => cb(e.payload));
 }
 
 /** Lines the agent's updater prints while `agentUpgrade` runs. */

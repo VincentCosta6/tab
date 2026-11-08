@@ -365,7 +365,13 @@ Signing in (Settings → Hub, or the Hub step of onboarding) is Supabase OAuth w
 
 The API is defined once, in `crates/tab-protocol/proto/tab/cloud/v1/account.proto`. Bodies are binary Protobuf (`application/x-protobuf`), errors are an `Error` with an `ErrorCode`. tab-infra depends on `tab-protocol` by git rev and builds its responses from the same Rust types; the app's `cloud_*` Tauri commands pass the bytes through and the UI decodes them with the generated TypeScript (`src/lib/protocol/cloud.ts`). The same additive-only rule as `hub.proto` applies, and tab-infra bumps its rev to pick up a change.
 
-Onboarding waits on this before Continue, with Try again on failure and See plans when the trial has ended. The access token is refreshed before each call when it's within a minute of expiring. Syncing to the cloud hub, device pairing and moving a hub are next.
+Onboarding waits on this before Continue, with Try again on failure and See plans when the trial has ended. The access token is refreshed before each call when it's within a minute of expiring.
+
+**Syncing with the cloud hub.** The hub Durable Object runs `tab_hub::Hub` on its own SQLite (the same `SqliteOn` store as the desktop), behind `GET /v1/hubs/{hub_id}/sync`, a WebSocket speaking hub.proto with the access token in `Authorization`. The edge checks membership and forwards the caller's role; the hub checks every request against it (guests read, members write, admins and owners may `Import`). `tab_core::cloud_link::CloudLink` is the app's end: one socket, reconnecting with a fresh token, request/reply calls that block (sync runs on a blocking thread), and pushes that wake sync.
+
+**Moving** (Settings → Hub → Move to tab cloud, `LocalHub::move_to_cloud`): flush `tab.db` into `hub.db`, then `Import` hub.db's whole log into the empty cloud hub, page by page, keeping sequence numbers, so `tab.db`'s sync cursor stays valid. From then on `tab.db` syncs with the cloud hub instead of `hub.db`, which keeps its copy from the move. A cloud hub that already has work (another computer moved first) is joined instead: `tab.db` takes its rows and adds what it lacked. `hub.cloud_hub` in config remembers the move; at launch sync waits until the cloud hub connects rather than writing to `hub.db`, whose numbering no longer matches. Moving back, device pairing and live sessions through the cloud are next.
+
+**Dev builds** (`pnpm dev:tab`) never use production: they read `~/.config/tab-dev/cloud.env`, which tab-infra's `scripts/dev.sh` writes when it starts a local tab cloud (Supabase in Docker plus both Workers under `wrangler dev` on `127.0.0.1:8787`; tab-infra's `docs/DEV.md`). Without it sign-in is off; `TAB_DEV_CLOUD=prod` points a dev build at production on purpose.
 
 ## Server (later)
 
