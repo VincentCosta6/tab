@@ -1,8 +1,9 @@
 //! macOS: a Seatbelt profile for `sandbox-exec -p`.
 //!
-//! The profile allows everything by default and then takes away: writes to
-//! protected folders, reads of hidden ones, and network when the policy
-//! limits it. In Seatbelt the last matching rule wins, so the order below is
+//! The profile allows everything by default and then takes away: the
+//! contents of confined folders (the home folder) except what's needed,
+//! writes to protected folders, reads of hidden ones, and network when the
+//! policy limits it. In Seatbelt the last matching rule wins, so the order below is
 //! the order of precedence.
 
 use std::path::Path;
@@ -23,13 +24,32 @@ fn quote(p: &Path) -> String {
     out
 }
 
+/// A regex matching every path that starts with `prefix`.
+fn prefix_regex(prefix: &str) -> String {
+    let mut out = String::from("(regex #\"^");
+    for c in prefix.chars() {
+        if "\\.^$|?*+()[]{}\"".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push_str("\")");
+    out
+}
+
 /// `subpath` matches a folder and everything in it, `literal` one file. A
-/// path that doesn't exist yet gets both.
+/// path that doesn't exist yet gets both. A path ending in `*` matches
+/// everything that starts with what comes before it.
 fn filters(paths: &[std::path::PathBuf]) -> String {
     let mut out = String::new();
     for p in paths {
         if p.as_os_str() == "/" {
             out.push_str(" (subpath \"/\")");
+            continue;
+        }
+        if let Some(prefix) = p.to_str().and_then(|s| s.strip_suffix('*')) {
+            out.push(' ');
+            out.push_str(&prefix_regex(prefix));
             continue;
         }
         let q = quote(p);
@@ -50,6 +70,27 @@ pub(super) const PROCARGS_RULE: &str = "(deny sysctl-read (sysctl-name-prefix \"
 
 pub(super) fn profile(policy: &Policy, proxy_port: Option<u16>, hide_procargs: bool) -> String {
     let mut p = String::from("(version 1)\n(allow default)\n");
+    if !policy.confine.is_empty() {
+        // `file-read-data` covers reading files and listing folders but not
+        // `stat`, so paths through a confined folder still resolve.
+        p.push_str(&format!(
+            "(deny file-read-data file-write*{})\n",
+            filters(&policy.confine)
+        ));
+        let readable: Vec<_> = policy
+            .readable
+            .iter()
+            .chain(&policy.open)
+            .chain(&policy.writable)
+            .cloned()
+            .collect();
+        if !readable.is_empty() {
+            p.push_str(&format!("(allow file-read*{})\n", filters(&readable)));
+        }
+        if !policy.open.is_empty() {
+            p.push_str(&format!("(allow file-write*{})\n", filters(&policy.open)));
+        }
+    }
     if !policy.protect.is_empty() {
         p.push_str(&format!("(deny file-write*{})\n", filters(&policy.protect)));
     }
@@ -69,6 +110,12 @@ pub(super) fn profile(policy: &Policy, proxy_port: Option<u16>, hide_procargs: b
     }
     if !policy.reveal.is_empty() {
         p.push_str(&format!("(allow file-read*{})\n", filters(&policy.reveal)));
+    }
+    if !policy.reveal_rw.is_empty() {
+        p.push_str(&format!(
+            "(allow file-read* file-write*{})\n",
+            filters(&policy.reveal_rw)
+        ));
     }
     // Programs tab runs on the agent's behalf instead (the real `gh`):
     // neither started nor read, so a copy can't be started either.

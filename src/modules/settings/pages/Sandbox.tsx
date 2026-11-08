@@ -32,6 +32,15 @@ function SandboxSection({ config, onChange }: { config: TabConfig["sandbox"]; on
         <FormRow label="SSH keys in chats" help="Off keeps ~/.ssh and your SSH agent out of chats, so GitHub is only reachable through tab. Leave on if agents push to other hosts over SSH.">
           <Toggle label="SSH keys in chats" checked={config.ssh_in_chats ?? true} onChange={(v) => onChange({ ...config, ssh_in_chats: v })} />
         </FormRow>
+        <FormRow label="Only what's needed" help="Agents can't read, list or change anything in your home folder, other people's or external drives except the chat's own folder, the folders below, its project's repos, toolchains and caches. Your Desktop, Documents, Mail, Photos and other chats stay out of reach.">
+          <Toggle label="Only what's needed" checked={config.confine ?? true} onChange={(v) => onChange({ ...config, confine: v })} />
+        </FormRow>
+        {(config.confine ?? true) && (
+          <FormRow label="Folders agents can use" help="Your code folders, one per line. Agents in your own chats can read and change these; agents reviewing someone else's code only get their own checkout.">
+            <TextArea rows={4} placeholder={"~/code"} value={list(config.folders ?? [])}
+              onChange={(e) => onChange({ ...config, folders: e.target.value.split("\n") })} />
+          </FormRow>
+        )}
         <FormRow label="Also protect" help="Folders agents may read but not change, one per line. tab's own data and, in a dev build, its checkout are always protected.">
           <TextArea rows={3} placeholder={"~/code/production-config"} value={list(config.protected)}
             onChange={(e) => onChange({ ...config, protected: e.target.value.split("\n") })} />

@@ -8,6 +8,19 @@ on:
   workflow_call:
 
 jobs:
+  # The macOS sandbox (Seatbelt) for real: the Linux job runs bubblewrap
+  # only, and without TAB_REQUIRE_SANDBOX these tests would skip instead of
+  # failing.
+  sandbox-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p tab-core --lib sandbox::
+        env:
+          TAB_REQUIRE_SANDBOX: "1"
+
   check:
     runs-on: ubuntu-latest
     steps:
@@ -15,7 +28,12 @@ jobs:
       - name: System dependencies for Tauri
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev bubblewrap
+      # tab's Linux sandbox (bubblewrap, as in the cloud runner) needs user
+      # namespaces, which Ubuntu 24.04's AppArmor keeps from unprivileged
+      # processes by default.
+      - name: Let bubblewrap start
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -34,6 +52,9 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build
       - run: cargo test -p tab-core
+        env:
+          # The sandbox tests fail instead of skipping if bubblewrap can't start.
+          TAB_REQUIRE_SANDBOX: "1"
       - run: cargo check -p tab
       # Shared logic, protocol and hub: fast. The full storage suite
       # (conformance, property, volume) runs outside CI with

@@ -492,6 +492,11 @@ impl AgentHub {
         } else {
             sb.chat_policy()
         };
+        // A confined chat of the person's own may use its project's repos
+        // and their worktrees, wherever they're checked out.
+        if !p.confine.is_empty() && p.trust == crate::sandbox::Trust::Person {
+            p.open.extend(self.project_checkouts(session));
+        }
         // Other chats' folders hold their tokens: each chat sees only its own
         // (made now, so the sandbox can show it).
         let _ = self.session_dir(&session.id);
@@ -505,6 +510,29 @@ impl AgentHub {
         } else {
             p
         }
+    }
+
+    /// Where the chat's project's repos are checked out, with each one's
+    /// git worktrees.
+    fn project_checkouts(&self, session: &Session) -> Vec<PathBuf> {
+        let project = session
+            .item_id
+            .as_deref()
+            .and_then(|id| self.store.get(id).ok().flatten())
+            .and_then(|i| i.project_id);
+        let Some(project) = project else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for repo in self.store.project_repos(&project).unwrap_or_default() {
+            let Some(path) = repo.path.filter(|p| !p.trim().is_empty()) else {
+                continue;
+            };
+            let root = crate::sandbox::real(Path::new(&path));
+            out.extend(crate::sandbox::worktrees(&root));
+            out.push(root);
+        }
+        out
     }
 
     /// Writes a chat's `gh` and `git` shims and points `cmd` at them, when
