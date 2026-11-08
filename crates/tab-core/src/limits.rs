@@ -35,7 +35,8 @@ pub fn raise_open_file_limit() {
             {
                 want = want.min(cap as libc::rlim_t);
             } else {
-                want = want.min(libc::OPEN_MAX as libc::rlim_t);
+                // OPEN_MAX in <sys/syslimits.h>.
+                want = want.min(10240);
             }
         }
         if want <= lim.rlim_cur {
