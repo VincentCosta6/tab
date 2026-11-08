@@ -75,12 +75,12 @@ function HubsSection() {
           <div className="hub-row">
             <Icon name="cloud" size={20} />
             <div className="hub-row-main">
-              <strong>tab cloud</strong> {mode === "cloud" && <Badge tone="accent">In use</Badge>} <Badge>Early access</Badge>
+              <strong>tab cloud</strong> {mode === "cloud" && <Badge tone="accent">Chosen</Badge>} <Badge>Early access</Badge>
               <div className="subtle">
                 {signedIn ? `${account!.account!.email ?? account!.account!.name ?? "Your account"}. ` : "Sign in above to use it. "}
                 Syncing to it is coming next; until then your work stays in this computer's hub.
               </div>
-              {signedIn && <CloudHubLine />}
+              {signedIn && <CloudHubLine inUse={mode === "cloud"} />}
             </div>
             {mode !== "cloud" && <Button size="sm" disabled={!signedIn} onClick={() => use("cloud")}>Use this hub</Button>}
           </div>
@@ -156,9 +156,11 @@ function MoveToCloud({ signedIn, changes, onClose }: { signedIn: boolean; change
         </ul>
         <div className="hub-row">
           <span className="subtle">
-            {signedIn ? "tab cloud isn't live yet, so nothing can be moved today." : "Sign in first. tab cloud isn't live yet, so nothing can be moved today."}
+            {signedIn
+              ? "Moving your work into your private hub is the next thing we're building. Until then, it stays on this computer."
+              : "Sign in and set up your private hub first. Moving your work into it is the next thing we're building."}
           </span>
-          <Button variant="primary" icon="upload" disabled title="Available when tab cloud launches">Move to tab cloud</Button>
+          <Button variant="primary" icon="upload" disabled title="Coming in a later update">Move to tab cloud</Button>
         </div>
       </div>
     </Card>
