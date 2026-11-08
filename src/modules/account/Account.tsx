@@ -48,7 +48,7 @@ export function SignInButtons({ onSignedIn }: { onSignedIn?: (a: Account) => voi
   };
 
   if (status && !status.configured) {
-    return <p className="subtle sign-in-note">Sign-in isn't set up in this build of tab. Release builds include it.</p>;
+    return <p className="subtle sign-in-note">Sign-in is turned off in this build of tab.</p>;
   }
   return (
     <div className="sign-in">
@@ -72,11 +72,14 @@ export function SignInButtons({ onSignedIn }: { onSignedIn?: (a: Account) => voi
 
 /** Who's signed in: their initial, name or email, and how they signed in. */
 export function AccountBadge({ account }: { account: Account }) {
+  const [broken, setBroken] = useState(false);
   const label = account.name || account.email || "Your tab account";
   const how = account.provider === "apple" ? "Apple" : account.provider === "google" ? "Google" : account.provider;
   return (
     <div className="account-badge">
-      {account.avatar_url ? <img src={account.avatar_url} alt="" /> : <span className="account-initial">{label[0]?.toUpperCase()}</span>}
+      {account.avatar_url && !broken ? (
+        <img src={account.avatar_url} alt="" referrerPolicy="no-referrer" onError={() => setBroken(true)} />
+      ) : <span className="account-initial">{label[0]?.toUpperCase()}</span>}
       <div>
         <strong>{label}</strong>
         <div className="subtle">
@@ -228,7 +231,7 @@ export function CloudHubSetup({ onReady, onNotReady }: { onReady?: (status: HubS
  * The cloud hubs for Settings: the person's own, with a button to set it up
  * when it isn't, then any team hubs they've been added to.
  */
-export function CloudHubLine() {
+export function CloudHubLine({ inUse = false }: { inUse?: boolean }) {
   const { data: status, error, isLoading } = useCloudHub(true);
   const { data: list } = useCloudHubs(true);
   const [settingUp, setSettingUp] = useState(false);
@@ -238,10 +241,20 @@ export function CloudHubLine() {
     if (isLoading) return <span className="subtle">Checking your private hub…</span>;
     if (error) return <span className="subtle">Couldn't check your private hub: {asFailure(error).message}</span>;
     if (status?.hub?.state === HubState.READY) return <span className="subtle">Your private hub is set up{whereIs(status.hub)}. {planNote(status.plan)}</span>;
+    // Chosen as the hub: set it up straight away, the same as onboarding.
+    // Otherwise ask, since setting up starts the free trial.
+    if (inUse) return <CloudHubSetup />;
     return (
-      <span className="subtle">
-        Your private hub isn't set up yet. <Button size="sm" variant="ghost" onClick={() => setSettingUp(true)}>Set it up</Button>
-      </span>
+      <div className="cloud-setup">
+        <Icon name="cloud" size={14} />
+        <div>
+          <strong>Your private hub isn't set up yet</strong>
+          <p className="subtle">It takes a few seconds and starts your 14-day free trial.</p>
+          <div className="cloud-setup-actions">
+            <Button size="sm" variant="primary" onClick={() => setSettingUp(true)}>Set up my private hub</Button>
+          </div>
+        </div>
+      </div>
     );
   })();
   if (!teams.length) return own;
