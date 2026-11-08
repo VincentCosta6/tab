@@ -159,6 +159,7 @@ fn policy(
         confine: Vec::new(),
         open: Vec::new(),
         readable: Vec::new(),
+        listed: Vec::new(),
         block_exec: Vec::new(),
         drop_env: Vec::new(),
         brokered: false,
@@ -1161,6 +1162,16 @@ fn starting_in_the_home_folder_opens_nothing() {
         PathBuf::from("/"),
     ] {
         let p = f.without_temp(s.starting_in(&s.chat_policy(), Path::new("/usr/bin/true"), &cwd));
+        // Only the home folder's own listing, which Claude Code needs to
+        // start there; nothing above it.
+        assert_eq!(
+            p.listed,
+            if cwd == f.home {
+                vec![cwd.clone()]
+            } else {
+                Vec::new()
+            }
+        );
         for rel in PRIVATE {
             assert!(
                 !p.allows(&f.home.join(rel), Access::Read),
@@ -1283,4 +1294,29 @@ async fn the_real_sandbox_agrees_on_private_places() {
         "the sandbox and Policy::allows disagree:\n{}",
         wrong.join("\n")
     );
+}
+
+/// Claude Code won't start in a folder it can't list ("Can't read the
+/// current directory (EPERM)"), so a chat started in the home folder may
+/// list it, and still can't read what's in it.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_chat_in_the_home_folder_can_list_it_but_not_read_it() {
+    let f = FakeHome::new();
+    let s = f.sandbox();
+    if !real_sandbox(&s) {
+        return;
+    }
+    let chat = f.chat(&s);
+    let (listed, _) = sh(&s, &chat, &f.home, "/bin/sh", "ls . >/dev/null").await;
+    assert!(listed, "couldn't list the home folder it started in");
+    for rel in PRIVATE {
+        let path = f.home.join(rel);
+        let script = format!(
+            "cat '{}'",
+            path.display().to_string().replace('\'', r"'\''")
+        );
+        let (_, out) = sh(&s, &chat, &f.home, "/bin/sh", &script).await;
+        assert!(!out.contains(&format!("contents of {rel}")), "read {rel}");
+    }
 }

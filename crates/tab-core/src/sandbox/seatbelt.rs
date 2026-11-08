@@ -97,6 +97,10 @@ pub(super) fn profile(policy: &Policy, proxy_port: Option<u16>, hide_procargs: b
         if !policy.open.is_empty() {
             p.push_str(&format!("(allow file-write*{})\n", filters(&policy.open)));
         }
+        // Only the folder's own listing: `literal`, never `subpath`.
+        for l in &policy.listed {
+            p.push_str(&format!("(allow file-read-data (literal {}))\n", quote(l)));
+        }
     }
     if !policy.protect.is_empty() {
         p.push_str(&format!("(deny file-write*{})\n", filters(&policy.protect)));
