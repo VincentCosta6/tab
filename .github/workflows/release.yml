@@ -273,7 +273,10 @@ jobs:
         env:
           TAB_SUPABASE_URL: ${{ vars.TAB_SUPABASE_URL }}
         run: |
-          echo "- Sign-in: ${TAB_SUPABASE_URL:-tab's own Supabase project (default)}" >> "$GITHUB_STEP_SUMMARY"
+          # No apostrophe inside ${...:-...}: macOS's bash 3.2 reads it as an
+          # unclosed quote even within double quotes.
+          default="the default Supabase project"
+          echo "- Sign-in: ${TAB_SUPABASE_URL:-$default}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build and upload
         id: build
