@@ -169,14 +169,18 @@ pub fn installed_elsewhere(kind: AgentKind) -> Option<PathBuf> {
     } else {
         vec![h.command.clone()]
     };
+    // Homebrew's folders too, which the app's PATH lacks when opened from
+    // Finder.
+    let system: &[&str] = if cfg!(windows) {
+        &[]
+    } else {
+        &["/opt/homebrew/bin", "/usr/local/bin"]
+    };
     h.bin_dirs
         .iter()
-        .flat_map(|d| {
-            names
-                .iter()
-                .map(|n| home.join(d).join(n))
-                .collect::<Vec<_>>()
-        })
+        .map(|d| home.join(d))
+        .chain(system.iter().map(PathBuf::from))
+        .flat_map(|d| names.iter().map(|n| d.join(n)).collect::<Vec<_>>())
         .find(|p| p.is_file())
 }
 
@@ -290,6 +294,21 @@ impl AgentHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_custom_command_that_is_the_default_name_is_found_like_no_custom() {
+        for kind in [AgentKind::ClaudeCode, AgentKind::OpenCode] {
+            let bare = default_command(kind);
+            assert_eq!(
+                super::super::find(kind, Some(bare)).ok(),
+                super::super::find(kind, None).ok()
+            );
+            assert_eq!(
+                super::super::find(kind, Some(&format!(" {bare} "))).ok(),
+                super::super::find(kind, None).ok()
+            );
+        }
+    }
 
     #[test]
     fn every_adapter_has_metadata() {
