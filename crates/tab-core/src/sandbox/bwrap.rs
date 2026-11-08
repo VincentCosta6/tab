@@ -5,13 +5,27 @@
 //! again read-write on top, and hidden ones covered with an empty tmpfs (or
 //! `/dev/null` for a file). bubblewrap applies mounts in order, so later
 //! arguments win, the same precedence as the Seatbelt profile.
+//!
+//! Where the kernel allows it, the process also gets its own PID namespace
+//! and `/proc`, so it can't read tab's environment or memory through
+//! `/proc/<pid>`. A domain allowlist gets a network namespace of its own,
+//! with tab's proxy reachable only through a Unix socket ([`super::bridge`]).
 
 use std::ffi::OsString;
 use std::path::Path;
 
 use super::{Network, Policy};
 
-pub(super) fn args(policy: &Policy, cwd: &Path) -> Vec<OsString> {
+/// What this computer's bubblewrap can do besides the basics.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Extras<'a> {
+    /// A PID namespace and a fresh `/proc` work here.
+    pub pid: bool,
+    /// The folder holding the proxy's Unix socket, for a domain list.
+    pub net_dir: Option<&'a Path>,
+}
+
+pub(super) fn args(policy: &Policy, cwd: &Path, x: Extras) -> Vec<OsString> {
     let mut a: Vec<OsString> = vec!["--die-with-parent".into()];
     fn bind(a: &mut Vec<OsString>, flag: &str, p: &Path) {
         a.push(flag.into());
@@ -25,6 +39,11 @@ pub(super) fn args(policy: &Policy, cwd: &Path) -> Vec<OsString> {
         Path::new("/"),
     );
     bind(&mut a, "--dev-bind", Path::new("/dev"));
+    if x.pid {
+        a.push("--unshare-pid".into());
+        a.push("--proc".into());
+        a.push("/proc".into());
+    }
     for p in policy
         .protect
         .iter()
@@ -57,8 +76,13 @@ pub(super) fn args(policy: &Policy, cwd: &Path) -> Vec<OsString> {
         a.push("/dev/null".into());
         a.push(p.into());
     }
-    if policy.network == Network::None {
-        a.push("--unshare-net".into());
+    match (&policy.network, x.net_dir) {
+        (Network::Any, _) => {}
+        (Network::None, _) | (Network::Domains(_), None) => a.push("--unshare-net".into()),
+        (Network::Domains(_), Some(dir)) => {
+            a.push("--unshare-net".into());
+            bind(&mut a, "--bind", dir);
+        }
     }
     a.push("--chdir".into());
     a.push(cwd.into());

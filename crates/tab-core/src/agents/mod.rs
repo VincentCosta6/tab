@@ -316,6 +316,9 @@ pub struct AgentHub {
     /// Puts a file in the hub and returns its hash, once the hub is up, so
     /// files a reply names reach other devices ([`crate::named_files`]).
     file_sink: std::sync::OnceLock<FileSink>,
+    /// Chats under this folder work on code nobody here wrote (the cloud
+    /// runner's clones), so they get the review policy.
+    review_root: RwLock<Option<PathBuf>>,
 }
 
 /// See [`AgentHub::set_file_sink`].
@@ -369,12 +372,19 @@ impl AgentHub {
             approvals: Mutex::new(HashMap::new()),
             opencode: tokio::sync::Mutex::new(HashMap::new()),
             file_sink: std::sync::OnceLock::new(),
+            review_root: RwLock::new(None),
         })
     }
 
     /// Where files an agent's reply names go, so other devices can show them.
     pub fn set_file_sink(&self, sink: FileSink) {
         let _ = self.file_sink.set(sink);
+    }
+
+    /// Treats every chat under `root` as work on someone else's code: the
+    /// review policy, model keys only, no git host token.
+    pub fn review_under(&self, root: &Path) {
+        *self.review_root.write().unwrap() = Some(crate::sandbox::real(root));
     }
 
     pub async fn set_config(&self, cfg: AgentConfig) {
@@ -472,12 +482,27 @@ impl AgentHub {
 
     /// What a session's agent may touch. A chat about a pull request runs
     /// in tab's checkout of it, someone else's code, so it gets the review
-    /// policy; every other chat is the person's own.
+    /// policy, as does one under [`AgentHub::review_under`] and a workflow's
+    /// agent job (nobody is at the keyboard, and its prompt may carry text
+    /// from an item: it pushes through tab's broker, not with the person's
+    /// token); every other chat is the person's own.
     pub fn policy(&self, session: &Session) -> crate::sandbox::Policy {
         let sb = crate::sandbox::current();
         let cwd = crate::sandbox::real(Path::new(&session.cwd));
         let workspaces = crate::sandbox::real(&self.dir.join("workspaces"));
-        let mut p = if cwd.starts_with(&workspaces) {
+        let reviewed = self
+            .review_root
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|r| cwd.starts_with(r));
+        let job = self
+            .store
+            .session_key(&session.id)
+            .ok()
+            .flatten()
+            .is_some_and(|k| k.starts_with("job:"));
+        let mut p = if cwd.starts_with(&workspaces) || reviewed || job {
             sb.review_policy(&cwd, Path::new(&self.workdir()))
         } else {
             sb.chat_policy()
@@ -1674,6 +1699,34 @@ mod keyed_tests {
                 .id,
             c.id
         );
+    }
+
+    /// Agent jobs and chats on a cloud runner's clones work on text and
+    /// code nobody at the keyboard checked: the review policy, so no git
+    /// host token or credential reaches them.
+    #[test]
+    fn jobs_and_cloud_clones_get_the_review_policy() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = broadcast::channel(16);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let now = chrono::Utc::now();
+        let cwd = std::env::temp_dir().join("tab-policy-repo");
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let chat = store
+            .session_create(None, AgentKind::ClaudeCode, "Chat", &cwd_s, now)
+            .unwrap();
+        assert_eq!(hub.policy(&chat).trust, crate::sandbox::Trust::Person);
+        let job = store
+            .session_create_keyed("job:1", AgentKind::ClaudeCode, "Job", &cwd_s, now)
+            .unwrap();
+        assert_eq!(hub.policy(&job).trust, crate::sandbox::Trust::Agent);
+        hub.review_under(&std::env::temp_dir());
+        assert_eq!(hub.policy(&chat).trust, crate::sandbox::Trust::Agent);
     }
 
     #[tokio::test]

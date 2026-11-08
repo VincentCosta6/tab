@@ -5171,6 +5171,7 @@ dependencies = [
  "chrono",
  "serde_json",
  "tab-core",
+ "tab-hub",
  "tokio",
  "tokio-util",
  "tracing",

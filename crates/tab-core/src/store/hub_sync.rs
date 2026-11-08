@@ -104,6 +104,23 @@ const NEW_TABLES_BASELINE: &[&str] = &[
     "workflow_runs",
 ];
 
+/// What the Hub page lists as synced: a label and the table it counts.
+pub const SYNCED_SUMMARY: &[(&str, &str)] = &[
+    ("Queue items", "items"),
+    ("Projects", "projects"),
+    ("Project notes", "project_notes"),
+    ("Chats", "sessions"),
+    ("Knowledge graph", "entities"),
+    ("Workflows", "workflows"),
+];
+
+/// One line of [`Store::hub_synced_counts`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SyncedCount {
+    pub what: &'static str,
+    pub count: u64,
+}
+
 /// One row to send to the hub: its current contents, or `None` if it's gone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutRow {
@@ -361,6 +378,22 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM hub_outbox WHERE seq <= ?1", [seq])?;
         Ok(())
+    }
+
+    /// How many of each kind of thing this copy holds, for the Hub page, so
+    /// people can see that projects, notes and the graph sync along with the
+    /// queue. Every table counted here is in [`SYNCED`].
+    pub fn hub_synced_counts(&self) -> anyhow::Result<Vec<SyncedCount>> {
+        let conn = self.conn.lock().unwrap();
+        SYNCED_SUMMARY
+            .iter()
+            .map(|(what, table)| {
+                let count = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                    r.get::<_, i64>(0)
+                })? as u64;
+                Ok(SyncedCount { what, count })
+            })
+            .collect()
     }
 
     pub fn hub_outbox_len(&self) -> anyhow::Result<u64> {

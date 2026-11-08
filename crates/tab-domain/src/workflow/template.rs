@@ -63,6 +63,21 @@ pub fn render_str(s: &str, ctx: &Value) -> Value {
     Value::String(out)
 }
 
+/// Renders `s` as text, passing each placeholder's path and value through
+/// `each` (to mark where outside text was put in, say).
+pub fn render_text_with(s: &str, ctx: &Value, each: impl Fn(&str, String) -> String) -> String {
+    let mut out = String::new();
+    let mut last = 0;
+    for (start, end, path) in spans(s) {
+        out.push_str(&s[last..start]);
+        let v = lookup(ctx, path).map(|v| text(&v)).unwrap_or_default();
+        out.push_str(&each(path, v));
+        last = end;
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
 /// Renders every string inside `v`.
 pub fn render(v: &Value, ctx: &Value) -> Value {
     match v {
@@ -92,6 +107,18 @@ pub fn refs(v: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn renders_text_through_a_wrapper() {
+        let ctx = json!({ "item": { "title": "Fix it" }, "workflow": { "name": "W" } });
+        let out = render_text_with("{{workflow.name}}: {{item.title}}!", &ctx, |p, v| {
+            format!("<{p}>{v}</{p}>")
+        });
+        assert_eq!(
+            out,
+            "<workflow.name>W</workflow.name>: <item.title>Fix it</item.title>!"
+        );
+    }
 
     #[test]
     fn renders_typed_and_text() {

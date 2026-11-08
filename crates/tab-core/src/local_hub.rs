@@ -168,6 +168,10 @@ pub struct HubStatusView {
     pub cloud_hub: Option<String>,
     /// Whether that cloud hub is connected right now.
     pub cloud_connected: bool,
+    /// The last change of the hub in use (cloud once moved) this copy has.
+    pub pulled_to: u64,
+    /// What this copy holds that syncs, by kind (projects, notes, graph…).
+    pub synced: Vec<crate::store::hub_sync::SyncedCount>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -992,6 +996,16 @@ impl LocalHub {
                 .unwrap_or(0),
             cloud_hub: self.cloud_link().map(|l| l.hub_id.clone()),
             cloud_connected: self.cloud_link().is_some_and(|l| l.is_connected()),
+            pulled_to: self
+                .local
+                .get()
+                .and_then(|(s, _)| s.hub_pulled_to().ok())
+                .unwrap_or(0),
+            synced: self
+                .local
+                .get()
+                .and_then(|(s, _)| s.hub_synced_counts().ok())
+                .unwrap_or_default(),
         })
     }
 
