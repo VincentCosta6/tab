@@ -32,6 +32,16 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .header-account img, .header-account .account-initial { width: 26px; height: 26px; border-radius: 50%; font-size: var(--text-xs); }
 .header-account:hover { box-shadow: 0 0 0 2px var(--border-strong); }
 @media (max-width: 760px) { .header-chip-place { display: none; } }
+.hub-card .link-card-head svg { flex: none; color: var(--fg-subtle); }
+.hub-card .link-card-head .badge { height: 20px; }
+.hub-card-facts dt { width: 72px; flex: none; }
+.hub-card-facts dd { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tone-text-warning { color: var(--tone-warning-fg); }
+.hub-card-devices { list-style: none; margin: 0; padding: var(--space-2) 0 0; border-top: 1px solid var(--border); display: grid; gap: 4px; font-size: var(--text-xs); }
+.hub-card-devices li { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hub-card-devices li > svg { flex: none; color: var(--fg-subtle); }
+.hub-card-device-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-card-device-state { flex: none; color: var(--fg-muted); }
 
 /* Where a connection runs. */
 .runs-on { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
