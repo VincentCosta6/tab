@@ -670,6 +670,56 @@ impl LocalHub {
         Ok(outcome)
     }
 
+    /// Brings this computer's work back from tab cloud into its own hub,
+    /// and stops syncing with the cloud. Blocks; run it on a blocking
+    /// thread.
+    ///
+    /// `tab.db` is a full copy of the cloud hub, so after one last sync it
+    /// is what `hub.db` should hold: every synced row goes in as a new
+    /// change, and anything `hub.db` still has from before the move that
+    /// the cloud has since dropped is deleted. `hub.db`'s older changes
+    /// aren't read back, so they can't undo newer ones. The cloud hub keeps
+    /// its copy, and other computers syncing with it carry on.
+    pub fn move_to_local(&self, store: &Store) -> anyhow::Result<u64> {
+        let _turn = self.syncing.lock().unwrap();
+        anyhow::ensure!(self.cloud_link().is_some(), "not syncing with tab cloud");
+        self.sync(store)?;
+        *self.cloud.write().unwrap() = None;
+        self.awaiting_cloud.store(false, Ordering::Relaxed);
+        let mut keys: std::collections::BTreeSet<(String, String)> =
+            store.hub_local_keys()?.into_iter().collect();
+        let tables: std::collections::HashSet<&str> =
+            crate::store::hub_sync::SYNCED.iter().map(|(t, _)| *t).collect();
+        let head = self.head()?;
+        let mut since = 0;
+        while since < head {
+            let page = self
+                .hub
+                .lock()
+                .unwrap()
+                .store()
+                .changes_since(since, PULL as usize)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let Some(last) = page.last().map(|a| a.seq) else {
+                break;
+            };
+            for a in &page {
+                if let Op::Put { kind, id, .. } | Op::Delete { kind, id } = &a.op
+                    && tables.contains(kind.as_str())
+                {
+                    keys.insert((kind.clone(), id.clone()));
+                }
+            }
+            since = last;
+        }
+        let keys: Vec<_> = keys.into_iter().collect();
+        store.hub_queue(&keys)?;
+        store.hub_set_pulled_to(head)?;
+        store.hub_mark_backfilled()?;
+        self.sync(store)?;
+        Ok(keys.len() as u64)
+    }
+
     /// Syncs `tab.db` with the cloud hub behind `link` (this computer moved
     /// before). Blocks; run it on a blocking thread.
     pub fn use_cloud(&self, link: Arc<CloudLink>, store: &Store) -> anyhow::Result<()> {

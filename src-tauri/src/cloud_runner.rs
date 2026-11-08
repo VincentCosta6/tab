@@ -165,6 +165,40 @@ pub async fn connection_runs_on(
     Ok(crate::masked(&saved))
 }
 
+/// A runner as the header and session views show it.
+#[derive(serde::Serialize)]
+pub struct RunnerView {
+    #[serde(flatten)]
+    caps: tab_core::runner::RunnerCaps,
+    awake: bool,
+    this_app: bool,
+}
+
+/// Every runner the hub knows (this computer, others, the cloud runner),
+/// whether each is awake, and which one is this app.
+#[tauri::command]
+pub async fn runners(app: State<'_, crate::AppState>) -> Result<Vec<RunnerView>, String> {
+    let me = app.store.device_id().map_err(|e| e.to_string())?;
+    let now = chrono::Utc::now();
+    Ok(app
+        .store
+        .runners()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|caps| RunnerView {
+            awake: caps.awake(now),
+            this_app: caps.id == me,
+            caps,
+        })
+        .collect())
+}
+
+/// Jobs workflows handed to runners, newest first.
+#[tauri::command]
+pub async fn jobs_recent(app: State<'_, crate::AppState>) -> Result<Vec<tab_core::runner::Job>, String> {
+    app.store.jobs_recent(50).map_err(|e| e.to_string())
+}
+
 /// The hub's cloud runner: a `tab.cloud.v1.RunnerStatus`.
 #[tauri::command]
 pub async fn cloud_runner_status(

@@ -1191,6 +1191,27 @@ async fn hub_move_to_cloud(
     Ok(outcome)
 }
 
+/// Brings this computer's work back from tab cloud into its own hub (see
+/// `LocalHub::move_to_local`). Connections set to run in tab cloud run on
+/// this computer again, so none stops. Returns how many rows it copied.
+#[tauri::command]
+async fn hub_move_to_local(state: State<'_, AppState>) -> CmdResult<u64> {
+    let hub = state.work_hub.clone().ok_or_else(|| err("this computer's hub isn't running"))?;
+    let store = state.store.clone();
+    let rows = tauri::async_runtime::spawn_blocking(move || hub.move_to_local(&store))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    let mut next = state.config.lock().await.clone();
+    next.hub.mode = tab_core::config::HubMode::Local;
+    next.hub.cloud_hub = None;
+    for c in next.connectors.values_mut() {
+        c.runs_on = tab_core::runner::RunsOn::ThisComputer;
+    }
+    state.apply(next).await.map_err(err)?;
+    Ok(rows)
+}
+
 #[tauri::command]
 async fn mcp_info(state: State<'_, AppState>) -> CmdResult<McpInfo> {
     let url = state.mcp_url.lock().unwrap().clone();
@@ -2924,6 +2945,9 @@ pub fn run() {
             account::account_sign_out,
             account::cloud_hub_status,
             hub_move_to_cloud,
+            hub_move_to_local,
+            cloud_runner::runners,
+            cloud_runner::jobs_recent,
             account::cloud_hubs,
             account::cloud_hub_set_up,
             gh_status,
