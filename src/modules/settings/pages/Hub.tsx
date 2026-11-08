@@ -75,10 +75,10 @@ function HubsSection() {
           <div className="hub-row">
             <Icon name="cloud" size={20} />
             <div className="hub-row-main">
-              <strong>tab cloud</strong> {mode === "cloud" && <Badge tone="accent">In use</Badge>} <Badge>Coming soon</Badge>
+              <strong>tab cloud</strong> {mode === "cloud" && <Badge tone="accent">In use</Badge>} <Badge>Early access</Badge>
               <div className="subtle">
                 {signedIn ? `${account!.account!.email ?? account!.account!.name ?? "Your account"}. ` : "Sign in above to use it. "}
-                Until tab cloud launches, your work stays in this computer's hub.
+                Syncing to it is coming next; until then your work stays in this computer's hub.
               </div>
               {signedIn && <CloudHubLine />}
             </div>

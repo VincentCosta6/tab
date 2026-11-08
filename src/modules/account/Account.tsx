@@ -72,11 +72,14 @@ export function SignInButtons({ onSignedIn }: { onSignedIn?: (a: Account) => voi
 
 /** Who's signed in: their initial, name or email, and how they signed in. */
 export function AccountBadge({ account }: { account: Account }) {
+  const [broken, setBroken] = useState(false);
   const label = account.name || account.email || "Your tab account";
   const how = account.provider === "apple" ? "Apple" : account.provider === "google" ? "Google" : account.provider;
   return (
     <div className="account-badge">
-      {account.avatar_url ? <img src={account.avatar_url} alt="" /> : <span className="account-initial">{label[0]?.toUpperCase()}</span>}
+      {account.avatar_url && !broken ? (
+        <img src={account.avatar_url} alt="" referrerPolicy="no-referrer" onError={() => setBroken(true)} />
+      ) : <span className="account-initial">{label[0]?.toUpperCase()}</span>}
       <div>
         <strong>{label}</strong>
         <div className="subtle">
