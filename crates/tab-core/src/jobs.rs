@@ -23,7 +23,8 @@ use chrono::{DateTime, Utc};
 use tab_domain::runner::{
     JOB_LEASE, JOB_RENEW, Job, JobResult, JobState, RunnerCaps, RunnerKind, job_lease,
 };
-use tokio_util::sync::CancellationToken;
+pub use tab_domain::runner::RunnerKind as Kind;
+pub use tokio_util::sync::CancellationToken;
 
 use crate::agents::AgentHub;
 use crate::engine::EngineEvent;
@@ -411,6 +412,15 @@ impl JobRunner {
             pr_url,
         })
     }
+}
+
+/// This computer's name, for its runner record.
+pub fn computer_name() -> String {
+    sysinfo::System::host_name()
+        .ok()
+        .map(|h| h.trim_end_matches(".local").to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "This computer".into())
 }
 
 fn first_line(s: &str) -> String {

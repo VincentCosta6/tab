@@ -141,7 +141,8 @@ export type ConnectorStatus =
   | { state: "running"; last_sync: string | null }
   | { state: "rate_limited"; until: string }
   | { state: "error"; message: string }
-  | { state: "stopped" };
+  | { state: "stopped" }
+  | { state: "in_cloud" };
 
 export interface RateLimitSpec { provider: string; resource: string; requests: number; per_seconds: number; burst: number; note: string }
 

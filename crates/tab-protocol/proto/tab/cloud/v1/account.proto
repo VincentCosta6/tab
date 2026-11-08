@@ -13,6 +13,18 @@
 //   POST /v1/hub            HubStatus  set up your personal hub (idempotent)
 //   GET  /v1/hubs           HubList    every hub you belong to
 //   GET  /v1/hubs/{hub_id}  HubStatus  one of them, if you're a member
+//   PUT  /v1/hubs/{hub_id}/secrets  SecretNames   store or remove secrets
+//                                                 (body PutSecrets; owner
+//                                                 or admin)
+//   GET  /v1/hubs/{hub_id}/secrets  SecretNames   their names, never values
+//   GET  /v1/hubs/{hub_id}/runner   RunnerStatus  the hub's cloud runner
+//   POST /v1/hubs/{hub_id}/runner   RunnerStatus  wake it (paid plans)
+//
+// The cloud runner (tab running headless next to the hub, for connections
+// set to run in tab cloud, workflows and agent jobs) calls one route of its
+// own, with `authorization: Runner <token>`, a token the hub gave it:
+//   GET  /v1/runner/secrets         Secrets       its hub's secrets, values
+//                                                 included
 //
 // Same compatibility rules as hub.proto: only add; never renumber or reuse a
 // field; reserve removed ones. `buf breaking` checks this.
@@ -116,4 +128,46 @@ message Error {
   ErrorCode code = 1;
   // Said for a person; safe to show as is.
   string message = 2;
+}
+
+// A secret a hub keeps for its cloud runner: a connection's sign-in
+// (`connection/<id>/<field>`), a harness's key (`harness/<id>/<ENV_VAR>`),
+// or git access (`git/token`). Stored encrypted with the hub's own key, and
+// only ever handed to that hub's cloud runner.
+message Secret {
+  string name = 1;
+  string value = 2;
+}
+
+message PutSecrets {
+  // Set (or replace) these.
+  repeated Secret secrets = 1;
+  // Then remove these, by name.
+  repeated string remove = 2;
+}
+
+message SecretNames {
+  repeated string names = 1;
+}
+
+message Secrets {
+  repeated Secret secrets = 1;
+}
+
+enum RunnerState {
+  RUNNER_STATE_UNSPECIFIED = 0;
+  // Not running. It starts when there's work for it, or on POST.
+  RUNNER_STATE_ASLEEP = 1;
+  RUNNER_STATE_STARTING = 2;
+  RUNNER_STATE_RUNNING = 3;
+  // The plan doesn't include a cloud runner.
+  RUNNER_STATE_NOT_ON_PLAN = 4;
+}
+
+message RunnerStatus {
+  RunnerState state = 1;
+  // When it last checked in.
+  google.protobuf.Timestamp seen_at = 2;
+  // Said for a person: why it's asleep, or what it's doing.
+  string detail = 3;
 }

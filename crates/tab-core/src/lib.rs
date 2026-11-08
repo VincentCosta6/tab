@@ -49,7 +49,7 @@ pub mod usage;
 pub mod workflow;
 pub mod workspace;
 
-pub use tab_domain::{links, model};
+pub use tab_domain::{links, model, runner};
 
 pub use config::TabConfig;
 pub use engine::{Change, Engine, EngineEvent, EngineHandle};

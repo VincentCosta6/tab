@@ -1,0 +1,238 @@
+//! Connections that run in tab cloud, and the hub's cloud runner.
+//!
+//! A person picks, per connection, whether it runs on this computer or in
+//! tab cloud. In tab cloud, the hub's cloud runner (tab running headless next
+//! to the hub, on paid plans) polls it, so it keeps running while every
+//! computer is off. For that, the connection's settings go to the hub: the
+//! plain ones as a synced `cloud_connections` row, the secret ones (tokens,
+//! passwords) to the hub's secret store, which keeps them encrypted with the
+//! hub's own key and hands them only to its cloud runner.
+//!
+//! The same store holds what the cloud runner's agents need: a harness's API
+//! key (`harness/<id>/<ENV_VAR>`) and git access (`git/token`).
+
+use tab_core::cloud::{self, pb};
+use tab_core::config::TabConfig;
+use tab_core::connectors::registry;
+use tab_core::model::SettingKind;
+use tab_core::store::Store;
+use tab_core::runner::RunsOn;
+use tauri::State;
+use tauri::ipc::Response;
+
+use crate::account::{AccountState, CloudFailure};
+
+/// Secret names a cloud runner may be given from Settings directly.
+const RUNNER_SECRET_PREFIXES: &[&str] = &["harness/", "git/"];
+
+/// A connector's settings split into plain ones and secret ones.
+fn split(
+    id: &str,
+    settings: &serde_json::Map<String, serde_json::Value>,
+) -> (serde_json::Map<String, serde_json::Value>, Vec<(String, String)>) {
+    let secret: Vec<String> = registry()
+        .into_iter()
+        .map(|f| f.descriptor())
+        .find(|d| d.id == id)
+        .map(|d| {
+            d.settings
+                .into_iter()
+                .filter(|s| s.kind == SettingKind::Secret)
+                .map(|s| s.key)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut plain = serde_json::Map::new();
+    let mut secrets = Vec::new();
+    for (k, v) in settings {
+        if secret.contains(k) {
+            if let Some(s) = v.as_str().filter(|s| !s.is_empty()) {
+                secrets.push((cloud::connection_secret(id, k), s.to_string()));
+            }
+        } else {
+            plain.insert(k.clone(), v.clone());
+        }
+    }
+    (plain, secrets)
+}
+
+/// Brings the hub in line with which connections run in tab cloud: their
+/// plain settings as synced rows, their secrets in the hub's store, and
+/// nothing left behind for connections that went back to a computer.
+pub async fn sync_connections(
+    account: &AccountState,
+    store: &Store,
+    cfg: &TabConfig,
+) -> Result<(), CloudFailure> {
+    let Some(hub) = cfg.hub.cloud_hub.clone() else {
+        return Ok(());
+    };
+    let now = chrono::Utc::now();
+    let mut put = Vec::new();
+    let mut remove = Vec::new();
+    let in_cloud: Vec<String> = store
+        .cloud_connections()
+        .map_err(CloudFailure::internal)?
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    for f in registry() {
+        let id = f.descriptor().id;
+        let c = cfg.connectors.get(&id);
+        let cloud = c.is_some_and(|c| c.enabled && c.runs_on == RunsOn::Cloud);
+        let (plain, secrets) = match c {
+            Some(c) => split(&id, &c.settings),
+            None => Default::default(),
+        };
+        if cloud {
+            store
+                .cloud_connection_set(&id, Some(&plain), now)
+                .map_err(CloudFailure::internal)?;
+            put.extend(secrets);
+        } else if in_cloud.contains(&id) {
+            store
+                .cloud_connection_set(&id, None, now)
+                .map_err(CloudFailure::internal)?;
+            for d in registry().into_iter().map(|f| f.descriptor()).filter(|d| d.id == id) {
+                for s in d.settings.into_iter().filter(|s| s.kind == SettingKind::Secret) {
+                    remove.push(cloud::connection_secret(&id, &s.key));
+                }
+            }
+        }
+    }
+    if put.is_empty() && remove.is_empty() {
+        return Ok(());
+    }
+    let token = account.token().await?;
+    cloud::put_secrets(account.cloud(), &token, &hub, put, remove).await?;
+    // Wake the runner so it picks the change up now.
+    if cfg.connectors.values().any(|c| c.enabled && c.runs_on == RunsOn::Cloud) {
+        let _ = cloud::wake_runner(account.cloud(), &token, &hub).await;
+    }
+    Ok(())
+}
+
+/// Sets where a connection runs and saves it.
+#[tauri::command]
+pub async fn connection_runs_on(
+    app: State<'_, crate::AppState>,
+    account: State<'_, AccountState>,
+    connection: String,
+    runs_on: RunsOn,
+) -> Result<TabConfig, CloudFailure> {
+    let mut next = app.config.lock().await.clone();
+    if runs_on == RunsOn::Cloud && next.hub.cloud_hub.is_none() {
+        return Err(cloud::CloudError::new(
+            pb::ErrorCode::BadRequest,
+            "Move your hub to tab cloud first (Settings → Hub), then a connection can run there.",
+        )
+        .into());
+    }
+    let Some(c) = next.connectors.get_mut(&connection) else {
+        return Err(cloud::CloudError::new(
+            pb::ErrorCode::BadRequest,
+            format!("{connection} isn't set up yet"),
+        )
+        .into());
+    };
+    c.runs_on = runs_on;
+    // Send the secrets before this app stops running it, so nothing is
+    // missed if the cloud can't be reached: the save fails instead.
+    sync_connections(&account, &app.store, &next).await?;
+    let saved = app.apply(next).await.map_err(CloudFailure::internal)?;
+    Ok(crate::masked(&saved))
+}
+
+/// The hub's cloud runner: a `tab.cloud.v1.RunnerStatus`.
+#[tauri::command]
+pub async fn cloud_runner_status(
+    app: State<'_, crate::AppState>,
+    account: State<'_, AccountState>,
+) -> Result<Response, CloudFailure> {
+    let hub = moved_hub(&app).await?;
+    let token = account.token().await?;
+    Ok(crate::account::bytes(
+        cloud::runner_status(account.cloud(), &token, &hub).await?,
+    ))
+}
+
+/// Wakes the hub's cloud runner: a `tab.cloud.v1.RunnerStatus`.
+#[tauri::command]
+pub async fn cloud_runner_wake(
+    app: State<'_, crate::AppState>,
+    account: State<'_, AccountState>,
+) -> Result<Response, CloudFailure> {
+    let hub = moved_hub(&app).await?;
+    let token = account.token().await?;
+    Ok(crate::account::bytes(
+        cloud::wake_runner(account.cloud(), &token, &hub).await?,
+    ))
+}
+
+/// The names of the secrets the hub keeps (never their values).
+#[tauri::command]
+pub async fn cloud_secret_names(
+    app: State<'_, crate::AppState>,
+    account: State<'_, AccountState>,
+) -> Result<Vec<String>, CloudFailure> {
+    let hub = moved_hub(&app).await?;
+    let token = account.token().await?;
+    Ok(cloud::secret_names(account.cloud(), &token, &hub).await?)
+}
+
+/// Stores (or with no value, removes) a secret for the cloud runner's
+/// agents: a harness's API key, or git access.
+#[tauri::command]
+pub async fn cloud_secret_set(
+    app: State<'_, crate::AppState>,
+    account: State<'_, AccountState>,
+    name: String,
+    value: Option<String>,
+) -> Result<Vec<String>, CloudFailure> {
+    if !RUNNER_SECRET_PREFIXES.iter().any(|p| name.starts_with(p)) {
+        return Err(cloud::CloudError::new(
+            pb::ErrorCode::BadRequest,
+            "Only a harness key or git access can be set here.",
+        )
+        .into());
+    }
+    let hub = moved_hub(&app).await?;
+    let token = account.token().await?;
+    let value = value.filter(|v| !v.trim().is_empty());
+    let (put, remove) = match value {
+        Some(v) => (vec![(name, v.trim().to_string())], vec![]),
+        None => (vec![], vec![name]),
+    };
+    Ok(cloud::put_secrets(account.cloud(), &token, &hub, put, remove).await?)
+}
+
+async fn moved_hub(app: &crate::AppState) -> Result<String, CloudFailure> {
+    app.config
+        .lock()
+        .await
+        .hub
+        .cloud_hub
+        .clone()
+        .ok_or_else(|| {
+            cloud::CloudError::new(
+                pb::ErrorCode::NotFound,
+                "This computer's work isn't in tab cloud yet.",
+            )
+            .into()
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn secret_fields_are_split_from_the_rest() {
+        let settings = json!({ "token": "ghp_x", "repos": "acme/api", "empty": "" });
+        let (plain, secrets) = split("github", settings.as_object().unwrap());
+        assert_eq!(secrets, [("connection/github/token".to_string(), "ghp_x".to_string())]);
+        assert_eq!(plain.get("repos"), Some(&json!("acme/api")));
+        assert!(!plain.contains_key("token"));
+    }
+}

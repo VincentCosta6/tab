@@ -30,6 +30,7 @@ use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tauri::{Emitter, Manager, State};
 
 mod account;
+mod cloud_runner;
 mod dev;
 mod updates;
 use tokio::sync::{Mutex, RwLock, broadcast};
@@ -50,6 +51,9 @@ struct Core {
     config_path: PathBuf,
     /// Which embedding model search by meaning wants (None when it's off).
     embed: tokio::sync::watch::Sender<Option<&'static str>>,
+    /// The hub's leases, once the hub is open, so the engine shares
+    /// workflow triggers with the person's other runners.
+    leases: std::sync::Mutex<Option<Arc<dyn tab_core::leases::Leases>>>,
 }
 
 struct AppState {
@@ -198,15 +202,17 @@ impl Core {
             }
             Err(e) => tracing::warn!(error = %e, "couldn't list sources"),
         }
-        *engine = Some(
-            Engine::from_config(
-                cfg,
-                self.store.clone(),
-                self.gateway.clone(),
-                self.events.clone(),
-            )
-            .start(),
+        let next = Engine::from_config(
+            cfg,
+            self.store.clone(),
+            self.gateway.clone(),
+            self.events.clone(),
         );
+        let next = match self.leases.lock().unwrap().clone() {
+            Some(l) => next.with_leases(l),
+            None => next,
+        };
+        *engine = Some(next.start());
     }
 
     /// Saves settings, restarts the engine with them and tells the UI.
@@ -2311,7 +2317,7 @@ fn secret_keys() -> Vec<(String, String)> {
         .collect()
 }
 
-fn masked(cfg: &TabConfig) -> TabConfig {
+pub(crate) fn masked(cfg: &TabConfig) -> TabConfig {
     let mut cfg = cfg.clone();
     if cfg.ranking.ai.api_key.is_some() {
         cfg.ranking.ai.api_key = Some(SECRET_MASK.into());
@@ -2375,7 +2381,11 @@ fn folder_problem(path: String) -> Option<String> {
 }
 
 #[tauri::command]
-async fn save_config(state: State<'_, AppState>, config: TabConfig) -> CmdResult<TabConfig> {
+async fn save_config(
+    state: State<'_, AppState>,
+    account: State<'_, account::AccountState>,
+    config: TabConfig,
+) -> CmdResult<TabConfig> {
     let current = state.config.lock().await;
     let mut next = unmask(config, &current);
     // Only moving sets the cloud hub, and once moved, work stays there
@@ -2385,7 +2395,12 @@ async fn save_config(state: State<'_, AppState>, config: TabConfig) -> CmdResult
         next.hub.mode = tab_core::config::HubMode::Cloud;
     }
     drop(current);
-    state.apply(next).await.map(|c| masked(&c)).map_err(err)
+    let saved = state.apply(next).await.map_err(err)?;
+    // Connections in tab cloud get their changed settings there too.
+    if let Err(e) = cloud_runner::sync_connections(&account, &state.store, &saved).await {
+        tracing::warn!(error = ?e.message(), "couldn't update connections in tab cloud");
+    }
+    Ok(masked(&saved))
 }
 
 /// Switches the model chats use. Only the agent hub picks it up, so
@@ -2694,6 +2709,7 @@ pub fn run() {
                 config: Mutex::new(config.clone()),
                 config_path,
                 embed,
+                leases: Default::default(),
             });
             // The hub: this device's copy (tab.db) syncs through its change
             // log, and other devices connect to it on localhost.
@@ -2701,6 +2717,18 @@ pub fn run() {
                 Ok(h) => {
                     // Other devices steer the sessions this one runs.
                     h.attach_agents(hub.clone());
+                    *core.leases.lock().unwrap() = Some(h.clone());
+                    // Agent jobs from workflows: this computer takes the
+                    // ones it can, on the hub's leases.
+                    let name = tab_core::jobs::computer_name();
+                    tab_core::jobs::JobRunner::new(
+                        store.clone(),
+                        Arc::new(hub.clone()),
+                        h.clone(),
+                        tab_core::runner::RunnerKind::Computer,
+                        &name,
+                    )
+                    .start(tab_core::jobs::CancellationToken::new());
                     Some(h)
                 }
                 Err(e) => {
@@ -2802,6 +2830,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             updates::app_version,
+            cloud_runner::connection_runs_on,
+            cloud_runner::cloud_runner_status,
+            cloud_runner::cloud_runner_wake,
+            cloud_runner::cloud_secret_names,
+            cloud_runner::cloud_secret_set,
             updates::app_update_check,
             updates::app_update_install,
             sandbox_status,

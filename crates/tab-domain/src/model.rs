@@ -360,6 +360,8 @@ pub enum ConnectorStatus {
     RateLimited { until: DateTime<Utc> },
     Error { message: String },
     Stopped,
+    /// Set to run in tab cloud, so this app doesn't run it.
+    InCloud,
 }
 
 /// How the UI should show items of one kind.

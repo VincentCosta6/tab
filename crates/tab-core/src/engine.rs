@@ -145,6 +145,9 @@ impl Engine {
                     None if built.iter().any(|c| c.id() == descriptor.id) => {
                         ConnectorStatus::Starting
                     }
+                    None if cfg.connector(&descriptor.id).is_some_and(|c| !c.runs_here()) => {
+                        ConnectorStatus::InCloud
+                    }
                     None => ConnectorStatus::Disabled,
                 };
                 ConnectorInfo {

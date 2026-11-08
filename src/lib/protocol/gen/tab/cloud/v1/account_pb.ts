@@ -13,6 +13,18 @@
 //   POST /v1/hub            HubStatus  set up your personal hub (idempotent)
 //   GET  /v1/hubs           HubList    every hub you belong to
 //   GET  /v1/hubs/{hub_id}  HubStatus  one of them, if you're a member
+//   PUT  /v1/hubs/{hub_id}/secrets  SecretNames   store or remove secrets
+//                                                 (body PutSecrets; owner
+//                                                 or admin)
+//   GET  /v1/hubs/{hub_id}/secrets  SecretNames   their names, never values
+//   GET  /v1/hubs/{hub_id}/runner   RunnerStatus  the hub's cloud runner
+//   POST /v1/hubs/{hub_id}/runner   RunnerStatus  wake it (paid plans)
+//
+// The cloud runner (tab running headless next to the hub, for connections
+// set to run in tab cloud, workflows and agent jobs) calls one route of its
+// own, with `authorization: Runner <token>`, a token the hub gave it:
+//   GET  /v1/runner/secrets         Secrets       its hub's secrets, values
+//                                                 included
 //
 // Same compatibility rules as hub.proto: only add; never renumber or reuse a
 // field; reserve removed ones. `buf breaking` checks this.
@@ -31,7 +43,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file tab/cloud/v1/account.proto.
  */
 export const file_tab_cloud_v1_account: GenFile = /*@__PURE__*/
-  fileDesc("Chp0YWIvY2xvdWQvdjEvYWNjb3VudC5wcm90bxIMdGFiLmNsb3VkLnYxIlEKBFBsYW4SDAoEbmFtZRgBIAEoCRIrCgdlbmRzX2F0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIOCgZhY3RpdmUYAyABKAgi3gEKA0h1YhIOCgZodWJfaWQYASABKAkSIwoEa2luZBgCIAEoDjIVLnRhYi5jbG91ZC52MS5IdWJLaW5kEgwKBG5hbWUYAyABKAkSIAoEcm9sZRgEIAEoDjISLnRhYi5jbG91ZC52MS5Sb2xlEiUKBXN0YXRlGAUgASgOMhYudGFiLmNsb3VkLnYxLkh1YlN0YXRlEg4KBnJlZ2lvbhgGIAEoCRIsCghyZWFkeV9hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDQoFZXJyb3IYCCABKAkiTQoJSHViU3RhdHVzEh4KA2h1YhgBIAEoCzIRLnRhYi5jbG91ZC52MS5IdWISIAoEcGxhbhgCIAEoCzISLnRhYi5jbG91ZC52MS5QbGFuIkwKB0h1Ykxpc3QSHwoEaHVicxgBIAMoCzIRLnRhYi5jbG91ZC52MS5IdWISIAoEcGxhbhgCIAEoCzISLnRhYi5jbG91ZC52MS5QbGFuIj8KBUVycm9yEiUKBGNvZGUYASABKA4yFy50YWIuY2xvdWQudjEuRXJyb3JDb2RlEg8KB21lc3NhZ2UYAiABKAkqgAEKCEh1YlN0YXRlEhkKFUhVQl9TVEFURV9VTlNQRUNJRklFRBAAEhIKDkhVQl9TVEFURV9OT05FEAESGgoWSFVCX1NUQVRFX1BST1ZJU0lPTklORxACEhMKD0hVQl9TVEFURV9SRUFEWRADEhQKEEhVQl9TVEFURV9GQUlMRUQQBCpNCgdIdWJLaW5kEhgKFEhVQl9LSU5EX1VOU1BFQ0lGSUVEEAASFQoRSFVCX0tJTkRfUEVSU09OQUwQARIRCg1IVUJfS0lORF9URUFNEAIqXQoEUm9sZRIUChBST0xFX1VOU1BFQ0lGSUVEEAASDgoKUk9MRV9PV05FUhABEg4KClJPTEVfQURNSU4QAhIPCgtST0xFX01FTUJFUhADEg4KClJPTEVfR1VFU1QQBCqeAgoJRXJyb3JDb2RlEhoKFkVSUk9SX0NPREVfVU5TUEVDSUZJRUQQABIeChpFUlJPUl9DT0RFX1VOQVVUSEVOVElDQVRFRBABEhwKGEVSUk9SX0NPREVfUExBTl9SRVFVSVJFRBACEhUKEUVSUk9SX0NPREVfTE9DS0VEEAMSGwoXRVJST1JfQ09ERV9SQVRFX0xJTUlURUQQBBIYChRFUlJPUl9DT0RFX05PVF9GT1VORBAFEhgKFEVSUk9SX0NPREVfRk9SQklEREVOEAYSGgoWRVJST1JfQ09ERV9CQURfUkVRVUVTVBAHEhcKE0VSUk9SX0NPREVfSU5URVJOQUwQCBIaChZFUlJPUl9DT0RFX1VOUkVBQ0hBQkxFEAliBnByb3RvMw", [file_google_protobuf_timestamp]);
+  fileDesc("Chp0YWIvY2xvdWQvdjEvYWNjb3VudC5wcm90bxIMdGFiLmNsb3VkLnYxIlEKBFBsYW4SDAoEbmFtZRgBIAEoCRIrCgdlbmRzX2F0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIOCgZhY3RpdmUYAyABKAgi3gEKA0h1YhIOCgZodWJfaWQYASABKAkSIwoEa2luZBgCIAEoDjIVLnRhYi5jbG91ZC52MS5IdWJLaW5kEgwKBG5hbWUYAyABKAkSIAoEcm9sZRgEIAEoDjISLnRhYi5jbG91ZC52MS5Sb2xlEiUKBXN0YXRlGAUgASgOMhYudGFiLmNsb3VkLnYxLkh1YlN0YXRlEg4KBnJlZ2lvbhgGIAEoCRIsCghyZWFkeV9hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDQoFZXJyb3IYCCABKAkiTQoJSHViU3RhdHVzEh4KA2h1YhgBIAEoCzIRLnRhYi5jbG91ZC52MS5IdWISIAoEcGxhbhgCIAEoCzISLnRhYi5jbG91ZC52MS5QbGFuIkwKB0h1Ykxpc3QSHwoEaHVicxgBIAMoCzIRLnRhYi5jbG91ZC52MS5IdWISIAoEcGxhbhgCIAEoCzISLnRhYi5jbG91ZC52MS5QbGFuIj8KBUVycm9yEiUKBGNvZGUYASABKA4yFy50YWIuY2xvdWQudjEuRXJyb3JDb2RlEg8KB21lc3NhZ2UYAiABKAkiJQoGU2VjcmV0EgwKBG5hbWUYASABKAkSDQoFdmFsdWUYAiABKAkiQwoKUHV0U2VjcmV0cxIlCgdzZWNyZXRzGAEgAygLMhQudGFiLmNsb3VkLnYxLlNlY3JldBIOCgZyZW1vdmUYAiADKAkiHAoLU2VjcmV0TmFtZXMSDQoFbmFtZXMYASADKAkiMAoHU2VjcmV0cxIlCgdzZWNyZXRzGAEgAygLMhQudGFiLmNsb3VkLnYxLlNlY3JldCJ1CgxSdW5uZXJTdGF0dXMSKAoFc3RhdGUYASABKA4yGS50YWIuY2xvdWQudjEuUnVubmVyU3RhdGUSKwoHc2Vlbl9hdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDgoGZGV0YWlsGAMgASgJKoABCghIdWJTdGF0ZRIZChVIVUJfU1RBVEVfVU5TUEVDSUZJRUQQABISCg5IVUJfU1RBVEVfTk9ORRABEhoKFkhVQl9TVEFURV9QUk9WSVNJT05JTkcQAhITCg9IVUJfU1RBVEVfUkVBRFkQAxIUChBIVUJfU1RBVEVfRkFJTEVEEAQqTQoHSHViS2luZBIYChRIVUJfS0lORF9VTlNQRUNJRklFRBAAEhUKEUhVQl9LSU5EX1BFUlNPTkFMEAESEQoNSFVCX0tJTkRfVEVBTRACKl0KBFJvbGUSFAoQUk9MRV9VTlNQRUNJRklFRBAAEg4KClJPTEVfT1dORVIQARIOCgpST0xFX0FETUlOEAISDwoLUk9MRV9NRU1CRVIQAxIOCgpST0xFX0dVRVNUEAQqngIKCUVycm9yQ29kZRIaChZFUlJPUl9DT0RFX1VOU1BFQ0lGSUVEEAASHgoaRVJST1JfQ09ERV9VTkFVVEhFTlRJQ0FURUQQARIcChhFUlJPUl9DT0RFX1BMQU5fUkVRVUlSRUQQAhIVChFFUlJPUl9DT0RFX0xPQ0tFRBADEhsKF0VSUk9SX0NPREVfUkFURV9MSU1JVEVEEAQSGAoURVJST1JfQ09ERV9OT1RfRk9VTkQQBRIYChRFUlJPUl9DT0RFX0ZPUkJJRERFThAGEhoKFkVSUk9SX0NPREVfQkFEX1JFUVVFU1QQBxIXChNFUlJPUl9DT0RFX0lOVEVSTkFMEAgSGgoWRVJST1JfQ09ERV9VTlJFQUNIQUJMRRAJKpcBCgtSdW5uZXJTdGF0ZRIcChhSVU5ORVJfU1RBVEVfVU5TUEVDSUZJRUQQABIXChNSVU5ORVJfU1RBVEVfQVNMRUVQEAESGQoVUlVOTkVSX1NUQVRFX1NUQVJUSU5HEAISGAoUUlVOTkVSX1NUQVRFX1JVTk5JTkcQAxIcChhSVU5ORVJfU1RBVEVfTk9UX09OX1BMQU4QBGIGcHJvdG8z", [file_google_protobuf_timestamp]);
 
 /**
  * Your plan. Cloud features work while `active`.
@@ -197,6 +209,124 @@ export type Error = Message<"tab.cloud.v1.Error"> & {
  */
 export const ErrorSchema: GenMessage<Error> = /*@__PURE__*/
   messageDesc(file_tab_cloud_v1_account, 4);
+
+/**
+ * A secret a hub keeps for its cloud runner: a connection's sign-in
+ * (`connection/<id>/<field>`), a harness's key (`harness/<id>/<ENV_VAR>`),
+ * or git access (`git/token`). Stored encrypted with the hub's own key, and
+ * only ever handed to that hub's cloud runner.
+ *
+ * @generated from message tab.cloud.v1.Secret
+ */
+export type Secret = Message<"tab.cloud.v1.Secret"> & {
+  /**
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * @generated from field: string value = 2;
+   */
+  value: string;
+};
+
+/**
+ * Describes the message tab.cloud.v1.Secret.
+ * Use `create(SecretSchema)` to create a new message.
+ */
+export const SecretSchema: GenMessage<Secret> = /*@__PURE__*/
+  messageDesc(file_tab_cloud_v1_account, 5);
+
+/**
+ * @generated from message tab.cloud.v1.PutSecrets
+ */
+export type PutSecrets = Message<"tab.cloud.v1.PutSecrets"> & {
+  /**
+   * Set (or replace) these.
+   *
+   * @generated from field: repeated tab.cloud.v1.Secret secrets = 1;
+   */
+  secrets: Secret[];
+
+  /**
+   * Then remove these, by name.
+   *
+   * @generated from field: repeated string remove = 2;
+   */
+  remove: string[];
+};
+
+/**
+ * Describes the message tab.cloud.v1.PutSecrets.
+ * Use `create(PutSecretsSchema)` to create a new message.
+ */
+export const PutSecretsSchema: GenMessage<PutSecrets> = /*@__PURE__*/
+  messageDesc(file_tab_cloud_v1_account, 6);
+
+/**
+ * @generated from message tab.cloud.v1.SecretNames
+ */
+export type SecretNames = Message<"tab.cloud.v1.SecretNames"> & {
+  /**
+   * @generated from field: repeated string names = 1;
+   */
+  names: string[];
+};
+
+/**
+ * Describes the message tab.cloud.v1.SecretNames.
+ * Use `create(SecretNamesSchema)` to create a new message.
+ */
+export const SecretNamesSchema: GenMessage<SecretNames> = /*@__PURE__*/
+  messageDesc(file_tab_cloud_v1_account, 7);
+
+/**
+ * @generated from message tab.cloud.v1.Secrets
+ */
+export type Secrets = Message<"tab.cloud.v1.Secrets"> & {
+  /**
+   * @generated from field: repeated tab.cloud.v1.Secret secrets = 1;
+   */
+  secrets: Secret[];
+};
+
+/**
+ * Describes the message tab.cloud.v1.Secrets.
+ * Use `create(SecretsSchema)` to create a new message.
+ */
+export const SecretsSchema: GenMessage<Secrets> = /*@__PURE__*/
+  messageDesc(file_tab_cloud_v1_account, 8);
+
+/**
+ * @generated from message tab.cloud.v1.RunnerStatus
+ */
+export type RunnerStatus = Message<"tab.cloud.v1.RunnerStatus"> & {
+  /**
+   * @generated from field: tab.cloud.v1.RunnerState state = 1;
+   */
+  state: RunnerState;
+
+  /**
+   * When it last checked in.
+   *
+   * @generated from field: google.protobuf.Timestamp seen_at = 2;
+   */
+  seenAt?: Timestamp | undefined;
+
+  /**
+   * Said for a person: why it's asleep, or what it's doing.
+   *
+   * @generated from field: string detail = 3;
+   */
+  detail: string;
+};
+
+/**
+ * Describes the message tab.cloud.v1.RunnerStatus.
+ * Use `create(RunnerStatusSchema)` to create a new message.
+ */
+export const RunnerStatusSchema: GenMessage<RunnerStatus> = /*@__PURE__*/
+  messageDesc(file_tab_cloud_v1_account, 9);
 
 /**
  * Where a hub is in being set up.
@@ -394,4 +524,44 @@ export enum ErrorCode {
  */
 export const ErrorCodeSchema: GenEnum<ErrorCode> = /*@__PURE__*/
   enumDesc(file_tab_cloud_v1_account, 3);
+
+/**
+ * @generated from enum tab.cloud.v1.RunnerState
+ */
+export enum RunnerState {
+  /**
+   * @generated from enum value: RUNNER_STATE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Not running. It starts when there's work for it, or on POST.
+   *
+   * @generated from enum value: RUNNER_STATE_ASLEEP = 1;
+   */
+  ASLEEP = 1,
+
+  /**
+   * @generated from enum value: RUNNER_STATE_STARTING = 2;
+   */
+  STARTING = 2,
+
+  /**
+   * @generated from enum value: RUNNER_STATE_RUNNING = 3;
+   */
+  RUNNING = 3,
+
+  /**
+   * The plan doesn't include a cloud runner.
+   *
+   * @generated from enum value: RUNNER_STATE_NOT_ON_PLAN = 4;
+   */
+  NOT_ON_PLAN = 4,
+}
+
+/**
+ * Describes the enum tab.cloud.v1.RunnerState.
+ */
+export const RunnerStateSchema: GenEnum<RunnerState> = /*@__PURE__*/
+  enumDesc(file_tab_cloud_v1_account, 4);
 
