@@ -2822,14 +2822,18 @@ pub fn run() {
                     // Agent jobs from workflows: this computer takes the
                     // ones it can, on the hub's leases.
                     let name = tab_core::jobs::computer_name();
-                    tab_core::jobs::JobRunner::new(
+                    let runner = tab_core::jobs::JobRunner::new(
                         store.clone(),
                         Arc::new(hub.clone()),
                         h.clone(),
                         tab_core::runner::RunnerKind::Computer,
                         &name,
-                    )
-                    .start(tab_core::jobs::CancellationToken::new());
+                    );
+                    // Setup isn't on the async runtime, and the runner's
+                    // loop is a task on it: start it from there.
+                    tauri::async_runtime::spawn(async move {
+                        runner.start(tab_core::jobs::CancellationToken::new());
+                    });
                     Some(h)
                 }
                 Err(e) => {
@@ -2871,9 +2875,10 @@ pub fn run() {
             };
             if let (Some(h), Some(id)) = (&work_hub, &cloud_hub) {
                 h.expect_cloud();
-                let link = app.state::<account::AccountState>().link(id);
-                let (h, store) = (h.clone(), store.clone());
+                let (h, store, app, id) = (h.clone(), store.clone(), app.handle().clone(), id.clone());
                 tauri::async_runtime::spawn(async move {
+                    // On the runtime: the link's socket is a task there.
+                    let link = app.state::<account::AccountState>().link(&id);
                     let Some(link) = link else {
                         tracing::error!("hub: moved to tab cloud, but sign-in is off in this build");
                         return;
