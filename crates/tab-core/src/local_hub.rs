@@ -1446,3 +1446,45 @@ async fn connection(hub: Arc<LocalHub>, mut socket: WebSocket, addr: SocketAddr)
 #[cfg(test)]
 #[path = "local_hub_tests.rs"]
 mod tests;
+
+/// Leases on the hub `tab.db` syncs with: this app's own, or the cloud hub
+/// once moved, where every runner (each computer, and tab cloud) claims.
+impl crate::leases::Leases for LocalHub {
+    fn holder(&self) -> String {
+        match (self.cloud_link(), self.local.get()) {
+            (Some(_), Some((store, _))) => store
+                .device_id()
+                .unwrap_or_else(|_| "this-computer".into()),
+            _ => "this-computer".into(),
+        }
+    }
+
+    fn claim_blocking(
+        &self,
+        key: &str,
+        ttl: chrono::Duration,
+    ) -> anyhow::Result<crate::leases::Claimed> {
+        let ttl_secs = ttl.num_seconds().clamp(1, u32::MAX as i64) as u32;
+        let Res::LeaseClaim(c) = self.up(Req::ClaimLease(pb::ClaimLease {
+            key: key.into(),
+            ttl_secs,
+        }))?
+        else {
+            anyhow::bail!("hub: unexpected reply to ClaimLease");
+        };
+        let claim = tab_domain::lease::Claim::try_from(c)
+            .map_err(|e| anyhow::anyhow!("hub: bad lease reply: {e:?}"))?;
+        let lease = claim.lease();
+        Ok(crate::leases::Claimed {
+            won: claim.won(),
+            token: lease.token,
+            holder: lease.holder.clone(),
+            expires_at: lease.expires_at,
+        })
+    }
+
+    fn release_blocking(&self, key: &str) -> anyhow::Result<()> {
+        self.up(Req::ReleaseLease(pb::ReleaseLease { key: key.into() }))
+            .map(|_| ())
+    }
+}

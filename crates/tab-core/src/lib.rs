@@ -34,6 +34,8 @@ pub mod gateway;
 pub mod gh;
 pub mod hub_tls;
 pub mod live;
+pub mod jobs;
+pub mod leases;
 pub mod local_hub;
 pub mod lsp;
 pub mod mcp;

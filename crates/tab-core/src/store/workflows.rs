@@ -251,8 +251,9 @@ impl Store {
         Ok(out)
     }
 
-    /// Runs left `running` by a previous app session never finished.
-    pub fn workflow_runs_abandon(&self, now: DateTime<Utc>) -> anyhow::Result<()> {
+    /// Runs `runner` left `running` when it last quit never finished. Runs
+    /// other runners started are theirs to finish.
+    pub fn workflow_runs_abandon(&self, runner: &str, now: DateTime<Utc>) -> anyhow::Result<()> {
         let stale: Vec<Run> = {
             let conn = self.conn();
             let mut st = conn.prepare("SELECT body FROM workflow_runs WHERE status = 'running'")?;
@@ -261,7 +262,10 @@ impl Store {
                 .filter_map(|b| serde_json::from_str(&b).ok())
                 .collect()
         };
-        for mut run in stale {
+        for mut run in stale
+            .into_iter()
+            .filter(|r: &Run| r.runner.is_empty() || r.runner == runner)
+        {
             run.status = RunStatus::Failed;
             run.error = Some("tab closed before the run finished".into());
             run.finished_at = Some(now);
@@ -315,6 +319,8 @@ mod tests {
             error: None,
             started_at: now,
             finished_at: Some(now),
+            runner: String::new(),
+            resume: None,
         };
         assert!(s.workflow_run_insert(&run).unwrap());
         let mut dup = run.clone();
