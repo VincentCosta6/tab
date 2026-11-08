@@ -2,11 +2,13 @@
 // and whether that hub is reachable, where the chat on screen runs and
 // whether it's connected, and your account.
 
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
-import { cx } from "../../design/components";
+import { Badge, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
-import { timeAgo } from "../../lib/format";
+import { bytes, timeAgo } from "../../lib/format";
 import type { HubStatus, Runner, Session, Tone } from "../../lib/types";
 import { useViewedSession } from "../../lib/viewing";
 import { useAccount } from "../account/Account";
@@ -48,16 +50,116 @@ export function hubLook(hub: HubStatus | null, runners: Runner[]): Look & { icon
   return { icon: "monitor", place: "This computer", tone: "success", label: "Running", detail: `Your hub runs inside this app, so it's awake while tab is open.${devices}` };
 }
 
+/** The hub chip: click for Settings → Hub, hover (or focus) for a card on how the hub is doing. */
 function HubChip({ hub, loading, runners }: { hub: HubStatus | null; loading: boolean; runners: Runner[] }) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const [at, setAt] = useState<DOMRect | null>(null);
+  const timer = useRef<number>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
   if (loading) return null;
   const l = hubLook(hub, runners);
+  const show = (delay: number) => {
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => ref.current && setAt(ref.current.getBoundingClientRect()), delay);
+  };
+  const hide = () => {
+    window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setAt(null), 150);
+  };
+  const width = 320;
   return (
-    <button className="header-chip" onClick={() => openSettings("hub")} title={`${l.detail}\nOpen Settings → Hub`}>
-      <Icon name={l.icon} size={14} />
-      <span className="header-chip-place">{l.place}</span>
-      <span className={cx("header-chip-state", `tone-${l.tone}`)}><i className="header-dot" aria-hidden="true" />{l.label}</span>
-    </button>
+    <>
+      <button
+        ref={ref}
+        className="header-chip"
+        onClick={() => { window.clearTimeout(timer.current); setAt(null); openSettings("hub"); }}
+        aria-label={`${l.place}: ${l.label}. Open Settings → Hub`}
+        onMouseEnter={() => show(250)}
+        onMouseLeave={hide}
+        onFocus={() => show(0)}
+        onBlur={hide}
+      >
+        <Icon name={l.icon} size={14} />
+        <span className="header-chip-place">{l.place}</span>
+        <span className={cx("header-chip-state", `tone-${l.tone}`)}><i className="header-dot" aria-hidden="true" />{l.label}</span>
+      </button>
+      {at && createPortal(
+        <div
+          className="link-card hub-card"
+          role="tooltip"
+          style={{ width, top: at.bottom + 6, left: Math.max(8, Math.min(at.right - width, window.innerWidth - width - 8)) }}
+          onMouseEnter={() => window.clearTimeout(timer.current)}
+          onMouseLeave={hide}
+        >
+          <HubCard hub={hub} runners={runners} look={l} />
+        </div>,
+        document.body,
+      )}
+    </>
   );
+}
+
+/** How the hub is doing, what it holds, and which devices are around. */
+function HubCard({ hub, runners, look: l }: { hub: HubStatus | null; runners: Runner[]; look: ReturnType<typeof hubLook> }) {
+  const facts: [string, ReactNode][] = [];
+  if (hub) {
+    if (hub.cloud_hub) {
+      facts.push(["Syncing", hub.pending ? <span className="tone-text-warning">{hub.pending.toLocaleString()} change{hub.pending > 1 ? "s" : ""} waiting</span> : "Up to date"]);
+    } else {
+      const others = hub.connections.filter((c) => !c.this_app);
+      const behind = others.filter((c) => c.behind > 0).length;
+      if (hub.started_at) facts.push(["Up", since(hub.started_at)]);
+      facts.push(["Address", hub.url ? <span className="mono">{hub.url}{hub.http3 ? " · HTTP/3" : ""}</span> : "Not listening"]);
+      facts.push(["Connected", others.length ? `${others.length} device${others.length > 1 ? "s" : ""}${behind ? `, ${behind} catching up` : ", all up to date"}` : "Only this app"]);
+      if (hub.pending) facts.push(["Syncing", <span className="tone-text-warning">{hub.pending.toLocaleString()} waiting</span>]);
+    }
+    facts.push(["Holds", `${hub.records.toLocaleString()} records · ${bytes(hub.storage_bytes)}`]);
+    if (hub.files) facts.push(["Files", `${hub.files.toLocaleString()} · ${bytes(hub.file_bytes)}`]);
+    if (!hub.cloud_hub && (hub.cpu_percent != null || hub.memory_bytes != null)) {
+      const cpu = hub.cpu_percent == null ? null : hub.cpu_percent / Math.max(1, hub.cpus);
+      facts.push(["App uses", [cpu != null && `${cpu.toFixed(1)}% CPU`, hub.memory_bytes != null && bytes(hub.memory_bytes)].filter(Boolean).join(" · ")]);
+    }
+  }
+  const devices = [...runners].sort((a, b) => Number(b.this_app) - Number(a.this_app) || Number(b.awake) - Number(a.awake));
+  return (
+    <>
+      <div className="link-card-head">
+        <Icon name={l.icon} size={14} />
+        <span>{l.place}</span>
+        <Badge tone={l.tone}>{l.label}</Badge>
+      </div>
+      <span className="link-card-meta">{l.detail}</span>
+      {!!facts.length && <dl className="link-card-facts hub-card-facts">{facts.map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>}
+      {!!devices.length && (
+        <ul className="hub-card-devices">
+          {devices.map((r) => {
+            const awake = r.this_app || r.awake;
+            return (
+              <li key={r.id}>
+                <span className={cx("header-chip-state", `tone-${awake ? "success" : "neutral"}`)}><i className="header-dot" aria-hidden="true" /></span>
+                <Icon name={r.kind === "cloud" ? "cloud" : "monitor"} size={12} />
+                <span className="hub-card-device-name">{r.this_app ? "This computer" : r.kind === "cloud" ? "Cloud runner" : r.name || "Another computer"}</span>
+                <span className="hub-card-device-state">{awake ? "Awake" : r.seen_at ? `Seen ${ago(r.seen_at)}` : "Asleep"}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <span className="link-card-hint">Click for Settings → Hub</span>
+    </>
+  );
+}
+
+/** "3h ago", or "just now". */
+function ago(iso: string): string {
+  const t = timeAgo(iso);
+  return /^\d+[mhd]$/.test(t) ? `${t} ago` : t;
+}
+
+/** How long the hub has been up: "for 3h", or "just now". */
+function since(iso: string): string {
+  const t = timeAgo(iso);
+  return /^\d+[mhd]$/.test(t) ? `for ${t}` : t;
 }
 
 /**
