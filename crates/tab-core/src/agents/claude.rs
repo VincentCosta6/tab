@@ -21,12 +21,76 @@ const MODES: &[&str] = &["default", "acceptEdits", "plan", "auto", "dontAsk"];
 /// between tool calls, so "Send now" interrupts while one is running.
 type OpenTools = Arc<Mutex<HashSet<String>>>;
 
+/// Most of a message quoted back in a reminder.
+const QUOTE: usize = 300;
+
+/// Messages the person sent mid-turn, until the agent answers them in text.
+///
+/// Claude Code shows a queued message to the model with the next tool
+/// result. The model then sometimes answers only in its thinking, which the
+/// person never sees, and goes on to its next tool call: from their side
+/// the message was ignored. So once a message has been shown, the agent's
+/// next step must start with visible text. If it starts with a tool call
+/// instead, tab says so in the chat and reminds the agent, once per message.
+#[derive(Default)]
+pub(super) struct Unanswered {
+    /// Written to stdin; the agent hasn't been shown them yet.
+    sent: Vec<String>,
+    /// Shown to the agent, with no reply in text since.
+    shown: Vec<String>,
+}
+
+impl Unanswered {
+    /// The person's message went to the agent.
+    pub(super) fn sent(&mut self, text: &str) {
+        self.sent.push(text.to_string());
+    }
+
+    /// A tool result came back: queued messages go to the model with it.
+    fn shown(&mut self) {
+        self.shown.append(&mut self.sent);
+    }
+
+    /// The agent said something visible: that answers what it was shown.
+    fn replied(&mut self) {
+        self.shown.clear();
+    }
+
+    /// The agent made a tool call. Returns the messages it went past
+    /// without a word, if any.
+    fn skipped(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.shown)
+    }
+}
+
+/// What tab tells the agent when it went past the person's messages.
+fn reminder(skipped: &[String]) -> String {
+    let quoted: Vec<String> = skipped
+        .iter()
+        .map(|m| {
+            let m = m.trim();
+            let cut: String = m.chars().take(QUOTE).collect();
+            if cut.len() < m.len() {
+                format!("\"{cut}…\"")
+            } else {
+                format!("\"{cut}\"")
+            }
+        })
+        .collect();
+    format!(
+        "(From tab, not the person.) You went on without replying to the person's message {}. \
+         Your thinking isn't shown to them, so to them it looks ignored. Reply to it now in visible \
+         text, then carry on.",
+        quoted.join(" and ")
+    )
+}
+
 /// The stdin line for a steering command, if it needs one: a message is
 /// queued as a user turn; an interrupt (Esc in the terminal) is sent only
 /// while a tool runs, since otherwise the message is read at the next step.
 fn steer_line(steer: Steer, tools_running: bool, n: u64) -> Option<Value> {
     match steer {
-        Steer::Message(text) => {
+        Steer::Message(text) | Steer::Reminder(text) => {
             Some(json!({ "type": "user", "message": { "role": "user", "content": text } }))
         }
         Steer::Interrupt if tools_running => Some(json!({
@@ -141,10 +205,15 @@ pub(super) async fn run_turn(
     let mut steer_rx = hub.steering_open(&session.id);
     let open_tools = OpenTools::default();
     let tools = open_tools.clone();
+    let unanswered = Arc::new(Mutex::new(Unanswered::default()));
+    let asked = unanswered.clone();
     tokio::spawn(async move {
         let mut n = 0;
         while let Some(steer) = steer_rx.recv().await {
             n += 1;
+            if let Steer::Message(text) = &steer {
+                asked.lock().unwrap().sent(text);
+            }
             let running = !tools.lock().unwrap().is_empty();
             let Some(line) = steer_line(steer, running, n) else {
                 continue;
@@ -170,6 +239,7 @@ pub(super) async fn run_turn(
     let mut lines = BufReader::new(stdout).lines();
     let mut parser = Parser::new(hub.clone(), session.id.clone());
     parser.open_tools = open_tools;
+    parser.unanswered = unanswered;
     parser.strict = strict;
     // Rough size of what tab adds to the system prompt (the item and its context).
     parser.tab_context_tokens = (system.len() / 4) as i64;
@@ -260,6 +330,9 @@ struct Parser {
     tab_context_tokens: i64,
     /// Shared with the steering task, which interrupts only while one runs.
     open_tools: OpenTools,
+    /// The person's mid-turn messages, until answered (shared with the
+    /// steering task, which notes each one it sends).
+    unanswered: Arc<Mutex<Unanswered>>,
     /// The person pressed "Send now": the next result only closes the
     /// interrupted part, and the turn goes on with their queued message.
     interrupted: bool,
@@ -337,6 +410,7 @@ impl Parser {
             last_call: None,
             tab_context_tokens: 0,
             open_tools: OpenTools::default(),
+            unanswered: Default::default(),
             interrupted: false,
             strict: false,
             leaked: Vec::new(),
@@ -431,12 +505,24 @@ impl Parser {
                             let text = block["text"].as_str().unwrap_or_default();
                             if !text.trim().is_empty() && self.once(format!("{msg_id}:{i}:{text}"))
                             {
+                                self.unanswered.lock().unwrap().replied();
                                 hub.post(&sid, "assistant", "text", text, Value::Null);
                             }
                         }
                         Some("tool_use") => {
                             let id = block["id"].as_str().unwrap_or_default().to_string();
                             if self.once(format!("tool:{id}")) {
+                                let skipped = self.unanswered.lock().unwrap().skipped();
+                                if !skipped.is_empty() {
+                                    hub.post(
+                                        &sid,
+                                        "system",
+                                        "status",
+                                        "The agent went on without replying to your message; tab asked it to answer.",
+                                        Value::Null,
+                                    );
+                                    hub.remind(&sid, reminder(&skipped));
+                                }
                                 self.open_tools.lock().unwrap().insert(id.clone());
                                 let name = block["name"].as_str().unwrap_or("tool");
                                 if super::is_wait(name, &block["input"]) {
@@ -469,6 +555,7 @@ impl Parser {
                         self.interrupted = true;
                     }
                     if block["type"] == "tool_result" {
+                        self.unanswered.lock().unwrap().shown();
                         if let Some(id) = block["tool_use_id"].as_str() {
                             self.open_tools.lock().unwrap().remove(id);
                             if self.waits.remove(id) && self.waits.is_empty() {
@@ -638,6 +725,113 @@ mod tests {
         assert_eq!(deltas, 1);
     }
 
+    /// A parser and the turn's steering channel, as `run_turn` sets them up.
+    fn steered_turn() -> (
+        Arc<Store>,
+        String,
+        Parser,
+        tokio::sync::mpsc::UnboundedReceiver<Steer>,
+    ) {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let hub = AgentHub::new(
+            store.clone(),
+            tokio::sync::broadcast::channel(64).0,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let rx = hub.steering_open(&s.id);
+        let p = Parser::new(hub, s.id.clone());
+        (store, s.id, p, rx)
+    }
+
+    fn feed(p: &mut Parser, lines: &[&str]) {
+        for line in lines {
+            p.handle(&serde_json::from_str(line).unwrap());
+        }
+    }
+
+    const CALL_1: &str = r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#;
+    const RESULT_1: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"a.txt"}]}}"#;
+    const THINK_2: &str = r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"thinking","thinking":"It's a made-up path."}]}}"#;
+    const CALL_2: &str = r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"pwd"}}]}}"#;
+
+    #[tokio::test]
+    async fn a_message_answered_only_in_thinking_gets_the_agent_reminded() {
+        let (store, sid, mut p, mut steering) = steered_turn();
+        // Sent while the first call runs; the model sees it with its result.
+        feed(&mut p, &[CALL_1]);
+        p.unanswered.lock().unwrap().sent("what is shot.png?");
+        feed(&mut p, &[RESULT_1, THINK_2, CALL_2]);
+        let note = store
+            .messages(&sid)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.kind == "status");
+        assert!(note.is_some_and(|m| m.content.contains("without replying")));
+        match steering.try_recv() {
+            Ok(Steer::Reminder(r)) => {
+                assert!(r.contains("\"what is shot.png?\""));
+                assert!(r.contains("visible"));
+            }
+            _ => panic!("expected a reminder"),
+        }
+        // Once per message: the next call alone doesn't remind again.
+        feed(
+            &mut p,
+            &[
+                r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"/w"}]}}"#,
+                r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"ls"}}]}}"#,
+            ],
+        );
+        assert!(steering.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_message_answered_in_text_needs_no_reminder() {
+        let (store, sid, mut p, mut steering) = steered_turn();
+        feed(&mut p, &[CALL_1]);
+        p.unanswered.lock().unwrap().sent("what is shot.png?");
+        feed(
+            &mut p,
+            &[
+                RESULT_1,
+                THINK_2,
+                r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"Nothing real: an example path."}]}}"#,
+                CALL_2,
+            ],
+        );
+        assert!(steering.try_recv().is_err());
+        assert!(
+            !store
+                .messages(&sid)
+                .unwrap()
+                .iter()
+                .any(|m| m.kind == "status")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_made_before_the_message_was_shown_is_fine() {
+        // The model was already writing its next call when the message
+        // arrived: it only sees the message with that call's result.
+        let (_store, _sid, mut p, mut steering) = steered_turn();
+        p.unanswered.lock().unwrap().sent("what is shot.png?");
+        feed(&mut p, &[CALL_1]);
+        assert!(steering.try_recv().is_err());
+    }
+
+    #[test]
+    fn reminders_quote_long_messages_cut_short() {
+        let long = "x".repeat(QUOTE + 50);
+        let r = reminder(&[long, "and this".into()]);
+        assert!(r.contains(&format!("\"{}…\"", "x".repeat(QUOTE))));
+        assert!(r.contains("and \"and this\""));
+        assert!(r.starts_with("(From tab, not the person.)"));
+    }
+
     #[tokio::test]
     async fn output_after_the_result_marks_the_session_working_again() {
         let store = Arc::new(Store::in_memory().unwrap());
@@ -693,6 +887,10 @@ mod tests {
     #[test]
     fn messages_queue_and_send_now_interrupts_only_a_running_tool() {
         let msg = steer_line(Steer::Message("hi".into()), true, 1).unwrap();
+        assert_eq!(
+            steer_line(Steer::Reminder("hi".into()), true, 2).unwrap(),
+            msg
+        );
         assert_eq!(
             (msg["type"].as_str(), msg["message"]["content"].as_str()),
             (Some("user"), Some("hi"))

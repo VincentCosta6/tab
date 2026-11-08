@@ -287,6 +287,9 @@ pub(crate) enum Steer {
     Message(String),
     /// Don't wait for the running tool: stop it and read what's queued now.
     Interrupt,
+    /// From tab, not the person: read like a message, but not one the
+    /// agent owes a reply to (see `claude::Unanswered`).
+    Reminder(String),
 }
 
 pub struct AgentHub {
@@ -649,6 +652,14 @@ impl AgentHub {
     /// false when no live turn takes messages (it already finished).
     pub fn steer(&self, session_id: &str, text: &str) -> anyhow::Result<bool> {
         self.steer_with(session_id, text, &[])
+    }
+
+    /// Tells a running turn something from tab itself: read like a steering
+    /// message, but not shown in the chat as the person's.
+    pub(crate) fn remind(&self, session_id: &str, text: String) {
+        if let Some(tx) = self.steering.lock().unwrap().get(session_id) {
+            let _ = tx.send(Steer::Reminder(text));
+        }
     }
 
     /// [`Self::steer`] with files the person attached (paths in
@@ -1187,6 +1198,9 @@ impl AgentHub {
              and opens them in a viewer on click. Screenshot it (a headless browser works, or the running \
              app) and embed the PNG rather than describing it or publishing a separate page. Say whether it \
              is a real screenshot or a mock.\n\
+             - The person can send messages while you work; they reach you between tool calls. Answer \
+             each one in visible reply text (not only in your thinking, which tab never shows them) \
+             before your next tool call, even if it's one line, then carry on.\n\
              Keep replies short; the person reads them in a side panel.\n",
         );
         if let Some(root) = dev_checkout() {
