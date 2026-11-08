@@ -118,7 +118,9 @@ Compatibility: fields and messages are only added, removed ones are `reserved`, 
 
 SQL backends share their tables and queries through `tab_store::sql`, built with sea-query, which renders for SQLite and Postgres. That's the "ORM" seam: no Rust ORM can drive the Durable Object's SQLite (only reachable as `storage.sql` inside the Worker), but a query builder works everywhere. Each backend runs the rendered SQL on its own driver (rusqlite, `storage.sql`, sqlx for Postgres later). Full-text search is the per-database part (FTS5 trigrams in SQLite, `pg_trgm` in Postgres).
 
-**Migration between local and cloud** (`tab_hub::migrate::copy`) replays one store's change log into an empty one. Each change keeps its author, time and sequence number, so devices synced to the old hub carry on against the new one. Leases aren't copied. Tests move data SQLite → in-memory → SQLite and compare everything.
+The desktop and the cloud hub are both SQLite, so they share one store, `tab_store::sqlite_on::SqliteOn<C>`, written against a small `SqliteConn` interface (run a statement, read rows, run a closure in a transaction, size). The desktop plugs in rusqlite (`tab_store::sqlite::SqliteStore`); the hub Durable Object in tab-infra plugs in `ctx.storage.sql` with `transactionSync`. A test connection that behaves like the Durable Object's (integers back as floats, no `BEGIN`/`PRAGMA` from statements) runs the whole conformance suite and the property tests, so the two can't drift.
+
+**Migration between local and cloud** (`tab_hub::migrate::copy`, or the `Import` request over the wire) replays one store's change log into an empty one. `Import` takes the log in pages; the first must start at seq 1 on an empty hub and each later page must continue right after the head on the same connection, so it can't rewrite a hub in use. Each change keeps its author, time and sequence number, so devices synced to the old hub carry on against the new one. Leases aren't copied. Tests move data SQLite → in-memory → SQLite and compare everything.
 
 ### Storage tests (built)
 

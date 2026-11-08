@@ -22,6 +22,12 @@ pub enum MigrateError {
     NotEmpty {
         head: Seq,
     },
+    /// The changes don't continue the destination's log: the first isn't
+    /// right after its head, or there's a gap.
+    OutOfOrder {
+        head: Seq,
+        got: Seq,
+    },
     Store(StoreError),
 }
 
@@ -30,6 +36,9 @@ impl std::fmt::Display for MigrateError {
         match self {
             MigrateError::NotEmpty { head } => {
                 write!(f, "the destination hub already has {head} changes")
+            }
+            MigrateError::OutOfOrder { head, got } => {
+                write!(f, "expected change {} next, got {got}", head + 1)
             }
             MigrateError::Store(e) => e.fmt(f),
         }
@@ -42,6 +51,29 @@ impl From<StoreError> for MigrateError {
     fn from(e: StoreError) -> Self {
         MigrateError::Store(e)
     }
+}
+
+/// Appends `changes` to `to`'s log as they are: same sequence numbers,
+/// authors and times. They must continue right after `to`'s head, with no
+/// gaps. Returns the new head.
+pub fn import<B: HubStore>(to: &mut B, changes: &[Applied]) -> Result<Seq, MigrateError> {
+    let mut head = to.head()?;
+    for (i, a) in changes.iter().enumerate() {
+        if a.seq != head + 1 + i as Seq {
+            return Err(MigrateError::OutOfOrder {
+                head: head + i as Seq,
+                got: a.seq,
+            });
+        }
+    }
+    // Changes made together (same author, same moment) are applied
+    // together, which keeps sequence numbers identical.
+    for group in changes.chunk_by(|a: &Applied, b: &Applied| a.by == b.by && a.at == b.at) {
+        let ops: Vec<_> = group.iter().map(|a| a.op.clone()).collect();
+        let applied = to.apply(&group[0].by, &ops, group[0].at)?;
+        head = applied.last().map_or(head, |a| a.seq);
+    }
+    Ok(head)
 }
 
 /// Copies everything in `from` into the empty store `to`, and returns the
@@ -59,17 +91,10 @@ pub fn copy<A: HubStore, B: HubStore>(
     let mut since = 0;
     loop {
         let batch = from.changes_since(since, BATCH)?;
-        let Some(last) = batch.last() else {
+        if batch.is_empty() {
             break;
-        };
-        since = last.seq;
-        // Changes made together (same author, same moment) are applied
-        // together, which keeps sequence numbers identical.
-        for group in batch.chunk_by(|a: &Applied, b: &Applied| a.by == b.by && a.at == b.at) {
-            let ops: Vec<_> = group.iter().map(|a| a.op.clone()).collect();
-            let applied = to.apply(&group[0].by, &ops, group[0].at)?;
-            debug_assert_eq!(applied.last().map(|a| a.seq), group.last().map(|a| a.seq));
         }
+        since = import(to, &batch)?;
         progress(since);
     }
     Ok(to.head()?)

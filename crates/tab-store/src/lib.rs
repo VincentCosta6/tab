@@ -19,7 +19,11 @@
 //!
 //! Backends:
 //! - [`mem::MemStore`]: in memory. Tests, and a reference for new backends.
-//! - [`sqlite::SqliteStore`] (feature `sqlite`): local SQLite.
+//! - [`sqlite_on::SqliteOn`] (feature `sql`): SQLite on any driver that
+//!   implements [`sqlite_on::SqliteConn`]. The desktop and the cloud hub
+//!   (a Durable Object's own SQLite) both run this one.
+//! - [`sqlite::SqliteStore`] (feature `sqlite`): `SqliteOn` on rusqlite,
+//!   for local SQLite.
 //!
 //! SQL backends share their tables and queries through [`sql`] (feature
 //! `sql`), built with sea-query, so a Postgres backend renders the same
@@ -48,6 +52,8 @@ pub mod mem;
 pub mod sql;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+#[cfg(feature = "sql")]
+pub mod sqlite_on;
 
 #[derive(Debug)]
 pub enum StoreError {
