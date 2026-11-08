@@ -458,6 +458,29 @@ async fn file_read(state: State<'_, AppState>, path: String) -> CmdResult<tauri:
     Ok(tauri::ipc::Response::new(std::fs::read(p).map_err(err)?))
 }
 
+/// When each file was last written and how big it is (`None` once it's
+/// gone). The chat polls this for the files in it, so a file the agent
+/// rewrites reloads wherever it shows.
+#[tauri::command]
+async fn file_stamps(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> CmdResult<Vec<Option<(u64, u64)>>> {
+    Ok(paths
+        .iter()
+        .take(64)
+        .map(|path| {
+            let meta = std::fs::metadata(state.local_attachment(path)).ok()?;
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_millis() as u64);
+            Some((modified, meta.len()))
+        })
+        .collect())
+}
+
 /// Starts the system's own dictation in the focused text box (macOS: the
 /// same as Edit → Start Dictation). Elsewhere, says how to start it.
 #[tauri::command]
@@ -2819,6 +2842,7 @@ pub fn run() {
             attachment_save,
             image_read,
             file_read,
+            file_stamps,
             file_open,
             start_dictation,
             github_link_summary,

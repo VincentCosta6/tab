@@ -1368,7 +1368,7 @@ fn with_attachments(text: &str, attachments: &[String]) -> String {
         return text.to_string();
     }
     format!(
-        "{text}\n\nThe person attached {} (open each with your Read tool to see it):\n{}",
+        "{text}\n\nThe person attached {} (open each with your Read tool to see it; to change one, write the new version under the same file name in your working folder and name its path in your reply, and tab shows it in its place):\n{}",
         if attachments.len() == 1 {
             "a file"
         } else {

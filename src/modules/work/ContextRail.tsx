@@ -1,11 +1,14 @@
 import { useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Brand } from "../../design/brands";
+import { cx } from "../../design/components";
 import { brandFor } from "../../design/brands";
+import { FilePreview } from "../../design/FileStage";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
 import { useItemContext } from "../../lib/hooks";
 import { parseLink } from "../../lib/links";
+import { useStage } from "../../lib/stage";
 import { keys } from "../../lib/query";
 import type { ContextEntry, QueueItem } from "../../lib/types";
 import { EntryCard, IconButton, ItemCard, sameLink } from "./ContextDrawer";
@@ -29,6 +32,7 @@ function connectorOf(e: ContextEntry): string {
 export function ContextRail({ item, onSelect }: { item: QueueItem; onSelect: (id: string) => void }) {
   const qc = useQueryClient();
   const { data: ctx } = useItemContext(item.id);
+  const stage = useStage();
   const [foundOpen, setFoundOpen] = useState(false);
   const groups = useMemo(() => {
     const own = (e: ContextEntry) => e.ref_item?.id === item.id || (!!e.url && !!item.url && sameLink(e.url, item.url));
@@ -46,7 +50,8 @@ export function ContextRail({ item, onSelect }: { item: QueueItem; onSelect: (id
   const found = (ctx?.entries ?? []).filter((e) => e.section === "found" && e.ref_item?.id !== item.id && !(e.url && item.url && sameLink(e.url, item.url)));
   const related = (ctx?.related ?? []).filter((r) => r.id !== item.id);
   const foundCount = found.length + related.length;
-  if (!groups.length && !foundCount) return null;
+  const files = stage?.files ?? [];
+  if (!groups.length && !foundCount && !files.length) return null;
   const refresh = () => qc.invalidateQueries({ queryKey: keys.context(item.id) });
   const pin = async (e: ContextEntry) => (await api.contextUpdate(e.id, { pinned: !e.pinned }), refresh());
   const remove = async (e: ContextEntry) => (await api.contextRemove(e.id), refresh());
@@ -55,6 +60,26 @@ export function ContextRail({ item, onSelect }: { item: QueueItem; onSelect: (id
 
   return (
     <aside className="ctx-rail" aria-label="Context">
+      {stage && files.length > 0 && (
+        <section className="ctx-rail-group">
+          <h4 className="ctx-rail-head">
+            <span className="ctx-pill-mark"><Icon name="files" size={13} /></span>
+            Files
+            <span className="ctx-count">{files.length}</span>
+          </h4>
+          <div className="rail-files">
+            {files.map((f, i) => (
+              <button key={f.path} className={cx("rail-file", stage.updated.has(f.path) && "fresh")} title={f.path} onClick={() => stage.open(files, i)}>
+                <FilePreview path={f.path} size="sm" />
+                <span className="rail-file-text">
+                  <span className="rail-file-name">{f.name}</span>
+                  <span className="subtle">{stage.updated.has(f.path) ? "Updated just now" : f.original ? "Edited by the agent" : f.from === "you" ? "You attached" : "From the agent"}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
       {groups.map(([key, list]) => (
         <section key={key} className="ctx-rail-group">
           <h4 className="ctx-rail-head">

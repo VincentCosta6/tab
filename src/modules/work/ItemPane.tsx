@@ -9,6 +9,7 @@ import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useChat, useItem } from "../../lib/hooks";
+import { useThreadFiles } from "../../lib/threadFiles";
 import { keys } from "../../lib/query";
 import type { QueueItem } from "../../lib/types";
 import { parsePullUrl } from "../github/pulls";
@@ -31,6 +32,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const { data: chat } = useChat(id);
+  const files = useThreadFiles(chat);
   const [readMode, setReadMode] = useReadMode();
   const tint = useProjectTint(item?.project_id);
   const chatCount = chat?.messages.filter((m) => m.role === "user" || (m.role === "assistant" && m.kind === "text")).length ?? 0;
@@ -144,7 +146,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         right={tab === "content" && <RichSwitch item={item} mode={readMode} onChange={setReadMode} />}
       />
       {/* A file opened from the chat takes the middle; the chat docks on its right. */}
-      <StageHost className="item-body">
+      <StageHost className="item-body" files={files}>
         <ChatView item={item} body={tab === "timeline" ? <Timeline itemId={item.id} /> : <Reader item={item} mode={readMode} />} showBody={tab !== "chat"} onSent={() => setTab("chat")} />
         <ContextRail key={item.id} item={item} onSelect={onSelect} />
       </StageHost>
