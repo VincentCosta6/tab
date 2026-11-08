@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tab · TAB Annihilates Backlogs</title>
+<meta name="description" content="One ranked, keyboard-driven queue for everything that needs you: PR reviews, CI failures, Slack mentions, email and AI agents waiting on input. With an agent on every item.">
+<link rel="canonical" href="https://tabqueue.com/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta property="og:title" content="tab · TAB Annihilates Backlogs">
+<meta property="og:description" content="One ranked queue for everything that needs you, with an agent on every item.">
+<meta property="og:url" content="https://tabqueue.com/">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#0c0c0e">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/favicon.svg" alt="" width="30" height="30">tab</a>
+    <nav class="nav">
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="/pricing/">Pricing</a>
+      <a href="https://github.com/VincentCosta6/tab">GitHub</a>
+      <a class="btn small primary" href="#download">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="hero wrap">
+    <span class="eyebrow"><b>TAB</b> Annihilates Backlogs</span>
+    <h1>Everything that needs you,<br><span class="grad">in one queue.</span></h1>
+    <p class="lede">PR reviews, CI failures, Slack mentions, email, meeting action items and AI agents waiting on input. tab pulls it all in, ranks it, and puts an agent on every item so you can clear it fast.</p>
+    <div class="cta" id="download">
+      <a class="btn primary" href="https://github.com/VincentCosta6/tab/releases/latest">Download for macOS</a>
+      <a class="btn" href="https://github.com/VincentCosta6/tab/releases/latest">Windows</a>
+    </div>
+    <p class="fine">Free for local use. Apple silicon and Windows x64.</p>
+
+    <div class="app" aria-hidden="true">
+      <div class="app-bar"><i></i><i></i><i></i><span>tab</span></div>
+      <div class="app-body">
+        <div class="q">
+          <div class="q-head"><strong>Work</strong><div class="chips"><span class="chip on">All 14</span><span class="chip">GitHub</span><span class="chip">Slack</span></div></div>
+          <div class="group" style="color: var(--red)">Now</div>
+          <div class="row sel"><span class="src gh">GH</span><div><div class="t">CI failing on main: checkout-service</div><div class="m"><span>acme/web · build #4182</span><em>2m</em></div></div></div>
+          <div class="row"><span class="src ai">AI</span><div><div class="t">Agent needs approval to run migrations</div><div class="m"><span>Billing refactor</span><em>4m</em></div></div></div>
+          <div class="group" style="color: var(--amber)">Today</div>
+          <div class="row"><span class="src gh">GH</span><div><div class="t">Review: Add idempotency keys to payments</div><div class="m"><span>acme/api#812 · dana</span><em>1h</em></div></div></div>
+          <div class="row"><span class="src sl">S</span><div><div class="t">@you can you confirm the launch date?</div><div class="m"><span>#launch · priya</span><em>2h</em></div></div></div>
+          <div class="row"><span class="src ji">J</span><div><div class="t">PAY-311 Refund webhook drops events</div><div class="m"><span>Payments · high</span><em>3h</em></div></div></div>
+          <div class="group" style="color: var(--sky)">This week</div>
+          <div class="row"><span class="src gm">M</span><div><div class="t">Contract renewal: needs your signature</div><div class="m"><span>legal@vendor.com</span><em>1d</em></div></div></div>
+        </div>
+        <div class="chat">
+          <div class="why">Ranked first: main is red and 3 PRs are blocked behind it.</div>
+          <h3>CI failing on main: checkout-service</h3>
+          <div class="ctx"><span class="pill">build #4182</span><span class="pill">acme/web#901</span><span class="pill found">+ Found: #incidents thread</span></div>
+          <div class="msg me">Find what broke it and open a fix.</div>
+          <div class="tool"><span class="ok">✓</span> read build log · <span class="ok">✓</span> git bisect · 3 files changed</div>
+          <div class="msg agent"><b>#901 renamed <span class="mono">taxRate</span></b> but the checkout test fixture still uses the old name. I updated the fixture and the two call sites.</div>
+          <div class="approve"><span>Push branch <span class="mono">fix/tax-rate-fixture</span> and open a PR?</span><b>Approve</b></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sources wrap">
+    Pulls in work from
+    <ul><li>GitHub</li><li>Slack</li><li>Gmail</li><li>Jira</li><li>Zoom</li><li>Claude Code</li><li>Codex</li><li>OpenCode</li></ul>
+  </div>
+
+  <section id="how">
+    <div class="wrap">
+      <div class="kicker">How it works</div>
+      <h2>Stop checking six apps to find out what's on fire.</h2>
+      <p class="section-lede">tab is a modular work queue for engineers, designers and PMs. It does the triage so you can do the work.</p>
+      <div class="steps">
+        <div class="step"><div class="n">1</div><h3>Connect</h3><p>Connections bring in everything that needs you: review requests, failing builds, mentions, email, meeting follow-ups and agents waiting on you.</p></div>
+        <div class="step"><div class="n">2</div><h3>Rank</h3><p>A deterministic score you can read, refined by your own instructions through Claude Haiku. Urgent work floats up, noise sinks.</p></div>
+        <div class="step"><div class="n">3</div><h3>Annihilate</h3><p>Open any item and work it with an agent that already has the context. Approve its steps, mark it done, move to the next.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <div class="kicker">Features</div>
+      <h2>A queue that does more than list things.</h2>
+      <div class="features">
+        <div class="feature"><div class="ico">💬</div><h3>An agent on every item</h3><p>Claude Code, Codex, OpenCode or Pi, with your own login. Each item gets its own session that picks up where you left off.</p></div>
+        <div class="feature"><div class="ico">🧭</div><h3>Context that finds itself</h3><p>The ticket, the PR, the thread: agents attach what's part of the work and file what might matter under Found.</p></div>
+        <div class="feature"><div class="ico">🔍</div><h3>Built-in code review</h3><p>A side-by-side diff with line comments that post straight to the PR. No tab switching.</p></div>
+        <div class="feature"><div class="ico">⚖️</div><h3>Rate budgets</h3><p>Every connection respects its provider's limits. Interactive work stays fast; background refreshes wait their turn.</p></div>
+        <div class="feature"><div class="ico">🗂️</div><h3>Projects that remember</h3><p>Repos, rules and notes per project, so the next chat starts knowing how your team works.</p></div>
+        <div class="feature"><div class="ico">⏰</div><h3>Tasks and schedules</h3><p>Create tasks with priority and due times, or let agents create follow-ups for you.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split">
+      <div>
+        <div class="kicker">Keyboard first</div>
+        <h2>Inbox zero, without touching the mouse.</h2>
+        <p class="section-lede">Move, finish, snooze and open from the home row. Hover actions overlay the row so nothing shifts under your cursor.</p>
+      </div>
+      <div class="keys">
+        <div class="key"><kbd>j</kbd><kbd>k</kbd>Move through the queue</div>
+        <div class="key"><kbd>e</kbd>Done, next item</div>
+        <div class="key"><kbd>s</kbd>Snooze, then <kbd>1</kbd>–<kbd>4</kbd></div>
+        <div class="key"><kbd>r</kbd>Review the PR</div>
+        <div class="key"><kbd>n</kbd>New chat</div>
+        <div class="key"><kbd>/</kbd>Search everything</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split">
+      <div class="rank">
+        <div class="rank-title">Why is this first?</div>
+        <div class="subtle" style="margin-bottom: 10px">CI failing on main: checkout-service</div>
+        <div class="rank-line"><span>Blocks others (3 PRs)</span><span>+30</span></div>
+        <div class="rank-line"><span>On the default branch</span><span>+20</span></div>
+        <div class="rank-line"><span>You're the last committer</span><span>+15</span></div>
+        <div class="rank-line nl"><span>"Payments is my priority"</span><span>+12</span></div>
+        <div class="rank-line total"><span>Score</span><span>77</span></div>
+      </div>
+      <div>
+        <div class="kicker">Ranking you can read</div>
+        <h2>No black box deciding your day.</h2>
+        <p class="section-lede">Every item shows the math behind its place. Tune the rules, or tell tab what matters in plain words.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="cloud">
+        <div class="kicker">tab cloud</div>
+        <h2>Your queue on every device.</h2>
+        <p class="section-lede">tab runs its own hub on your machine. Sign in with Apple or Google and move it to tab cloud to keep every device in sync.</p>
+        <ul>
+          <li>A private hub with its own storage and its own data key</li>
+          <li>Sync across desktops as each change commits</li>
+          <li>Pick a region close to you</li>
+          <li>Move back to local any time with Import</li>
+        </ul>
+        <div class="cta" style="justify-content: flex-start"><a class="btn primary" href="/pricing/">See plans</a></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="final">
+    <div class="wrap">
+      <h2>Annihilate your backlog.</h2>
+      <p class="section-lede">Download tab and connect your first source in under a minute.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/VincentCosta6/tab/releases/latest">Download tab</a>
+        <a class="btn" href="https://github.com/VincentCosta6/tab">Star on GitHub</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/favicon.svg" alt="" width="22" height="22">tab</a>
+    <nav>
+      <a href="/pricing/">Pricing</a>
+      <a href="https://github.com/VincentCosta6/tab">GitHub</a>
+      <a href="https://github.com/VincentCosta6/tab/releases">Releases</a>
+    </nav>
+    <span>© 2026 tab</span>
+  </div>
+</footer>
+
+</body>
+</html>
