@@ -14,7 +14,9 @@ import { cx } from "../../../design/components";
 import { Icon } from "../../../design/icons";
 import type { PrFile, ReviewThread } from "../../../lib/types";
 import { StackCtx, useReview, type StackFollower, type StackScroll } from "./context";
+import { isReviewImage } from "./data";
 import { FileDiff } from "./FileDiff";
+import { ImageDiff } from "./ImageDiff";
 import { isViewed, splitPath, statusLetter, statusTone } from "./model";
 
 // Creating a diff editor (models, the diff, decorations, zones) is the costliest
@@ -101,6 +103,7 @@ function StackItem({ file, threads, scrollRoot, register, autoMarked }: { file: 
   const prevViewed = useRef(viewed);
   const hKey = heightKey(file, mode);
   const known = knownHeights.get(hKey);
+  const image = isReviewImage(file.filename);
 
   // Marking a file viewed by hand collapses it, like github.com. Auto-read
   // leaves it open: it's above the view, and collapsing it would jump the page.
@@ -137,8 +140,8 @@ function StackItem({ file, threads, scrollRoot, register, autoMarked }: { file: 
       data-path={file.filename}
     >
       <FileHeader file={file} threads={threads} collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} onOpen={() => openFile(file.filename)} />
-      {!collapsed && (near && mounted ? <FileDiff file={file} initialHeight={known} onHeight={(h) => knownHeights.set(hKey, h)} /> : <div className="rv-diff-placeholder" style={{ height: known ?? Math.min(1200, 40 + (file.additions + file.deletions) * 19) }} />)}
-      {!collapsed && file.additions + file.deletions === 0 && <p className="subtle rv-pad">No text changes (binary file, mode change, or rename).</p>}
+      {!collapsed && (image ? (near && <ImageDiff file={file} />) : near && mounted ? <FileDiff file={file} initialHeight={known} onHeight={(h) => knownHeights.set(hKey, h)} /> : <div className="rv-diff-placeholder" style={{ height: known ?? Math.min(1200, 40 + (file.additions + file.deletions) * 19) }} />)}
+      {!collapsed && !image && file.additions + file.deletions === 0 && <p className="subtle rv-pad">No text changes (binary file, mode change, or rename).</p>}
       <div ref={end} className="rv-stack-end" />
     </section>
   );
