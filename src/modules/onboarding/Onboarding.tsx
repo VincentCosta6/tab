@@ -63,6 +63,10 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
     setSaveError(null);
     try {
       await save.mutateAsync({ ...draft, hub: { mode: hubMode }, onboarded: true });
+      // tab cloud: put this computer's work in the private hub (or join it,
+      // if another computer already did) now, rather than as a later step.
+      // It carries on after this closes; Settings → Hub shows how it went.
+      if (hubMode === "cloud" && hubReady) void api.hubMoveToCloud().catch(() => {});
       onClose();
     } catch (e) {
       setSaveError(`Couldn't save: ${e}`);
@@ -146,8 +150,8 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
 
         {step === 2 && (
           <div className="onboarding-body">
-            <h2>Choose where your work syncs</h2>
-            <p className="subtle">Your queue, chats, projects and workflows live in a hub. You can move it later in Settings.</p>
+            <h2>Where should your work be kept?</h2>
+            <p className="subtle">Your queue, chats, projects and workflows live in one place, called a hub. You can change this later in Settings → Hub.</p>
             <div className="hub-choices">
               <HubChoice mode="cloud" chosen={hubMode === "cloud"} onChoose={setHubMode}>
                 <div className="agent-choice-head">
@@ -167,9 +171,13 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
                       <>
                         <AccountBadge account={account.account} />
                         <CloudHubSetup onReady={() => setHubReady(true)} onNotReady={() => setHubReady(false)} />
+                        {hubReady && <p className="subtle">Your work moves into it when you finish.</p>}
                       </>
                     ) : (
-                      <SignInButtons />
+                      <>
+                        <p className="subtle">Sign in, and tab sets up your private hub. Your work moves into it when you finish.</p>
+                        <SignInButtons />
+                      </>
                     )}
                   </div>
                 )}

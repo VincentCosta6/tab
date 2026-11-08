@@ -1,12 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { Badge, Button, Card, FormRow, Meter, Section, StatusDot } from "../../../design/components";
 import { Icon } from "../../../design/icons";
 import { api, onHubMove } from "../../../lib/api";
 import { bytes, timeAgo } from "../../../lib/format";
-import { asFailure } from "../../../lib/protocol/cloud";
-import type { HubMode, MoveOutcome } from "../../../lib/types";
-import { AccountBadge, CloudHubLine, SignInButtons, accountKey, cloudPerks, localDrawbacks, useAccount } from "../../account/Account";
+import { HubState, asFailure } from "../../../lib/protocol/cloud";
+import type { HubMode } from "../../../lib/types";
+import { AccountBadge, CloudHubLine, CloudHubSetup, SignInButtons, accountKey, localDrawbacks, useAccount, useCloudHub } from "../../account/Account";
 import { useDraft } from "../draft";
 
 export function HubPage() {
@@ -19,16 +19,17 @@ export function HubPage() {
   );
 }
 
-/** The tab account the cloud hub belongs to. */
+/** The tab account the cloud hub belongs to. Signing in is step 1 below, so this shows only once signed in. */
 function AccountSection() {
   const qc = useQueryClient();
   const { data: status } = useAccount();
   const [busy, setBusy] = useState(false);
+  if (!status?.account) return null;
   const signOut = async () => {
     setBusy(true);
     try {
       await api.accountSignOut();
-      qc.setQueryData(accountKey, { configured: status?.configured ?? false, account: null });
+      qc.setQueryData(accountKey, { configured: status.configured, account: null });
     } finally {
       setBusy(false);
     }
@@ -36,122 +37,109 @@ function AccountSection() {
   return (
     <Section title="Account" description="Your tab account. tab cloud keeps your hub under it.">
       <Card>
-        {status?.account ? (
-          <div className="hub-row">
-            <AccountBadge account={status.account} />
-            <Button size="sm" variant="ghost" disabled={busy} onClick={signOut}>{busy ? "Signing out…" : "Sign out"}</Button>
-          </div>
-        ) : (
-          <div className="hub-account-out">
-            <p className="subtle">Not signed in. Sign in to use tab cloud: it keeps your work private, syncs your devices and works with the mobile app.</p>
-            <div style={{ maxWidth: 320 }}><SignInButtons /></div>
-          </div>
-        )}
+        <div className="hub-row">
+          <AccountBadge account={status.account} />
+          <Button size="sm" variant="ghost" disabled={busy} onClick={signOut}>{busy ? "Signing out…" : "Sign out"}</Button>
+        </div>
       </Card>
     </Section>
   );
 }
 
-/** The hubs this person has, which one is in use, adding one and moving between them. */
+/**
+ * Where this person's work is kept, said plainly, and the one thing to do
+ * next. tab cloud takes three steps (sign in, set up the private hub, move
+ * the work), each done right here; the current one has the only button.
+ */
 function HubsSection() {
   const { draft, set } = useDraft();
   const { data: account } = useAccount();
   const local = useQuery({ queryKey: ["hub-status"], queryFn: api.hubStatus, refetchInterval: 2000 });
-  const mode: HubMode = draft.hub?.mode ?? "local";
   const signedIn = !!account?.account;
-  const [adding, setAdding] = useState(false);
-  const [moving, setMoving] = useState(false);
-  const use = (m: HubMode) => set((c) => void (c.hub = { ...c.hub, mode: m }));
+  const cloudHub = useCloudHub(signedIn);
+  const [settingUp, setSettingUp] = useState(false);
   const h = local.data;
-  // Moved: work syncs with the cloud hub, and this computer's hub keeps its copy.
   const moved = !!h?.cloud_hub;
+  const mode: HubMode = moved ? "cloud" : (draft.hub?.mode ?? "local");
+  const hubReady = cloudHub.data?.hub?.state === HubState.READY;
+  const use = (m: HubMode) => set((c) => void (c.hub = { ...c.hub, mode: m }));
+
+  const headline = moved
+    ? "Your work syncs with tab cloud."
+    : mode === "cloud"
+      ? "You picked tab cloud, but your work is still only on this computer."
+      : "Your work is kept on this computer only.";
+  const detail = moved
+    ? h!.cloud_connected
+      ? "Every computer you sign in on sees the same queue, chats and projects."
+      : "Not connected right now. Changes you make wait here and sync when it reconnects."
+    : mode === "cloud"
+      ? "Finish the steps below to start syncing."
+      : "Nothing syncs, and other computers and your phone can't see it.";
 
   return (
-    <Section
-      title="Hubs"
-      description="Your queue, chats, projects and workflows sync through a hub. tab uses one at a time; Save applies a change."
-      actions={!adding && <Button size="sm" icon="plus" onClick={() => setAdding(true)}>Add a hub</Button>}
-    >
-      {adding && <AddHub signedIn={signedIn} onClose={() => setAdding(false)} onAdded={() => (use("cloud"), setAdding(false))} />}
+    <Section title="Where your work is kept" description="Your queue, chats, projects and workflows live in one place, called a hub.">
       <Card>
-        {(signedIn || mode === "cloud") && (
-          <div className="hub-row">
-            <Icon name="cloud" size={20} />
-            <div className="hub-row-main">
-              <strong>tab cloud</strong> {mode === "cloud" && <Badge tone="accent">Chosen</Badge>} <Badge>Early access</Badge>
-              <div className="subtle">
-                {signedIn ? `${account!.account!.email ?? account!.account!.name ?? "Your account"}. ` : "Sign in above to use it. "}
-                {moved
-                  ? h!.cloud_connected
-                    ? "Your work syncs here."
-                    : "Your work syncs here. Not connected right now; changes wait and go up when it reconnects."
-                  : "Your work is still in this computer's hub. Move it here to sync."}
-              </div>
-              {signedIn && <CloudHubLine inUse={mode === "cloud"} />}
-            </div>
-            {mode !== "cloud" && <Button size="sm" disabled={!signedIn} onClick={() => use("cloud")}>Use this hub</Button>}
-          </div>
-        )}
         <div className="hub-row">
-          <Icon name="folder" size={20} />
+          <Icon name={moved || mode === "cloud" ? "cloud" : "folder"} size={20} />
           <div className="hub-row-main">
-            <strong>This computer</strong> {mode === "local" && !moved && <Badge tone="accent">In use</Badge>}{" "}
-            {h ? <Badge tone="success">Running</Badge> : !local.isLoading && <Badge tone="danger">Not running</Badge>}
-            <div className="subtle">
-              {h ? `${h.records.toLocaleString()} records · ${h.head.toLocaleString()} changes · ${bytes(h.storage_bytes)}` : "The hub inside this app."}
-              {moved && " · Keeps its copy from when you moved."}
-            </div>
+            <strong>{headline}</strong> {moved && (h!.cloud_connected ? <Badge tone="success">Connected</Badge> : <Badge tone="warning">Offline</Badge>)}
+            <div className="subtle">{detail}</div>
           </div>
-          <div className="hub-row-actions">
-            {mode !== "local" && !moved && <Button size="sm" onClick={() => use("local")}>Use this hub</Button>}
-            {!moved && <Button size="sm" variant={mode === "cloud" ? "primary" : undefined} icon="upload" onClick={() => setMoving((v) => !v)}>Move to tab cloud</Button>}
-          </div>
+          {!moved && mode === "local" && <Button size="sm" variant="primary" icon="cloud" onClick={() => use("cloud")}>Use tab cloud</Button>}
+          {!moved && mode === "cloud" && <Button size="sm" variant="ghost" onClick={() => use("local")}>Keep it on this computer</Button>}
         </div>
-        {mode === "local" && (
+
+        {!moved && mode === "cloud" && (
+          <ol className="hub-steps">
+            <HubStep n={1} done={signedIn} title="Sign in to your tab account">
+              {!signedIn && <div style={{ maxWidth: 320 }}><SignInButtons /></div>}
+            </HubStep>
+            <HubStep n={2} done={hubReady} title="Set up your private hub" waiting={!signedIn}>
+              {signedIn && !hubReady && (settingUp ? (
+                <CloudHubSetup />
+              ) : (
+                <>
+                  <p className="subtle">Your own hub in tab cloud. Only your devices can reach it. Takes a few seconds and starts your 14-day free trial.</p>
+                  <Button size="sm" variant="primary" onClick={() => setSettingUp(true)}>Set up my private hub</Button>
+                </>
+              ))}
+            </HubStep>
+            <HubStep n={3} done={false} title="Move your work into it" waiting={!hubReady}>
+              {hubReady && <MoveToCloud changes={h?.head ?? 0} />}
+            </HubStep>
+          </ol>
+        )}
+
+        {moved && <CloudHubLine />}
+        {mode === "local" && !moved && (
           <ul className="hub-drawbacks hub-row-note">
             {localDrawbacks.map((d) => <li key={d}><Icon name="alert" size={13} /> <span>{d}</span></li>)}
           </ul>
         )}
       </Card>
-      {moving && !moved && <MoveToCloud signedIn={signedIn} changes={h?.head ?? 0} onClose={() => setMoving(false)} onMoved={() => use("cloud")} />}
     </Section>
   );
 }
 
-/** Adding a hub: tab cloud by signing in; your own server later. */
-function AddHub({ signedIn, onClose, onAdded }: { signedIn: boolean; onClose: () => void; onAdded: () => void }) {
+/** One step toward tab cloud: done, the current one (with its button), or still to come. */
+function HubStep({ n, title, done, waiting = false, children }: { n: number; title: string; done: boolean; waiting?: boolean; children?: ReactNode }) {
   return (
-    <Card>
-      <div className="hub-add">
-        <div className="hub-add-head">
-          <strong>Add a hub</strong>
-          <Button size="sm" variant="ghost" icon="x" aria-label="Close" onClick={onClose} />
-        </div>
-        <div className="hub-choices">
-          <div className="agent-choice hub-choice chosen">
-            <div className="agent-choice-head"><Icon name="cloud" size={20} /><strong>tab cloud</strong><span className="onboarding-recommended">Recommended</span></div>
-            <ul className="hub-perks">
-              {cloudPerks.map((p) => <li key={p.title}><Icon name={p.icon} size={14} /> <span><strong>{p.title}.</strong> {p.text}</span></li>)}
-            </ul>
-            <div className="hub-sign-in">
-              {signedIn ? <Button variant="primary" onClick={onAdded}>Use tab cloud</Button> : <SignInButtons onSignedIn={onAdded} />}
-            </div>
-          </div>
-          <div className="agent-choice hub-choice disabled" aria-disabled>
-            <div className="agent-choice-head"><Icon name="globe" size={20} /><strong>Your own server</strong><Badge>Coming soon</Badge></div>
-            <p>Run the hub on a server you control, or connect to another computer's hub by its address and certificate.</p>
-          </div>
-        </div>
+    <li className={done ? "done" : waiting ? "waiting" : "current"}>
+      <span className="hub-step-mark">{done ? <Icon name="check" size={11} /> : n}</span>
+      <div>
+        <strong>{title}</strong>
+        {!done && !waiting && children && <div className="hub-step-body">{children}</div>}
       </div>
-    </Card>
+    </li>
   );
 }
 
-/** Moving this computer's hub into tab cloud, with its whole history. */
-function MoveToCloud({ signedIn, changes, onClose, onMoved }: { signedIn: boolean; changes: number; onClose: () => void; onMoved: () => void }) {
+/** Moving this computer's work into the private hub, with its whole history. */
+function MoveToCloud({ changes }: { changes: number }) {
   const qc = useQueryClient();
   const [state, setState] = useState<
-    { kind: "idle" } | { kind: "moving"; done: number; total: number } | { kind: "done"; outcome: MoveOutcome } | { kind: "failed"; message: string }
+    { kind: "idle" } | { kind: "moving"; done: number; total: number } | { kind: "failed"; message: string }
   >({ kind: "idle" });
   useEffect(() => {
     let off: (() => void) | undefined;
@@ -161,9 +149,8 @@ function MoveToCloud({ signedIn, changes, onClose, onMoved }: { signedIn: boolea
   const move = async () => {
     setState({ kind: "moving", done: 0, total: changes });
     try {
-      const outcome = await api.hubMoveToCloud();
-      setState({ kind: "done", outcome });
-      onMoved();
+      await api.hubMoveToCloud();
+      // The page now shows it syncing; the saved config already says cloud.
       void qc.invalidateQueries({ queryKey: ["hub-status"] });
       void qc.invalidateQueries({ queryKey: ["config"] });
     } catch (e) {
@@ -171,41 +158,20 @@ function MoveToCloud({ signedIn, changes, onClose, onMoved }: { signedIn: boolea
     }
   };
   return (
-    <Card>
-      <div className="hub-add">
-        <div className="hub-add-head">
-          <strong>Move this computer's hub to tab cloud</strong>
-          {state.kind !== "moving" && <Button size="sm" variant="ghost" icon="x" aria-label="Close" onClick={onClose} />}
-        </div>
-        <ul className="hub-perks">
-          <li><Icon name="check" size={14} /> <span>Copies all {changes.toLocaleString()} changes, in order, with who made each and when.</span></li>
-          <li><Icon name="check" size={14} /> <span>Then this computer syncs with tab cloud, and your other computers can join it.</span></li>
-          <li><Icon name="check" size={14} /> <span>This computer's hub keeps its copy from the move.</span></li>
-          <li><Icon name="alert" size={14} /> <span>If your cloud hub already has work (another computer moved first), this computer joins it instead: it takes the cloud's work and adds what it was missing.</span></li>
-        </ul>
-        <div className="hub-row" role="status">
-          <span className="subtle">
-            {state.kind === "moving"
-              ? `Moving… ${state.done.toLocaleString()} of ${state.total.toLocaleString()} changes`
-              : state.kind === "done"
-                ? state.outcome.kind === "moved"
-                  ? `Moved ${state.outcome.changes.toLocaleString()} changes. Your work now syncs with tab cloud.`
-                  : "Joined your cloud hub. Your work now syncs with tab cloud."
-                : state.kind === "failed"
-                  ? `Couldn't move: ${state.message}`
-                  : signedIn
-                    ? "Takes a few seconds. You can keep working; changes made meanwhile follow."
-                    : "Sign in and set up your private hub first."}
-          </span>
-          {state.kind !== "done" && (
-            <Button variant="primary" icon="upload" disabled={!signedIn || state.kind === "moving"} onClick={() => void move()}>
-              {state.kind === "failed" ? "Try again" : "Move to tab cloud"}
-            </Button>
-          )}
-        </div>
-        {state.kind === "moving" && state.total > 0 && <Meter value={state.done} max={state.total} />}
+    <>
+      <p className="subtle">
+        Copies all {changes.toLocaleString()} changes, in order, with who made each and when. This computer keeps its copy.
+        If another computer already moved its work there, this one joins it instead.
+      </p>
+      <div className="cloud-setup-actions" role="status">
+        <Button size="sm" variant="primary" icon="upload" disabled={state.kind === "moving"} onClick={() => void move()}>
+          {state.kind === "failed" ? "Try again" : state.kind === "moving" ? "Moving…" : "Move my work"}
+        </Button>
+        {state.kind === "moving" && <span className="subtle">{state.done.toLocaleString()} of {state.total.toLocaleString()}</span>}
+        {state.kind === "failed" && <span className="text-danger">Couldn't move: {state.message}</span>}
       </div>
-    </Card>
+      {state.kind === "moving" && state.total > 0 && <Meter value={state.done} max={state.total} />}
+    </>
   );
 }
 
