@@ -2743,6 +2743,9 @@ pub fn run() {
                 .unwrap_or_else(|_| "info,tab_core=debug".into()),
         )
         .init();
+    // Opened from Finder, tab gets a soft limit of 256 open files, and every
+    // agent it starts inherits it.
+    tab_core::limits::raise_open_file_limit();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

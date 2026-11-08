@@ -115,6 +115,10 @@ pub struct Policy {
     /// Readable but not writable inside `confine`: toolchains, shell and
     /// git setup.
     pub readable: Vec<PathBuf>,
+    /// Folders inside `confine` that can be listed, though nothing in them
+    /// is readable: the folder a chat starts in when that's the home folder.
+    /// Claude Code won't start in a folder it can't list.
+    pub listed: Vec<PathBuf>,
     /// Programs that can't be started: the real `gh` when tab brokers it.
     pub block_exec: Vec<PathBuf>,
     /// Variables removed from the environment on top of what `trust` removes.
@@ -478,6 +482,9 @@ impl Policy {
                     ok = false;
                 }
                 if covers(&self.readable, p) || covers(&self.open, p) || covers(&self.writable, p) {
+                    ok = true;
+                }
+                if self.listed.iter().any(|l| l == p) {
                     ok = true;
                 }
                 if covers(&self.hide, p) {
@@ -939,7 +946,8 @@ impl Sandbox {
 
     /// Lets a confined process into the folder it starts in and the folder
     /// its program lives in. Not when it starts in the home folder (or above
-    /// it): that would open everything again.
+    /// it): that would open everything again, so the home folder only gets
+    /// its listing, which Claude Code needs to start there.
     pub(crate) fn starting_in(&self, policy: &Policy, exe: &Path, cwd: &Path) -> Policy {
         let mut p = policy.clone();
         if p.confine.is_empty() {
@@ -950,6 +958,9 @@ impl Sandbox {
             || p.confine.iter().any(|r| r.starts_with(&cwd));
         if !too_wide {
             p.open.push(cwd);
+        } else if covers(&p.confine, &cwd) && !p.listed.contains(&cwd) {
+            // The home folder itself: its names, not what's in it.
+            p.listed.push(cwd);
         }
         for e in [exe.to_path_buf(), real(exe)] {
             if let Some(dir) = e.parent().filter(|d| d.components().count() > 1) {
@@ -1001,6 +1012,7 @@ impl Sandbox {
             confine: Vec::new(),
             open: Vec::new(),
             readable: Vec::new(),
+            listed: Vec::new(),
             block_exec: Vec::new(),
             drop_env: Vec::new(),
             brokered: false,
@@ -1026,6 +1038,7 @@ impl Sandbox {
             confine: Vec::new(),
             open: Vec::new(),
             readable: Vec::new(),
+            listed: Vec::new(),
             block_exec: Vec::new(),
             drop_env: Vec::new(),
             brokered: false,
@@ -1052,6 +1065,7 @@ impl Sandbox {
             confine: Vec::new(),
             open: Vec::new(),
             readable: Vec::new(),
+            listed: Vec::new(),
             block_exec: Vec::new(),
             drop_env: Vec::new(),
             brokered: false,

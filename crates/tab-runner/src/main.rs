@@ -196,6 +196,7 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(sandbox::bridge::main(args.collect()));
     }
     sandbox::harden_process(true);
+    tab_core::limits::raise_open_file_limit();
     let env = Env::from_env()?;
     // SAFETY: no other thread has started yet.
     unsafe { std::env::remove_var("TAB_RUNNER_TOKEN") };

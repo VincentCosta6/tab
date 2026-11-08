@@ -35,6 +35,7 @@ pub mod gh;
 pub mod hub_tls;
 pub mod jobs;
 pub mod leases;
+pub mod limits;
 pub mod live;
 pub mod local_hub;
 pub mod lsp;

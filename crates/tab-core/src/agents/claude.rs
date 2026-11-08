@@ -219,6 +219,7 @@ pub(super) async fn run_turn(
         .stderr(Stdio::piped());
 
     tracing::debug!(session = %session.id, mode, strict, resume = ?session.agent_session_id, sandboxed = prepared.enforced, "starting Claude Code turn");
+    let sandboxed = prepared.enforced;
     let mut child = prepared
         .spawn()
         .map_err(|e| anyhow::anyhow!("starting Claude Code ({}) failed: {e}", exe.display()))?;
@@ -317,25 +318,26 @@ pub(super) async fn run_turn(
     let status = child.wait().await?;
     let stderr = err_task.await.unwrap_or_default();
     if !parser.finished {
-        let tail: String = stderr
-            .lines()
-            .rev()
-            .take(8)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n");
         anyhow::bail!(
-            "Claude Code exited ({status}) before finishing.{}",
-            if tail.is_empty() {
-                String::new()
-            } else {
-                format!("\n{tail}")
-            }
+            "Claude Code exited ({status}) before finishing.{}{}",
+            super::per_turn::tail(&stderr),
+            startup_hint(&stderr, sandboxed)
         );
     }
     Ok(())
+}
+
+/// Claude Code's runtime (Bun) blames the open-file limit for any error it
+/// can't name while starting, and suggests `ulimit`. Under tab's sandbox the
+/// usual cause is a folder it was kept out of, which no limit fixes.
+fn startup_hint(stderr: &str, sandboxed: bool) -> &'static str {
+    let fd_message =
+        stderr.contains("max file descriptors") || stderr.contains("ran out of file descriptors");
+    if fd_message && sandboxed {
+        "\n\ntab's sandbox may have kept Claude Code out of something it needs. Turning off \"Only what's needed\" in Settings → Sandbox works around it."
+    } else {
+        ""
+    }
 }
 
 /// Turns stream-json lines into transcript entries.
@@ -705,6 +707,19 @@ mod tests {
     use crate::engine::EngineEvent;
     use crate::store::Store;
     use chrono::Utc;
+
+    /// Bun's startup error, as Claude Code prints it on macOS.
+    const BUN_STARTUP: &str = "error: An unknown error occurred, possibly due to low max file descriptors (Unexpected)\n\nCurrent limit: 256\n\nTo fix this, try running:\n\n  ulimit -n 2147483646\n\nIf that still doesn't work, you may need to run:\n\n  sudo launchctl limit maxfiles 2147483646\n";
+
+    #[test]
+    fn a_startup_failure_keeps_its_first_line_and_points_at_the_sandbox() {
+        let tail = super::super::per_turn::tail(BUN_STARTUP);
+        assert!(tail.contains("(Unexpected)"), "{tail}");
+        assert!(tail.contains("Current limit: 256"), "{tail}");
+        assert!(startup_hint(BUN_STARTUP, true).contains("Only what's needed"));
+        assert_eq!(startup_hint(BUN_STARTUP, false), "");
+        assert_eq!(startup_hint("error: not signed in", true), "");
+    }
 
     /// The real Claude Code in a confined chat: it starts, signs in, keeps
     /// its transcript, and its shell can't list the Desktop. Run by hand
