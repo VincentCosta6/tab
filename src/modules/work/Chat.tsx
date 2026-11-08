@@ -477,7 +477,7 @@ function agentSteps(messages: SessionMessage[], results: Map<number, SessionMess
 }
 
 /**
- * Pinned to the bottom of the chat while the agent works: its step list
+ * The last thing in the chat, never over it: the agent's plan for this turn
  * with each step's status, and the tool it's running right now.
  */
 function ProgressBar({ messages, results, running }: { messages: SessionMessage[]; results: Map<number, SessionMessage>; running: boolean }) {
