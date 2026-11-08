@@ -100,7 +100,12 @@ impl AppState {
     }
 
     /// Sends the person's message to a session another device runs.
-    fn steer_remote(&self, session: &str, text: &str, attachments: &[String]) -> CmdResult<()> {
+    async fn steer_remote(
+        &self,
+        session: &str,
+        text: &str,
+        attachments: &[String],
+    ) -> CmdResult<()> {
         let hub = self
             .work_hub
             .as_ref()
@@ -116,6 +121,7 @@ impl AppState {
                 files,
             },
         )
+        .await
         .map_err(err)?;
         Ok(())
     }
@@ -753,7 +759,7 @@ async fn chat_send(
     let session = state.hub.session_for_item(&item.id).map_err(err)?;
     // Another device runs this chat: the message goes there through the hub.
     if !state.hub.runs_here(&session) {
-        state.steer_remote(&session.id, &text, &attachments)?;
+        state.steer_remote(&session.id, &text, &attachments).await?;
         return Ok(ChatStarted { item, session });
     }
     // A turn in flight takes the message (and its files) as steering;
@@ -1056,6 +1062,7 @@ async fn chat_stop(state: State<'_, AppState>, session_id: String) -> CmdResult<
     match (&state.work_hub, remote) {
         (Some(h), true) => {
             h.steer_remote(&session_id, &SteerCommand::Stop)
+                .await
                 .map_err(err)?;
         }
         _ => state.hub.stop(&session_id),
@@ -1075,6 +1082,7 @@ async fn chat_interrupt(state: State<'_, AppState>, session_id: String) -> CmdRe
     match (&state.work_hub, remote) {
         (Some(h), true) => {
             h.steer_remote(&session_id, &SteerCommand::Interrupt)
+                .await
                 .map_err(err)?;
         }
         _ => {
@@ -1112,6 +1120,7 @@ async fn approval_resolve(
             answers,
         },
     )
+    .await
     .map_err(err)?;
     Ok(true)
 }
@@ -2822,14 +2831,18 @@ pub fn run() {
                     // Agent jobs from workflows: this computer takes the
                     // ones it can, on the hub's leases.
                     let name = tab_core::jobs::computer_name();
-                    tab_core::jobs::JobRunner::new(
+                    let runner = tab_core::jobs::JobRunner::new(
                         store.clone(),
                         Arc::new(hub.clone()),
                         h.clone(),
                         tab_core::runner::RunnerKind::Computer,
                         &name,
-                    )
-                    .start(tab_core::jobs::CancellationToken::new());
+                    );
+                    // Setup isn't on the async runtime, and the runner's
+                    // loop is a task on it: start it from there.
+                    tauri::async_runtime::spawn(async move {
+                        runner.start(tab_core::jobs::CancellationToken::new());
+                    });
                     Some(h)
                 }
                 Err(e) => {
@@ -2871,9 +2884,10 @@ pub fn run() {
             };
             if let (Some(h), Some(id)) = (&work_hub, &cloud_hub) {
                 h.expect_cloud();
-                let link = app.state::<account::AccountState>().link(id);
-                let (h, store) = (h.clone(), store.clone());
+                let (h, store, app, id) = (h.clone(), store.clone(), app.handle().clone(), id.clone());
                 tauri::async_runtime::spawn(async move {
+                    // On the runtime: the link's socket is a task there.
+                    let link = app.state::<account::AccountState>().link(&id);
                     let Some(link) = link else {
                         tracing::error!("hub: moved to tab cloud, but sign-in is off in this build");
                         return;

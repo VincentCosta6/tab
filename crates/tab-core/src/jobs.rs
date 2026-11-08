@@ -156,7 +156,8 @@ impl JobRunner {
         self.git_token.lock().unwrap().clone()
     }
 
-    /// Looks for jobs until `cancel`.
+    /// Looks for jobs until `cancel`. Call it on the tokio runtime (inside
+    /// a task, or `block_on`): it spawns the runner's loop there.
     pub fn start(self: &Arc<Self>, cancel: CancellationToken) {
         let me = self.clone();
         tokio::spawn(async move {
