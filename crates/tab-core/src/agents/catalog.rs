@@ -92,7 +92,8 @@ pub struct ModelSpec {
 pub struct ListModels {
     pub args: Vec<String>,
     /// How to read its output. `provider_slash_model_lines`: one
-    /// `provider/model` per line.
+    /// `provider/model` per line. `provider_model_table`: a table whose
+    /// first two columns are the provider and the model.
     pub format: String,
 }
 
@@ -116,9 +117,7 @@ pub struct Upgrade {
 
 impl Harness {
     pub fn kind(&self) -> Option<AgentKind> {
-        [AgentKind::ClaudeCode, AgentKind::OpenCode]
-            .into_iter()
-            .find(|k| k.as_str() == self.id)
+        AgentKind::ALL.into_iter().find(|k| k.as_str() == self.id)
     }
 
     /// The command that installs it on this computer, if tab can run one.
@@ -204,24 +203,43 @@ pub fn options(h: &Harness, listed: &str) -> Vec<ModelOption> {
         common: m.common,
     });
     let format = h.list_models.as_ref().map(|l| l.format.as_str());
-    let mut more: Vec<ModelOption> = match format {
+    let ids: Vec<String> = match format {
         Some("provider_slash_model_lines") => listed
             .lines()
             .map(str::trim)
-            .filter(|l| {
-                !l.contains(char::is_whitespace)
-                    && l.split_once('/')
-                        .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty())
-            })
-            .map(|id| ModelOption {
-                agent,
-                id: id.into(),
-                label: id.split_once('/').map(|(_, m)| m).unwrap_or(id).into(),
-                common: h.common_models.iter().any(|c| c == id),
-            })
+            .filter(|l| !l.contains(char::is_whitespace))
+            .map(str::to_string)
             .collect(),
+        // A table whose first two columns are provider and model, under a
+        // `provider model …` header.
+        Some("provider_model_table") => {
+            let cols = |l: &str| {
+                let mut c = l.split_whitespace();
+                Some((c.next()?.to_string(), c.next()?.to_string()))
+            };
+            listed
+                .lines()
+                .skip_while(|l| cols(l).is_none_or(|(p, m)| p != "provider" || m != "model"))
+                .skip(1)
+                .filter_map(cols)
+                .map(|(p, m)| format!("{p}/{m}"))
+                .collect()
+        }
         _ => Vec::new(),
     };
+    let mut more: Vec<ModelOption> = ids
+        .iter()
+        .filter(|id| {
+            id.split_once('/')
+                .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty())
+        })
+        .map(|id| ModelOption {
+            agent,
+            id: id.clone(),
+            label: id.split_once('/').map(|(_, m)| m).unwrap_or(id).into(),
+            common: h.common_models.iter().any(|c| c == id),
+        })
+        .collect();
     more.sort_by(|a, b| b.common.cmp(&a.common).then_with(|| a.id.cmp(&b.id)));
     fixed
         .chain(more)
@@ -293,7 +311,7 @@ mod tests {
 
     #[test]
     fn every_adapter_has_metadata() {
-        for kind in [AgentKind::ClaudeCode, AgentKind::OpenCode] {
+        for kind in AgentKind::ALL {
             let h = harness(kind);
             assert_eq!(h.command, default_command(kind));
             assert!(h.install.npm.is_some() || h.install.unix.is_some());
@@ -319,6 +337,23 @@ mod tests {
         );
         assert!(m[0].common && !m[1].common);
         assert_eq!(m[0].label, "claude-sonnet-5-5");
+    }
+
+    #[test]
+    fn a_model_table_reads_its_first_two_columns() {
+        let pi = harness(AgentKind::Pi);
+        let out = "Warning: errors loading models.json\nprovider   model              context  max-out  thinking  images\nanthropic  claude-sonnet-5-5  1M       64K      yes       yes\nopenai     gpt-6-sol          400K     128K     yes       yes\n";
+        let ids: Vec<_> = options(pi, out)
+            .into_iter()
+            .map(|m| (m.id, m.common))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("anthropic/claude-sonnet-5-5".to_string(), true),
+                ("openai/gpt-6-sol".to_string(), true),
+            ]
+        );
     }
 
     #[test]

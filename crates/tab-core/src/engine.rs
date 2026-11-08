@@ -565,10 +565,7 @@ impl Timeline {
         match e {
             EngineEvent::SessionChanged { session: s } => {
                 let Some(item) = &s.item_id else { return };
-                let agent = match s.agent {
-                    crate::model::AgentKind::ClaudeCode => "Claude Code",
-                    crate::model::AgentKind::OpenCode => "OpenCode",
-                };
+                let agent = crate::agents::catalog::harness(s.agent).name.as_str();
                 let before = self.sessions.insert(s.id.clone(), s.status);
                 let first = before.is_none()
                     && !self

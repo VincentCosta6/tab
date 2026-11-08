@@ -677,6 +677,10 @@ pub enum AgentKind {
     /// `opencode`, as the app and the store spell it.
     #[serde(rename = "opencode", alias = "open_code")]
     OpenCode,
+    /// OpenAI's Codex CLI.
+    Codex,
+    /// Pi, the minimal coding agent.
+    Pi,
 }
 
 impl AgentKind {
@@ -684,14 +688,24 @@ impl AgentKind {
         match self {
             AgentKind::ClaudeCode => "claude_code",
             AgentKind::OpenCode => "opencode",
+            AgentKind::Codex => "codex",
+            AgentKind::Pi => "pi",
         }
     }
+    /// Every harness tab has an adapter for, in the order it suggests them.
+    pub const ALL: [AgentKind; 4] = [
+        AgentKind::ClaudeCode,
+        AgentKind::OpenCode,
+        AgentKind::Codex,
+        AgentKind::Pi,
+    ];
+    /// From [`Self::as_str`]. Anything unknown (a harness from a newer app)
+    /// reads as Claude Code.
     pub fn parse(s: &str) -> Self {
-        if s == "opencode" {
-            AgentKind::OpenCode
-        } else {
-            AgentKind::ClaudeCode
-        }
+        Self::ALL
+            .into_iter()
+            .find(|k| k.as_str() == s)
+            .unwrap_or(AgentKind::ClaudeCode)
     }
 }
 

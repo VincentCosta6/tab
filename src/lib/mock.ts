@@ -14,14 +14,18 @@ import type {
 } from "./types";
 
 const harnesses = harnessData as unknown as Harness[];
-let mockOpenCode = false;
+// `?agents=none` starts with no agent installed, `?agents=claude_code,codex` with those.
+const mockInstalled = new Set<AgentKind>(
+  ((typeof location !== "undefined" && new URLSearchParams(location.search).get("agents")) || "claude_code").split(",").filter((k) => k !== "none") as AgentKind[],
+);
+const mockOpenCode = () => mockInstalled.has("opencode");
 const mockModels = (): ModelOption[] => {
   const claude = (harnessData[0].models as { id: string; label: string; common?: boolean }[]).map((m) => ({ agent: "claude_code" as AgentKind, id: m.id, label: m.label, common: !!m.common }));
-  if (!mockOpenCode) return claude;
+  if (!mockOpenCode()) return mockInstalled.has("claude_code") ? claude : [];
   const common = harnessData[1].common_models as string[];
   const oc = ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-haiku-5-5", "openai/gpt-5.5", "openai/gpt-5.5-mini", "google/gemini-3-pro", "ollama/qwen3:32b", "openrouter/deepseek/deepseek-v4"]
     .map((id) => ({ agent: "opencode" as AgentKind, id, label: id.slice(id.indexOf("/") + 1), common: common.includes(id) }));
-  return [...claude, ...oc];
+  return [...(mockInstalled.has("claude_code") ? claude : []), ...oc];
 };
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
@@ -424,18 +428,16 @@ export const mockApi = {
           mockAppUpdated = true;
           return undefined;
         }
-        case "detect_agents": return [
-          mockOpenCode
-            ? { kind: "opencode", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\opencode.cmd", version: "1.4.2", error: null }
-            : { kind: "opencode", found: false, path: null, version: null, error: "`opencode` was not found on PATH.", install_command: "npm install -g opencode-ai" },
-          { kind: "claude_code", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\claude.cmd", version: "2.1.318 (Claude Code)", error: null },
-        ];
+        case "detect_agents": return harnesses.map((h) => mockInstalled.has(h.id)
+          ? { kind: h.id, found: true, path: `/usr/local/bin/${h.command}`, version: h.id === "claude_code" ? "2.1.318 (Claude Code)" : "1.4.2", error: null }
+          : { kind: h.id, found: false, path: null, version: null, error: `\`${h.command}\` was not found on PATH.`, install_command: h.install.npm ? `npm install -g ${h.install.npm}` : h.install.unix });
         case "agent_harnesses": return harnesses;
         case "agent_models": return mockModels();
         case "agent_install": {
-          const steps = ["npm install -g opencode-ai", "added 12 packages in 4s", "Installed OpenCode 1.4.2"];
+          const h = harnesses.find((x) => x.id === args.kind);
+          const steps = [`npm install -g ${h?.install.npm ?? h?.command}`, "added 12 packages in 4s", `Installed ${h?.name} 1.4.2`];
           for (const s of steps) { await new Promise((r) => setTimeout(r, 600)); upgradeListeners.forEach((l) => l(s)); }
-          if ((args.kind as AgentKind) === "opencode") mockOpenCode = true;
+          mockInstalled.add(args.kind as AgentKind);
           return undefined;
         }
         case "set_agent_model": {

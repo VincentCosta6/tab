@@ -1,4 +1,5 @@
-//! Agent sessions: tab drives a coding agent (Claude Code or OpenCode) on
+//! Agent sessions: tab drives a coding agent (Claude Code, OpenCode, Codex
+//! or Pi) on
 //! behalf of a queue item and streams the conversation into the chat view.
 //!
 //! * One session per item. Chatting on an item reuses its latest session;
@@ -14,7 +15,10 @@
 
 pub mod catalog;
 mod claude;
+mod codex;
 mod opencode;
+mod per_turn;
+mod pi;
 mod small;
 mod suggest;
 mod titler;
@@ -871,6 +875,12 @@ impl AgentHub {
                 AgentKind::OpenCode => {
                     opencode::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
                 }
+                AgentKind::Codex => {
+                    codex::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
+                }
+                AgentKind::Pi => {
+                    pi::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
+                }
             };
             let followups = {
                 let mut running = hub.running.lock().unwrap();
@@ -1328,17 +1338,21 @@ impl AgentHub {
         Some(probe(cfg.kind?, cfg.command.as_deref()).await)
     }
 
-    /// Looks for both supported agents, for onboarding.
+    /// Looks for every harness tab can drive, in `harnesses.json` order, all
+    /// at once since each asks its CLI for a version. Each is looked up the
+    /// way chats start it: the app's PATH, then its install folders.
     pub async fn detect(&self) -> Vec<AgentProbe> {
         let cfg = self.config();
-        let mut out = Vec::new();
-        for kind in catalog::harnesses().iter().filter_map(|h| h.kind()) {
-            let custom = (cfg.kind == Some(kind))
-                .then(|| cfg.command.clone())
-                .flatten();
-            out.push(probe(kind, custom.as_deref()).await);
-        }
-        out
+        let probes = catalog::harnesses()
+            .iter()
+            .filter_map(|h| h.kind())
+            .map(|kind| {
+                let custom = (cfg.kind == Some(kind))
+                    .then(|| cfg.command.clone())
+                    .flatten();
+                async move { probe(kind, custom.as_deref()).await }
+            });
+        futures_util::future::join_all(probes).await
     }
 }
 

@@ -4,9 +4,9 @@ import { Icon } from "../../design/icons";
 import { cx } from "../../design/components";
 import { api, onAgentUpgrade } from "../../lib/api";
 
-const agentName: Record<string, string> = { claude_code: "Claude Code", opencode: "OpenCode" };
+const agentName: Record<string, string> = { claude_code: "Claude Code", opencode: "OpenCode", codex: "Codex", pi: "Pi" };
 /** What fits in the 84px nav; the full name goes in the tooltip. */
-const shortName: Record<string, string> = { claude_code: "Claude", opencode: "OpenCode" };
+const shortName: Record<string, string> = { claude_code: "Claude", opencode: "OpenCode", codex: "Codex", pi: "Pi" };
 
 /** "2.1.91 (Claude Code)" → [2, 1, 91]. */
 function parts(v: string | null | undefined): number[] | null {

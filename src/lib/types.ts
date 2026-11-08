@@ -259,7 +259,7 @@ export interface ContextEntry {
 export interface NewContext { section: ContextSection; ref_item_id?: string | null; url?: string | null; title: string; summary?: string | null; added_by: string }
 export interface ItemContext { item: QueueItem; entries: ContextEntry[]; related: QueueItem[] }
 
-export type AgentKind = "claude_code" | "opencode";
+export type AgentKind = "claude_code" | "opencode" | "codex" | "pi";
 export type SessionStatus = "idle" | "working" | "needs_input" | "monitoring" | "failed";
 export interface Session {
   id: string;

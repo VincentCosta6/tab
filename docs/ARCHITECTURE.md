@@ -283,11 +283,15 @@ Designed: a local MCP server (Streamable HTTP on localhost with a per-install to
 
 Configuration tools write the same config and tables the UI does, so "set up an automation that snoozes Dependabot PRs until Friday" in chat produces exactly what the builder would.
 
-## Agent sessions (built: Claude Code and OpenCode)
+## Agent sessions (built: Claude Code, OpenCode, Codex and Pi)
 
 Built (`tab-core/src/agents`): one session per item, reused on every message; transcripts in `sessions` / `session_messages`; events `SessionChanged`, `SessionMessage`, `SessionDelta` (streaming text), `ApprovalRequested` / `ApprovalResolved`.
 - *Claude Code*: one `claude -p --output-format stream-json --include-partial-messages` process per turn, `--resume` with the stored session id, `--append-system-prompt-file` with the item and its Context, `--mcp-config` pointing at tab, and `--permission-prompt-tool mcp__tab__approve` so approvals come to the chat. Runs the user's own Claude Code install and login. `bypassPermissions` is never offered.
 - *OpenCode*: tab starts `opencode serve` on a free localhost port (or uses a configured URL), injects its MCP server through `OPENCODE_CONFIG_CONTENT`, creates a session per task, sends `prompt_async` with the context as `system`, follows `GET /event` (SSE) for text deltas, tool parts and `permission.asked`, and answers permissions with `POST /permission/{id}/reply`.
+- *Codex* (`agents/codex.rs`): one `codex exec --json` process per turn (`resume <thread id>` after the first), the context as `developer_instructions`, tab's MCP server through `-c mcp_servers.tab.*` with its token in `TAB_MCP_TOKEN`. `exec` can't route approvals, so it runs with `approval_policy="never"`: inside tab's sandbox where that's enforced (`--sandbox danger-full-access`, since Codex's own sandbox can't nest in it), else in Codex's `workspace-write` sandbox. Strict adds `--ignore-user-config --ignore-rules`, and a call to any MCP server but `tab` stops the turn.
+- *Pi* (`agents/pi.rs`): one `pi --mode json` process per turn; each chat is the Pi session `--session-id <chat id>`, the context goes in `--append-system-prompt <file>`. Pi has no approvals and reads MCP servers only from its own config, so it doesn't get tab's tools yet. Strict adds `--no-extensions --no-skills --no-prompt-templates --no-approve`.
+- Codex and Pi share `agents/per_turn.rs`: messages sent mid-turn wait and run as the next turn, since neither CLI takes input once started.
+- Which harnesses exist is data (`agents/harnesses.json`). Onboarding and Settings probe all of them at once and list the installed ones first; the rest sit under a search, in file order (Claude Code, then OpenCode).
 - Windows: executables are resolved with `which` (so npm `.cmd` shims work) and started without a console window.
 
 Still designed: a PTY terminal view for arbitrary CLI agents (below).
