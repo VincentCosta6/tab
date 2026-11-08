@@ -35,6 +35,7 @@ message ClientEnvelope {
     Watch watch = 19;
     Publish publish = 20;
     Steer steer = 21;
+    Import import = 22;
   }
 }
 
@@ -58,6 +59,7 @@ message ServerEnvelope {
     Live live = 22;
     Steered steered = 23;
     Watched watched = 24;
+    Imported imported = 25;
   }
 }
 
@@ -150,6 +152,17 @@ message Apply {
   repeated Op ops = 1;
 }
 
+// Copies another hub's history into this one, oldest first, keeping each
+// change's sequence number, author and time, so devices synced to the old
+// hub carry on against this one. This is how a hub moves (local to cloud,
+// and back). Send the history in pages: the first page must start at
+// seq 1 on an empty hub, and each later page must continue right after
+// the hub's head, on the same connection. Anything else is a Conflict,
+// so an import can't rewrite or interleave with a hub already in use.
+message Import {
+  repeated AppliedOp changes = 1;
+}
+
 // Changes after `since`, oldest first.
 message GetChanges {
   uint64 since = 1;
@@ -233,6 +246,11 @@ message Welcome {
 message Applied {
   uint64 first = 1;
   uint64 last = 2;
+}
+
+// Reply to Import: the hub's head after the page.
+message Imported {
+  uint64 head = 1;
 }
 
 // Reply to GetChanges, and pushed to other clients when something changes.

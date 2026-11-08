@@ -715,3 +715,57 @@ fn file_cleanup_pages_through_many_files() {
     assert_eq!(gone.len(), 1200);
     assert_eq!(blobs.stats().unwrap().files, 0);
 }
+
+#[test]
+fn importing_moves_a_hub_over_the_wire() {
+    // The desktop's hub, with some history.
+    let mut local = SqliteStore::in_memory().unwrap();
+    history(&mut local);
+    let log = local.changes_since(0, 100).unwrap();
+    let page = |from: usize, to: usize| {
+        Req::Import(pb::Import {
+            changes: log[from..to].iter().map(Into::into).collect(),
+        })
+    };
+
+    let mut cloud = Hub::new(SqliteStore::in_memory().unwrap(), "cloud", t(0));
+    cloud.connect(MAC, "", t(0));
+    cloud.connect(PHONE, "", t(0));
+    send(&mut cloud, MAC, 1, hello("mac", 0), t(9));
+    send(&mut cloud, PHONE, 1, hello("phone", 0), t(9));
+
+    // A page that doesn't start at 1 is refused.
+    let h = send(&mut cloud, MAC, 2, page(1, 3), t(9));
+    assert!(matches!(body(&h), Res::Error(e) if e.code == pb::error::Code::Conflict as i32));
+
+    // Two pages, in order, keep every seq, author and time, and are pushed
+    // to the phone like any write.
+    let h = send(&mut cloud, MAC, 3, page(0, 2), t(9));
+    assert!(matches!(body(&h), Res::Imported(i) if i.head == 2), "{h:?}");
+    assert!(
+        matches!(&h.push, Some(p) if matches!(&p.body, Some(Res::Changes(c)) if c.changes.len() == 2))
+    );
+    // Only the importing connection may carry on.
+    let h = send(&mut cloud, PHONE, 2, page(2, log.len()), t(9));
+    assert!(matches!(body(&h), Res::Error(e) if e.code == pb::error::Code::Conflict as i32));
+    // Skipping ahead is refused, and writes nothing.
+    let h = send(&mut cloud, MAC, 4, page(3, log.len()), t(9));
+    assert!(
+        matches!(body(&h), Res::Error(e) if e.message.contains("expected change 3")),
+        "{h:?}"
+    );
+    let h = send(&mut cloud, MAC, 5, page(2, log.len()), t(9));
+    assert!(matches!(body(&h), Res::Imported(i) if i.head == log.len() as u64));
+    assert_eq!(cloud.store().changes_since(0, 100).unwrap(), log);
+    assert_eq!(
+        cloud.store().search("three", 5).unwrap(),
+        local.search("three", 5).unwrap()
+    );
+
+    // A hub that's in use can't be imported into, even by a new connection
+    // from the same device.
+    cloud.connect(3, "", t(10));
+    send(&mut cloud, 3, 1, hello("mac", 0), t(10));
+    let h = send(&mut cloud, 3, 2, page(0, 1), t(10));
+    assert!(matches!(body(&h), Res::Error(e) if e.message.contains("already has")));
+}

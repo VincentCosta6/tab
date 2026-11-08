@@ -79,6 +79,9 @@ struct Conn {
     synced_to: u64,
     /// Sessions it wants live events for.
     watching: BTreeSet<String>,
+    /// It's importing another hub's history (see [`pb::Import`]), and the
+    /// log has nothing but what it sent.
+    importing: bool,
 }
 
 pub struct Hub<S> {
@@ -122,6 +125,7 @@ impl<S: HubStore> Hub<S> {
                 connected_at: now,
                 synced_to: 0,
                 watching: BTreeSet::new(),
+                importing: false,
             },
         );
     }
@@ -255,24 +259,7 @@ impl<S: HubStore> Hub<S> {
                     })?;
                 let before = self.store.head().map_err(err)?;
                 let applied = self.store.apply(device, &ops, now).map_err(err)?;
-                let head = self.store.head().map_err(err)?;
-                // Everyone gets the push; the writer, if it was caught up,
-                // is still caught up.
-                for (other, c) in self.conns.iter_mut() {
-                    if *other != conn || c.synced_to == before {
-                        c.synced_to = head;
-                    }
-                }
-                let push = (!applied.is_empty()).then(|| {
-                    ServerEnvelope::new(
-                        0,
-                        Res::Changes(pb::Changes {
-                            changes: applied.iter().map(Into::into).collect(),
-                            head,
-                            more: false,
-                        }),
-                    )
-                });
+                let push = self.wrote(conn, before, &applied).map_err(err)?;
                 Handled {
                     reply: ServerEnvelope::new(
                         id,
@@ -285,6 +272,7 @@ impl<S: HubStore> Hub<S> {
                     direct: vec![],
                 }
             }
+            Req::Import(im) => self.import(conn, id, im)?,
             Req::Watch(w) => self.watch(conn, id, w.sessions),
             Req::Publish(p) => self.publish(conn, device, id, p).map_err(|e| e.reply(id))?,
             Req::Steer(st) => self.steer(device, id, st).map_err(|e| e.reply(id))?,
@@ -339,6 +327,65 @@ impl<S: HubStore> Hub<S> {
                     edges: edges.iter().map(Into::into).collect(),
                 }))
             }
+        })
+    }
+
+    /// After a write: moves cursors along and builds the push for everyone
+    /// else. The writer, if it was caught up, is still caught up.
+    fn wrote(
+        &mut self,
+        conn: ConnId,
+        before: u64,
+        applied: &[tab_domain::ops::Applied],
+    ) -> Result<Option<ServerEnvelope>, StoreError> {
+        let head = self.store.head()?;
+        for (other, c) in self.conns.iter_mut() {
+            if *other != conn || c.synced_to == before {
+                c.synced_to = head;
+            }
+        }
+        Ok((!applied.is_empty()).then(|| {
+            ServerEnvelope::new(
+                0,
+                Res::Changes(pb::Changes {
+                    changes: applied.iter().map(Into::into).collect(),
+                    head,
+                    more: false,
+                }),
+            )
+        }))
+    }
+
+    // The error is the reply to send, so its size doesn't matter.
+    #[allow(clippy::result_large_err)]
+    fn import(&mut self, conn: ConnId, id: u64, im: pb::Import) -> Result<Handled, ServerEnvelope> {
+        let err = |e| store_error(id, e);
+        let conflict = |m: String| ServerEnvelope::error(id, pb::error::Code::Conflict, m);
+        let changes = im
+            .changes
+            .into_iter()
+            .map(tab_domain::ops::Applied::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ServerEnvelope::error(id, pb::error::Code::BadRequest, e.to_string()))?;
+        let before = self.store.head().map_err(err)?;
+        let importing = self.conns.get(&conn).is_some_and(|c| c.importing);
+        if before != 0 && !importing {
+            return Err(conflict(format!(
+                "this hub already has {before} changes; import only into an empty hub"
+            )));
+        }
+        let head = migrate::import(&mut self.store, &changes).map_err(|e| match e {
+            migrate::MigrateError::Store(e) => store_error(id, e),
+            other => conflict(other.to_string()),
+        })?;
+        if let Some(c) = self.conns.get_mut(&conn) {
+            c.importing = true;
+        }
+        let push = self.wrote(conn, before, &changes).map_err(err)?;
+        Ok(Handled {
+            reply: ServerEnvelope::new(id, Res::Imported(pb::Imported { head })),
+            push,
+            direct: vec![],
         })
     }
 

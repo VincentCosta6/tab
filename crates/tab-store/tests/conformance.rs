@@ -25,6 +25,12 @@ fn temp_db() -> tab_store::sqlite::SqliteStore {
     tab_store::sqlite::SqliteStore::open(path).unwrap()
 }
 
+mod common;
+
+mod like_durable_object {
+    tab_store::conformance_tests!(super::common::do_like::store());
+}
+
 mod sqlite_file {
     tab_store::conformance_tests!(super::temp_db());
 }
