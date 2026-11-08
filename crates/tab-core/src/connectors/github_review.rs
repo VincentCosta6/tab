@@ -513,6 +513,40 @@ pub async fn file_at(gw: &Gateway, repo: &str, sha: &str, path: &str) -> anyhow:
     }
 }
 
+/// A file's bytes at a commit, for showing images in the review. The contents
+/// API sends files up to 1 MB as base64 inside its JSON; bigger ones come back
+/// without content and read as empty. Not cached here: the cache keys on the
+/// URL, which `file_at` shares with a different response. The UI keeps them.
+pub async fn file_bytes_at(
+    gw: &Gateway,
+    repo: &str,
+    sha: &str,
+    path: &str,
+) -> anyhow::Result<Vec<u8>> {
+    use base64::Engine;
+    let call = Call::get(
+        "github",
+        "github",
+        "review: file bytes",
+        format!("{API}/repos/{repo}/contents/{path}"),
+    )
+    .query("ref", sha);
+    let body: Value = match gw.send(call).await {
+        Ok(r) => r.json()?,
+        Err(crate::gateway::GatewayError::Http { status: 404, .. }) => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    if body["encoding"].as_str() != Some("base64") {
+        return Ok(Vec::new());
+    }
+    let b64: String = body["content"]
+        .as_str()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    Ok(base64::engine::general_purpose::STANDARD.decode(b64)?)
+}
+
 /// What the UI knows about the PR that every action needs.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrRef {

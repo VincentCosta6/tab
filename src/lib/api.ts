@@ -119,6 +119,8 @@ export const api = {
   mcpInfo: () => call<{ url: string | null; token: string }>("mcp_info"),
   githubPull: (repo: string, number: number, sample: boolean) => call<PullReview>("github_pull", { repo, number, sample }),
   githubFile: (repo: string, sha: string, path: string) => call<string>("github_file", { repo, sha, path }),
+  /** An image's bytes at a commit, for the review's image diff: from the local clone, or the API. */
+  reviewFileBytes: (repo: string, sha: string, path: string, local: boolean) => call<ArrayBuffer>("review_file_bytes", { repo, sha, path, local }),
   githubReviewAction: (pr: PrRef, action: ReviewAction) => call<void>("github_review_action", { pr, action }),
   workspacePrepare: (target: { repo: string; number: number; head_sha: string; base_sha: string; base_ref: string }) =>
     call<ReviewWorkspace>("review_workspace_prepare", { target }),

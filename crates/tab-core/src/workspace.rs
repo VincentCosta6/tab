@@ -229,6 +229,11 @@ impl Git {
     }
 
     async fn run(&self, dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+        Ok(String::from_utf8_lossy(&self.run_bytes(dir, args).await?).into_owned())
+    }
+
+    /// `run`, with stdout as bytes rather than text (for binary blobs).
+    async fn run_bytes(&self, dir: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
         let out = self
             .cmd(dir)
             .args(args)
@@ -245,7 +250,7 @@ impl Git {
                 .unwrap_or("git failed");
             anyhow::bail!("git {}: {}", args.first().unwrap_or(&""), last.trim());
         }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(out.stdout)
     }
 
     /// Runs a long git command, reporting `--progress` output as it goes.
@@ -608,6 +613,17 @@ impl Workspaces {
         match git.run(&clone, &["cat-file", "-e", &spec]).await {
             Ok(_) => git.run(&clone, &["cat-file", "blob", &spec]).await,
             Err(_) => Ok(String::new()),
+        }
+    }
+
+    /// `read`, as bytes, for files that aren't text (images in the review).
+    pub async fn read_bytes(&self, repo: &str, sha: &str, path: &str) -> anyhow::Result<Vec<u8>> {
+        let git = self.git(None)?;
+        let clone = self.repo_dir(repo)?.join("repo");
+        let spec = format!("{}:{}", valid_sha(sha)?, valid_path(path)?);
+        match git.run(&clone, &["cat-file", "-e", &spec]).await {
+            Ok(_) => git.run_bytes(&clone, &["cat-file", "blob", &spec]).await,
+            Err(_) => Ok(Vec::new()),
         }
     }
 

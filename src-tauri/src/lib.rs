@@ -1754,6 +1754,31 @@ async fn github_file(
         .map_err(err)
 }
 
+/// An image's bytes at a commit, for the review's image diff: from the local
+/// clone when there is one, else the contents API. Only images are served.
+#[tauri::command]
+async fn review_file_bytes(
+    state: State<'_, AppState>,
+    repo: String,
+    sha: String,
+    path: String,
+    local: bool,
+) -> CmdResult<tauri::ipc::Response> {
+    if image_ext(&path).is_none() && !path.to_ascii_lowercase().ends_with(".svg") {
+        return Err("not an image".into());
+    }
+    let bytes = if local {
+        state.workspaces.read_bytes(&repo, &sha, &path).await
+    } else {
+        github_review::file_bytes_at(&state.gateway, &repo, &sha, &path).await
+    }
+    .map_err(err)?;
+    if bytes.len() > MAX_IMAGE {
+        return Err("this image is too big to show here".into());
+    }
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[tauri::command]
 async fn github_review_action(
     state: State<'_, AppState>,
@@ -2918,6 +2943,7 @@ pub fn run() {
             gh_install,
             github_pull,
             github_file,
+            review_file_bytes,
             github_review_action,
             review_workspace_prepare,
             review_workspace_file,

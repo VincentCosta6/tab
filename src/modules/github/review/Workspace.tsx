@@ -19,11 +19,12 @@ import { loadProject, projectStore, setOpener } from "../monaco";
 import { AiPanel, FixBanner, useAi } from "./ai";
 import { Boot } from "./Boot";
 import { Ctx, type ComposerTarget, type DiffMode, type ReviewCtx } from "./context";
-import { readFile, useActions, usePull, useSource, useWorkspace } from "./data";
+import { isReviewImage, readFile, useActions, usePull, useSource, useWorkspace } from "./data";
 import { DiffStack, FileHeader } from "./DiffStack";
 import { FileDiff } from "./FileDiff";
 import { FileView } from "./FileView";
 import { Header } from "./Header";
+import { ImageDiff, ImageFile } from "./ImageDiff";
 import { LinkedWork } from "./LinkedWork";
 import { LanguageStatus } from "./LanguageServers";
 import { buildTree, compactTree, isViewed, openThreads, splitPath, treeOrder } from "./model";
@@ -268,11 +269,11 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack }: 
                 return f ? (
                   <div className="rv-diff-tab">
                     <FileHeader file={f} />
-                    <FileDiff key={`${f.filename}:${mode}`} file={f} fill reveal={tab.reveal} />
+                    {isReviewImage(f.filename) ? <ImageDiff key={f.filename} file={f} fill /> : <FileDiff key={`${f.filename}:${mode}`} file={f} fill reveal={tab.reveal} />}
                   </div>
                 ) : null;
               })()}
-              {tab.kind === "file" && <FileView key={tab.path} path={tab.path} reveal={tab.reveal} />}
+              {tab.kind === "file" && (isReviewImage(tab.path) ? <ImageFile key={tab.path} path={tab.path} reveal={tab.reveal} /> : <FileView key={tab.path} path={tab.path} reveal={tab.reveal} />)}
             </div>
           </main>
           {ctx.ai.open && <AiPanel ai={ctx.ai} pr={pr} openFile={openFile} />}
