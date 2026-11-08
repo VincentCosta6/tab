@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, cx } from "../../design/components";
-import { Brand } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { Markdown } from "../../design/markdown";
 import { Attachments } from "../../design/ImageViewer";
@@ -12,12 +11,10 @@ import { Dictation } from "./Dictation";
 import { useDropTarget } from "./DropZone";
 import { api } from "../../lib/api";
 import { useChat, useConfig, useHarnesses, useStream } from "../../lib/hooks";
-import { ModelMenu, modelFor } from "./ModelMenu";
+import { HarnessIcon, ModelMenu, modelFor } from "./ModelMenu";
 import { keys } from "../../lib/query";
 import type { AgentKind, Approval, Chat, QueueItem, SessionMessage, SessionStatus } from "../../lib/types";
 
-export const agentLabel: Record<AgentKind, string> = { claude_code: "Claude Code", opencode: "OpenCode" };
-const agentBrand: Record<AgentKind, string> = { claude_code: "claude", opencode: "opencode" };
 
 export function openOnboarding() {
   window.dispatchEvent(new CustomEvent("tab:onboarding"));
@@ -252,14 +249,16 @@ function useNow(every: number) {
 }
 
 export function AgentStatus({ chat }: { chat: Chat | undefined }) {
+  const { data: harnesses = [] } = useHarnesses();
   const s = chat?.session;
   if (!s) return null;
+  const harness = harnesses.find((h) => h.id === s.agent);
   const status: SessionStatus = chat.approvals.length ? "needs_input" : s.status;
   const text = { idle: "Idle", working: "Working…", needs_input: "Needs you", monitoring: "Monitoring", failed: "Failed" }[status];
   return (
     <span className={cx("agent-status", `agent-${status}`)}>
-      <Brand name={agentBrand[s.agent]} size={12} />
-      {agentLabel[s.agent]} · {text}
+      <HarnessIcon harness={harness} size={12} />
+      {harness?.name ?? s.agent} · {text}
     </span>
   );
 }

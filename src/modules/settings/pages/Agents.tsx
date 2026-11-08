@@ -3,7 +3,8 @@ import { openOnboarding } from "../../work/Chat";
 import { Button, Card, FormRow, Section, TextArea, TextInput, Toggle } from "../../../design/components";
 import { api } from "../../../lib/api";
 import { useFolderProblem, useHarnesses, useModels } from "../../../lib/hooks";
-import { ModelMenu, modelFor } from "../../work/ModelMenu";
+import { ModelMenu, modelFor, useInstalled } from "../../work/ModelMenu";
+import { orderHarnesses } from "../../../lib/harnesses";
 import { useDraft } from "../draft";
 import { AgentVersionRow } from "./AgentVersion";
 
@@ -13,6 +14,7 @@ export function AgentsPage() {
   const titler = draft.agent.titler ?? { enabled: true, model: null, instructions: "" };
   const { data: harnesses = [] } = useHarnesses();
   const { data: models = [] } = useModels();
+  const installed = useInstalled();
   const workdirProblem = useFolderProblem(draft.agent.workdir);
   const titlerAgent = titler.agent ?? draft.agent.kind;
   const harness = harnesses.find((h) => h.id === draft.agent.kind);
@@ -24,7 +26,7 @@ export function AgentsPage() {
           <FormRow label="Agent">
             <select className="select" value={draft.agent.kind ?? ""} onChange={(e) => set((c) => void ((c.agent.kind = (e.target.value || null) as typeof c.agent.kind), (c.agent.model = c.agent.kind ? c.agent.models?.[c.agent.kind] ?? null : null)))}>
               <option value="">Not set up</option>
-              {harnesses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+              {orderHarnesses(harnesses, installed).map((h) => <option key={h.id} value={h.id}>{h.name}{installed.has(h.id) ? "" : " (not found on this computer)"}</option>)}
             </select>
           </FormRow>
           <AgentVersionRow />

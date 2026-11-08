@@ -276,6 +276,13 @@
 .tagline { margin: 0; font-size: var(--text-xl); color: var(--fg-muted); }
 .tagline strong { color: var(--tone-accent-fg); }
 .agent-choices { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+.agent-picker { display: grid; gap: var(--space-3); }
+.agent-picker-title { margin: 0; font-size: var(--text-sm); font-weight: 600; color: var(--fg-muted); }
+.agent-picker-note { margin: 0; color: var(--fg-muted); font-size: var(--text-sm); }
+.agent-picker-search { display: grid; gap: var(--space-3); }
+.agent-picker-more > summary { cursor: pointer; font-size: var(--text-sm); color: var(--fg-muted); }
+.agent-picker-more > summary:hover { color: var(--fg); }
+.agent-picker-more > .agent-picker-search { margin-top: var(--space-3); }
 .agent-choice { display: grid; gap: var(--space-2); align-content: start; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-raised); text-align: left; cursor: pointer; color: var(--fg); }
 .agent-choice:hover { border-color: var(--border-strong); }
 .agent-choice.chosen { border-color: var(--focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent); }

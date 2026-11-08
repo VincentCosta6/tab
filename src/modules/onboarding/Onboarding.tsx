@@ -8,6 +8,7 @@ import { GhConnect } from "../connections/GhConnect";
 import { useConfig, useFolderProblem, useHarnesses, useSaveConfig } from "../../lib/hooks";
 import type { AgentKind, AgentProbe, Harness, HubMode, TabConfig } from "../../lib/types";
 import { HarnessIcon, ModelMenu, modelFor } from "../work/ModelMenu";
+import { harnessMatches, orderHarnesses } from "../../lib/harnesses";
 import { AccountBadge, CloudHubSetup, SignInButtons, cloudPerks, localDrawbacks, useAccount } from "../account/Account";
 
 const steps = ["Welcome", "Agent", "Hub", "Connections", "Ready"];
@@ -20,20 +21,25 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
   const [draft, setDraft] = useState<TabConfig | null>(null);
   const qc = useQueryClient();
   const { data: harnesses = [] } = useHarnesses();
-  // Looks again every few seconds while something isn't installed, and when
-  // the window comes back, so an agent installed in a terminal shows up.
+  // Looks again every few seconds while no agent is installed, and when the
+  // window comes back, so an agent installed in a terminal shows up.
   const probes = useQuery({
     queryKey: ["probes"],
     queryFn: api.detectAgents,
     staleTime: 0,
     enabled: step === 1,
     refetchOnWindowFocus: true,
-    refetchInterval: (q) => (q.state.data?.some((p) => !p.found) ? 3000 : false),
+    refetchInterval: (q) => (q.state.data && !q.state.data.some((p) => p.found) ? 3000 : false),
   });
   const found = probes.data?.filter((p) => p.found).map((p) => p.kind).join(",");
   useEffect(() => {
     void qc.invalidateQueries({ queryKey: ["agent-models"] });
   }, [found, qc]);
+  // Nothing chosen yet: start on the first agent this computer has.
+  const firstFound = harnesses.find((h) => found?.split(",").includes(h.id))?.id;
+  useEffect(() => {
+    if (firstFound) setDraft((d) => (d && !d.agent.kind ? { ...d, agent: { ...d.agent, kind: firstFound, model: d.agent.models?.[firstFound] ?? null } } : d));
+  }, [firstFound]);
   const sandbox = useQuery({ queryKey: ["sandbox"], queryFn: api.sandboxStatus, staleTime: 60_000, enabled: step === 1 });
 
   useEffect(() => {
@@ -56,7 +62,6 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
     fn(next);
     setDraft(next);
   };
-  const probe = (k: AgentKind): AgentProbe | undefined => probes.data?.find((p) => p.kind === k);
   const github = draft.connectors.github ?? { enabled: false, settings: {} };
 
   const finish = async () => {
@@ -96,20 +101,15 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
         {step === 1 && (
           <div className="onboarding-body">
             <h2>Set up your agent</h2>
-            <p className="subtle">tab runs your coding agent on this computer and streams it into the app. Pick one; you can switch later in Settings.</p>
-            <div className="agent-choices">
-              {harnesses.map((h) => (
-                <AgentChoice
-                  key={h.id}
-                  harness={h}
-                  probe={probe(h.id)}
-                  loading={probes.isLoading}
-                  chosen={draft.agent.kind === h.id}
-                  onChoose={() => set((c) => void ((c.agent.kind = h.id), (c.agent.model = c.agent.models?.[h.id] ?? null)))}
-                  onInstalled={() => (probes.refetch(), set((c) => void (c.agent.kind ??= h.id)))}
-                />
-              ))}
-            </div>
+            <p className="subtle">tab runs a coding agent on this computer and streams it into the app. Pick one; you can switch later in Settings, and each chat can use any agent you have.</p>
+            <AgentPicker
+              harnesses={harnesses}
+              probes={probes.data}
+              loading={probes.isLoading}
+              chosen={draft.agent.kind}
+              onChoose={(k) => set((c) => void ((c.agent.kind = k), (c.agent.model = c.agent.models?.[k] ?? null)))}
+              onInstalled={(k) => (probes.refetch(), set((c) => void (c.agent.kind ??= k)))}
+            />
             <div className="onboarding-fields">
               <label>
                 Work folder <small>Sessions start here, usually where your repos live.</small>
@@ -268,6 +268,52 @@ function SafetyOption({ icon, title, text, checked, onChange }: { icon: "shield"
         <p className="subtle">{text} You can change this in Settings.</p>
       </div>
       <Toggle label={title} checked={checked} onChange={onChange} />
+    </div>
+  );
+}
+
+/**
+ * The agents to choose from. The ones on this computer come first; the rest
+ * sit under a search, since there are many. With none installed, the search
+ * list is all there is, starting with Claude Code and OpenCode.
+ */
+function AgentPicker({ harnesses, probes, loading, chosen, onChoose, onInstalled }: { harnesses: Harness[]; probes: AgentProbe[] | undefined; loading: boolean; chosen: AgentKind | null; onChoose: (k: AgentKind) => void; onInstalled: (k: AgentKind) => void }) {
+  const [query, setQuery] = useState("");
+  const probe = (k: AgentKind) => probes?.find((p) => p.kind === k);
+  const installed = new Set(probes?.filter((p) => p.found).map((p) => p.kind) ?? []);
+  const ordered = orderHarnesses(harnesses, installed);
+  const here = ordered.filter((h) => installed.has(h.id));
+  const others = ordered.filter((h) => !installed.has(h.id));
+  const matching = others.filter((h) => harnessMatches(h, query));
+  const card = (h: Harness) => (
+    <AgentChoice key={h.id} harness={h} probe={probe(h.id)} loading={loading} chosen={chosen === h.id} onChoose={() => onChoose(h.id)} onInstalled={() => onInstalled(h.id)} />
+  );
+  if (loading) return <div className="agent-probe subtle">Looking for agents on this computer…</div>;
+  const catalog = (
+    <div className="agent-picker-search">
+      <TextInput icon="search" placeholder="Search agents" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search agents" />
+      <div className="agent-choices">{matching.map(card)}</div>
+      {!matching.length && <p className="subtle">No agent matches “{query.trim()}”.</p>}
+    </div>
+  );
+  if (!here.length) {
+    return (
+      <div className="agent-picker">
+        <p className="agent-picker-note">No agent found on this computer yet. Install one here, or install it in a terminal and it shows up.</p>
+        {catalog}
+      </div>
+    );
+  }
+  return (
+    <div className="agent-picker">
+      <h3 className="agent-picker-title">On this computer</h3>
+      <div className="agent-choices">{here.map(card)}</div>
+      {!!others.length && (
+        <details className="agent-picker-more" open={!!chosen && others.some((h) => h.id === chosen)}>
+          <summary>Install another agent <span className="subtle">({others.length})</span></summary>
+          {catalog}
+        </details>
+      )}
     </div>
   );
 }

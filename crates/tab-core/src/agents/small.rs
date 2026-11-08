@@ -18,8 +18,8 @@ pub(super) const DEFAULT_MODEL: &str = "claude-haiku-5-5";
 pub(super) struct Ask<'a> {
     /// The harness to ask; `None` is the one chats use.
     pub agent: Option<AgentKind>,
-    /// `None` is a small Claude model on Claude Code, and the chat model on
-    /// OpenCode.
+    /// `None` is the harness's small model (`harnesses.json`), else the
+    /// chat model.
     pub model: Option<&'a str>,
     pub system: &'a str,
     pub prompt: &'a str,
@@ -40,15 +40,25 @@ pub(super) async fn complete(
 ) -> anyhow::Result<Value> {
     match ask.agent.or(cfg.kind) {
         Some(AgentKind::ClaudeCode) => via_claude(hub, cfg, ask).await,
-        Some(AgentKind::OpenCode) => {
+        Some(kind) => {
             let mut system = ask.system.to_string();
             if let Some(schema) = &ask.schema {
                 system.push_str(&format!(
                     "\n\nReply with only a JSON object matching this schema, no prose:\n{schema}"
                 ));
             }
-            let model = ask.model.or(cfg.model_for(AgentKind::OpenCode));
-            let text = super::opencode::complete(hub, &system, ask.prompt, model).await?;
+            let model = ask
+                .model
+                .or(super::catalog::harness(kind).small_model.as_deref())
+                .or(cfg.model_for(kind));
+            let text = match kind {
+                AgentKind::OpenCode => {
+                    super::opencode::complete(hub, &system, ask.prompt, model).await?
+                }
+                AgentKind::Codex => super::codex::complete(hub, &system, ask.prompt, model).await?,
+                AgentKind::Pi => super::pi::complete(hub, &system, ask.prompt, model).await?,
+                AgentKind::ClaudeCode => unreachable!("handled above"),
+            };
             Ok(match ask.schema {
                 Some(_) => parse_json_reply(&text).unwrap_or(Value::Null),
                 None => Value::String(text),

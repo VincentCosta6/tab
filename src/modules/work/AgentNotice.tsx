@@ -6,7 +6,14 @@ import type { SessionMessage as ChatMessage } from "../../lib/types";
 
 const authError = /authentication_error|OAuth (access )?token|invalid api key|please run \/login|not logged in|401/i;
 
-const agentName: Record<string, string> = { claude_code: "Claude Code", opencode: "OpenCode" };
+const agentName: Record<string, string> = { claude_code: "Claude Code", opencode: "OpenCode", codex: "Codex", pi: "Pi" };
+/** How each harness signs in again: a command, then what to type in it, if anything. */
+const signIn: Record<string, [string, string | null]> = {
+  claude_code: ["claude", "/login"],
+  opencode: ["opencode auth login", null],
+  codex: ["codex login", null],
+  pi: ["pi", "/login"],
+};
 
 function Copy({ text }: { text: string }) {
   const [done, setDone] = useState(false);
@@ -29,7 +36,7 @@ export function AgentNotice({ messages }: { messages?: ChatMessage[] }) {
   const last = talk[talk.length - 1];
 
   if (last?.kind === "error" && authError.test(last.content)) {
-    const login = health?.kind === "opencode" ? "opencode auth login" : "claude";
+    const [login, then] = signIn[health?.kind ?? "claude_code"] ?? signIn.claude_code;
     return (
       <div className="agent-notice danger" role="status">
         <Icon name="lock" size={14} />
@@ -37,7 +44,7 @@ export function AgentNotice({ messages }: { messages?: ChatMessage[] }) {
           <strong>{name} needs you to sign in again.</strong>
           <span>
             In a terminal, run <Copy text={login} />
-            {health?.kind !== "opencode" && <> and type <code>/login</code></>}. Then send your message again.
+            {then && <> and type <code>{then}</code></>}. Then send your message again.
           </span>
         </div>
       </div>

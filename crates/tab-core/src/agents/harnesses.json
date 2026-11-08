@@ -128,5 +128,128 @@
       ".opencode/bin",
       ".local/bin"
     ]
+  },
+  {
+    "id": "codex",
+    "name": "Codex",
+    "icon": {
+      "brand": null,
+      "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><rect x=\"1.5\" y=\"3\" width=\"21\" height=\"18\" rx=\"4.5\" fill=\"none\" stroke=\"#8b8b93\" stroke-width=\"2\"/><path d=\"M6.5 9l3.5 3-3.5 3\" fill=\"none\" stroke=\"#8b8b93\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M12.5 15.5h5\" stroke=\"#8b8b93\" stroke-width=\"2\" stroke-linecap=\"round\"/></svg>"
+    },
+    "command": "codex",
+    "pitch": "OpenAI's coding agent. tab runs the Codex CLI with your ChatGPT sign-in or API key and streams each turn.",
+    "capabilities": {
+      "strict": true,
+      "permission_modes": [],
+      "external_server": false,
+      "budget_cap": false
+    },
+    "model_hint": "e.g. gpt-6-sol",
+    "small_model": null,
+    "models": [
+      {
+        "id": "gpt-6.1-sol",
+        "label": "GPT-6.1 Sol",
+        "common": true
+      },
+      {
+        "id": "gpt-6-astra",
+        "label": "GPT-6 Astra",
+        "common": true
+      },
+      {
+        "id": "gpt-6-sol",
+        "label": "GPT-6 Sol",
+        "common": true
+      },
+      {
+        "id": "gpt-6-luna",
+        "label": "GPT-6 Luna",
+        "common": true
+      },
+      {
+        "id": "gpt-5.6-sol",
+        "label": "GPT-5.6 Sol"
+      },
+      {
+        "id": "gpt-6.1-terra",
+        "label": "GPT-6.1 Terra"
+      },
+      {
+        "id": "gpt-5.6-terra",
+        "label": "GPT-5.6 Terra"
+      },
+      {
+        "id": "gpt-5.6-luna",
+        "label": "GPT-5.6 Luna"
+      },
+      {
+        "id": "gpt-5.5",
+        "label": "GPT-5.5"
+      }
+    ],
+    "list_models": null,
+    "common_models": [],
+    "install": {
+      "npm": "@openai/codex",
+      "unix": null,
+      "windows": null
+    },
+    "upgrade": {
+      "winget": null,
+      "npm": "npm install -g @openai/codex@latest",
+      "brew": "brew upgrade codex",
+      "native": null
+    },
+    "bin_dirs": [
+      ".local/bin",
+      ".codex/bin"
+    ]
+  },
+  {
+    "id": "pi",
+    "name": "Pi",
+    "icon": {
+      "brand": null,
+      "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><rect x=\"1.5\" y=\"1.5\" width=\"21\" height=\"21\" rx=\"5\" fill=\"none\" stroke=\"#8b8b93\" stroke-width=\"2\"/><path d=\"M6.5 8h11M9.5 8v9M14.5 8v7.5c0 1 .6 1.5 1.5 1.5h1\" fill=\"none\" stroke=\"#8b8b93\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+    },
+    "command": "pi",
+    "pitch": "A small, open source agent that works with most model providers. tab runs it one turn at a time and keeps each chat as a Pi session.",
+    "capabilities": {
+      "strict": true,
+      "permission_modes": [],
+      "external_server": false,
+      "budget_cap": false
+    },
+    "model_hint": "provider/model, e.g. anthropic/claude-sonnet-5-5",
+    "small_model": null,
+    "models": [],
+    "list_models": {
+      "args": [
+        "--list-models"
+      ],
+      "format": "provider_model_table"
+    },
+    "common_models": [
+      "anthropic/claude-opus-5-5",
+      "anthropic/claude-sonnet-5-5",
+      "anthropic/claude-haiku-5-5",
+      "openai/gpt-6-sol"
+    ],
+    "install": {
+      "npm": "@earendil-works/pi-coding-agent",
+      "unix": "curl -fsSL https://pi.dev/install.sh | sh",
+      "windows": "irm https://pi.dev/install.ps1 | iex"
+    },
+    "upgrade": {
+      "winget": null,
+      "npm": "npm install -g @earendil-works/pi-coding-agent@latest",
+      "brew": null,
+      "native": "pi update"
+    },
+    "bin_dirs": [
+      ".local/bin",
+      ".pi/bin"
+    ]
   }
 ]
