@@ -99,7 +99,7 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
 export function SandboxPill() {
   const { data } = useQuery({ queryKey: ["sandbox"], queryFn: api.sandboxStatus, staleTime: 60_000 });
   if (!data?.enabled) return null;
-  const github = "gh and git reach GitHub through tab with your GitHub connection; force pushes, merges and deletes ask you first.";
+  const github = "gh and git reach GitHub through tab with your GitHub connection; force pushes (except to a branch this chat created), merges and deletes ask you first.";
   return (
     <span className={cx("sandbox-pill", !data.enforced && "limited")} title={`${data.summary} ${github}`}>
       <Icon name="shield" size={11} /> {data.enforced ? "Sandboxed" : "Limited sandbox"}
