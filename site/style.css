@@ -46,6 +46,8 @@ code, kbd { font-family: var(--font-mono); }
 .nav { display: flex; align-items: center; gap: 24px; font-size: 13px; }
 .nav a { text-decoration: none; color: var(--fg-muted); }
 .nav a:hover { color: var(--fg); }
+.nav-icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: var(--radius-md); }
+.nav-icon:hover { background: var(--bg-hover); }
 
 /* Buttons, as in the app */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 38px; padding: 0 16px; border-radius: var(--radius-md); font-weight: 500; font-size: 14px; text-decoration: none; border: 1px solid var(--border-strong); background: var(--bg-raised); color: var(--fg); }
@@ -164,7 +166,7 @@ footer a:hover { color: var(--fg); }
   .split { gap: 32px; }
   .split.flip > :first-child { order: 1; }
   .cloud { padding: 28px; }
-  .nav a:not(.btn) { display: none; }
+  .nav a:not(.btn, .nav-icon) { display: none; }
   section { padding-top: 80px; }
   .hero { padding-top: 56px; }
   .logo-hero { width: 104px; height: 104px; }
