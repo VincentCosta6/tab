@@ -371,6 +371,8 @@ Onboarding waits on this before Continue, with Try again on failure and See plan
 
 **Moving** (Settings → Hub → Move to tab cloud, `LocalHub::move_to_cloud`): flush `tab.db` into `hub.db`, then `Import` hub.db's whole log into the empty cloud hub, page by page, keeping sequence numbers, so `tab.db`'s sync cursor stays valid. From then on `tab.db` syncs with the cloud hub instead of `hub.db`, which keeps its copy from the move. A cloud hub that already has work (another computer moved first) is joined instead: `tab.db` takes its rows and adds what it lacked. `hub.cloud_hub` in config remembers the move; at launch sync waits until the cloud hub connects rather than writing to `hub.db`, whose numbering no longer matches. Moving back, device pairing and live sessions through the cloud are next.
 
+**Dev builds** (`pnpm dev:tab`) never use production: they read `~/.config/tab-dev/cloud.env`, which tab-infra's `scripts/dev.sh` writes when it starts a local tab cloud (Supabase in Docker plus both Workers under `wrangler dev` on `127.0.0.1:8787`; tab-infra's `docs/DEV.md`). Without it sign-in is off; `TAB_DEV_CLOUD=prod` points a dev build at production on purpose.
+
 ## Server (later)
 
 Sync across devices, team-shared automations and graph, and a webhook receiver so GitHub and Slack push instead of being polled (which also removes most rate-limit pressure). The local app stays the source of truth for a single user and works offline. The pieces it builds on (tab-domain, tab-protocol, tab-store, tab-hub) are in the repo; see Layout.
