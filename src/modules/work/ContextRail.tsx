@@ -13,6 +13,9 @@ import { keys } from "../../lib/query";
 import type { ContextEntry, QueueItem } from "../../lib/types";
 import { EntryCard, IconButton, ItemCard, sameLink } from "./ContextDrawer";
 
+/** Files the rail shows before "Show more": the newest. */
+const RAIL_FILES = 2;
+
 const groupNames: Record<string, string> = {
   github: "GitHub", slack: "Slack", gmail: "Email", zoom: "Meetings", jira: "Jira", linear: "Linear", tab: "tab",
 };
@@ -34,6 +37,7 @@ export function ContextRail({ item, onSelect }: { item: QueueItem; onSelect: (id
   const { data: ctx } = useItemContext(item.id);
   const stage = useStage();
   const [foundOpen, setFoundOpen] = useState(false);
+  const [allFiles, setAllFiles] = useState(false);
   const groups = useMemo(() => {
     const own = (e: ContextEntry) => e.ref_item?.id === item.id || (!!e.url && !!item.url && sameLink(e.url, item.url));
     const entries = (ctx?.entries ?? []).filter((e) => e.section === "context" && !own(e));
@@ -68,7 +72,7 @@ export function ContextRail({ item, onSelect }: { item: QueueItem; onSelect: (id
             <span className="ctx-count">{files.length}</span>
           </h4>
           <div className="rail-files">
-            {files.map((f, i) => (
+            {files.map((f, i) => (allFiles || i >= files.length - RAIL_FILES) && (
               <button key={f.path} className={cx("rail-file", stage.updated.has(f.path) && "fresh")} title={f.path} onClick={() => stage.open(files, i)}>
                 <FilePreview path={f.path} size="sm" />
                 <span className="rail-file-text">
@@ -78,6 +82,11 @@ export function ContextRail({ item, onSelect }: { item: QueueItem; onSelect: (id
               </button>
             ))}
           </div>
+          {files.length > RAIL_FILES && (
+            <button className="rail-files-more" aria-expanded={allFiles} onClick={() => setAllFiles((v) => !v)}>
+              {allFiles ? "Show less" : `Show ${files.length - RAIL_FILES} more`}
+            </button>
+          )}
         </section>
       )}
       {groups.map(([key, list]) => (
