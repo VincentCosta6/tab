@@ -754,6 +754,7 @@ async fn this_app_watches_and_steers_a_session_another_device_runs() {
             answers: None,
         },
     )
+    .await
     .unwrap();
     let file = hub.file_put(b"diagram").unwrap();
     hub.steer_remote(
@@ -768,6 +769,7 @@ async fn this_app_watches_and_steers_a_session_another_device_runs() {
             }],
         },
     )
+    .await
     .unwrap();
     let mut got = vec![];
     while got.len() < 2 {
@@ -814,7 +816,10 @@ async fn steering_a_session_whose_device_is_away_says_so() {
         body: json!({ "id": "s1", "device": "device-desktop-at-home" }),
     }])
     .unwrap();
-    let e = hub.steer_remote("s1", &SteerCommand::Stop).unwrap_err();
+    let e = hub
+        .steer_remote("s1", &SteerCommand::Stop)
+        .await
+        .unwrap_err();
     assert!(e.to_string().contains("isn't connected"), "{e}");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -924,20 +929,53 @@ async fn fake_cloud() -> (String, Arc<Mutex<tab_hub::Hub<SqliteStore>>>) {
         "cloud",
         Utc::now(),
     )));
+    /// Each open socket's outbox, for pushes and live frames.
+    type Sockets = Arc<Mutex<std::collections::HashMap<u64, mpsc::UnboundedSender<Vec<u8>>>>>;
     async fn sync(
         ws: WebSocketUpgrade,
         headers: axum::http::HeaderMap,
         UrlPath(_id): UrlPath<String>,
-        State((hub, next)): State<(Cloud, Arc<AtomicU64>)>,
+        State((hub, next, sockets)): State<(Cloud, Arc<AtomicU64>, Sockets)>,
     ) -> Response {
         if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer t0k") {
             return StatusCode::UNAUTHORIZED.into_response();
         }
         ws.on_upgrade(move |mut socket| async move {
             let conn = next.fetch_add(1, Ordering::Relaxed);
+            let (tx, mut out) = mpsc::unbounded_channel::<Vec<u8>>();
+            sockets.lock().unwrap().insert(conn, tx);
             hub.lock().unwrap().connect(conn, "", Utc::now());
-            while let Some(Ok(Message::Binary(b))) = socket.recv().await {
+            loop {
+                let b = tokio::select! {
+                    m = socket.recv() => match m {
+                        Some(Ok(Message::Binary(b))) => b,
+                        _ => break,
+                    },
+                    f = out.recv() => {
+                        let Some(f) = f else { break };
+                        if socket.send(Message::Binary(f.into())).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                };
                 let h = hub.lock().unwrap().handle_frame(conn, &b, Utc::now());
+                // Like the Durable Object: pushes to the others, live frames
+                // to the connections they're for.
+                {
+                    let socks = sockets.lock().unwrap();
+                    if let Some(p) = &h.push {
+                        let f = encode(p);
+                        for (c, s) in socks.iter().filter(|(c, _)| **c != conn) {
+                            let _ = (c, s.send(f.clone()));
+                        }
+                    }
+                    for (c, env) in &h.direct {
+                        if let Some(s) = socks.get(c) {
+                            let _ = s.send(encode(env));
+                        }
+                    }
+                }
                 if socket
                     .send(Message::Binary(encode(&h.reply).into()))
                     .await
@@ -946,6 +984,7 @@ async fn fake_cloud() -> (String, Arc<Mutex<tab_hub::Hub<SqliteStore>>>) {
                     break;
                 }
             }
+            sockets.lock().unwrap().remove(&conn);
             hub.lock().unwrap().disconnect(conn);
         })
     }
@@ -988,9 +1027,10 @@ async fn fake_cloud() -> (String, Arc<Mutex<tab_hub::Hub<SqliteStore>>>) {
         .route("/v1/hubs/{id}/files", axum::routing::put(put_file))
         .route("/v1/hubs/{id}/files/{hex}", get(get_file))
         .with_state(Files::default());
+    let sockets: Sockets = Default::default();
     let app = Router::new()
         .route("/v1/hubs/{id}/sync", get(sync))
-        .with_state((hub.clone(), Arc::new(AtomicU64::new(1))))
+        .with_state((hub.clone(), Arc::new(AtomicU64::new(1)), sockets))
         .merge(files);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
@@ -1189,6 +1229,116 @@ async fn files_reach_other_computers_through_the_cloud() {
             .await
             .is_err()
     );
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
+/// Two computers on one cloud hub: the one that didn't start a chat watches
+/// it and steers it, through the cloud rather than its own hub.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn computers_on_one_cloud_hub_watch_and_steer_each_others_chats() {
+    let (api, _cloud) = fake_cloud().await;
+
+    // The Mac moves to tab cloud; the PC joins it.
+    let (mac_hub, dir) = temp_hub("cloud-live-mac");
+    let mac = Arc::new(Store::in_memory().unwrap());
+    mac_hub.introduce(&mac).unwrap();
+    let (h, s, link) = (mac_hub.clone(), mac.clone(), link_to(&api));
+    blocking(move || h.move_to_cloud(link, &s, |_, _| {}))
+        .await
+        .unwrap();
+    // What the cloud sends the Mac lands in its inbox (the live loop isn't
+    // running, so the test reads it).
+    let mut mac_inbox = mac_hub.inbox_rx.lock().unwrap().take().unwrap();
+
+    let (pc_hub, dir2) = temp_hub("cloud-live-pc");
+    let pc = Arc::new(Store::in_memory().unwrap());
+    pc_hub.introduce(&pc).unwrap();
+    // The PC's app is running (as when someone moves from Settings).
+    let (events, mut ui) = broadcast::channel(64);
+    pc_hub.follow(pc.clone(), events);
+    let (h, s, link) = (pc_hub.clone(), pc.clone(), link_to(&api));
+    blocking(move || h.move_to_cloud(link, &s, |_, _| {}))
+        .await
+        .unwrap();
+
+    // A chat the Mac runs, mid-turn, syncs to the PC.
+    let sid = "s-mac";
+    let session = Op::Put {
+        kind: "sessions".into(),
+        id: json!([sid]).to_string(),
+        body: json!({
+            "id": sid, "item_id": null, "agent": "claude_code", "agent_session_id": null,
+            "title": "On the Mac", "status": "working", "cwd": "/w",
+            "created_at": "2027-01-15T08:00:00.000Z", "updated_at": "2027-01-15T08:00:00.000Z",
+            "key": null, "brief": null, "device": mac.device_id().unwrap(),
+        }),
+    };
+    let h = mac_hub.clone();
+    blocking(move || h.apply(&[session])).await.unwrap();
+    until("the Mac's chat to reach the PC", || {
+        pc.session_get(sid).unwrap().is_some()
+    })
+    .await;
+
+    // The PC watches it through the cloud, and the Mac is told.
+    pc_hub.rewatch(&pc);
+    let watched = loop {
+        let env = tokio::time::timeout(Duration::from_secs(3), mac_inbox.recv())
+            .await
+            .expect("the Mac should hear it's watched")
+            .unwrap();
+        if let Some(Res::Watched(w)) = env.body {
+            break w;
+        }
+    };
+    assert_eq!((watched.session.as_str(), watched.watchers), (sid, 1));
+    assert!(mac_hub.note_watched(&watched));
+    assert!(mac_hub.watched(sid));
+
+    // What the Mac streams shows up on the PC.
+    mac_hub.publish(&crate::live::LiveEvent::SessionDelta {
+        session_id: sid.into(),
+        text: "Reading the".into(),
+    });
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(3), ui.recv())
+            .await
+            .expect("the Mac's reply should stream to the PC")
+            .unwrap();
+        if let EngineEvent::SessionDelta { session_id, text } = ev {
+            assert_eq!((session_id.as_str(), text.as_str()), (sid, "Reading the"));
+            break;
+        }
+    }
+
+    // A message typed on the PC reaches the Mac.
+    let n = pc_hub
+        .steer_remote(
+            sid,
+            &SteerCommand::Message {
+                text: "also check the tests".into(),
+                files: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    let steered = loop {
+        let env = tokio::time::timeout(Duration::from_secs(3), mac_inbox.recv())
+            .await
+            .expect("the steer should reach the Mac")
+            .unwrap();
+        if let Some(Res::Steered(s)) = env.body {
+            break s;
+        }
+    };
+    assert_eq!(steered.session, sid);
+    assert!(matches!(
+        serde_json::from_slice::<SteerCommand>(&steered.body_json).unwrap(),
+        SteerCommand::Message { text, .. } if text == "also check the tests"
+    ));
+
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(dir2);
 }

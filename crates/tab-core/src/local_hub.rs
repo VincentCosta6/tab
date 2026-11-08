@@ -96,6 +96,9 @@ pub struct LocalHub {
     remote_approvals: Mutex<std::collections::HashMap<String, String>>,
     /// Sessions other devices run that the app is watching.
     watching: Mutex<std::collections::BTreeSet<String>>,
+    /// How many connections the cloud hub says watch each session this app
+    /// runs (its `Watched` notices). On the app's own hub it asks the hub.
+    cloud_watchers: Mutex<std::collections::HashMap<String, u32>>,
     next_conn: AtomicU64,
     next_request: AtomicU64,
     url: OnceLock<String>,
@@ -220,6 +223,7 @@ impl LocalHub {
             agents: OnceLock::new(),
             remote_approvals: Default::default(),
             watching: Default::default(),
+            cloud_watchers: Default::default(),
             next_conn: AtomicU64::new(1),
             next_request: AtomicU64::new(1),
             url: OnceLock::new(),
@@ -272,6 +276,39 @@ impl LocalHub {
     /// The cloud hub `tab.db` syncs with, if this computer has moved.
     pub fn cloud_link(&self) -> Option<Arc<CloudLink>> {
         self.cloud.read().unwrap().clone()
+    }
+
+    /// Starts syncing with the cloud hub behind `link`: its live pushes come
+    /// to this app's inbox, and it watches what this app watches.
+    fn link_cloud(&self, link: Arc<CloudLink>) {
+        link.set_live(self.inbox.clone());
+        link.watch(self.watching.lock().unwrap().iter().cloned().collect());
+        *self.cloud.write().unwrap() = Some(link);
+    }
+
+    /// Whether anyone watches `session`, on the hub this app's sessions are
+    /// seen through: the cloud one once moved, else this app's own.
+    fn watched(&self, session: &str) -> bool {
+        if self.cloud_link().is_some() {
+            return self
+                .cloud_watchers
+                .lock()
+                .unwrap()
+                .get(session)
+                .is_some_and(|n| *n > 0);
+        }
+        !self.hub.lock().unwrap().watchers(session).is_empty()
+    }
+
+    /// Notes how many watch a session this app runs. True if anyone does.
+    fn note_watched(&self, w: &pb::Watched) -> bool {
+        let mut counts = self.cloud_watchers.lock().unwrap();
+        if w.watchers == 0 {
+            counts.remove(&w.session);
+            return false;
+        }
+        counts.insert(w.session.clone(), w.watchers);
+        true
     }
 
     /// A request to the hub `tab.db` syncs with: the cloud one once moved,
@@ -754,7 +791,7 @@ impl LocalHub {
             store.hub_forget()?;
             MoveOutcome::Joined { head: cloud_head }
         };
-        *self.cloud.write().unwrap() = Some(link);
+        self.link_cloud(link);
         self.upload_all_soon();
         self.introduce(store)?;
         self.sync(store)?;
@@ -777,6 +814,11 @@ impl LocalHub {
         self.sync(store)?;
         *self.cloud.write().unwrap() = None;
         self.awaiting_cloud.store(false, Ordering::Relaxed);
+        // Watch on this app's own hub again.
+        let watching: Vec<String> = self.watching.lock().unwrap().iter().cloned().collect();
+        if let Err(e) = self.request(Req::Watch(pb::Watch { sessions: watching })) {
+            tracing::debug!(error = %e, "hub: couldn't watch on this app's hub");
+        }
         let mut keys: std::collections::BTreeSet<(String, String)> =
             store.hub_local_keys()?.into_iter().collect();
         let tables: std::collections::HashSet<&str> = crate::store::hub_sync::SYNCED
@@ -818,7 +860,7 @@ impl LocalHub {
     pub fn use_cloud(self: &Arc<Self>, link: Arc<CloudLink>, store: &Store) -> anyhow::Result<()> {
         let _turn = self.syncing.lock().unwrap();
         self.cloud_hello(&link, store)?;
-        *self.cloud.write().unwrap() = Some(link);
+        self.link_cloud(link);
         self.upload_all_soon();
         self.awaiting_cloud.store(false, Ordering::Relaxed);
         self.introduce(store)?;
@@ -1150,13 +1192,22 @@ impl LocalHub {
         Ok(gone.len())
     }
 
-    /// Sends a command to the device running `session`. Returns how many of
+    /// Sends a command to the device running `session`, through the hub
+    /// this app syncs with (the cloud one once moved). Returns how many of
     /// its connections got it; fails if it isn't connected.
-    pub fn steer_remote(&self, session: &str, cmd: &SteerCommand) -> anyhow::Result<u32> {
-        match self.request(Req::Steer(pb::Steer {
+    pub async fn steer_remote(
+        self: &Arc<Self>,
+        session: &str,
+        cmd: &SteerCommand,
+    ) -> anyhow::Result<u32> {
+        let req = Req::Steer(pb::Steer {
             session: session.into(),
             body_json: serde_json::to_vec(cmd)?,
-        }))? {
+        });
+        // The cloud's reply is waited for on a blocking thread.
+        let me = self.clone();
+        let reply = tokio::task::spawn_blocking(move || me.up(req)).await??;
+        match reply {
             Res::Delivered(d) => Ok(d.connections),
             _ => anyhow::bail!("hub: unexpected reply to Steer"),
         }
@@ -1169,22 +1220,23 @@ impl LocalHub {
 
     /// Publishes a live event for a session this app runs, if anyone watches.
     fn publish(&self, event: &LiveEvent) {
-        if self
-            .hub
-            .lock()
-            .unwrap()
-            .watchers(event.session())
-            .is_empty()
-        {
+        if !self.watched(event.session()) {
             return;
         }
         let Ok(json) = serde_json::to_vec(event) else {
             return;
         };
-        if let Err(e) = self.request(Req::Publish(pb::Publish {
+        let req = Req::Publish(pb::Publish {
             session: event.session().into(),
             event_json: json,
-        })) {
+        });
+        // Live events aren't worth waiting for: one the cloud misses is
+        // overtaken by the next, and the stored transcript has it anyway.
+        if let Some(link) = self.cloud_link() {
+            link.send(req);
+            return;
+        }
+        if let Err(e) = self.request(req) {
             tracing::debug!(error = %e, "hub: couldn't publish a live event");
         }
     }
@@ -1207,9 +1259,12 @@ impl LocalHub {
         }
         *watching = want.clone();
         drop(watching);
-        if let Err(e) = self.request(Req::Watch(pb::Watch {
-            sessions: want.into_iter().collect(),
-        })) {
+        let sessions: Vec<String> = want.into_iter().collect();
+        if let Some(link) = self.cloud_link() {
+            link.watch(sessions);
+            return;
+        }
+        if let Err(e) = self.request(Req::Watch(pb::Watch { sessions })) {
             tracing::debug!(error = %e, "hub: couldn't update what this app watches");
         }
     }
@@ -1233,7 +1288,7 @@ impl LocalHub {
                     continue;
                 };
                 // Only sessions this app runs, and only while someone watches.
-                if me.hub.lock().unwrap().watchers(live.session()).is_empty() {
+                if !me.watched(live.session()) {
                     continue;
                 }
                 let mine = me.agents.get().is_some_and(|a| {
@@ -1257,7 +1312,10 @@ impl LocalHub {
             while let Some(env) = inbox.recv().await {
                 match env.body {
                     Some(Res::Steered(s)) => me.steered(&store, s).await,
-                    Some(Res::Watched(w)) if w.watchers > 0 => {
+                    Some(Res::Watched(w)) => {
+                        if !me.note_watched(&w) {
+                            continue;
+                        }
                         if let Some(agents) = me.agents.get() {
                             for approval in agents.pending_approvals(&w.session) {
                                 me.publish(&LiveEvent::ApprovalRequested { approval });
