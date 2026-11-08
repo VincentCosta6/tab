@@ -4,7 +4,11 @@
 //! contents of confined folders (the home folder) except what's needed,
 //! writes to protected folders, reads of hidden ones, and network when the
 //! policy limits it. In Seatbelt the last matching rule wins, so the order below is
-//! the order of precedence.
+//! the order of precedence, with one catch: a rule naming an operation
+//! (`file-read-data`) is consulted before one naming its family
+//! (`file-read*`), whatever their order. The home folder is confined with
+//! `file-read-data` (so `stat` still works), so every rule about reading
+//! names `file-read-data` too, or it couldn't undo or redo that.
 
 use std::path::Path;
 
@@ -85,7 +89,10 @@ pub(super) fn profile(policy: &Policy, proxy_port: Option<u16>, hide_procargs: b
             .cloned()
             .collect();
         if !readable.is_empty() {
-            p.push_str(&format!("(allow file-read*{})\n", filters(&readable)));
+            p.push_str(&format!(
+                "(allow file-read* file-read-data{})\n",
+                filters(&readable)
+            ));
         }
         if !policy.open.is_empty() {
             p.push_str(&format!("(allow file-write*{})\n", filters(&policy.open)));
@@ -104,16 +111,19 @@ pub(super) fn profile(policy: &Policy, proxy_port: Option<u16>, hide_procargs: b
     p.push_str("(allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n");
     if !policy.hide.is_empty() {
         p.push_str(&format!(
-            "(deny file-read* file-write*{})\n",
+            "(deny file-read* file-read-data file-write*{})\n",
             filters(&policy.hide)
         ));
     }
     if !policy.reveal.is_empty() {
-        p.push_str(&format!("(allow file-read*{})\n", filters(&policy.reveal)));
+        p.push_str(&format!(
+            "(allow file-read* file-read-data{})\n",
+            filters(&policy.reveal)
+        ));
     }
     if !policy.reveal_rw.is_empty() {
         p.push_str(&format!(
-            "(allow file-read* file-write*{})\n",
+            "(allow file-read* file-read-data file-write*{})\n",
             filters(&policy.reveal_rw)
         ));
     }
@@ -121,7 +131,7 @@ pub(super) fn profile(policy: &Policy, proxy_port: Option<u16>, hide_procargs: b
     // neither started nor read, so a copy can't be started either.
     for b in &policy.block_exec {
         p.push_str(&format!(
-            "(deny process-exec file-read* (literal {}))\n",
+            "(deny process-exec file-read* file-read-data (literal {}))\n",
             quote(b)
         ));
     }

@@ -181,7 +181,7 @@ fn seatbelt_profile_orders_rules() {
         .find("(allow file-write* (literal \"/work\") (subpath \"/work\"))")
         .unwrap();
     let hide = s
-        .find("(deny file-read* file-write* (literal \"/home/me/.aws\")")
+        .find("(deny file-read* file-read-data file-write* (literal \"/home/me/.aws\")")
         .unwrap();
     assert!(deny < allow && allow < hide, "{s}");
     assert!(s.contains("(deny network-outbound (remote ip))"));
@@ -200,7 +200,9 @@ fn seatbelt_profile_orders_rules() {
     b.block_exec.push("/opt/homebrew/bin/gh".into());
     let g = seatbelt::profile(&b, None, false);
     assert!(
-        g.contains("(deny process-exec file-read* (literal \"/opt/homebrew/bin/gh\"))"),
+        g.contains(
+            "(deny process-exec file-read* file-read-data (literal \"/opt/homebrew/bin/gh\"))"
+        ),
         "{g}"
     );
 }
@@ -786,14 +788,16 @@ fn seatbelt_confines_before_everything_else() {
         .find("(deny file-read-data file-write* (literal \"/home/me\") (subpath \"/home/me\"))")
         .expect(&s);
     let read = s
-        .find("(allow file-read* (literal \"/home/me/.cargo\")")
+        .find("(allow file-read* file-read-data (literal \"/home/me/.cargo\")")
         .expect(&s);
     let protect = s
         .find("(deny file-write* (literal \"/home/me/code/locked\")")
         .expect(&s);
-    let hide = s.find("(deny file-read* file-write*").expect(&s);
+    let hide = s
+        .find("(deny file-read* file-read-data file-write*")
+        .expect(&s);
     let back = s
-        .find("(allow file-read* file-write* (literal \"/home/me/.claude/projects/x/abc.jsonl\")")
+        .find("(allow file-read* file-read-data file-write* (literal \"/home/me/.claude/projects/x/abc.jsonl\")")
         .expect(&s);
     // Last match wins: protected and hidden paths stay so inside open ones,
     // and the chat's own transcript comes back last.
@@ -802,6 +806,12 @@ fn seatbelt_confines_before_everything_else() {
         "{s}"
     );
     assert!(s.contains(r#"(regex #"^/home/me/\.claude\.json")"#), "{s}");
+    // Seatbelt consults `file-read-data` rules before `file-read*` ones, so
+    // a read rule without it couldn't override the confinement (or keep a
+    // hidden file hidden inside an allowed folder).
+    for line in s.lines().filter(|l| l.contains("file-read*")) {
+        assert!(line.contains("file-read-data"), "{line}");
+    }
 }
 
 #[test]
