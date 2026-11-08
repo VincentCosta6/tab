@@ -542,6 +542,10 @@ export interface SandboxConfig {
   container_runtime: string;
   /** Chats may use the person's SSH keys (for hosts tab doesn't sign in). */
   ssh_in_chats: boolean;
+  /** Only let agents into the folders they need (macOS and Linux). */
+  confine?: boolean;
+  /** Folders agents may use when `confine` is on. */
+  folders?: string[];
 }
 
 export interface SandboxStatus {

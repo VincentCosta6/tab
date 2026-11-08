@@ -102,6 +102,23 @@ fn steer_line(steer: Steer, tools_running: bool, n: u64) -> Option<Value> {
     }
 }
 
+/// Claude Code's folder (`~/.claude`, or `CLAUDE_CONFIG_DIR`).
+fn claude_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| crate::sandbox::home().map(|h| h.join(".claude")))
+}
+
+/// When the home folder is confined: Claude Code may use its folder and
+/// settings, but of the conversations kept there only this one (see
+/// [`crate::sandbox::own_claude_conversation`]).
+fn own_conversation(policy: &mut crate::sandbox::Policy, cwd: &std::path::Path, id: &str) {
+    if let (Some(dir), Some(home)) = (claude_dir(), crate::sandbox::home()) {
+        crate::sandbox::own_claude_conversation(policy, &dir, &home, cwd, id);
+    }
+}
+
 pub(super) async fn run_turn(
     hub: &Arc<AgentHub>,
     session: &Session,
@@ -115,7 +132,14 @@ pub(super) async fn run_turn(
     let system_file = dir.join("system.md");
     std::fs::write(&system_file, system)?;
 
-    let policy = hub.policy(session);
+    // Claude Code's own conversation id, chosen here on the first turn so the
+    // sandbox can let the chat into its transcript and no other.
+    let agent_id = session
+        .agent_session_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let mut policy = hub.policy(session);
+    own_conversation(&mut policy, std::path::Path::new(&session.cwd), &agent_id);
     let settings = crate::sandbox::current().claude_settings(&policy);
     // A copy to look at when debugging; Claude Code gets the JSON itself.
     // Given a file, it vets every folder on the path first and refuses the
@@ -175,9 +199,10 @@ pub(super) async fn run_turn(
     if let Some(cap) = cfg.budget.per_turn_usd.filter(|c| *c > 0.0) {
         cmd.args(["--max-budget-usd", &format!("{cap:.2}")]);
     }
-    if let Some(id) = &session.agent_session_id {
-        cmd.args(["--resume", id]);
-    }
+    match &session.agent_session_id {
+        Some(id) => cmd.args(["--resume", id]),
+        None => cmd.args(["--session-id", &agent_id]),
+    };
     let mut prepared = crate::sandbox::current()
         .command(&exe, &cmd.0, std::path::Path::new(&session.cwd), &policy)
         .await?;
@@ -680,6 +705,95 @@ mod tests {
     use crate::engine::EngineEvent;
     use crate::store::Store;
     use chrono::Utc;
+
+    /// The real Claude Code in a confined chat: it starts, signs in, keeps
+    /// its transcript, and its shell can't list the Desktop. Run by hand
+    /// from a terminal (macOS can't start a sandbox inside tab's):
+    /// `cargo test -p tab-core --lib real_claude_in_a_confined_chat -- --ignored --nocapture`
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore]
+    async fn real_claude_in_a_confined_chat() {
+        let sb = crate::sandbox::current();
+        assert!(
+            sb.backend().enforces(),
+            "run this outside a sandbox ({:?})",
+            sb.backend()
+        );
+        let exe = which::which("claude").expect("claude on PATH");
+        let cwd = crate::sandbox::real(&std::env::temp_dir())
+            .join(format!("tab-confined-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut p = sb.chat_policy();
+        own_conversation(&mut p, &cwd, &id);
+        let args: Vec<std::ffi::OsString> = [
+            "-p",
+            "Run `ls ~/Desktop` with Bash, then answer with the word DONE and what it printed.",
+            "--session-id",
+            &id,
+            "--allowedTools",
+            "Bash",
+        ]
+        .iter()
+        .map(Into::into)
+        .collect();
+        let mut c = sb.command(&exe, &args, &cwd, &p).await.unwrap();
+        c.cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let out = c.cmd.output().await.unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        println!("{text}");
+        assert!(out.status.success() && text.contains("DONE"), "{text}");
+        let transcript = claude_dir()
+            .unwrap()
+            .join("projects")
+            .join(crate::sandbox::claude_project_slug(&cwd))
+            .join(format!("{id}.jsonl"));
+        assert!(
+            transcript.is_file(),
+            "no transcript at {}",
+            transcript.display()
+        );
+    }
+
+    #[test]
+    fn a_confined_chat_reaches_only_its_own_conversation() {
+        let root = crate::sandbox::real(&std::env::temp_dir())
+            .join(format!("tab-claude-home-{}", uuid::Uuid::new_v4()));
+        let (dir, cwd) = (root.join(".claude"), std::path::Path::new("/work/my repo"));
+        let mut p = crate::sandbox::current().chat_policy();
+        p.confine.clear();
+        crate::sandbox::own_claude_conversation(&mut p, &dir, &root, cwd, "abc");
+        assert!(
+            p.reveal_rw.is_empty(),
+            "nothing changes when the home isn't confined"
+        );
+
+        p.confine = vec![root.clone()];
+        crate::sandbox::own_claude_conversation(&mut p, &dir, &root, cwd, "abc");
+        let project = dir.join("projects").join("-work-my-repo");
+        assert!(project.is_dir(), "made before the agent starts");
+        assert!(p.open.contains(&dir));
+        assert!(p.open.contains(&root.join(".claude.json*")));
+        for hidden in ["projects", "history.jsonl", "file-history", "todos"] {
+            assert!(p.hide.contains(&dir.join(hidden)), "{hidden}");
+        }
+        assert!(p.reveal_rw.contains(&project.join("abc.jsonl")));
+        assert!(p.reveal_rw.contains(&project.join("abc")));
+        assert!(p.reveal_rw.contains(&project.join("memory")));
+        assert!(
+            !p.reveal_rw
+                .iter()
+                .any(|r| r.ends_with("projects") || r == &project)
+        );
+        // Claude Code's Read rules can't carve out the transcript, so the
+        // sandbox alone holds the projects folder.
+        let rules = crate::sandbox::current().claude_settings(&p);
+        let deny = rules["permissions"]["deny"].to_string();
+        assert!(!deny.contains("projects"), "{deny}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[tokio::test]
     async fn parses_a_stream_json_turn() {

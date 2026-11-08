@@ -101,6 +101,20 @@ pub struct Policy {
     pub hide: Vec<PathBuf>,
     /// Readable even inside a hidden folder.
     pub reveal: Vec<PathBuf>,
+    /// Readable and writable even inside a hidden folder: the agent's own
+    /// transcript among every other chat's.
+    pub reveal_rw: Vec<PathBuf>,
+    /// Folders whose contents are off limits except for `open` and
+    /// `readable` (the home folder, other people's, external drives).
+    /// Their names still show to `stat`, so paths resolve; what's in
+    /// them can't be read, listed or changed.
+    pub confine: Vec<PathBuf>,
+    /// Usable inside `confine`: the chat's folder, code folders, caches.
+    /// `protect` and `hide` still apply inside them.
+    pub open: Vec<PathBuf>,
+    /// Readable but not writable inside `confine`: toolchains, shell and
+    /// git setup.
+    pub readable: Vec<PathBuf>,
     /// Programs that can't be started: the real `gh` when tab brokers it.
     pub block_exec: Vec<PathBuf>,
     /// Variables removed from the environment on top of what `trust` removes.
@@ -130,6 +144,16 @@ pub struct SandboxConfig {
     /// `docker` or `podman`; empty picks whichever is installed.
     #[serde(default)]
     pub container_runtime: String,
+    /// Only let agents into the folders they need: the chat's own, code
+    /// folders, toolchains and caches. Everything else in the home folder,
+    /// other people's, external drives and tab's own folders can't be read
+    /// or listed. On by default, on macOS and Linux.
+    #[serde(default = "yes")]
+    pub confine: bool,
+    /// Folders agents may use when `confine` is on, on top of the chat's
+    /// own folder and its project's repos.
+    #[serde(default = "default_folders")]
+    pub folders: Vec<String>,
     /// Whether chats may use the person's SSH keys. On by default, since
     /// people push to other hosts over SSH; off keeps `~/.ssh` and the SSH
     /// agent out of chats, so GitHub is only reachable through tab.
@@ -139,6 +163,24 @@ pub struct SandboxConfig {
 
 fn yes() -> bool {
     true
+}
+
+/// Where people usually keep code. Missing ones are harmless.
+pub fn default_folders() -> Vec<String> {
+    [
+        "~/tmp",
+        "~/src",
+        "~/code",
+        "~/dev",
+        "~/Developer",
+        "~/projects",
+        "~/repos",
+        "~/git",
+        "~/work",
+        "~/workspace",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 pub fn default_lsp_domains() -> Vec<String> {
@@ -165,6 +207,8 @@ impl Default for SandboxConfig {
             hidden: Vec::new(),
             lsp_domains: default_lsp_domains(),
             container_runtime: String::new(),
+            confine: true,
+            folders: default_folders(),
             ssh_in_chats: true,
         }
     }
@@ -271,6 +315,9 @@ pub struct Sandbox {
     /// like this one's: a dev build's agents can't change the installed
     /// app's files or read its tokens.
     others: Vec<PathBuf>,
+    /// Confine on every OS, not only macOS: tests check policies with
+    /// [`Policy::allows`] wherever they run.
+    confine_anywhere: bool,
 }
 
 static CURRENT: OnceLock<Arc<Sandbox>> = OnceLock::new();
@@ -323,6 +370,148 @@ pub(crate) fn real(p: &Path) -> PathBuf {
             s.strip_prefix(r"\\?\").map(PathBuf::from).unwrap_or(r)
         }
         Err(_) => p.to_path_buf(),
+    }
+}
+
+/// A checkout's other git worktrees, read from `.git/worktrees/*/gitdir`
+/// (each names the worktree's own `.git` file).
+pub(crate) fn worktrees(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root.join(".git").join("worktrees")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| std::fs::read_to_string(e.path().join("gitdir")).ok())
+        .filter_map(|g| Path::new(g.trim()).parent().map(real))
+        .collect()
+}
+
+/// What in Claude Code's folder belongs to other conversations: their
+/// transcripts, the prompts typed into them, backups of files they edited.
+const OTHER_CONVERSATIONS: &[&str] = &[
+    "projects",
+    "history.jsonl",
+    "file-history",
+    "todos",
+    "debug",
+    "session-env",
+    "paste-cache",
+];
+
+/// How Claude Code names a working folder's transcript folder.
+pub(crate) fn claude_project_slug(cwd: &Path) -> String {
+    cwd.display()
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// When the home folder is confined: Claude Code (folder `dir`) may use
+/// its folder and settings, but of the conversations kept there only
+/// conversation `id` (and the working folder's memory).
+pub(crate) fn own_claude_conversation(
+    policy: &mut Policy,
+    dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    id: &str,
+) {
+    if policy.confine.is_empty() {
+        return;
+    }
+    let dir = real(dir);
+    policy.open.push(dir.clone());
+    // Its settings file and the copies it writes beside it.
+    policy.open.push(real(home).join(".claude.json*"));
+    policy
+        .hide
+        .extend(OTHER_CONVERSATIONS.iter().map(|o| dir.join(o)));
+    let mut slugs = vec![claude_project_slug(cwd), claude_project_slug(&real(cwd))];
+    slugs.dedup();
+    for slug in slugs {
+        let project = dir.join("projects").join(&slug);
+        // Made here: inside the hidden folder the agent couldn't.
+        let _ = std::fs::create_dir_all(&project);
+        policy.reveal_rw.extend([
+            project.join(format!("{id}.jsonl")),
+            project.join(id),
+            project.join("memory"),
+        ]);
+    }
+    policy.reveal_rw.extend([
+        dir.join("file-history").join(id),
+        dir.join("session-env").join(id),
+        dir.join("debug").join(format!("{id}.txt")),
+        dir.join("todos").join(format!("{id}*")),
+    ]);
+}
+
+/// Read or write, for [`Policy::allows`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    Read,
+    Write,
+}
+
+/// Whether one of `entries` covers `p`: the path itself or anything in it,
+/// or, for an entry ending in `*`, anything starting with it.
+fn covers(entries: &[PathBuf], p: &Path) -> bool {
+    entries
+        .iter()
+        .any(|e| match e.to_str().and_then(|s| s.strip_suffix('*')) {
+            Some(prefix) => p.to_str().is_some_and(|s| s.starts_with(prefix)),
+            None => e.as_os_str() == "/" || p.starts_with(e),
+        })
+}
+
+impl Policy {
+    /// What the Seatbelt profile ([`seatbelt::profile`]) decides for `p`:
+    /// the same rules in the same order, the last that matches winning.
+    /// Tests check private places against it on every OS, and check it
+    /// against the real sandbox where one starts.
+    pub fn allows(&self, p: &Path, access: Access) -> bool {
+        let mut ok = true;
+        match access {
+            Access::Read => {
+                if covers(&self.confine, p) {
+                    ok = false;
+                }
+                if covers(&self.readable, p) || covers(&self.open, p) || covers(&self.writable, p) {
+                    ok = true;
+                }
+                if covers(&self.hide, p) {
+                    ok = false;
+                }
+                if covers(&self.reveal, p) || covers(&self.reveal_rw, p) {
+                    ok = true;
+                }
+                if self.block_exec.iter().any(|b| b == p) {
+                    ok = false;
+                }
+            }
+            Access::Write => {
+                if covers(&self.confine, p) {
+                    ok = false;
+                }
+                if covers(&self.open, p) {
+                    ok = true;
+                }
+                if covers(&self.protect, p) {
+                    ok = false;
+                }
+                if covers(&self.writable, p) {
+                    ok = true;
+                }
+                if covers(&self.hide, p) {
+                    ok = false;
+                }
+                if covers(&self.reveal_rw, p) {
+                    ok = true;
+                }
+            }
+        }
+        ok
     }
 }
 
@@ -404,6 +593,86 @@ const GIT_SECRETS: &[&str] = &[
     ".pypirc",
 ];
 
+/// What tools need to read under the home folder when it's confined:
+/// toolchains, version managers and the shell and git setup they start
+/// from. Read-only; credentials among them stay hidden by `SECRETS` and
+/// `GIT_SECRETS`.
+const TOOLCHAINS: &[&str] = &[
+    ".cargo",
+    ".nvm",
+    ".volta",
+    ".fnm",
+    ".bun",
+    ".deno",
+    ".pyenv",
+    ".rbenv",
+    ".asdf",
+    ".sdkman",
+    ".gradle",
+    ".m2",
+    ".yarn",
+    ".npm-global",
+    ".local/bin",
+    ".local/share/claude",
+    ".local/share/mise",
+    ".local/share/uv",
+    ".local/state/mise",
+    "go/bin",
+    "Library/pnpm",
+    "Library/Python",
+    ".config/git",
+    ".config/gh",
+    ".config/pnpm",
+    ".config/yarn",
+    ".config/mise",
+    ".config/fish",
+    ".config/starship.toml",
+    ".oh-my-zsh",
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".profile",
+    ".gitconfig",
+    ".gitignore_global",
+    ".editorconfig",
+    ".npmrc",
+    ".ssh",
+    ".docker",
+    // The login keychain's file: `security` (which Claude Code signs in
+    // with) opens it in-process. Its items stay encrypted; macOS asks
+    // before handing any out.
+    "Library/Keychains",
+];
+
+/// Folders confined besides the home folder: other people's homes and
+/// external drives.
+const CONFINED_ROOTS: &[&str] = if cfg!(target_os = "linux") {
+    &["/home", "/mnt", "/media"]
+} else if cfg!(target_os = "macos") {
+    &["/Users", "/Volumes"]
+} else {
+    &[]
+};
+
+/// Where the other agent harnesses tab runs keep their sign-in, settings
+/// and conversations: usable whole, unlike Claude Code's (see
+/// [`own_claude_conversation`]), until each gets the same split.
+const HARNESSES: &[&str] = &[
+    ".codex",
+    ".config/opencode",
+    ".local/share/opencode",
+    ".local/state/opencode",
+    ".pi",
+];
+
+/// Toolchain folders that are also written to: installs a project asks
+/// for (`rust-toolchain.toml`), and global caches.
+const TOOLCHAINS_RW: &[&str] = &[".rustup"];
+
 /// Files that run on every new shell or login: never writable, so nothing
 /// can leave a command behind for later.
 const STARTUP: &[&str] = &[
@@ -450,7 +719,16 @@ impl Sandbox {
             data_dir: data_dir.map(|d| real(&d)),
             config_dir: config_dir.map(|d| real(&d)),
             others: Vec::new(),
+            confine_anywhere: false,
         }
+    }
+
+    /// Takes `home` as the home folder and confines it on any OS (tests).
+    #[cfg(test)]
+    pub(crate) fn confining_home(mut self, home: &Path) -> Self {
+        self.home = Some(real(home));
+        self.confine_anywhere = true;
+        self
     }
 
     /// Also guards another tab's folders (see [`Sandbox::others`]).
@@ -502,8 +780,16 @@ impl Sandbox {
                 "Off. Agents and commands still start without tab's secrets, and stopping a chat ends everything it started.".to_string(),
                 None,
             ),
+            (true, Backend::Seatbelt) if self.confines() => (
+                "On, with macOS's built-in sandbox. Agents only reach the chat's own folder, your code folders, toolchains and caches: the rest of your home folder, other chats and tab's data are off limits.".to_string(),
+                None,
+            ),
             (true, Backend::Seatbelt) => (
                 "On, with macOS's built-in sandbox. Agents can't change tab's own files or your shell setup, or read cloud credentials and browser data.".to_string(),
+                None,
+            ),
+            (true, Backend::Bubblewrap) if self.confines() => (
+                "On, with bubblewrap. Agents only reach the chat's own folder, your code folders, toolchains and caches: the rest of your home folder, other chats and tab's data are off limits.".to_string(),
                 None,
             ),
             (true, Backend::Bubblewrap) => (
@@ -544,12 +830,13 @@ impl Sandbox {
         rel.iter().map(|r| h.join(r)).collect()
     }
 
-    fn user_paths(list: &[String]) -> Vec<PathBuf> {
+    /// Paths from Settings, `~/` meaning this sandbox's home folder.
+    fn user_paths(&self, list: &[String]) -> Vec<PathBuf> {
         list.iter()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
             .map(|s| {
-                let p = match (s.strip_prefix("~/"), home()) {
+                let p = match (s.strip_prefix("~/"), &self.home) {
                     (Some(rest), Some(h)) => h.join(rest),
                     _ => PathBuf::from(s),
                 };
@@ -580,6 +867,102 @@ impl Sandbox {
         out
     }
 
+    /// Whether policies lock the home folder down to what's needed (see
+    /// [`SandboxConfig::confine`]): macOS (Seatbelt) and Linux (bubblewrap,
+    /// the cloud runner included). Not Windows, which enforces nothing.
+    pub fn confines(&self) -> bool {
+        let c = self.config();
+        let os = cfg!(any(target_os = "macos", target_os = "linux"));
+        c.enabled && c.confine && (os || self.confine_anywhere)
+    }
+
+    /// Locks the home folder, other people's and external drives, leaving
+    /// tools, caches, the chat's attachments and, in the person's own
+    /// chats, their code folders. The chat's
+    /// own folder is added when it starts ([`Sandbox::command`]), its
+    /// project's repos by `AgentHub::policy`.
+    fn confine(&self, p: &mut Policy) {
+        if !self.confines() {
+            return;
+        }
+        p.confine
+            .extend(CONFINED_ROOTS.iter().map(|r| real(Path::new(r))));
+        if let Some(h) = self
+            .home
+            .clone()
+            .filter(|h| !p.confine.iter().any(|r| h.starts_with(r)))
+        {
+            p.confine.push(h);
+        }
+        // tab's own folders where they aren't in the home folder: the cloud
+        // runner's `/data`, holding every job's checkout and session.
+        let tabs = self
+            .data_dir
+            .iter()
+            .chain(&self.config_dir)
+            .chain(&self.others);
+        for d in tabs.cloned().collect::<Vec<_>>() {
+            if !p.confine.iter().any(|r| d.starts_with(r)) {
+                p.confine.push(d);
+            }
+        }
+        p.readable.extend(self.under_home(TOOLCHAINS));
+        p.readable.extend(dev_checkout());
+        if let Some(d) = &self.data_dir {
+            p.readable.push(d.join("attachments"));
+        }
+        p.open.extend(self.under_home(TOOLCHAINS_RW));
+        p.open.extend(self.under_home(HARNESSES));
+        for var in [
+            "CODEX_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+        ] {
+            if let Some(d) = std::env::var_os(var).filter(|d| !d.is_empty()) {
+                let d = real(Path::new(&d));
+                // Only a harness's own folder, never a whole XDG root.
+                if var == "CODEX_HOME" {
+                    p.open.push(d);
+                } else {
+                    p.open.push(d.join("opencode"));
+                }
+            }
+        }
+        p.open.extend(self.under_home(CACHES));
+        // Someone else's code (a review, a language server, a workflow
+        // command) gets its own folder only, not the person's other code.
+        if p.trust == Trust::Person {
+            p.open.extend(self.user_paths(&self.config().folders));
+        }
+    }
+
+    /// Lets a confined process into the folder it starts in and the folder
+    /// its program lives in. Not when it starts in the home folder (or above
+    /// it): that would open everything again.
+    pub(crate) fn starting_in(&self, policy: &Policy, exe: &Path, cwd: &Path) -> Policy {
+        let mut p = policy.clone();
+        if p.confine.is_empty() {
+            return p;
+        }
+        let cwd = real(cwd);
+        let too_wide = self.home.as_ref().is_some_and(|h| h.starts_with(&cwd))
+            || p.confine.iter().any(|r| r.starts_with(&cwd));
+        if !too_wide {
+            p.open.push(cwd);
+        }
+        for e in [exe.to_path_buf(), real(exe)] {
+            if let Some(dir) = e.parent().filter(|d| d.components().count() > 1) {
+                let dir = dir.to_path_buf();
+                let wide = self.home.as_ref().is_some_and(|h| h.starts_with(&dir));
+                if !wide && !p.readable.contains(&dir) {
+                    p.readable.push(dir);
+                }
+            }
+        }
+        p
+    }
+
     fn common(&self, trust: Trust) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let cfg = self.config();
         let mut protect: Vec<PathBuf> = Vec::new();
@@ -588,10 +971,10 @@ impl Sandbox {
         protect.extend(self.config_dir.clone());
         protect.extend(self.others.iter().cloned());
         protect.extend(self.under_home(STARTUP));
-        protect.extend(Self::user_paths(&cfg.protected));
+        protect.extend(self.user_paths(&cfg.protected));
         let mut hide = self.under_home(SECRETS);
         hide.extend(self.tab_secrets());
-        hide.extend(Self::user_paths(&cfg.hidden));
+        hide.extend(self.user_paths(&cfg.hidden));
         if trust != Trust::Person {
             hide.extend(self.under_home(GIT_SECRETS));
         }
@@ -609,17 +992,23 @@ impl Sandbox {
         if let Some(root) = dev_checkout() {
             writable.push(root.join(".git"));
         }
-        Policy {
+        let mut p = Policy {
             protect,
             writable,
             hide,
             reveal: Vec::new(),
+            reveal_rw: Vec::new(),
+            confine: Vec::new(),
+            open: Vec::new(),
+            readable: Vec::new(),
             block_exec: Vec::new(),
             drop_env: Vec::new(),
             brokered: false,
             network: Network::Any,
             trust: Trust::Person,
-        }
+        };
+        self.confine(&mut p);
+        p
     }
 
     /// An agent chat about someone else's pull request, in its checkout.
@@ -628,17 +1017,23 @@ impl Sandbox {
     pub fn review_policy(&self, checkout: &Path, workdir: &Path) -> Policy {
         let (mut protect, hide) = self.common(Trust::Agent);
         protect.push(real(workdir));
-        Policy {
+        let mut p = Policy {
             protect,
             writable: vec![real(checkout)],
             hide,
             reveal: Vec::new(),
+            reveal_rw: Vec::new(),
+            confine: Vec::new(),
+            open: Vec::new(),
+            readable: Vec::new(),
             block_exec: Vec::new(),
             drop_env: Vec::new(),
             brokered: false,
             network: Network::Any,
             trust: Trust::Agent,
-        }
+        };
+        self.confine(&mut p);
+        p
     }
 
     /// A language server or command: read anything not hidden, write only
@@ -648,17 +1043,23 @@ impl Sandbox {
         let mut w: Vec<PathBuf> = writable.iter().map(|p| real(p)).collect();
         w.extend(self.under_home(CACHES));
         w.extend(temp_dirs());
-        Policy {
+        let mut p = Policy {
             protect: vec![PathBuf::from("/")],
             writable: w,
             hide,
             reveal: Vec::new(),
+            reveal_rw: Vec::new(),
+            confine: Vec::new(),
+            open: Vec::new(),
+            readable: Vec::new(),
             block_exec: Vec::new(),
             drop_env: Vec::new(),
             brokered: false,
             network,
             trust: Trust::Untrusted,
-        }
+        };
+        self.confine(&mut p);
+        p
     }
 
     /// A chat whose `gh` and git network commands go through tab (see
@@ -729,6 +1130,7 @@ impl Sandbox {
             _ => None,
         };
         let port = proxy.as_ref().map(|p| p.port);
+        let policy = &self.starting_in(policy, exe, cwd);
         if enabled && self.backend == Backend::Bubblewrap {
             prepare_hidden(policy);
         }
@@ -823,7 +1225,14 @@ impl Sandbox {
                 // Claude Code's `Edit` rules cover every file write.
                 deny.extend(rule("Edit", p));
             }
-            for p in &policy.hide {
+            // A hidden folder with a way back in (Claude Code's own
+            // transcript, the chat's memory) is left to the sandbox: Claude
+            // Code's rules can't make the exception.
+            for p in policy
+                .hide
+                .iter()
+                .filter(|h| !policy.reveal_rw.iter().any(|r| r.starts_with(h)))
+            {
                 deny.extend(rule("Read", p));
             }
         }
