@@ -674,6 +674,10 @@ body.resizing iframe { pointer-events: none; }
 .step-mark.in_progress.still { animation: none; border-color: var(--fg-subtle); }
 .step-mark.completed { background: var(--tone-success-fg); color: var(--bg-raised); }
 @keyframes step-spin { to { transform: rotate(360deg); } }
+.progress-list li.progress-now { color: var(--fg-muted); align-items: center; }
+.progress-list li.progress-now .dots { flex: none; width: 14px; justify-content: center; gap: 2px; }
+.progress-list li.progress-now .dots i { width: 3.5px; height: 3.5px; }
+.progress-list li.progress-now > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
 .progress-step { color: var(--fg-subtle); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-top: 1px solid var(--border); padding-top: 6px; }
 .question-hint { font-size: var(--text-xs); }
 .question-skip { margin-top: 6px; font-size: var(--text-xs); color: var(--fg-subtle); }
@@ -989,9 +993,6 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
 .file-preview-ext { position: absolute; bottom: 3px; right: 4px; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
 
 /* The chat's files pinned above the composer. */
-.file-tray { flex: none; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; margin: 0 auto var(--space-2); padding: 2px var(--space-6); max-width: calc(780px + 2 * var(--space-6)); width: 100%; }
-.file-tray::-webkit-scrollbar { display: none; }
-.stage-host.staged > .chat .file-tray { padding-inline: var(--space-4); }
 .file-tile { position: relative; flex: none; display: grid; gap: 3px; width: 80px; padding: 2px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg-muted); font: inherit; cursor: pointer; text-align: left; }
 .file-tile:hover .file-preview { border-color: var(--border-strong); }
 .file-tile:hover { color: var(--fg); }
@@ -1053,6 +1054,14 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
 .msg-user .file-chips { margin-bottom: 6px; }
 .msg-tool-list { display: grid; gap: 4px; margin-top: var(--space-1); padding-left: 2px; }
 .msg-tool-list .msg-tool { border-left-color: transparent; }
+/* The agent's working-out between tool calls, inside a folded work group. */
+.msg-thought { color: var(--fg-muted); font-size: var(--text-sm); padding: 2px 0 2px 8px; }
+.msg-thought .markdown p { margin: 0; }
+/* What the agent showed in a turn, at the turn's end. */
+.turn-files { display: grid; gap: 6px; justify-items: start; }
+.turn-files .md-image { margin: 0; }
+.turn-docs { display: flex; flex-wrap: wrap; gap: 6px; }
+.turn-doc { width: 80px; }
 /* Steps made from tool calls when the agent gave no plan: one line each, cut to fit. */
 .progress-list.activity li > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; font-family: var(--font-mono); font-size: 11.5px; }
 .progress-list li.progress-earlier { color: var(--fg-subtle); font-size: var(--text-xs); padding-left: 23px; }

@@ -849,7 +849,8 @@ async fn a_phone_watches_a_session_this_app_runs_and_answers_its_prompt() {
     })
     .await;
 
-    // The agent is part-way through a reply when the phone starts watching.
+    // The agent is part-way through a reply when the phone starts watching:
+    // its text stays here (the phone gets the reply with the transcript).
     let _ = events.send(EngineEvent::SessionDelta {
         session_id: session.id.clone(),
         text: "So far ".into(),
@@ -871,19 +872,6 @@ async fn a_phone_watches_a_session_this_app_runs_and_answers_its_prompt() {
         }
         _ => None,
     };
-    // It gets the text so far, then what streams after.
-    let first = loop {
-        if let Some(ev) = live(next(&mut phone).await) {
-            break ev;
-        }
-    };
-    assert_eq!(
-        first,
-        crate::live::LiveEvent::SessionDelta {
-            session_id: session.id.clone(),
-            text: "So far ".into()
-        }
-    );
 
     // The agent asks; the phone sees the prompt and answers it.
     let (a, sid) = (agents.clone(), session.id.clone());
@@ -892,10 +880,12 @@ async fn a_phone_watches_a_session_this_app_runs_and_answers_its_prompt() {
             .await
     });
     let approval = loop {
-        if let Some(crate::live::LiveEvent::ApprovalRequested { approval }) =
-            live(next(&mut phone).await)
-        {
-            break approval;
+        match live(next(&mut phone).await) {
+            Some(crate::live::LiveEvent::ApprovalRequested { approval }) => break approval,
+            Some(crate::live::LiveEvent::SessionDelta { .. }) => {
+                panic!("streamed text shouldn't leave this machine")
+            }
+            _ => {}
         }
     };
     let cmd = SteerCommand::Approval {

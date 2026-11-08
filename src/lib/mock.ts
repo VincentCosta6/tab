@@ -723,6 +723,7 @@ function showcase() {
   };
   post(session, "user", "text", "What changed in the 14:10 deploy? Is the cart cache the cause?");
   tool("mcp__tab__tab_search: 14:10 deploy checkout", "mcp__tab__tab_search", { query: "14:10 deploy checkout" }, "3 results");
+  post(session, "assistant", "text", "The incident thread puts the slowdown right at 14:10. Checking what that deploy shipped.");
   tool("git log --oneline --since=13:30 origin/main", "Bash", { command: "git log --oneline --since=13:30 origin/main", description: "List commits in the deploy" }, "a41c2e9 Cut cart cache TTL to 5s for price freshness (#488)\n7be0d13 Bump tracing to 0.1.41");
   tool("Read src/cart/cache.rs", "Read", { file_path: "src/cart/cache.rs" }, "const CART_TTL: Duration = Duration::from_secs(5);");
   tool("mcp__tab__tab_add_found: #incident-checkout thread", "mcp__tab__tab_add_found", { title: "#incident-checkout thread" }, "Added under found.");

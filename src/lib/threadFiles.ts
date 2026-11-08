@@ -89,6 +89,20 @@ export function threadFiles(messages: SessionMessage[], base: string | null): Th
   return list;
 }
 
+/** Files made to be looked at (images, PDFs, markdown docs, pages), not source code. */
+export function isShowable(path: string): boolean {
+  if (isImagePath(path)) return true;
+  const ext = /\.([A-Za-z0-9]+)$/.exec(path.split(/[?#]/)[0])?.[1].toLowerCase() ?? "";
+  return ["pdf", "md", "markdown", "mdx", "html", "htm", "svg", "mp4", "mov", "webm"].includes(ext);
+}
+
+/**
+ * What the chat pins beside itself: what the agent made for the person to
+ * look at. Their own attachments still travel with the chat (another agent
+ * picking it up elsewhere needs them) but they already know those.
+ */
+export const isPinned = (f: ThreadFile) => (f.from === "agent" || !!f.original) && isShowable(f.path);
+
 export function useThreadFiles(chat: Chat | undefined): ThreadFile[] {
   const messages = chat?.messages;
   const base = chat?.session?.cwd ?? null;

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, UrgencyLabel, cx } from "../../design/components";
 import { FlapTitle } from "../../design/FlapTitle";
@@ -9,7 +9,7 @@ import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useChat, useItem } from "../../lib/hooks";
-import { useThreadFiles } from "../../lib/threadFiles";
+import { isPinned, useThreadFiles } from "../../lib/threadFiles";
 import { keys } from "../../lib/query";
 import type { QueueItem } from "../../lib/types";
 import { parsePullUrl } from "../github/pulls";
@@ -32,7 +32,8 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const { data: chat } = useChat(id);
-  const files = useThreadFiles(chat);
+  const all = useThreadFiles(chat);
+  const files = useMemo(() => all.filter(isPinned), [all]);
   const [readMode, setReadMode] = useReadMode();
   const tint = useProjectTint(item?.project_id);
   const chatCount = chat?.messages.filter((m) => m.role === "user" || (m.role === "assistant" && m.kind === "text")).length ?? 0;

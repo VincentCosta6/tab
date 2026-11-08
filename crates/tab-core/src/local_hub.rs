@@ -1077,16 +1077,7 @@ impl LocalHub {
     /// events for watchers, handles steering and watch notices addressed to
     /// it, and shows other devices' live events here.
     fn run_live(self: &Arc<Self>, store: Arc<Store>, events: broadcast::Sender<EngineEvent>) {
-        // Text streamed so far in each session's current reply, for
-        // watchers who join mid-turn.
-        let partial: Arc<Mutex<std::collections::HashMap<String, String>>> = Default::default();
-
-        let (me, mut rx, part, st) = (
-            self.clone(),
-            events.subscribe(),
-            partial.clone(),
-            store.clone(),
-        );
+        let (me, mut rx, st) = (self.clone(), events.subscribe(), store.clone());
         tokio::spawn(async move {
             loop {
                 let e = match rx.recv().await {
@@ -1094,24 +1085,8 @@ impl LocalHub {
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
-                match &e {
-                    EngineEvent::SessionDelta { session_id, text } => {
-                        part.lock()
-                            .unwrap()
-                            .entry(session_id.clone())
-                            .or_default()
-                            .push_str(text);
-                    }
-                    EngineEvent::SessionMessage { message } => {
-                        part.lock().unwrap().remove(&message.session_id);
-                    }
-                    EngineEvent::SessionChanged { session } => {
-                        if session.status != SessionStatus::Working {
-                            part.lock().unwrap().remove(&session.id);
-                        }
-                        me.rewatch(&st);
-                    }
-                    _ => {}
+                if let EngineEvent::SessionChanged { .. } = &e {
+                    me.rewatch(&st);
                 }
                 let Some(live) = LiveEvent::from_engine(&e) else {
                     continue;
@@ -1142,13 +1117,6 @@ impl LocalHub {
                 match env.body {
                     Some(Res::Steered(s)) => me.steered(&store, s).await,
                     Some(Res::Watched(w)) if w.watchers > 0 => {
-                        let text = partial.lock().unwrap().get(&w.session).cloned();
-                        if let Some(text) = text.filter(|t| !t.is_empty()) {
-                            me.publish(&LiveEvent::SessionDelta {
-                                session_id: w.session.clone(),
-                                text,
-                            });
-                        }
                         if let Some(agents) = me.agents.get() {
                             for approval in agents.pending_approvals(&w.session) {
                                 me.publish(&LiveEvent::ApprovalRequested { approval });
