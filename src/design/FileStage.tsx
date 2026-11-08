@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, inTauri } from "../lib/api";
-import { fileName, isImagePath, isLocalPath, openImages, useImageSrc } from "../lib/images";
+import { fileName, isImagePath, isLocalPath, MISSING_IMAGE, openImages, useImage, useImageSrc } from "../lib/images";
 import { StageContext, useStage, type Stage, type StageFile } from "../lib/stage";
 import type { ThreadFile } from "../lib/threadFiles";
 import { Button, cx } from "./components";
@@ -276,7 +276,8 @@ function FileView({ file, files, index, replaced, fresh, onStep, onPick, onClose
 }
 
 function ImageContent({ file }: { file: StageFile }) {
-  const src = useImageSrc(file.path);
+  const { url: src, failed } = useImage(file.path);
+  if (failed) return <div className="stage-note">{MISSING_IMAGE}</div>;
   if (!src) return <div className="stage-note">Loading…</div>;
   return (
     <div className="stage-image">

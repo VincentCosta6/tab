@@ -22,6 +22,10 @@ pub struct FileRef {
     pub hash: String,
     pub name: String,
     pub size: u64,
+    /// For a file an agent's reply named: the path the reply says, which
+    /// other devices look the file up by (see [`crate::named_files`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// Where an attachment lives in a device's attachments folder:
@@ -59,6 +63,7 @@ pub fn file_ref(path: &Path) -> Option<FileRef> {
         hash,
         name: path.file_name()?.to_string_lossy().into_owned(),
         size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+        path: None,
     })
 }
 
@@ -201,7 +206,8 @@ mod tests {
             Some(FileRef {
                 hash: hash.clone(),
                 name: "shot 1.png".into(),
-                size: 9
+                size: 9,
+                path: None,
             })
         );
         // A pre-hub attachment folder isn't a hash.

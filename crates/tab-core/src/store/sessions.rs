@@ -251,6 +251,39 @@ impl Store {
         })
     }
 
+    /// The file the newest message naming `path` recorded for it (see
+    /// [`crate::named_files`]): how a device shows a file an agent made on
+    /// another one.
+    pub fn named_file(&self, path: &str) -> anyhow::Result<Option<crate::live::FileRef>> {
+        // Messages store `meta` as compact JSON, so the path appears as is.
+        let needle = format!(
+            "%{}%",
+            like_escape(&format!("\"path\":{}", serde_json::to_string(path)?))
+        );
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT meta FROM session_messages WHERE meta LIKE ?1 ESCAPE '\\'
+             ORDER BY id DESC LIMIT 20",
+        )?;
+        let metas = stmt
+            .query_map([needle], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for meta in metas {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&meta) else {
+                continue;
+            };
+            let files: Vec<crate::live::FileRef> = v
+                .get("files")
+                .cloned()
+                .and_then(|f| serde_json::from_value(f).ok())
+                .unwrap_or_default();
+            if let Some(f) = files.into_iter().find(|f| f.path.as_deref() == Some(path)) {
+                return Ok(Some(f));
+            }
+        }
+        Ok(None)
+    }
+
     /// A message by its synced key (see migration 013).
     pub fn message_by_uid(&self, uid: &str) -> anyhow::Result<Option<SessionMessage>> {
         Ok(self
@@ -324,5 +357,69 @@ impl Store {
             .query_map([ts(since)], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         Ok(ids)
+    }
+}
+
+/// `s` for a LIKE pattern with `ESCAPE '\\'`: its `%`, `_` and `\\` match
+/// themselves.
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn named_file_is_the_newest_message_naming_the_path() {
+        let s = Store::in_memory().unwrap();
+        let chat = s
+            .session_create(None, AgentKind::ClaudeCode, "Shots", "/w", Utc::now())
+            .unwrap();
+        let file = |hash: &str, path: &str| json!({ "files": [{ "hash": hash, "name": "shot.png", "size": 3, "path": path }] });
+        let (old, new) = (
+            tab_domain::blob::hash(b"old"),
+            tab_domain::blob::hash(b"new"),
+        );
+        s.message_add(
+            &chat.id,
+            "assistant",
+            "text",
+            "`/tmp/a_b/shot.png`",
+            &file(&old, "/tmp/a_b/shot.png"),
+            Utc::now(),
+        )
+        .unwrap();
+        s.message_add(
+            &chat.id,
+            "assistant",
+            "text",
+            "again",
+            &file(&new, "/tmp/a_b/shot.png"),
+            Utc::now(),
+        )
+        .unwrap();
+        // `_` is a LIKE wildcard; it mustn't match another character.
+        s.message_add(
+            &chat.id,
+            "assistant",
+            "text",
+            "other",
+            &file(&old, "/tmp/aXb/shot.png"),
+            Utc::now(),
+        )
+        .unwrap();
+        let got = s.named_file("/tmp/a_b/shot.png").unwrap().unwrap();
+        assert_eq!(got.hash, new);
+        assert_eq!(s.named_file("/tmp/aYb/shot.png").unwrap(), None);
+        assert_eq!(s.named_file("/tmp/a%/shot.png").unwrap(), None);
     }
 }

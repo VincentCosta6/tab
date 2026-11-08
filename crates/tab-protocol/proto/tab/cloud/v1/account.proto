@@ -19,14 +19,25 @@
 //   GET  /v1/hubs/{hub_id}/secrets  SecretNames   their names, never values
 //   GET  /v1/hubs/{hub_id}/runner   RunnerStatus  the hub's cloud runner
 //   POST /v1/hubs/{hub_id}/runner   RunnerStatus  wake it (paid plans)
+//   PUT  /v1/hubs/{hub_id}/files    StoredFile    store a file (members);
+//                                                 the body is its raw bytes
+//   GET  /v1/hubs/{hub_id}/files/{hex}            a file's raw bytes, by the
+//                                                 hex of its sha256 (404
+//                                                 Error when it isn't there);
+//                                                 HEAD says whether it is
+//
+// Files (chat attachments, images an agent made) are the one exception to
+// Protobuf bodies: they go up and come down as their own bytes, at most
+// 50 MiB. The hub names each by its hash, keeps it while a record refers to
+// it, and deletes it a day after nothing does.
 //
 // The cloud runner (tab running headless next to the hub, for connections
 // set to run in tab cloud, workflows and agent jobs) calls one route of its
 // own, with `authorization: Runner <token>`, a token the hub gave it:
 //   GET  /v1/runner/secrets         Secrets       its hub's secrets, values
 //                                                 included
-// and syncs with its hub like any computer, at /v1/hubs/{hub_id}/sync with
-// `authorization: Bearer <token>`. A token is `tabrunner.<hub_id>.<secret>`;
+// and syncs with its hub like any computer, at /v1/hubs/{hub_id}/sync (and
+// /files) with `authorization: Bearer <token>`. A token is `tabrunner.<hub_id>.<secret>`;
 // only the hub can say it's valid, and each start of the runner gets a new one.
 //
 // Same compatibility rules as hub.proto: only add; never renumber or reuse a
@@ -173,4 +184,11 @@ message RunnerStatus {
   google.protobuf.Timestamp seen_at = 2;
   // Said for a person: why it's asleep, or what it's doing.
   string detail = 3;
+}
+
+// A file the hub now has.
+message StoredFile {
+  // `sha256:<hex>` of its bytes, as records refer to it.
+  string hash = 1;
+  uint64 size = 2;
 }

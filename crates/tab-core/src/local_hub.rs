@@ -68,6 +68,8 @@ const IDLE: Duration = Duration::from_secs(5);
 const PULL: u32 = 500;
 /// How often files nothing refers to are cleaned up.
 const COLLECT: Duration = Duration::from_secs(60 * 60);
+/// How long a file the cloud hub didn't have isn't asked for again.
+const MISS_FOR: Duration = Duration::from_secs(60);
 
 /// Who a frame is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +117,12 @@ pub struct LocalHub {
     /// (changes queue up) rather than go to `hub.db`, whose sequence
     /// numbers stopped matching at the move.
     awaiting_cloud: std::sync::atomic::AtomicBool,
+    /// Files the cloud hub is known to have.
+    uploaded: Mutex<std::collections::HashSet<String>>,
+    /// Files that couldn't go up yet; tried again on each sync.
+    to_upload: Mutex<std::collections::BTreeSet<String>>,
+    /// Files the cloud hub didn't have, and when it was asked.
+    misses: Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 /// How [`LocalHub::move_to_cloud`] went.
@@ -223,6 +231,9 @@ impl LocalHub {
             cloud: Default::default(),
             syncing: Mutex::new(()),
             awaiting_cloud: Default::default(),
+            uploaded: Default::default(),
+            to_upload: Default::default(),
+            misses: Default::default(),
         }))
     }
 
@@ -367,6 +378,18 @@ impl LocalHub {
             }
         }
         ops.reverse();
+        // The files these records mention go up first, so a device that
+        // gets the record can fetch what it names.
+        if let Some(link) = self.cloud_link() {
+            let mut refs = std::collections::BTreeSet::new();
+            for op in &ops {
+                if let Op::Put { body, .. } = op {
+                    refs.extend(tab_domain::blob::refs(body));
+                }
+            }
+            refs.extend(std::mem::take(&mut *self.to_upload.lock().unwrap()));
+            self.upload(&link, refs, false);
+        }
         let mut refused = vec![];
         if !ops.is_empty() && self.apply(&ops).is_err() {
             // Find which ones the hub won't take; the rest go through.
@@ -393,6 +416,69 @@ impl LocalHub {
             self.announce(store, &changed);
         }
         Ok(rows.len())
+    }
+
+    /// Sends the cloud hub the files in `hashes` this hub has and it lacks.
+    /// One that fails is tried again on the next sync. With `ask`, first
+    /// asks whether the cloud has each (for files that may have gone up
+    /// from another device, or before this app started).
+    fn upload(&self, link: &CloudLink, hashes: impl IntoIterator<Item = String>, ask: bool) {
+        for hash in hashes {
+            if self.uploaded.lock().unwrap().contains(&hash) {
+                continue;
+            }
+            let bytes = match self.file_get(&hash) {
+                Ok(Some(b)) => b,
+                // Not on this computer: another device's, or swept.
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(error = %e, "hub: couldn't read a file to upload");
+                    continue;
+                }
+            };
+            let done = match ask.then(|| link.has_file(&hash)) {
+                Some(Ok(true)) => Ok(()),
+                _ => link.put_file(bytes).and_then(|s| {
+                    anyhow::ensure!(s.hash == hash, "cloud hub stored {} for {hash}", s.hash);
+                    Ok(())
+                }),
+            };
+            match done {
+                Ok(()) => {
+                    self.uploaded.lock().unwrap().insert(hash);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "hub: couldn't upload a file; will retry");
+                    self.to_upload.lock().unwrap().insert(hash);
+                }
+            }
+        }
+    }
+
+    /// Sends the cloud hub every file this hub keeps that it lacks, in the
+    /// background: files attached before the move, or while it was away.
+    fn upload_all_soon(self: &Arc<Self>) {
+        let Some(link) = self.cloud_link() else {
+            return;
+        };
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let mut after = String::new();
+            loop {
+                let page = match me.files.lock().unwrap().list(&after, 200) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "hub: couldn't list files to upload");
+                        return;
+                    }
+                };
+                let Some(last) = page.last() else {
+                    return;
+                };
+                after = last.hash.clone();
+                me.upload(&link, page.into_iter().map(|m| m.hash), true);
+            }
+        });
     }
 
     /// Reads one page of the hub's log into `tab.db`. Returns whether
@@ -621,7 +707,7 @@ impl LocalHub {
     /// adds what it lacks, as when meeting any hub with data. `hub.db`
     /// keeps its copy either way. `progress(done, total)` hears each page.
     pub fn move_to_cloud(
-        &self,
+        self: &Arc<Self>,
         link: Arc<CloudLink>,
         store: &Store,
         mut progress: impl FnMut(u64, u64),
@@ -669,6 +755,7 @@ impl LocalHub {
             MoveOutcome::Joined { head: cloud_head }
         };
         *self.cloud.write().unwrap() = Some(link);
+        self.upload_all_soon();
         self.introduce(store)?;
         self.sync(store)?;
         Ok(outcome)
@@ -728,10 +815,11 @@ impl LocalHub {
 
     /// Syncs `tab.db` with the cloud hub behind `link` (this computer moved
     /// before). Blocks; run it on a blocking thread.
-    pub fn use_cloud(&self, link: Arc<CloudLink>, store: &Store) -> anyhow::Result<()> {
+    pub fn use_cloud(self: &Arc<Self>, link: Arc<CloudLink>, store: &Store) -> anyhow::Result<()> {
         let _turn = self.syncing.lock().unwrap();
         self.cloud_hello(&link, store)?;
         *self.cloud.write().unwrap() = Some(link);
+        self.upload_all_soon();
         self.awaiting_cloud.store(false, Ordering::Relaxed);
         self.introduce(store)?;
         self.sync(store)
@@ -948,7 +1036,15 @@ impl LocalHub {
 /// Files, and the live channel.
 impl LocalHub {
     /// Lets other devices steer the sessions this app runs.
-    pub fn attach_agents(&self, agents: Arc<AgentHub>) {
+    /// Also gives them somewhere to put the files their replies name.
+    pub fn attach_agents(self: &Arc<Self>, agents: Arc<AgentHub>) {
+        let hub = Arc::downgrade(self);
+        agents.set_file_sink(Arc::new(move |bytes: &[u8]| {
+            let hub = hub
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("the hub has shut down"))?;
+            Ok(hub.file_put(bytes)?.hash)
+        }));
         let _ = self.agents.set(agents);
     }
 
@@ -978,18 +1074,58 @@ impl LocalHub {
         if dest.is_file() {
             return Ok(dest);
         }
-        let src = self
-            .files
-            .lock()
-            .unwrap()
-            .path(hash)
-            .filter(|p| p.is_file())
-            .ok_or_else(|| anyhow::anyhow!("the hub doesn't have that file"))?;
+        let here = |hub: &Self| hub.files.lock().unwrap().path(hash).filter(|p| p.is_file());
+        let src = match here(self) {
+            Some(p) => p,
+            None => {
+                self.fetch_from_cloud(hash)?;
+                here(self).ok_or_else(|| anyhow::anyhow!("the hub doesn't have that file"))?
+            }
+        };
         std::fs::create_dir_all(dest.parent().expect("has a folder"))?;
         // A copy, not a link: an agent editing the attachment mustn't change
         // the bytes behind the hash. (On APFS and Btrfs this is a cheap clone.)
         std::fs::copy(&src, &dest)?;
         Ok(dest)
+    }
+
+    /// Copies a file from the cloud hub into this one. Blocks on the
+    /// download. A file the cloud didn't have isn't asked for again for a
+    /// minute (the chat polls the files it shows).
+    fn fetch_from_cloud(&self, hash: &str) -> anyhow::Result<()> {
+        let link = self
+            .cloud_link()
+            .ok_or_else(|| anyhow::anyhow!("the hub doesn't have that file"))?;
+        if self
+            .misses
+            .lock()
+            .unwrap()
+            .get(hash)
+            .is_some_and(|at| at.elapsed() < MISS_FOR)
+        {
+            anyhow::bail!("the hub doesn't have that file");
+        }
+        match link.get_file(hash) {
+            Ok(Some(bytes)) => {
+                self.file_put(&bytes)?;
+                self.uploaded.lock().unwrap().insert(hash.to_string());
+                Ok(())
+            }
+            Ok(None) => {
+                self.misses
+                    .lock()
+                    .unwrap()
+                    .insert(hash.to_string(), std::time::Instant::now());
+                anyhow::bail!("the hub doesn't have that file")
+            }
+            Err(e) => {
+                self.misses
+                    .lock()
+                    .unwrap()
+                    .insert(hash.to_string(), std::time::Instant::now());
+                Err(e)
+            }
+        }
     }
 
     /// Saves a file the person attached: into the hub, then into the
@@ -1001,6 +1137,11 @@ impl LocalHub {
 
     /// Deletes files nothing refers to any more (after the grace period).
     pub fn collect_files(&self) -> anyhow::Result<usize> {
+        // Synced with the cloud, this hub's records stop moving, so its
+        // files are a cache of the cloud's; keep any that haven't gone up.
+        if self.cloud_link().is_some() && !self.to_upload.lock().unwrap().is_empty() {
+            return Ok(0);
+        }
         let hub = self.hub.lock().unwrap();
         let mut files = self.files.lock().unwrap();
         let gone =

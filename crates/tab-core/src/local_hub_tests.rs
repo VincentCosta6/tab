@@ -764,6 +764,7 @@ async fn this_app_watches_and_steers_a_session_another_device_runs() {
                 hash: file.hash.clone(),
                 name: "d.png".into(),
                 size: file.size,
+                path: None,
             }],
         },
     )
@@ -922,8 +923,9 @@ async fn a_phone_watches_a_session_this_app_runs_and_answers_its_prompt() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// A stand-in for tab cloud: tab's hub behind `/v1/hubs/{id}/sync`, the way
-/// the hub Durable Object serves it (minus accounts).
+/// A stand-in for tab cloud: tab's hub behind `/v1/hubs/{id}/sync`, and its
+/// files at `/v1/hubs/{id}/files`, the way the hub Durable Object serves
+/// them (minus accounts, and R2).
 async fn fake_cloud() -> (String, Arc<Mutex<tab_hub::Hub<SqliteStore>>>) {
     use axum::extract::Path as UrlPath;
     type Cloud = Arc<Mutex<tab_hub::Hub<SqliteStore>>>;
@@ -957,9 +959,49 @@ async fn fake_cloud() -> (String, Arc<Mutex<tab_hub::Hub<SqliteStore>>>) {
             hub.lock().unwrap().disconnect(conn);
         })
     }
+    type Files = Arc<Mutex<tab_store::blob::MemBlobStore>>;
+    fn authed(headers: &axum::http::HeaderMap) -> bool {
+        headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer t0k")
+    }
+    async fn put_file(
+        headers: axum::http::HeaderMap,
+        State(files): State<Files>,
+        body: axum::body::Bytes,
+    ) -> Response {
+        use prost::Message as _;
+        if !authed(&headers) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        let m = files.lock().unwrap().put(&body, Utc::now()).unwrap();
+        tab_protocol::cloud::StoredFile {
+            hash: m.hash,
+            size: m.size,
+        }
+        .encode_to_vec()
+        .into_response()
+    }
+    async fn get_file(
+        headers: axum::http::HeaderMap,
+        UrlPath((_id, hex)): UrlPath<(String, String)>,
+        State(files): State<Files>,
+    ) -> Response {
+        if !authed(&headers) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        let hash = tab_domain::blob::from_hex(&hex).unwrap_or_default();
+        match files.lock().unwrap().get(&hash).unwrap() {
+            Some(b) => b.into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+    let files = Router::new()
+        .route("/v1/hubs/{id}/files", axum::routing::put(put_file))
+        .route("/v1/hubs/{id}/files/{hex}", get(get_file))
+        .with_state(Files::default());
     let app = Router::new()
         .route("/v1/hubs/{id}/sync", get(sync))
-        .with_state((hub.clone(), Arc::new(AtomicU64::new(1))));
+        .with_state((hub.clone(), Arc::new(AtomicU64::new(1))))
+        .merge(files);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
@@ -1081,6 +1123,81 @@ async fn moving_to_the_cloud_keeps_history_syncs_from_then_on_and_can_come_back(
     assert!(
         blocking(move || h.move_to_local(&s)).await.is_err(),
         "already local"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn files_reach_other_computers_through_the_cloud() {
+    let (api, _cloud) = fake_cloud().await;
+    let (mac_hub, dir) = temp_hub("files-mac");
+    let mac = Arc::new(Store::in_memory().unwrap());
+    mac_hub.introduce(&mac).unwrap();
+    let (h, s, link) = (mac_hub.clone(), mac.clone(), link_to(&api));
+    blocking(move || h.move_to_cloud(link, &s, |_, _| {}).map(|_| ()))
+        .await
+        .unwrap();
+
+    // The agent on this computer makes a screenshot and names it.
+    let shot = dir.join("work").join("shot.png");
+    std::fs::create_dir_all(shot.parent().unwrap()).unwrap();
+    std::fs::write(&shot, b"png from the mac").unwrap();
+    let agents = crate::agents::AgentHub::new(
+        mac.clone(),
+        broadcast::channel(16).0,
+        Default::default(),
+        dir.join("agents"),
+    );
+    mac_hub.attach_agents(agents.clone());
+    let chat = mac
+        .session_create(
+            None,
+            crate::model::AgentKind::ClaudeCode,
+            "Shots",
+            "/w",
+            Utc::now(),
+        )
+        .unwrap();
+    let text = format!("Here: `{}`", shot.display());
+    agents.post(
+        &chat.id,
+        "assistant",
+        "text",
+        &text,
+        serde_json::Value::Null,
+    );
+    let hash = tab_domain::blob::hash(b"png from the mac");
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    blocking(move || h.sync(&s)).await.unwrap();
+
+    // Another computer gets the chat, and the file behind the path.
+    let (pc_hub, dir2) = temp_hub("files-pc");
+    let pc = Arc::new(Store::in_memory().unwrap());
+    pc_hub.introduce(&pc).unwrap();
+    let (h, s, link) = (pc_hub.clone(), pc.clone(), link_to(&api));
+    blocking(move || h.move_to_cloud(link, &s, |_, _| {}).map(|_| ()))
+        .await
+        .unwrap();
+    let path = shot.display().to_string();
+    let file = pc
+        .named_file(&path)
+        .unwrap()
+        .expect("the reply recorded the file");
+    assert_eq!(file.hash, hash);
+    let (h, d, f) = (pc_hub.clone(), dir2.join("attachments"), file.clone());
+    let local = blocking(move || h.file_materialize(&d, &f.hash, &f.name))
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(local).unwrap(), b"png from the mac");
+
+    // A file the cloud doesn't have fails rather than hangs.
+    let (h, d) = (pc_hub.clone(), dir2.join("attachments"));
+    let missing = tab_domain::blob::hash(b"nowhere");
+    assert!(
+        blocking(move || h.file_materialize(&d, &missing, "x.png"))
+            .await
+            .is_err()
     );
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(dir2);

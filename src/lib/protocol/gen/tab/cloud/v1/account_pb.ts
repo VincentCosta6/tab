@@ -19,14 +19,25 @@
 //   GET  /v1/hubs/{hub_id}/secrets  SecretNames   their names, never values
 //   GET  /v1/hubs/{hub_id}/runner   RunnerStatus  the hub's cloud runner
 //   POST /v1/hubs/{hub_id}/runner   RunnerStatus  wake it (paid plans)
+//   PUT  /v1/hubs/{hub_id}/files    StoredFile    store a file (members);
+//                                                 the body is its raw bytes
+//   GET  /v1/hubs/{hub_id}/files/{hex}            a file's raw bytes, by the
+//                                                 hex of its sha256 (404
+//                                                 Error when it isn't there);
+//                                                 HEAD says whether it is
+//
+// Files (chat attachments, images an agent made) are the one exception to
+// Protobuf bodies: they go up and come down as their own bytes, at most
+// 50 MiB. The hub names each by its hash, keeps it while a record refers to
+// it, and deletes it a day after nothing does.
 //
 // The cloud runner (tab running headless next to the hub, for connections
 // set to run in tab cloud, workflows and agent jobs) calls one route of its
 // own, with `authorization: Runner <token>`, a token the hub gave it:
 //   GET  /v1/runner/secrets         Secrets       its hub's secrets, values
 //                                                 included
-// and syncs with its hub like any computer, at /v1/hubs/{hub_id}/sync with
-// `authorization: Bearer <token>`. A token is `tabrunner.<hub_id>.<secret>`;
+// and syncs with its hub like any computer, at /v1/hubs/{hub_id}/sync (and
+// /files) with `authorization: Bearer <token>`. A token is `tabrunner.<hub_id>.<secret>`;
 // only the hub can say it's valid, and each start of the runner gets a new one.
 //
 // Same compatibility rules as hub.proto: only add; never renumber or reuse a
@@ -46,7 +57,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file tab/cloud/v1/account.proto.
  */
 export const file_tab_cloud_v1_account: GenFile = /*@__PURE__*/
-  fileDesc("Chp0YWIvY2xvdWQvdjEvYWNjb3VudC5wcm90bxIMdGFiLmNsb3VkLnYxIlEKBFBsYW4SDAoEbmFtZRgBIAEoCRIrCgdlbmRzX2F0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIOCgZhY3RpdmUYAyABKAgi3gEKA0h1YhIOCgZodWJfaWQYASABKAkSIwoEa2luZBgCIAEoDjIVLnRhYi5jbG91ZC52MS5IdWJLaW5kEgwKBG5hbWUYAyABKAkSIAoEcm9sZRgEIAEoDjISLnRhYi5jbG91ZC52MS5Sb2xlEiUKBXN0YXRlGAUgASgOMhYudGFiLmNsb3VkLnYxLkh1YlN0YXRlEg4KBnJlZ2lvbhgGIAEoCRIsCghyZWFkeV9hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDQoFZXJyb3IYCCABKAkiTQoJSHViU3RhdHVzEh4KA2h1YhgBIAEoCzIRLnRhYi5jbG91ZC52MS5IdWISIAoEcGxhbhgCIAEoCzISLnRhYi5jbG91ZC52MS5QbGFuIkwKB0h1Ykxpc3QSHwoEaHVicxgBIAMoCzIRLnRhYi5jbG91ZC52MS5IdWISIAoEcGxhbhgCIAEoCzISLnRhYi5jbG91ZC52MS5QbGFuIj8KBUVycm9yEiUKBGNvZGUYASABKA4yFy50YWIuY2xvdWQudjEuRXJyb3JDb2RlEg8KB21lc3NhZ2UYAiABKAkiJQoGU2VjcmV0EgwKBG5hbWUYASABKAkSDQoFdmFsdWUYAiABKAkiQwoKUHV0U2VjcmV0cxIlCgdzZWNyZXRzGAEgAygLMhQudGFiLmNsb3VkLnYxLlNlY3JldBIOCgZyZW1vdmUYAiADKAkiHAoLU2VjcmV0TmFtZXMSDQoFbmFtZXMYASADKAkiMAoHU2VjcmV0cxIlCgdzZWNyZXRzGAEgAygLMhQudGFiLmNsb3VkLnYxLlNlY3JldCJ1CgxSdW5uZXJTdGF0dXMSKAoFc3RhdGUYASABKA4yGS50YWIuY2xvdWQudjEuUnVubmVyU3RhdGUSKwoHc2Vlbl9hdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDgoGZGV0YWlsGAMgASgJKoABCghIdWJTdGF0ZRIZChVIVUJfU1RBVEVfVU5TUEVDSUZJRUQQABISCg5IVUJfU1RBVEVfTk9ORRABEhoKFkhVQl9TVEFURV9QUk9WSVNJT05JTkcQAhITCg9IVUJfU1RBVEVfUkVBRFkQAxIUChBIVUJfU1RBVEVfRkFJTEVEEAQqTQoHSHViS2luZBIYChRIVUJfS0lORF9VTlNQRUNJRklFRBAAEhUKEUhVQl9LSU5EX1BFUlNPTkFMEAESEQoNSFVCX0tJTkRfVEVBTRACKl0KBFJvbGUSFAoQUk9MRV9VTlNQRUNJRklFRBAAEg4KClJPTEVfT1dORVIQARIOCgpST0xFX0FETUlOEAISDwoLUk9MRV9NRU1CRVIQAxIOCgpST0xFX0dVRVNUEAQqngIKCUVycm9yQ29kZRIaChZFUlJPUl9DT0RFX1VOU1BFQ0lGSUVEEAASHgoaRVJST1JfQ09ERV9VTkFVVEhFTlRJQ0FURUQQARIcChhFUlJPUl9DT0RFX1BMQU5fUkVRVUlSRUQQAhIVChFFUlJPUl9DT0RFX0xPQ0tFRBADEhsKF0VSUk9SX0NPREVfUkFURV9MSU1JVEVEEAQSGAoURVJST1JfQ09ERV9OT1RfRk9VTkQQBRIYChRFUlJPUl9DT0RFX0ZPUkJJRERFThAGEhoKFkVSUk9SX0NPREVfQkFEX1JFUVVFU1QQBxIXChNFUlJPUl9DT0RFX0lOVEVSTkFMEAgSGgoWRVJST1JfQ09ERV9VTlJFQUNIQUJMRRAJKpcBCgtSdW5uZXJTdGF0ZRIcChhSVU5ORVJfU1RBVEVfVU5TUEVDSUZJRUQQABIXChNSVU5ORVJfU1RBVEVfQVNMRUVQEAESGQoVUlVOTkVSX1NUQVRFX1NUQVJUSU5HEAISGAoUUlVOTkVSX1NUQVRFX1JVTk5JTkcQAxIcChhSVU5ORVJfU1RBVEVfTk9UX09OX1BMQU4QBGIGcHJvdG8z", [file_google_protobuf_timestamp]);
+  fileDesc("Chp0YWIvY2xvdWQvdjEvYWNjb3VudC5wcm90bxIMdGFiLmNsb3VkLnYxIlEKBFBsYW4SDAoEbmFtZRgBIAEoCRIrCgdlbmRzX2F0GAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIOCgZhY3RpdmUYAyABKAgi3gEKA0h1YhIOCgZodWJfaWQYASABKAkSIwoEa2luZBgCIAEoDjIVLnRhYi5jbG91ZC52MS5IdWJLaW5kEgwKBG5hbWUYAyABKAkSIAoEcm9sZRgEIAEoDjISLnRhYi5jbG91ZC52MS5Sb2xlEiUKBXN0YXRlGAUgASgOMhYudGFiLmNsb3VkLnYxLkh1YlN0YXRlEg4KBnJlZ2lvbhgGIAEoCRIsCghyZWFkeV9hdBgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDQoFZXJyb3IYCCABKAkiTQoJSHViU3RhdHVzEh4KA2h1YhgBIAEoCzIRLnRhYi5jbG91ZC52MS5IdWISIAoEcGxhbhgCIAEoCzISLnRhYi5jbG91ZC52MS5QbGFuIkwKB0h1Ykxpc3QSHwoEaHVicxgBIAMoCzIRLnRhYi5jbG91ZC52MS5IdWISIAoEcGxhbhgCIAEoCzISLnRhYi5jbG91ZC52MS5QbGFuIj8KBUVycm9yEiUKBGNvZGUYASABKA4yFy50YWIuY2xvdWQudjEuRXJyb3JDb2RlEg8KB21lc3NhZ2UYAiABKAkiJQoGU2VjcmV0EgwKBG5hbWUYASABKAkSDQoFdmFsdWUYAiABKAkiQwoKUHV0U2VjcmV0cxIlCgdzZWNyZXRzGAEgAygLMhQudGFiLmNsb3VkLnYxLlNlY3JldBIOCgZyZW1vdmUYAiADKAkiHAoLU2VjcmV0TmFtZXMSDQoFbmFtZXMYASADKAkiMAoHU2VjcmV0cxIlCgdzZWNyZXRzGAEgAygLMhQudGFiLmNsb3VkLnYxLlNlY3JldCJ1CgxSdW5uZXJTdGF0dXMSKAoFc3RhdGUYASABKA4yGS50YWIuY2xvdWQudjEuUnVubmVyU3RhdGUSKwoHc2Vlbl9hdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDgoGZGV0YWlsGAMgASgJIigKClN0b3JlZEZpbGUSDAoEaGFzaBgBIAEoCRIMCgRzaXplGAIgASgEKoABCghIdWJTdGF0ZRIZChVIVUJfU1RBVEVfVU5TUEVDSUZJRUQQABISCg5IVUJfU1RBVEVfTk9ORRABEhoKFkhVQl9TVEFURV9QUk9WSVNJT05JTkcQAhITCg9IVUJfU1RBVEVfUkVBRFkQAxIUChBIVUJfU1RBVEVfRkFJTEVEEAQqTQoHSHViS2luZBIYChRIVUJfS0lORF9VTlNQRUNJRklFRBAAEhUKEUhVQl9LSU5EX1BFUlNPTkFMEAESEQoNSFVCX0tJTkRfVEVBTRACKl0KBFJvbGUSFAoQUk9MRV9VTlNQRUNJRklFRBAAEg4KClJPTEVfT1dORVIQARIOCgpST0xFX0FETUlOEAISDwoLUk9MRV9NRU1CRVIQAxIOCgpST0xFX0dVRVNUEAQqngIKCUVycm9yQ29kZRIaChZFUlJPUl9DT0RFX1VOU1BFQ0lGSUVEEAASHgoaRVJST1JfQ09ERV9VTkFVVEhFTlRJQ0FURUQQARIcChhFUlJPUl9DT0RFX1BMQU5fUkVRVUlSRUQQAhIVChFFUlJPUl9DT0RFX0xPQ0tFRBADEhsKF0VSUk9SX0NPREVfUkFURV9MSU1JVEVEEAQSGAoURVJST1JfQ09ERV9OT1RfRk9VTkQQBRIYChRFUlJPUl9DT0RFX0ZPUkJJRERFThAGEhoKFkVSUk9SX0NPREVfQkFEX1JFUVVFU1QQBxIXChNFUlJPUl9DT0RFX0lOVEVSTkFMEAgSGgoWRVJST1JfQ09ERV9VTlJFQUNIQUJMRRAJKpcBCgtSdW5uZXJTdGF0ZRIcChhSVU5ORVJfU1RBVEVfVU5TUEVDSUZJRUQQABIXChNSVU5ORVJfU1RBVEVfQVNMRUVQEAESGQoVUlVOTkVSX1NUQVRFX1NUQVJUSU5HEAISGAoUUlVOTkVSX1NUQVRFX1JVTk5JTkcQAxIcChhSVU5ORVJfU1RBVEVfTk9UX09OX1BMQU4QBGIGcHJvdG8z", [file_google_protobuf_timestamp]);
 
 /**
  * Your plan. Cloud features work while `active`.
@@ -330,6 +341,32 @@ export type RunnerStatus = Message<"tab.cloud.v1.RunnerStatus"> & {
  */
 export const RunnerStatusSchema: GenMessage<RunnerStatus> = /*@__PURE__*/
   messageDesc(file_tab_cloud_v1_account, 9);
+
+/**
+ * A file the hub now has.
+ *
+ * @generated from message tab.cloud.v1.StoredFile
+ */
+export type StoredFile = Message<"tab.cloud.v1.StoredFile"> & {
+  /**
+   * `sha256:<hex>` of its bytes, as records refer to it.
+   *
+   * @generated from field: string hash = 1;
+   */
+  hash: string;
+
+  /**
+   * @generated from field: uint64 size = 2;
+   */
+  size: bigint;
+};
+
+/**
+ * Describes the message tab.cloud.v1.StoredFile.
+ * Use `create(StoredFileSchema)` to create a new message.
+ */
+export const StoredFileSchema: GenMessage<StoredFile> = /*@__PURE__*/
+  messageDesc(file_tab_cloud_v1_account, 10);
 
 /**
  * Where a hub is in being set up.

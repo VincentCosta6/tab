@@ -12,6 +12,10 @@
 //! `spawn_blocking`, never on the async runtime. Pushes (other devices'
 //! changes) wake [`CloudLink::changed`], so sync can read them straight away.
 //! A `ws://` address (a local `wrangler dev`) works too, for dev builds.
+//!
+//! Files travel beside the socket, over HTTPS at the hub's `/files`
+//! (`PUT /v1/hubs/{hub_id}/files`, `GET|HEAD /v1/hubs/{hub_id}/files/{hex}`),
+//! as their own bytes. Those calls block too.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,6 +32,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 /// How long one request may take before it's given up on.
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// How long one file may take to go up or come down (up to 50 MiB).
+const FILE_TIMEOUT: Duration = Duration::from_secs(180);
 /// Waits between reconnects, growing to the last.
 const BACKOFF: [u64; 5] = [1, 2, 5, 10, 30];
 
@@ -48,6 +54,40 @@ pub struct CloudLink {
     /// Said again on every reconnect, so the hub knows who this is.
     hello: Arc<Mutex<Option<pb::Hello>>>,
     connected: Arc<std::sync::atomic::AtomicBool>,
+    token: TokenSource,
+    /// Where file calls run; the caller's thread waits on them.
+    rt: tokio::runtime::Handle,
+}
+
+/// What a cloud hub said about a file it stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFile {
+    pub hash: String,
+    pub size: u64,
+}
+
+/// A hub's sync address to the address of its files.
+pub fn files_url(sync: &str) -> String {
+    let base = sync.strip_suffix("/sync").unwrap_or(sync);
+    let http = if let Some(rest) = base.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = base.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        base.to_string()
+    };
+    format!("{http}/files")
+}
+
+fn http() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(concat!("tab-desktop/", env!("CARGO_PKG_VERSION")))
+            .timeout(FILE_TIMEOUT)
+            .build()
+            .expect("an HTTP client")
+    })
 }
 
 /// `https://api.tabqueue.com` and a hub id to that hub's sync address.
@@ -90,6 +130,8 @@ impl CloudLink {
             changed: Arc::new(Notify::new()),
             hello: Default::default(),
             connected: Default::default(),
+            token: token.clone(),
+            rt: tokio::runtime::Handle::current(),
         });
         tokio::spawn(run(
             link.url.clone(),
@@ -139,6 +181,114 @@ impl CloudLink {
                 anyhow::bail!("cloud hub: no reply in {}s", TIMEOUT.as_secs())
             }
         }
+    }
+}
+
+/// Files in the cloud hub.
+impl CloudLink {
+    /// Runs `f` on the runtime and waits for it here, so it can be called
+    /// from any thread (even one of the runtime's, as `request` is).
+    fn wait<T: Send + 'static>(
+        &self,
+        f: impl std::future::Future<Output = anyhow::Result<T>> + Send + 'static,
+    ) -> anyhow::Result<T> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.rt.spawn(async move {
+            let _ = tx.send(f.await);
+        });
+        rx.recv_timeout(FILE_TIMEOUT + Duration::from_secs(5))
+            .map_err(|_| anyhow::anyhow!("cloud hub: no answer about a file"))?
+    }
+
+    fn file_request(
+        &self,
+        method: reqwest::Method,
+        hash: Option<&str>,
+    ) -> anyhow::Result<
+        impl std::future::Future<Output = anyhow::Result<reqwest::RequestBuilder>> + Send + 'static,
+    > {
+        let base = files_url(&self.url);
+        let url = match hash {
+            Some(h) => {
+                let hex = tab_domain::blob::hex(h)
+                    .ok_or_else(|| anyhow::anyhow!("not a file hash: {h}"))?;
+                format!("{base}/{hex}")
+            }
+            None => base,
+        };
+        let token = self.token.clone();
+        Ok(async move {
+            let token = token().await?;
+            Ok(http()
+                .request(method, url)
+                .header("authorization", format!("Bearer {token}")))
+        })
+    }
+
+    /// Stores a file in the cloud hub. The hub names it by its hash, so
+    /// sending the same bytes again changes nothing.
+    pub fn put_file(&self, bytes: Vec<u8>) -> anyhow::Result<StoredFile> {
+        let req = self.file_request(reqwest::Method::PUT, None)?;
+        self.wait(async move {
+            let res = req
+                .await?
+                .header("content-type", "application/octet-stream")
+                .header("accept", tab_protocol::cloud::CONTENT_TYPE)
+                .body(bytes)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("cloud hub: {}", e.without_url()))?;
+            let status = res.status().as_u16();
+            let body = res.bytes().await?;
+            let stored: tab_protocol::cloud::StoredFile = crate::cloud::interpret(status, &body)
+                .map_err(|e| anyhow::anyhow!("cloud hub: {e}"))?;
+            Ok(StoredFile {
+                hash: stored.hash,
+                size: stored.size,
+            })
+        })
+    }
+
+    /// A file's bytes from the cloud hub, or `None` if it doesn't have it.
+    /// The bytes are checked against the hash.
+    pub fn get_file(&self, hash: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let req = self.file_request(reqwest::Method::GET, Some(hash))?;
+        let want = hash.to_string();
+        self.wait(async move {
+            let res = req
+                .await?
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("cloud hub: {}", e.without_url()))?;
+            match res.status().as_u16() {
+                404 => return Ok(None),
+                200 => {}
+                s => anyhow::bail!("cloud hub answered {s} for a file"),
+            }
+            let bytes = res.bytes().await?.to_vec();
+            anyhow::ensure!(
+                tab_domain::blob::hash(&bytes) == want,
+                "cloud hub: a file came back with other bytes than its hash says"
+            );
+            Ok(Some(bytes))
+        })
+    }
+
+    /// Whether the cloud hub has this file.
+    pub fn has_file(&self, hash: &str) -> anyhow::Result<bool> {
+        let req = self.file_request(reqwest::Method::HEAD, Some(hash))?;
+        self.wait(async move {
+            let res = req
+                .await?
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("cloud hub: {}", e.without_url()))?;
+            match res.status().as_u16() {
+                200 => Ok(true),
+                404 => Ok(false),
+                s => anyhow::bail!("cloud hub answered {s} for a file"),
+            }
+        })
     }
 }
 
@@ -278,6 +428,18 @@ mod tests {
         assert_eq!(
             sync_url("http://127.0.0.1:8787/", "ab"),
             "ws://127.0.0.1:8787/v1/hubs/ab/sync"
+        );
+    }
+
+    #[test]
+    fn file_urls() {
+        assert_eq!(
+            files_url("wss://api.tabqueue.com/v1/hubs/ab/sync"),
+            "https://api.tabqueue.com/v1/hubs/ab/files"
+        );
+        assert_eq!(
+            files_url(&sync_url("http://127.0.0.1:8787", "ab")),
+            "http://127.0.0.1:8787/v1/hubs/ab/files"
         );
     }
 }

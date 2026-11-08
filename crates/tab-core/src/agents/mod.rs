@@ -287,6 +287,9 @@ pub(crate) enum Steer {
     Message(String),
     /// Don't wait for the running tool: stop it and read what's queued now.
     Interrupt,
+    /// From tab, not the person: read like a message, but not one the
+    /// agent owes a reply to (see `claude::Unanswered`).
+    Reminder(String),
 }
 
 pub struct AgentHub {
@@ -310,10 +313,16 @@ pub struct AgentHub {
     approvals: Mutex<HashMap<String, (Approval, oneshot::Sender<Decision>)>>,
     /// OpenCode servers by chat id (see `opencode::server`).
     opencode: tokio::sync::Mutex<HashMap<String, Arc<opencode::Server>>>,
+    /// Puts a file in the hub and returns its hash, once the hub is up, so
+    /// files a reply names reach other devices ([`crate::named_files`]).
+    file_sink: std::sync::OnceLock<FileSink>,
     /// Chats under this folder work on code nobody here wrote (the cloud
     /// runner's clones), so they get the review policy.
     review_root: RwLock<Option<PathBuf>>,
 }
+
+/// See [`AgentHub::set_file_sink`].
+pub type FileSink = Arc<dyn Fn(&[u8]) -> anyhow::Result<String> + Send + Sync>;
 
 /// The checkout a dev build of tab runs from, so agents can be told not to
 /// edit it under the running app. None in release builds.
@@ -362,8 +371,14 @@ impl AgentHub {
             followups: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             opencode: tokio::sync::Mutex::new(HashMap::new()),
+            file_sink: std::sync::OnceLock::new(),
             review_root: RwLock::new(None),
         })
+    }
+
+    /// Where files an agent's reply names go, so other devices can show them.
+    pub fn set_file_sink(&self, sink: FileSink) {
+        let _ = self.file_sink.set(sink);
     }
 
     /// Treats every chat under `root` as work on someone else's code: the
@@ -559,8 +574,11 @@ impl AgentHub {
         role: &str,
         kind: &str,
         content: &str,
-        meta: serde_json::Value,
+        mut meta: serde_json::Value,
     ) {
+        if role == "assistant" && kind == "text" {
+            self.share_named_files(session_id, content, &mut meta);
+        }
         match self
             .store
             .message_add(session_id, role, kind, content, &meta, Utc::now())
@@ -568,6 +586,28 @@ impl AgentHub {
             Ok(message) => self.emit(EngineEvent::SessionMessage { message }),
             Err(e) => tracing::error!(error = %e, "storing session message failed"),
         }
+    }
+
+    /// Puts the local files a reply names in the hub and records them in
+    /// its `files`, so a device that isn't this one can show them.
+    fn share_named_files(&self, session_id: &str, text: &str, meta: &mut serde_json::Value) {
+        let Some(sink) = self.file_sink.get() else {
+            return;
+        };
+        let cwd = self
+            .store
+            .session_get(session_id)
+            .ok()
+            .flatten()
+            .map(|s| s.cwd);
+        let files = crate::named_files::share(text, cwd.as_deref(), |b| sink(b));
+        if files.is_empty() {
+            return;
+        }
+        if !meta.is_object() {
+            *meta = serde_json::json!({});
+        }
+        meta["files"] = serde_json::to_value(files).unwrap_or_default();
     }
 
     pub(crate) fn delta(&self, session_id: &str, text: &str) {
@@ -674,6 +714,14 @@ impl AgentHub {
     /// false when no live turn takes messages (it already finished).
     pub fn steer(&self, session_id: &str, text: &str) -> anyhow::Result<bool> {
         self.steer_with(session_id, text, &[])
+    }
+
+    /// Tells a running turn something from tab itself: read like a steering
+    /// message, but not shown in the chat as the person's.
+    pub(crate) fn remind(&self, session_id: &str, text: String) {
+        if let Some(tx) = self.steering.lock().unwrap().get(session_id) {
+            let _ = tx.send(Steer::Reminder(text));
+        }
     }
 
     /// [`Self::steer`] with files the person attached (paths in
@@ -1212,6 +1260,9 @@ impl AgentHub {
              and opens them in a viewer on click. Screenshot it (a headless browser works, or the running \
              app) and embed the PNG rather than describing it or publishing a separate page. Say whether it \
              is a real screenshot or a mock.\n\
+             - The person can send messages while you work; they reach you between tool calls. Answer \
+             each one in visible reply text (not only in your thinking, which tab never shows them) \
+             before your next tool call, even if it's one line, then carry on.\n\
              Keep replies short; the person reads them in a side panel.\n",
         );
         if let Some(root) = dev_checkout() {
