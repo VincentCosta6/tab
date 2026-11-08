@@ -11,6 +11,10 @@
 //! runs on a blocking thread, like its SQLite work), so call them from
 //! `spawn_blocking`, never on the async runtime. Pushes (other devices'
 //! changes) wake [`CloudLink::changed`], so sync can read them straight away.
+//! The live channel's pushes (steering, live events, watch notices) go to
+//! the sink set with [`CloudLink::set_live`], the same inbox the app's own
+//! hub feeds, so watching and steering work across computers on one cloud
+//! hub as they do on a local one.
 //! A `ws://` address (a local `wrangler dev`) works too, for dev builds.
 
 use std::collections::HashMap;
@@ -21,7 +25,7 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use futures_util::{SinkExt, StreamExt};
 use tab_protocol::pb::{self, client_envelope::Body as Req, server_envelope::Body as Res};
-use tab_protocol::{ClientEnvelope, encode};
+use tab_protocol::{ClientEnvelope, ServerEnvelope, encode};
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -35,6 +39,8 @@ const BACKOFF: [u64; 5] = [1, 2, 5, 10, 30];
 pub type TokenSource = Arc<dyn Fn() -> BoxFuture<'static, anyhow::Result<String>> + Send + Sync>;
 
 type Waiting = Arc<Mutex<HashMap<u64, std::sync::mpsc::SyncSender<Res>>>>;
+/// Where the live channel's pushes go.
+type LiveSink = Arc<Mutex<Option<mpsc::UnboundedSender<ServerEnvelope>>>>;
 
 pub struct CloudLink {
     /// The hub's sync address.
@@ -47,6 +53,10 @@ pub struct CloudLink {
     pub changed: Arc<Notify>,
     /// Said again on every reconnect, so the hub knows who this is.
     hello: Arc<Mutex<Option<pb::Hello>>>,
+    /// The sessions this app watches, said again after every reconnect
+    /// (the hub forgets a connection's watches when it drops).
+    watch: Arc<Mutex<Option<pb::Watch>>>,
+    live: LiveSink,
     connected: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -89,16 +99,22 @@ impl CloudLink {
             next: AtomicU64::new(1),
             changed: Arc::new(Notify::new()),
             hello: Default::default(),
+            watch: Default::default(),
+            live: Default::default(),
             connected: Default::default(),
         });
         tokio::spawn(run(
             link.url.clone(),
             token,
             rx,
-            link.waiting.clone(),
-            link.changed.clone(),
-            link.hello.clone(),
-            link.connected.clone(),
+            Shared {
+                waiting: link.waiting.clone(),
+                changed: link.changed.clone(),
+                hello: link.hello.clone(),
+                watch: link.watch.clone(),
+                live: link.live.clone(),
+                connected: link.connected.clone(),
+            },
         ));
         link
     }
@@ -114,6 +130,26 @@ impl CloudLink {
             Res::Welcome(w) => Ok(w.head),
             other => anyhow::bail!("cloud hub: unexpected reply to hello: {other:?}"),
         }
+    }
+
+    /// Where steering, live events and watch notices from the hub go.
+    pub fn set_live(&self, sink: mpsc::UnboundedSender<ServerEnvelope>) {
+        *self.live.lock().unwrap() = Some(sink);
+    }
+
+    /// Watches `sessions` (replacing what was watched), now and after every
+    /// reconnect. Doesn't wait for the reply.
+    pub fn watch(&self, sessions: Vec<String>) {
+        let w = pb::Watch { sessions };
+        *self.watch.lock().unwrap() = Some(w.clone());
+        self.send(Req::Watch(w));
+    }
+
+    /// Sends one request without waiting for its reply (a live event, which
+    /// is no use late). Dropped while disconnected.
+    pub fn send(&self, req: Req) {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let _ = self.outgoing.send(encode(&ClientEnvelope::new(id, req)));
     }
 
     /// Sends one request and waits for its reply. A hub error is an `Err`.
@@ -159,17 +195,49 @@ async fn open(url: &str, token: &TokenSource) -> anyhow::Result<Socket> {
     Ok(ws)
 }
 
+/// What the socket task shares with its [`CloudLink`].
+struct Shared {
+    waiting: Waiting,
+    changed: Arc<Notify>,
+    hello: Arc<Mutex<Option<pb::Hello>>>,
+    watch: Arc<Mutex<Option<pb::Watch>>>,
+    live: LiveSink,
+    connected: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// What to do with a frame the hub sent unasked (request id 0).
+#[derive(Debug, PartialEq)]
+enum Push {
+    /// Other devices changed something: sync.
+    Changed,
+    /// The live channel: for the app's inbox.
+    Live,
+    Ignore,
+}
+
+fn push_kind(body: &Option<Res>) -> Push {
+    match body {
+        Some(Res::Changes(_)) => Push::Changed,
+        Some(Res::Steered(_) | Res::Live(_) | Res::Watched(_)) => Push::Live,
+        _ => Push::Ignore,
+    }
+}
+
 /// Keeps the socket up for as long as the link exists.
-#[allow(clippy::too_many_arguments)]
 async fn run(
     url: String,
     token: TokenSource,
     mut outgoing: mpsc::UnboundedReceiver<Vec<u8>>,
-    waiting: Waiting,
-    changed: Arc<Notify>,
-    hello: Arc<Mutex<Option<pb::Hello>>>,
-    connected: Arc<std::sync::atomic::AtomicBool>,
+    sh: Shared,
 ) {
+    let Shared {
+        waiting,
+        changed,
+        hello,
+        watch,
+        live,
+        connected,
+    } = sh;
     let mut attempt = 0usize;
     loop {
         let ws = match open(&url, &token).await {
@@ -199,6 +267,15 @@ async fn run(
                 ))
                 .await;
         }
+        // Then what this app watches, so live events reach it again.
+        let again = watch.lock().unwrap().clone();
+        if let Some(w) = again {
+            let _ = tx
+                .send(Message::Binary(
+                    encode(&ClientEnvelope::new(0, Req::Watch(w))).into(),
+                ))
+                .await;
+        }
         // Anything sent while disconnected may have been missed.
         changed.notify_one();
         loop {
@@ -217,8 +294,14 @@ async fn run(
                     };
                     let Ok(env) = tab_protocol::decode_server(&frame) else { continue };
                     if env.request_id == 0 {
-                        if matches!(env.body, Some(Res::Changes(_))) {
-                            changed.notify_one();
+                        match push_kind(&env.body) {
+                            Push::Changed => changed.notify_one(),
+                            Push::Live => {
+                                if let Some(sink) = &*live.lock().unwrap() {
+                                    let _ = sink.send(env);
+                                }
+                            }
+                            Push::Ignore => {}
                         }
                         continue;
                     }
@@ -279,5 +362,20 @@ mod tests {
             sync_url("http://127.0.0.1:8787/", "ab"),
             "ws://127.0.0.1:8787/v1/hubs/ab/sync"
         );
+    }
+
+    #[test]
+    fn live_pushes_go_to_the_inbox() {
+        let steered = Some(Res::Steered(pb::Steered::default()));
+        let live = Some(Res::Live(pb::Live::default()));
+        let watched = Some(Res::Watched(pb::Watched::default()));
+        for b in [steered, live, watched] {
+            assert_eq!(push_kind(&b), Push::Live);
+        }
+        assert_eq!(
+            push_kind(&Some(Res::Changes(pb::Changes::default()))),
+            Push::Changed
+        );
+        assert_eq!(push_kind(&None), Push::Ignore);
     }
 }
