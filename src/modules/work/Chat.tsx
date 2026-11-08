@@ -188,7 +188,7 @@ function ContextMeter({ messages }: { messages: SessionMessage[] }) {
     <div className="cw" ref={ref}>
       <button className="cw-chip" onClick={() => setOpen(!open)} title={`Context: ${k(used)} of ${k(size)} · cache ${cacheText(cache, left)}`}>
         <span className="cw-ring" style={{ ["--p" as string]: `${pct}%` }} data-tone={tone} />
-        {k(used)}
+        <span className="cw-used">{k(used)}</span>
         {cache !== "none" && <span className={cx("cw-cache", `cache-${cache}`)}>{cache === "cold" ? "cold" : clock(left)}</span>}
       </button>
       {open && (
@@ -1073,7 +1073,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
           {chat?.messages && <ContextMeter messages={chat.messages} />}
         </span>
         {running && chat?.session && (
-          <Button size="sm" icon="stop" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
+          <Button size="sm" icon="stop" className="composer-stop" title="Stop the agent" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
         )}
         <Button size="sm" variant="primary" icon="arrow-up" disabled={(!text.trim() && !images.length) || uploading > 0} onClick={submit}>{running ? "Steer" : "Send"}</Button>
       </div>
