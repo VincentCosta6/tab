@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, UrgencyLabel, cx } from "../../design/components";
 import { FlapTitle } from "../../design/FlapTitle";
@@ -9,7 +9,7 @@ import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useChat, useItem } from "../../lib/hooks";
-import { useThreadFiles } from "../../lib/threadFiles";
+import { isPinned, useThreadFiles } from "../../lib/threadFiles";
 import { keys } from "../../lib/query";
 import type { QueueItem } from "../../lib/types";
 import { parsePullUrl } from "../github/pulls";
@@ -32,7 +32,8 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const { data: chat } = useChat(id);
-  const files = useThreadFiles(chat);
+  const all = useThreadFiles(chat);
+  const files = useMemo(() => all.filter(isPinned), [all]);
   const [readMode, setReadMode] = useReadMode();
   const tint = useProjectTint(item?.project_id);
   const chatCount = chat?.messages.filter((m) => m.role === "user" || (m.role === "assistant" && m.kind === "text")).length ?? 0;
@@ -92,35 +93,33 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   return (
     <div className={cx("item-pane", tint.className)} style={tint.style}>
       <header className="item-head">
-        <div className="item-head-main">
+        <div className="item-head-glyph">
           <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={34} />
-          <div className="item-head-text">
-            <ItemTitle item={item} />
-            <div className="item-meta">
+        </div>
+        <ItemTitle item={item} />
+        <div className="item-meta">
+              <ProjectPicker value={item.project_id ?? null} onChange={(p) => move(item, p)} compact />
               <Badge tone={k.tone}>{k.label}</Badge>
               {r && <UrgencyLabel urgency={r.urgency} />}
-              {item.actor && <span>{item.actor}</span>}
-              {item.context && <span>· {item.context}</span>}
-              <span>· {timeAgo(item.occurred_at)}</span>
+              {item.actor && <span className="item-who" title={item.actor}>{item.actor}</span>}
+              {item.context && <span className="item-where" title={item.context}>· {item.context}</span>}
+              <span className="item-when">· {timeAgo(item.occurred_at)}</span>
               {item.state === "snoozed" && item.snoozed_until && <Badge icon="clock">back in {timeUntil(item.snoozed_until)}</Badge>}
               {item.state === "done" && <Badge tone="success" icon="check">Done</Badge>}
             </div>
-          </div>
-        </div>
         <div className="item-actions">
-          <ProjectPicker value={item.project_id ?? null} onChange={(p) => move(item, p)} align="right" compact />
-          {pull && <Button size="sm" icon="code" shortcut="R" onClick={() => setReviewing(true)}>Review</Button>}
+          {pull && <Button size="sm" icon="code" shortcut="R" title="Review (R)" onClick={() => setReviewing(true)}>Review</Button>}
           {item.url && <OpenMenu url={item.url} onOpenInTab={pull ? () => setReviewing(true) : undefined} tabLabel="Open in tab (review)" />}
           {item.state !== "done" && (
             <span className="menu-anchor">
-              <Button size="sm" icon="clock" shortcut="S" onClick={() => setSnoozeOpen((v) => !v)}>Snooze</Button>
+              <Button size="sm" icon="clock" shortcut="S" title="Snooze (S)" onClick={() => setSnoozeOpen((v) => !v)}>Snooze</Button>
               {snoozeOpen && <SnoozeMenu style={{ right: 0 }} onPick={(m) => snooze(item, m)} onClose={() => setSnoozeOpen(false)} />}
             </span>
           )}
           {item.state === "done" ? (
-            <Button size="sm" icon="undo" shortcut="E" onClick={() => reopen(item)}>Reopen</Button>
+            <Button size="sm" icon="undo" shortcut="E" title="Reopen (E)" onClick={() => reopen(item)}>Reopen</Button>
           ) : (
-            <Button size="sm" variant="primary" icon="check" shortcut="E" onClick={() => done(item)}>Done</Button>
+            <Button size="sm" variant="primary" icon="check" shortcut="E" title="Done (E)" className="item-done" onClick={() => done(item)}>Done</Button>
           )}
         </div>
       </header>

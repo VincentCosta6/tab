@@ -20,7 +20,7 @@ export const MarkdownLinks = createContext<((href: string, e: MouseEvent) => voi
  * (`screenshots/after.png`) still shows. Files it names by an absolute path,
  * and links to local files, show as cards that open the file.
  */
-export const MarkdownFiles = createContext<{ base: string | null } | null>(null);
+export const MarkdownFiles = createContext<{ base: string | null; imagesAtEnd?: boolean } | null>(null);
 
 function LocalLink({ href, label, children }: { href: string; label: string; children: ReactNode }) {
   const on = useContext(MarkdownLinks);
@@ -38,15 +38,34 @@ function LocalLink({ href, label, children }: { href: string; label: string; chi
   );
 }
 
-/** An image in a message: a thumbnail that opens the viewer. */
+/**
+ * An image in a message: a thumbnail that opens the viewer. In a chat that
+ * gathers its images at the end of each turn (`imagesAtEnd`), a local one
+ * reads as a card here and shows in full there, once.
+ */
 function InlineImage({ src: raw, alt }: { src: string; alt: string }) {
   const files = useContext(MarkdownFiles);
-  const stage = useStage();
   const src = resolvePath(raw, files?.base);
+  if (files?.imagesAtEnd && isLocalPath(src)) return <FileChip path={src} label={alt && alt !== raw ? alt : undefined} />;
+  return <ImageThumb src={src} alt={alt} />;
+}
+
+/** A shown image: a thumbnail that opens it on the stage, or the viewer. */
+export function ImageThumb({ src, alt, list }: { src: string; alt?: string; list?: string[] }) {
+  const stage = useStage();
   const url = useImageSrc(/^(https?:|data:|blob:)/.test(src) || isLocalPath(src) ? src : null);
   if (!url) return <code>{alt || src}</code>;
   return (
-    <button className="md-image" onClick={() => (stage ? stage.open([{ path: src, name: alt || undefined }]) : openImages([{ src, name: alt || undefined }]))} title={alt || src}>
+    <button
+      className="md-image"
+      onClick={() => {
+        const all = list?.length ? list : [src];
+        const at = Math.max(0, all.indexOf(src));
+        if (stage) stage.open(all.map((p) => ({ path: p, name: p === src ? alt || undefined : undefined })), at);
+        else openImages(all.map((p) => ({ src: p, name: p === src ? alt || undefined : undefined })), at);
+      }}
+      title={alt || src}
+    >
       <img src={url} alt={alt} />
     </button>
   );

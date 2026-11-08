@@ -1,13 +1,14 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { setViewedSession } from "../../lib/viewing";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
-import { Markdown } from "../../design/markdown";
 import { Attachments } from "../../design/ImageViewer";
-import { FileTray } from "../../design/FileStage";
-import { MarkdownFiles } from "../../design/markdown";
-import { saveAttachment } from "../../lib/images";
+import { FilePreview } from "../../design/FileStage";
+import { ImageThumb, Markdown, MarkdownFiles } from "../../design/markdown";
+import { fileName, isImagePath, saveAttachment } from "../../lib/images";
+import { filesInText, isShowable } from "../../lib/threadFiles";
+import { useStage } from "../../lib/stage";
 import { AgentNotice } from "./AgentNotice";
 import { Dictation } from "./Dictation";
 import { useDropTarget } from "./DropZone";
@@ -91,7 +92,6 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
       {/* The body stays mounted while hidden, so switching back doesn't reload it. */}
       {body && <div className="chat-body" hidden={!showBody}>{body}</div>}
       {(!body || !showBody) && <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />}
-      {(!body || !showBody) && <FileTray />}
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
       <Composer chat={chat} onSend={send} placeholder={`Ask about this, or tell the agent what to do…`} />
     </div>
@@ -291,6 +291,10 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
     if (m.kind === "secret_request" && newestCard.get(m.meta?.connector_id) !== m.id) m.meta = { ...m.meta, superseded: true };
   });
 
+  const base = chat?.session?.cwd ?? null;
+  const folded = useMemo(() => foldedTexts(messages, !!chat?.running), [messages, chat?.running]);
+  const turns = useMemo(() => splitTurns(messages, base), [messages, base]);
+
   // Follow new output while the person is at the bottom; leave them be once they scroll up.
   // Their own message always brings them back down.
   const last = messages[messages.length - 1];
@@ -318,22 +322,22 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
     );
 
   return (
-    <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null }}>
+    <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null, imagesAtEnd: true }}>
     <div className="transcript" ref={box} onScroll={(e) => { const el = e.currentTarget; stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}>
       <div className="transcript-head"><AgentStatus chat={chat} /></div>
-      {groupTools(messages, paired).map((g) =>
-        Array.isArray(g)
-          ? <ToolGroup key={g[0].id} calls={g} results={results} />
-          : <MessageView key={g.id} m={g} result={results.get(g.id)} onSend={onSend} />,
-      )}
-      {stream && (
-        <div className="msg msg-assistant streaming">
-          <Markdown text={stream} />
-        </div>
-      )}
+      {turns.map((t) => (
+        <Fragment key={t.messages[0].id}>
+          {groupTools(t.messages, paired, folded).map((g) =>
+            Array.isArray(g)
+              ? <ToolGroup key={g[0].id} calls={g} results={results} />
+              : <MessageView key={g.id} m={g} result={results.get(g.id)} onSend={onSend} />,
+          )}
+          {t.files.length > 0 && <TurnFiles paths={t.files} />}
+        </Fragment>
+      ))}
       {chat?.approvals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
       {chat?.running && chat.session && <SteerWait messages={messages} results={results} sessionId={chat.session.id} />}
-      <ProgressBar messages={messages} results={results} running={!!chat?.running} />
+      <ProgressBar messages={messages} results={results} running={!!chat?.running} folded={folded} writing={!!stream} />
     </div>
     </MarkdownFiles.Provider>
   );
@@ -484,9 +488,11 @@ function agentSteps(messages: SessionMessage[], results: Map<number, SessionMess
 
 /**
  * The last thing in the chat, never over it: the agent's plan for this turn
- * with each step's status, and the tool it's running right now.
+ * with each step's status, and what it's doing right now. A step that's
+ * under way spins, so "Working" shows only when none is (at the foot of the
+ * list, where the work is), never as a second spinner beside a step's.
  */
-function ProgressBar({ messages, results, running }: { messages: SessionMessage[]; results: Map<number, SessionMessage>; running: boolean }) {
+function ProgressBar({ messages, results, running, folded, writing }: { messages: SessionMessage[]; results: Map<number, SessionMessage>; running: boolean; folded: Set<number>; writing: boolean }) {
   // Open while the agent works, folded to one line once it's done (click to open either way).
   const [toggled, setToggled] = useState<boolean | null>(null);
   useEffect(() => setToggled(null), [running]);
@@ -506,29 +512,42 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
   }
   const earlier = Math.max(0, activity.length - 5);
   const todos = plan.length ? plan : activity.slice(-5);
+  // What it's doing now, in its own words if it said (its latest working-out), else the tool it ran.
   let step = "";
+  let note = "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.role === "user") break; // only this turn's work
-    if (m.kind !== "tool") continue;
+    if (!note && folded.has(m.id)) note = m.content.trim().split("\n")[0].replace(/[`*]/g, "");
+    if (step || m.kind !== "tool") continue;
     const tool = m.meta?.tool;
     if (isStepTool(tool) || tool === "AskUserQuestion") continue;
     step = m.content.replace(/^mcp__tab__/, "tab: ").split("\n")[0];
-    break;
   }
   if (!running && !todos.length) return null;
   const done = todos.filter((t) => t.status === "completed").length;
   const active = plan.find((t) => t.status === "in_progress");
-  const label = active ? active.activeForm || active.content : step || "Working";
+  const busy = todos.some((t) => t.status === "in_progress");
+  const now = writing ? "Writing a reply" : note || step || "Working";
+  const label = active ? active.activeForm || active.content : now;
   const count = plan.length ? `${done} of ${plan.length}` : activity.length ? `${activity.length} tool call${activity.length > 1 ? "s" : ""}` : "";
+  const open = todos.length > 0 && !collapsed;
   return (
     <div className={cx("progress-bar", running && "running")}>
-      <button className="progress-head" onClick={() => todos.length && setCollapsed(!collapsed)} aria-expanded={!collapsed}>
-        {running ? <span className="dots"><i /><i /><i /></span> : <Icon name="check" size={12} />}
-        <span className="progress-label">{running ? (collapsed || !todos.length ? label : "Working") : "Done"}</span>
-        {count && <span className="progress-count">{count}</span>}
-      </button>
-      {todos.length > 0 && !collapsed && (
+      {open ? (
+        <button className="progress-head" onClick={() => setCollapsed(true)} aria-expanded>
+          {!running && <Icon name="check" size={12} />}
+          <span className="progress-label">{running ? (plan.length ? "Steps" : "This turn") : "Done"}</span>
+          {count && <span className="progress-count">{count}</span>}
+        </button>
+      ) : (
+        <button className="progress-head" onClick={() => todos.length && setCollapsed(false)} aria-expanded={false}>
+          {running ? <span className="dots"><i /><i /><i /></span> : <Icon name="check" size={12} />}
+          <span className="progress-label">{running ? label : "Done"}</span>
+          {count && <span className="progress-count">{count}</span>}
+        </button>
+      )}
+      {open && (
         <ul className={cx("progress-list", !plan.length && "activity")}>
           {earlier > 0 && <li className="progress-earlier">{earlier} earlier</li>}
           {todos.map((t, i) => (
@@ -537,9 +556,15 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
               <span>{t.status === "in_progress" && running ? t.activeForm || t.content : t.content}</span>
             </li>
           ))}
+          {running && !busy && (
+            <li className="progress-now">
+              <span className="dots"><i /><i /><i /></span>
+              <span>{now}</span>
+            </li>
+          )}
         </ul>
       )}
-      {running && step && active && <div className="progress-step">{step}</div>}
+      {running && busy && (note || step) && <div className="progress-step">{note || step}</div>}
     </div>
   );
 }
@@ -548,17 +573,102 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
 const isRow = (m: SessionMessage) => m.kind === "tool" && !isStepTool(m.meta?.tool) && m.meta?.tool !== "AskUserQuestion";
 
 /**
- * The transcript with runs of back-to-back tool calls gathered into one
- * group each, so a long stretch of work reads as one line, not fifty.
- * Step updates and paired results inside a run don't break it.
+ * The agent's text between tool calls ("Reading the config next…") is its
+ * working-out, not its answer: it folds into the work group around it, so
+ * a turn reads as the person's message, one line of work, and the reply.
+ * Text stays out when nothing but its answer follows it. While the agent
+ * works, all of this turn's text folds (it can't be told apart yet), except
+ * its reply to a message sent mid-turn, which the person is waiting on.
  */
-function groupTools(messages: SessionMessage[], paired: Set<SessionMessage>): (SessionMessage | SessionMessage[])[] {
+function foldedTexts(messages: SessionMessage[], running: boolean): Set<number> {
+  const out = new Set<number>();
+  let laterWork = running; // walking back: real work comes after this point in the turn
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "user") {
+      // The reply to a steer: its first text stays where the person can see it.
+      if (m.meta?.steer) for (let j = i + 1; j < messages.length && messages[j].role !== "user"; j++) {
+        if (messages[j].role === "assistant" && messages[j].kind === "text") { out.delete(messages[j].id); break; }
+      }
+      laterWork = false;
+      continue;
+    }
+    if (isRow(m)) laterWork = true;
+    else if (m.role === "assistant" && m.kind === "text" && laterWork) out.add(m.id);
+  }
+  return out;
+}
+
+interface Turn { messages: SessionMessage[]; files: string[] }
+
+/**
+ * The chat by turn (each person's message and what the agent did after it),
+ * with the files the agent showed in that turn: shown together at the end of
+ * the turn, not wherever its working-out named them.
+ */
+function splitTurns(messages: SessionMessage[], base: string | null): Turn[] {
+  const turns: Turn[] = [];
+  const attached = new Set<string>();
+  for (const m of messages) if (m.role === "user" && Array.isArray(m.meta?.attachments)) for (const p of m.meta.attachments) attached.add(p);
+  const seen = new Set<string>();
+  for (const m of messages) {
+    if (m.role === "user" || !turns.length) turns.push({ messages: [], files: [] });
+    const t = turns[turns.length - 1];
+    t.messages.push(m);
+    if (m.role !== "assistant" || m.kind !== "text") continue;
+    for (const p of filesInText(m.content, base)) {
+      if (seen.has(p) || attached.has(p) || !isShowable(p)) continue;
+      seen.add(p);
+      t.files.push(p);
+    }
+  }
+  return turns;
+}
+
+/** What the agent showed in a turn: images in full, documents as cards that open on the stage. */
+function TurnFiles({ paths }: { paths: string[] }) {
+  const stage = useStage();
+  const images = paths.filter(isImagePath);
+  const docs = paths.filter((p) => !isImagePath(p));
+  return (
+    <div className="turn-files">
+      {images.map((p) => <ImageThumb key={p} src={p} list={images} />)}
+      {docs.length > 0 && (
+        <div className="turn-docs">
+          {docs.map((p, i) => (
+            <button
+              key={p}
+              className="file-tile turn-doc"
+              title={p}
+              onClick={(e) => {
+                if (e.altKey || !stage) return void api.fileOpen(p, e.altKey).catch(() => {});
+                stage.open(docs, i);
+              }}
+            >
+              <FilePreview path={p} size="sm" />
+              <span className="file-tile-name">{fileName(p)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A turn with runs of back-to-back tool calls, and the agent's working-out
+ * between them, gathered into one group each, so a long stretch of work
+ * reads as one line, not fifty. Step updates and paired results inside a
+ * run don't break it.
+ */
+function groupTools(messages: SessionMessage[], paired: Set<SessionMessage>, folded: Set<number>): (SessionMessage | SessionMessage[])[] {
   const out: (SessionMessage | SessionMessage[])[] = [];
   let run: SessionMessage[] | null = null;
   for (const m of messages) {
     if (m.kind === "tool_result" && paired.has(m)) continue;
     if (m.kind === "tool" && isStepTool(m.meta?.tool)) continue;
-    if (isRow(m)) {
+    if (m.kind === "suggestion") continue;
+    if (isRow(m) || folded.has(m.id)) {
       if (!run) out.push((run = []));
       run.push(m);
       continue;
@@ -569,22 +679,28 @@ function groupTools(messages: SessionMessage[], paired: Set<SessionMessage>): (S
   return out;
 }
 
-/** A run of tool calls: one line saying how many and which, opening to each call. */
-function ToolGroup({ calls, results }: { calls: SessionMessage[]; results: Map<number, SessionMessage> }) {
-  if (calls.length === 1) return <ToolRow m={calls[0]} result={results.get(calls[0].id)} />;
+/** A run of work: one line saying how many tool calls and which, opening to each call and the agent's notes between them. */
+function ToolGroup({ calls: run, results }: { calls: SessionMessage[]; results: Map<number, SessionMessage> }) {
+  const calls = run.filter((m) => m.kind === "tool");
+  if (run.length === 1 && calls.length === 1) return <ToolRow m={calls[0]} result={results.get(calls[0].id)} />;
   const names = [...new Set(calls.map((c) => toolName(c.meta?.tool ?? c.content)))];
   const failed = calls.filter((c) => results.get(c.id)?.meta?.is_error).length;
+  const note = run.find((m) => m.kind === "text");
   return (
     <details className={cx("msg-tool msg-tool-group", failed > 0 && "failed")}>
       <summary>
         <Icon name="terminal" size={12} />
         <span className="msg-tool-name">
-          {calls.length} tool calls · {names.slice(0, 4).join(", ")}{names.length > 4 ? ` +${names.length - 4}` : ""}
+          {calls.length
+            ? <>{calls.length} tool call{calls.length > 1 ? "s" : ""} · {names.slice(0, 4).join(", ")}{names.length > 4 ? ` +${names.length - 4}` : ""}</>
+            : note?.content.split("\n")[0]}
         </span>
         {failed > 0 && <span className="msg-tool-flag">{failed} failed</span>}
       </summary>
       <div className="msg-tool-list">
-        {calls.map((c) => <ToolRow key={c.id} m={c} result={results.get(c.id)} />)}
+        {run.map((c) => c.kind === "text"
+          ? <div key={c.id} className="msg-thought"><Markdown text={c.content} /></div>
+          : <ToolRow key={c.id} m={c} result={results.get(c.id)} />)}
       </div>
     </details>
   );

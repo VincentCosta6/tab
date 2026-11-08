@@ -1222,6 +1222,9 @@ impl AgentHub {
              - To show the person an image or a file (a screenshot you took, a PDF or report you wrote), \
              put its absolute path in backticks, like `/full/path/shot.png`: tab shows images inline and \
              other files as a card they can open. Don't just describe it; show it.\n\
+             - A plan, design or architecture write-up longer than a few lines goes in a markdown file \
+             (in your working folder), named by its path in backticks: tab shows it as a card the person \
+             opens to read, and it travels with the chat. Keep the reply itself short.\n\
              - If the work splits into follow-ups, create them with tab_create_task.\n\
              - Waiting on CI, a deploy or anything else slow: don't block on it with sleep or a --watch \
              command in the foreground. If you can, start the wait in the background (e.g. \
