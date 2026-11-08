@@ -1374,6 +1374,16 @@ pub(crate) fn agent_exe(cfg: &AgentConfig, kind: AgentKind) -> anyhow::Result<Pa
         .command
         .as_deref()
         .filter(|c| !c.trim().is_empty() && cfg.kind == Some(kind));
+    find(kind, custom)
+}
+
+/// `custom`, else `kind`'s command on PATH, else where its installer puts
+/// it. A custom command that's just the default name (`claude`) is looked for
+/// in the install folders too.
+fn find(kind: AgentKind, custom: Option<&str>) -> anyhow::Result<PathBuf> {
+    let custom = custom
+        .map(str::trim)
+        .filter(|c| *c != default_command(kind));
     resolve(custom.unwrap_or(default_command(kind))).or_else(|e| {
         custom
             .is_none()
@@ -1408,15 +1418,8 @@ pub fn command(exe: &std::path::Path) -> tokio::process::Command {
 }
 
 async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
-    let name = custom.unwrap_or(default_command(kind));
-    let found = resolve(name).or_else(|e| {
-        // Just installed: the app's PATH may not have its folder yet.
-        custom
-            .is_none()
-            .then(|| catalog::installed_elsewhere(kind))
-            .flatten()
-            .ok_or(e)
-    });
+    // Just installed: the app's PATH may not have its folder yet.
+    let found = find(kind, custom);
     let mut p = AgentProbe {
         kind,
         found: false,

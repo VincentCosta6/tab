@@ -39,6 +39,7 @@ pub mod mcp;
 pub mod ranker;
 pub mod ratelimit;
 pub mod sandbox;
+pub mod shell_path;
 pub mod storage;
 pub mod store;
 pub mod usage;
