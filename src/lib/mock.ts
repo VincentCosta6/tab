@@ -308,6 +308,7 @@ export const mockApi = {
         case "start_dictation": throw "Dictation needs the desktop app.";
         case "attachment_save": return `${URL.createObjectURL(new Blob([args.bytes]))}#${args.name}`;
         case "file_open": return null;
+        case "file_stamps": return (args.paths as string[]).map(() => null);
         case "image_read": return await (await fetch(String(args.path))).arrayBuffer();
         case "file_read": return await (await fetch(String(args.path))).arrayBuffer();
         case "item_by_url": {

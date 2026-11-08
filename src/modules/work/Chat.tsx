@@ -4,6 +4,7 @@ import { Button, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
 import { Markdown } from "../../design/markdown";
 import { Attachments } from "../../design/ImageViewer";
+import { FileTray } from "../../design/FileStage";
 import { MarkdownFiles } from "../../design/markdown";
 import { saveAttachment } from "../../lib/images";
 import { AgentNotice } from "./AgentNotice";
@@ -86,6 +87,7 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
       {/* The body stays mounted while hidden, so switching back doesn't reload it. */}
       {body && <div className="chat-body" hidden={!showBody}>{body}</div>}
       {(!body || !showBody) && <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />}
+      {(!body || !showBody) && <FileTray />}
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
       <Composer chat={chat} onSend={send} placeholder={`Ask about this, or tell the agent what to do…`} />
     </div>
