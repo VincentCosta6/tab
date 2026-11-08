@@ -1180,9 +1180,14 @@ async fn hub_move_to_cloud(
     next.hub.cloud_hub = Some(hub_id);
     next.save(&state.config_path)
         .map_err(account::CloudFailure::internal)?;
-    *current = next;
+    *current = next.clone();
     drop(current);
     let _ = state.events.send(EngineEvent::ConfigChanged);
+    // The cloud runner gets the agent setup (and any connections already
+    // set to run there) now, not at the next save.
+    if let Err(e) = cloud_runner::sync_connections(&account, &state.store, &next).await {
+        tracing::warn!(error = %e.message(), "couldn't send the cloud runner its setup");
+    }
     Ok(outcome)
 }
 

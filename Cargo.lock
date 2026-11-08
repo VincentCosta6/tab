@@ -5164,6 +5164,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tab-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde_json",
+ "tab-core",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tab-store"
 version = "0.1.0"
 dependencies = [

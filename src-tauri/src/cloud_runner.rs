@@ -56,6 +56,19 @@ fn split(
     (plain, secrets)
 }
 
+/// The agent setup the cloud runner's harnesses use: this computer's, with
+/// its paths left out (they mean nothing in tab cloud).
+fn agent_setup(cfg: &TabConfig) -> String {
+    let mut a = cfg.agent.clone();
+    a.command = None;
+    a.opencode_url = None;
+    a.workdir = None;
+    serde_json::to_string(&a).unwrap_or_default()
+}
+
+/// The agent setup last sent, so a save that didn't change it sends nothing.
+static SENT_SETUP: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
 /// Brings the hub in line with which connections run in tab cloud: their
 /// plain settings as synced rows, their secrets in the hub's store, and
 /// nothing left behind for connections that went back to a computer.
@@ -100,11 +113,20 @@ pub async fn sync_connections(
             }
         }
     }
+    let setup = agent_setup(cfg);
+    let sent = SENT_SETUP.lock().ok().and_then(|g| g.clone());
+    let new_setup = sent.as_ref() != Some(&(hub.clone(), setup.clone()));
+    if new_setup {
+        put.push((cloud::AGENT_SETUP_SECRET.to_string(), setup.clone()));
+    }
     if put.is_empty() && remove.is_empty() {
         return Ok(());
     }
     let token = account.token().await?;
     cloud::put_secrets(account.cloud(), &token, &hub, put, remove).await?;
+    if let Ok(mut g) = SENT_SETUP.lock() {
+        *g = Some((hub.clone(), setup));
+    }
     // Wake the runner so it picks the change up now.
     if cfg.connectors.values().any(|c| c.enabled && c.runs_on == RunsOn::Cloud) {
         let _ = cloud::wake_runner(account.cloud(), &token, &hub).await;
@@ -226,6 +248,15 @@ async fn moved_hub(app: &crate::AppState) -> Result<String, CloudFailure> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_agent_setup_leaves_this_computers_paths_out() {
+        let mut cfg = TabConfig::default();
+        cfg.agent.workdir = Some("/Users/v/code".into());
+        cfg.agent.command = Some("/opt/claude".into());
+        let s: serde_json::Value = serde_json::from_str(&agent_setup(&cfg)).unwrap();
+        assert!(s["workdir"].is_null() && s["command"].is_null());
+    }
 
     #[test]
     fn secret_fields_are_split_from_the_rest() {

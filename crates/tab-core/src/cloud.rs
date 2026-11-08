@@ -241,6 +241,10 @@ pub fn connection_secret(connection: &str, field: &str) -> String {
     format!("connection/{connection}/{field}")
 }
 
+/// The secret holding the person's agent setup (JSON `AgentConfig`, with
+/// this computer's paths left out) for the cloud runner's harnesses.
+pub const AGENT_SETUP_SECRET: &str = "setup/agent";
+
 /// The secret name a harness's environment variable is kept under.
 pub fn harness_secret(harness: &str, var: &str) -> String {
     format!("harness/{harness}/{var}")

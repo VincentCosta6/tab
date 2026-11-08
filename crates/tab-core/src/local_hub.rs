@@ -1450,13 +1450,13 @@ mod tests;
 /// Leases on the hub `tab.db` syncs with: this app's own, or the cloud hub
 /// once moved, where every runner (each computer, and tab cloud) claims.
 impl crate::leases::Leases for LocalHub {
+    /// The device id this app says hello with (to its own hub once
+    /// following, and to the cloud hub), which the hub names as holder.
     fn holder(&self) -> String {
-        match (self.cloud_link(), self.local.get()) {
-            (Some(_), Some((store, _))) => store
-                .device_id()
-                .unwrap_or_else(|_| "this-computer".into()),
-            _ => "this-computer".into(),
-        }
+        self.local
+            .get()
+            .and_then(|(store, _)| store.device_id().ok())
+            .unwrap_or_else(|| "this-computer".into())
     }
 
     fn claim_blocking(
