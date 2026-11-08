@@ -156,18 +156,32 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .pane > .empty { margin: auto; }
 .pane-loading { padding: var(--space-6); }
 .item-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.item-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--space-4); padding: var(--space-4) var(--space-6) var(--space-3); border-bottom: 1px solid var(--border); background: var(--bg-raised); }
-/* The title keeps room to read; when the pane is too narrow for it and the actions, they drop below it. */
-.item-head-main { display: flex; gap: var(--space-3); min-width: 0; flex: 1 1 300px; }
-.item-head-text { min-width: 0; display: grid; gap: 4px; }
+.item-head { container-type: inline-size; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 4px var(--space-3); padding: var(--space-4) var(--space-6) var(--space-3); border-bottom: 1px solid var(--border); background: var(--bg-raised); }
+/* Glyph | title | actions, with the info line under title and actions, full width. */
+.item-head-glyph { grid-column: 1; grid-row: 1 / 3; }
+.item-head > .item-title, .item-head > .item-title-edit { grid-column: 2; grid-row: 1; align-self: center; }
+.item-head > .item-actions { grid-column: 3; grid-row: 1; margin-left: var(--space-2); }
+.item-head > .item-meta { grid-column: 2 / 4; grid-row: 2; }
 /* The chat's sandbox state, pinned left of the title. */
 .item-title { margin: 0; font-size: var(--text-lg); font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .item-title-renamable { cursor: text; border-radius: var(--radius-sm); }
 .item-title-renamable:hover { background: var(--bg-hover); box-shadow: 0 0 0 3px var(--bg-hover); }
 .item-title-edit { display: block; width: 100%; padding: 0; border: 0; border-radius: var(--radius-sm); background: var(--bg-raised); color: inherit; font: inherit; font-size: var(--text-lg); font-weight: 600; line-height: 1.3; outline: 0; box-shadow: 0 0 0 3px var(--bg-raised), 0 0 0 4px var(--focus); }
-.item-meta { display: flex; gap: 2px var(--space-2); flex-wrap: wrap; align-items: center; color: var(--fg-muted); font-size: var(--text-sm); }
-.item-meta > span { white-space: nowrap; }
-.item-actions { display: flex; flex-wrap: wrap; gap: var(--space-1); flex: none; align-items: center; margin-left: auto; }
+/* One line: who and where give way (cut short) before the time does. */
+.item-meta { display: flex; gap: var(--space-2); align-items: center; min-width: 0; color: var(--fg-muted); font-size: var(--text-sm); white-space: nowrap; }
+.item-meta > * { flex: none; }
+.item-meta > .item-who, .item-meta > .item-where { flex: 0 1 auto; min-width: 2.5em; overflow: hidden; text-overflow: ellipsis; }
+.item-meta > .item-where { flex-shrink: 3; }
+/* The project reads as part of the line, a button only on hover. */
+.item-meta .pj-trigger { background: transparent; border-color: transparent; color: var(--fg-muted); padding-left: 2px; }
+.item-meta .pj-trigger:hover, .item-meta .pj-trigger.active { background: var(--bg-hover); color: var(--fg); }
+.item-actions { display: flex; gap: var(--space-1); flex: none; align-items: center; }
+/* A narrow pane: the actions shrink to icons (names on hover) so the title keeps the room. */
+@container (max-width: 640px) {
+  .item-actions .kbd { display: none; }
+  .item-actions .btn:not(.item-done) > span { display: none; }
+  .item-actions .btn:not(.item-done) { padding-inline: 7px; }
+}
 .menu-anchor { position: relative; }
 
 .ctx { border-bottom: 1px solid var(--border); background: var(--bg-raised); }
@@ -620,7 +634,7 @@ body.resizing iframe { pointer-events: none; }
 .composer-project .pj-trigger:hover, .composer-project .pj-trigger.active { border-color: var(--border); color: var(--fg); }
 .composer-project .pj-trigger.empty { padding-left: 5px; }
 .queue-filters { gap: var(--space-2); align-items: center; justify-content: space-between; }
-.item-head-text .pj-picker { margin-left: 2px; }
+.item-meta .pj-picker { margin-left: -4px; }
 
 /* A chat in a project takes on the project's color. */
 .has-project .item-head { box-shadow: inset 0 3px 0 var(--project); }
