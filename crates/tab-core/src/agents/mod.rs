@@ -310,7 +310,13 @@ pub struct AgentHub {
     approvals: Mutex<HashMap<String, (Approval, oneshot::Sender<Decision>)>>,
     /// OpenCode servers by chat id (see `opencode::server`).
     opencode: tokio::sync::Mutex<HashMap<String, Arc<opencode::Server>>>,
+    /// Puts a file in the hub and returns its hash, once the hub is up, so
+    /// files a reply names reach other devices ([`crate::named_files`]).
+    file_sink: std::sync::OnceLock<FileSink>,
 }
+
+/// See [`AgentHub::set_file_sink`].
+pub type FileSink = Arc<dyn Fn(&[u8]) -> anyhow::Result<String> + Send + Sync>;
 
 /// The checkout a dev build of tab runs from, so agents can be told not to
 /// edit it under the running app. None in release builds.
@@ -359,7 +365,13 @@ impl AgentHub {
             followups: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             opencode: tokio::sync::Mutex::new(HashMap::new()),
+            file_sink: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Where files an agent's reply names go, so other devices can show them.
+    pub fn set_file_sink(&self, sink: FileSink) {
+        let _ = self.file_sink.set(sink);
     }
 
     pub async fn set_config(&self, cfg: AgentConfig) {
@@ -534,8 +546,11 @@ impl AgentHub {
         role: &str,
         kind: &str,
         content: &str,
-        meta: serde_json::Value,
+        mut meta: serde_json::Value,
     ) {
+        if role == "assistant" && kind == "text" {
+            self.share_named_files(session_id, content, &mut meta);
+        }
         match self
             .store
             .message_add(session_id, role, kind, content, &meta, Utc::now())
@@ -543,6 +558,28 @@ impl AgentHub {
             Ok(message) => self.emit(EngineEvent::SessionMessage { message }),
             Err(e) => tracing::error!(error = %e, "storing session message failed"),
         }
+    }
+
+    /// Puts the local files a reply names in the hub and records them in
+    /// its `files`, so a device that isn't this one can show them.
+    fn share_named_files(&self, session_id: &str, text: &str, meta: &mut serde_json::Value) {
+        let Some(sink) = self.file_sink.get() else {
+            return;
+        };
+        let cwd = self
+            .store
+            .session_get(session_id)
+            .ok()
+            .flatten()
+            .map(|s| s.cwd);
+        let files = crate::named_files::share(text, cwd.as_deref(), |b| sink(b));
+        if files.is_empty() {
+            return;
+        }
+        if !meta.is_object() {
+            *meta = serde_json::json!({});
+        }
+        meta["files"] = serde_json::to_value(files).unwrap_or_default();
     }
 
     pub(crate) fn delta(&self, session_id: &str, text: &str) {

@@ -39,6 +39,7 @@ pub mod live;
 pub mod local_hub;
 pub mod lsp;
 pub mod mcp;
+pub mod named_files;
 pub mod ranker;
 pub mod ratelimit;
 pub mod sandbox;

@@ -29,19 +29,32 @@ export async function saveAttachment(file: File): Promise<string> {
   return api.attachmentSave(name, new Uint8Array(await file.arrayBuffer()));
 }
 
-/** Something the webview can put in an `<img src>`: URLs as they are, local files read through tab. */
-export function useImageSrc(src: string | null | undefined): string | undefined {
+/**
+ * Something the webview can put in an `<img src>`: URLs as they are, local
+ * files read through tab (which fetches one from the hub when it isn't on
+ * this computer). `failed` once tab has said it can't be had, so a missing
+ * image says so rather than loading for ever.
+ */
+export function useImage(src: string | null | undefined): { url?: string; failed: boolean } {
   const local = !!src && inTauri && isLocalPath(src);
-  const { data } = useQuery({
+  const { data, isError } = useQuery({
     queryKey: ["image", src],
     queryFn: async () => URL.createObjectURL(new Blob([await api.imageRead(src!)])),
     enabled: local,
     staleTime: Infinity,
     gcTime: 10 * 60_000,
+    retry: 1,
   });
-  if (!src) return undefined;
-  return local ? data : src;
+  if (!src) return { failed: false };
+  return local ? { url: data, failed: isError } : { url: src, failed: false };
 }
+
+export function useImageSrc(src: string | null | undefined): string | undefined {
+  return useImage(src).url;
+}
+
+/** What to say in place of an image that can't be shown. */
+export const MISSING_IMAGE = "This image isn't on this computer, and the hub doesn't have it.";
 
 export interface ViewerImage {
   src: string;

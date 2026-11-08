@@ -69,17 +69,31 @@ struct AppState {
 impl AppState {
     /// An attachment path as this device has it. Chats synced from another
     /// device, or files swept from the cache, name a path that isn't here;
-    /// one in the hub's naming (`.../<hash hex>/<name>`) is fetched from the
-    /// hub into this device's attachments folder.
+    /// one in the hub's naming (`.../<hash hex>/<name>`), or one an agent's
+    /// reply named on another device ([`tab_core::named_files`]), is fetched
+    /// from the hub (the cloud hub, when this computer syncs with one) into
+    /// this device's attachments folder.
     fn local_attachment(&self, path: &str) -> String {
         let p = std::path::Path::new(path);
         if p.exists() {
             return path.to_string();
         }
-        let (Some(hub), Some(file)) = (&self.work_hub, tab_core::live::file_ref(p)) else {
+        let Some(hub) = &self.work_hub else {
             return path.to_string();
         };
-        match hub.file_materialize(&self.hub.attachments_dir(), &file.hash, &file.name) {
+        // An attachment, by its hub name; or a file an agent's reply named
+        // on another device, by what that reply recorded for the path.
+        let file =
+            tab_core::live::file_ref(p).or_else(|| self.store.named_file(path).ok().flatten());
+        let Some(file) = file else {
+            return path.to_string();
+        };
+        // Fetching from the cloud blocks; let the runtime move other work off
+        // this thread meanwhile.
+        let got = tokio::task::block_in_place(|| {
+            hub.file_materialize(&self.hub.attachments_dir(), &file.hash, &file.name)
+        });
+        match got {
             Ok(local) => local.display().to_string(),
             Err(_) => path.to_string(),
         }
