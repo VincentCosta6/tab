@@ -131,6 +131,14 @@ impl Store {
             })?)
     }
 
+    /// Makes this install go by `device` instead (a cloud runner goes by the
+    /// id its hub gives it, so it can't say hello as anything else).
+    pub fn set_device_id(&self, device: &str) -> anyhow::Result<()> {
+        self.conn()
+            .execute("UPDATE this_device SET device = ?1 WHERE id = 1", [device])?;
+        Ok(())
+    }
+
     /// Fires after every commit to `tab.db` (once per wait, however many
     /// commits happened since).
     pub fn commits(&self) -> std::sync::Arc<tokio::sync::Notify> {

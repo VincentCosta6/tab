@@ -9,7 +9,7 @@
 //! | OS      | Files                         | Network                                  |
 //! |---------|-------------------------------|------------------------------------------|
 //! | macOS   | Seatbelt (`sandbox-exec`)     | Seatbelt: none, or only tab's proxy      |
-//! | Linux   | bubblewrap (`bwrap`)          | none via a network namespace; domain lists go through tab's proxy but aren't enforced |
+//! | Linux   | bubblewrap (`bwrap`)          | a network namespace: none, or only tab's proxy |
 //! | Windows | not enforced                  | not enforced                             |
 //! | any, with an image | a Docker or Podman container | none, or the container's network |
 //!
@@ -29,6 +29,7 @@
 //!   commands. Writes are limited to the checkout or the run's folder, and
 //!   git and SSH credentials are hidden too.
 
+pub mod bridge;
 pub mod broker;
 mod bwrap;
 pub mod container;
@@ -37,8 +38,10 @@ pub mod proxy;
 mod seatbelt;
 pub mod tree;
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -251,6 +254,15 @@ fn explain_spawn(cmd: &tokio::process::Command, e: std::io::Error) -> std::io::E
 pub struct Sandbox {
     cfg: RwLock<SandboxConfig>,
     backend: Backend,
+    /// What [`detect`] found, when it isn't a sandbox tab can use.
+    detected: Option<String>,
+    /// Variables every process started here gets, as far as its trust
+    /// allows (see [`Sandbox::set_spawn_env`]). They never enter this
+    /// process's own environment.
+    spawn_env: RwLock<BTreeMap<String, String>>,
+    /// Refuse to start anything when policies can't be enforced (the cloud
+    /// runner: there's no person at the keyboard to notice).
+    strict: AtomicBool,
     home: Option<PathBuf>,
     /// tab's own data and config folders.
     data_dir: Option<PathBuf>,
@@ -262,6 +274,26 @@ pub struct Sandbox {
 }
 
 static CURRENT: OnceLock<Arc<Sandbox>> = OnceLock::new();
+
+/// Makes this process's memory and environment unreadable to other
+/// processes of the same user (Linux: not dumpable, so `/proc/<pid>/environ`
+/// and `/proc/<pid>/mem` belong to root and `ptrace` is refused). Call first
+/// thing in `main`. Elsewhere it does nothing: on macOS the sandbox profile
+/// keeps agents from reading other processes' environments instead. Dev
+/// builds stay debuggable unless `force`.
+pub fn harden_process(force: bool) {
+    if cfg!(debug_assertions) && !force {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: prctl with PR_SET_DUMPABLE takes plain integers.
+        let r = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
+        if r != 0 {
+            tracing::warn!(error = %std::io::Error::last_os_error(), "couldn't make tab non-dumpable");
+        }
+    }
+}
 
 /// Sets the app's sandbox. Call once at startup.
 pub fn install(s: Arc<Sandbox>) {
@@ -332,6 +364,33 @@ const SECRETS: &[&str] = &[
     "Library/Safari",
 ];
 
+/// tab's own secrets in its config folder: every connection's settings,
+/// and the person's tab cloud sign-in (a Supabase refresh token).
+const CONFIG_SECRETS: &[&str] = &["config.json", "account.json"];
+
+/// tab's own secrets in its data folder: the database (connection tokens),
+/// the local hub's copy of every synced record, and the hub's TLS key.
+const DATA_SECRETS: &[&str] = &[
+    "tab.db",
+    "tab.db-wal",
+    "tab.db-shm",
+    "mcp-token",
+    "hub.db",
+    "hub.db-wal",
+    "hub.db-shm",
+    "hub-tls",
+];
+
+/// Hidden files that tools (or tab itself) may create while a process runs.
+/// bubblewrap can only cover a path that exists when the process starts, so
+/// these are made empty (readable by this user only) first. Each is fine to
+/// find empty: git, curl and tab all read an empty one as "nothing stored".
+const MADE_BEFORE_HIDING: &[&str] = &[".git-credentials", ".netrc", "account.json", "mcp-token"];
+
+/// Hidden folders made (empty, this user only) before a process starts, for
+/// the same reason.
+const DIRS_MADE_BEFORE_HIDING: &[&str] = &["hub-tls"];
+
 /// Credentials a person's own chat may use (to push and open PRs), but code
 /// nobody here wrote may not.
 const GIT_SECRETS: &[&str] = &[
@@ -380,9 +439,13 @@ const CACHES: &[&str] = &[
 
 impl Sandbox {
     pub fn new(cfg: SandboxConfig, data_dir: Option<PathBuf>, config_dir: Option<PathBuf>) -> Self {
+        let (backend, detected) = detect();
         Self {
             cfg: RwLock::new(cfg),
-            backend: detect(),
+            backend,
+            detected,
+            spawn_env: RwLock::new(BTreeMap::new()),
+            strict: AtomicBool::new(false),
             home: home().map(|h| real(&h)),
             data_dir: data_dir.map(|d| real(&d)),
             config_dir: config_dir.map(|d| real(&d)),
@@ -396,6 +459,22 @@ impl Sandbox {
         self.others.sort();
         self.others.dedup();
         self
+    }
+
+    /// Sets the variables every process started from here on gets, on top
+    /// of what's left of tab's own environment. Each still goes through the
+    /// trust filter ([`env::keeps`]) and the policy's `drop_env`, so a model
+    /// key reaches an agent and a GitHub token reaches only the person's own
+    /// chats. Used by the cloud runner, which keeps the hub's secrets in
+    /// memory instead of in its own environment, where any process of the
+    /// same user could read them from `/proc`.
+    pub fn set_spawn_env(&self, vars: BTreeMap<String, String>) {
+        *self.spawn_env.write().unwrap() = vars;
+    }
+
+    /// Refuses to start a process when its policy can't be enforced here.
+    pub fn require_enforcement(&self, on: bool) {
+        self.strict.store(on, Ordering::SeqCst);
     }
 
     pub fn set_config(&self, cfg: SandboxConfig) {
@@ -428,19 +507,23 @@ impl Sandbox {
                 None,
             ),
             (true, Backend::Bubblewrap) => (
-                "On, with bubblewrap. Agents can't change tab's own files or your shell setup, or read cloud credentials and browser data. Network allowlists aren't enforced on Linux yet.".to_string(),
+                "On, with bubblewrap. Agents can't change tab's own files or your shell setup, or read cloud credentials and browser data.".to_string(),
                 None,
             ),
             (true, Backend::Inherited) => (
-                "tab is running inside a sandbox already, and macOS can't start another inside it, so agents and commands run under that sandbox's limits instead of tab's.".to_string(),
-                None,
+                "tab is running inside a sandbox already, and macOS can't start another inside it, so agents and commands run under that sandbox's limits instead of tab's. Review chats and workflow commands don't get their own stricter limits here.".to_string(),
+                Some("Run tab outside the sandbox (from Finder, or a terminal that isn't sandboxed) to get tab's own limits.".to_string()),
+            ),
+            (true, Backend::Unavailable) if cfg!(target_os = "macos") => (
+                "macOS's sandbox didn't start here, so file limits aren't enforced.".to_string(),
+                self.detected.clone(),
             ),
             (true, Backend::Unavailable) if cfg!(windows) => (
                 "Windows has no sandbox tab can use yet, so file limits aren't enforced. Agents still start without tab's secrets, Claude Code is told not to touch protected folders, and stopping a chat ends everything it started.".to_string(),
                 Some("Workflow commands that name a container image run isolated in Docker or Podman.".to_string()),
             ),
             (true, Backend::Unavailable) => (
-                "bubblewrap isn't working here, so file limits aren't enforced.".to_string(),
+                "bubblewrap isn't working here, so file and network limits aren't enforced.".to_string(),
                 Some("Install bubblewrap (apt install bubblewrap, dnf install bubblewrap). On Ubuntu 24.04+, unprivileged user namespaces must be allowed for it.".to_string()),
             ),
         };
@@ -476,30 +559,24 @@ impl Sandbox {
     }
 
     /// tab's own files: its database and config hold every connection's
-    /// token.
-    fn tab_secrets(&self) -> Vec<PathBuf> {
+    /// token, `account.json` the person's tab cloud sign-in, `hub.db` a copy
+    /// of every synced record (other chats' transcripts included), and
+    /// `hub-tls` the local hub's private key.
+    pub(crate) fn tab_secrets(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
-        // Just the file: on macOS and Windows the config and data folders
+        // Just the files: on macOS and Windows the config and data folders
         // are the same, and agents read their chat's files from there.
         if let Some(c) = &self.config_dir {
-            out.push(c.join("config.json"));
+            out.extend(CONFIG_SECRETS.iter().map(|f| c.join(f)));
         }
         if let Some(d) = &self.data_dir {
-            for f in ["tab.db", "tab.db-wal", "tab.db-shm", "mcp-token"] {
-                out.push(d.join(f));
-            }
+            out.extend(DATA_SECRETS.iter().map(|f| d.join(f)));
         }
         for d in &self.others {
-            for f in [
-                "config.json",
-                "tab.db",
-                "tab.db-wal",
-                "tab.db-shm",
-                "mcp-token",
-            ] {
-                out.push(d.join(f));
-            }
+            out.extend(CONFIG_SECRETS.iter().chain(DATA_SECRETS).map(|f| d.join(f)));
         }
+        out.sort();
+        out.dedup();
         out
     }
 
@@ -634,24 +711,55 @@ impl Sandbox {
         policy: &Policy,
     ) -> anyhow::Result<Prepared> {
         let enabled = self.config().enabled;
+        if self.strict.load(Ordering::SeqCst) && !(enabled && self.backend.enforces()) {
+            anyhow::bail!(
+                "tab's sandbox isn't working here ({:?}), and this runner starts nothing without it",
+                self.backend
+            );
+        }
+        // Under bubblewrap a domain list reaches the proxy through a Unix
+        // socket and a bridge inside the sandbox; without the bridge the
+        // process gets no network at all rather than all of it.
+        let bridged = enabled
+            && self.backend == Backend::Bubblewrap
+            && matches!(policy.network, Network::Domains(_))
+            && bridge::helper().is_some();
         let proxy = match (&policy.network, enabled) {
-            (Network::Domains(d), true) => Some(proxy::start(d.clone()).await?),
+            (Network::Domains(d), true) => Some(proxy::start_on(d.clone(), bridged).await?),
             _ => None,
         };
         let port = proxy.as_ref().map(|p| p.port);
+        if enabled && self.backend == Backend::Bubblewrap {
+            prepare_hidden(policy);
+        }
         let (mut cmd, enforced) = match (enabled, self.backend) {
             (true, Backend::Seatbelt) => {
-                let profile = seatbelt::profile(policy, port);
+                let profile = seatbelt::profile(policy, port, seatbelt_procargs());
                 let mut c = tokio::process::Command::new("/usr/bin/sandbox-exec");
                 c.arg("-p").arg(profile).arg(exe).args(args);
                 (c, true)
             }
             (true, Backend::Bubblewrap) => {
+                let sock = proxy.as_ref().and_then(|p| p.socket.clone());
+                let x = bwrap::Extras {
+                    pid: bwrap_pid(),
+                    net_dir: sock.as_deref().and_then(Path::parent),
+                };
                 let mut c = tokio::process::Command::new("bwrap");
-                c.args(bwrap::args(policy, cwd))
-                    .arg("--")
-                    .arg(exe)
-                    .args(args);
+                c.args(bwrap::args(policy, cwd, x)).arg("--");
+                match (sock, port, bridge::helper()) {
+                    (Some(sock), Some(port), Some(helper)) => {
+                        c.arg(helper)
+                            .arg(bridge::SUBCOMMAND)
+                            .arg(sock)
+                            .arg(port.to_string())
+                            .arg(exe)
+                            .args(args);
+                    }
+                    _ => {
+                        c.arg(exe).args(args);
+                    }
+                }
                 (c, true)
             }
             _ => {
@@ -662,6 +770,11 @@ impl Sandbox {
         };
         cmd.current_dir(cwd);
         env::scrub(&mut cmd, policy.trust);
+        for (k, v) in self.spawn_env.read().unwrap().iter() {
+            if env::keeps(k, policy.trust) {
+                cmd.env(k, v);
+            }
+        }
         for k in &policy.drop_env {
             cmd.env_remove(k);
         }
@@ -714,7 +827,15 @@ impl Sandbox {
                 deny.extend(rule("Read", p));
             }
         }
-        let allow: Vec<&str> = if self.enforced() {
+        // Shell commands run without asking only where the sandbox holds
+        // their network to the policy too: under bubblewrap a domain list
+        // without the bridge means no network, so it still holds.
+        let network_holds = match &policy.network {
+            Network::Any => true,
+            Network::None => true,
+            Network::Domains(_) => self.backend == Backend::Seatbelt || bridge::helper().is_some(),
+        };
+        let allow: Vec<&str> = if self.enforced() && network_holds {
             vec!["Bash"]
         } else if policy.brokered {
             vec!["Bash(gh:*)", "Bash(git:*)"]
@@ -796,38 +917,124 @@ fn temp_dirs() -> Vec<PathBuf> {
     v
 }
 
-/// Which sandbox works here. Checked once: Seatbelt is part of macOS, and
-/// bubblewrap is tried for real, since distributions can block the user
-/// namespaces it needs.
-fn detect() -> Backend {
+/// Which sandbox works here, and what went wrong when none does. Checked
+/// once: Seatbelt is part of macOS, and bubblewrap is tried for real, since
+/// distributions can block the user namespaces it needs.
+fn detect() -> (Backend, Option<String>) {
     if cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").exists() {
-        // Fails (exit 71) when this process is sandboxed already.
-        let ok = std::process::Command::new("/usr/bin/sandbox-exec")
+        let status = std::process::Command::new("/usr/bin/sandbox-exec")
             .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        return if ok {
-            Backend::Seatbelt
-        } else {
-            Backend::Inherited
+            .status();
+        return match status {
+            Ok(s) if s.success() => (Backend::Seatbelt, None),
+            // sandbox_apply refuses (EX_OSERR, 71) inside another sandbox.
+            Ok(s) if s.code() == Some(71) => (Backend::Inherited, None),
+            // Anything else is no sandbox at all, and is said so: never
+            // taken as "the outer sandbox applies".
+            Ok(s) => (
+                Backend::Unavailable,
+                Some(format!("sandbox-exec answered {s}.")),
+            ),
+            Err(e) => (
+                Backend::Unavailable,
+                Some(format!("sandbox-exec didn't start: {e}.")),
+            ),
         };
     }
     if cfg!(target_os = "linux") {
-        let ok = std::process::Command::new("bwrap")
-            .args(["--dev-bind", "/", "/", "--", "true"])
+        if bwrap_works(&["--dev-bind", "/", "/", "--", "true"]) {
+            return (Backend::Bubblewrap, None);
+        }
+        return (
+            Backend::Unavailable,
+            Some("bubblewrap didn't start a sandbox here.".into()),
+        );
+    }
+    (Backend::Unavailable, None)
+}
+
+fn bwrap_works(args: &[&str]) -> bool {
+    std::process::Command::new("bwrap")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Whether bubblewrap can give a process its own PID namespace and `/proc`
+/// here (some container runtimes refuse to mount `/proc`).
+fn bwrap_pid() -> bool {
+    static OK: OnceLock<bool> = OnceLock::new();
+    *OK.get_or_init(|| {
+        bwrap_works(&[
+            "--dev-bind",
+            "/",
+            "/",
+            "--unshare-pid",
+            "--proc",
+            "/proc",
+            "--",
+            "true",
+        ])
+    })
+}
+
+/// Whether this macOS's Seatbelt takes the rule that hides other processes'
+/// environments; checked once, so a macOS that doesn't know the filter
+/// still gets the rest of the profile.
+fn seatbelt_procargs() -> bool {
+    static OK: OnceLock<bool> = OnceLock::new();
+    *OK.get_or_init(|| {
+        let profile = format!("(version 1)(allow default){}", seatbelt::PROCARGS_RULE);
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/usr/bin/true"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .is_ok_and(|s| s.success());
-        if ok {
-            return Backend::Bubblewrap;
+            .is_ok_and(|s| s.success())
+    })
+}
+
+/// bubblewrap covers a hidden path only if it exists when the process
+/// starts, so a credential file a tool writes mid-chat would be readable.
+/// The ones that are safe to find empty are made first (readable by this
+/// user only).
+fn prepare_hidden(policy: &Policy) {
+    for p in &policy.hide {
+        if p.exists() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !p.parent().is_some_and(Path::is_dir) {
+            continue;
+        }
+        if MADE_BEFORE_HIDING.contains(&name) {
+            let mut o = std::fs::OpenOptions::new();
+            o.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                o.mode(0o600);
+            }
+            let _ = o.open(p);
+        } else if DIRS_MADE_BEFORE_HIDING.contains(&name) {
+            let mut b = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                b.mode(0o700);
+            }
+            let _ = b.create(p);
         }
     }
-    Backend::Unavailable
 }
 
 #[cfg(test)]

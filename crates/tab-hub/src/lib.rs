@@ -15,7 +15,16 @@
 //! That keeps it building for Wasm and makes it easy to test.
 //!
 //! Every connection says [`Hello`](pb::Hello) first, naming its device; the
-//! hub refuses anything else until then. It keeps track of who is connected
+//! hub refuses anything else until then.
+//!
+//! A device id is only what a client says, so where the host knows who is
+//! calling (the cloud hub, from the verified token) it tells the hub
+//! ([`Hub::connect_as`]): the first user to say hello as a device owns that
+//! id ([`Hub::device_owners`], which the host keeps and restores with
+//! [`Hub::bind_device`]), and nobody else can say hello as it. A host can
+//! also pin a connection to one device id (the cloud runner's,
+//! [`runner_device`]); there, ids starting `runner-` can only be said that
+//! way. It keeps track of who is connected
 //! and how far each one has synced, for the Hub page ([`Hub::status`]).
 //!
 //! Agent sessions are watched and steered from any device through the
@@ -70,9 +79,26 @@ impl Handled {
 /// The host's id for one connection (a socket, or the desktop app itself).
 pub type ConnId = u64;
 
+/// The largest live event or steering body the hub relays, in bytes. Text a
+/// session streams is cut far below this by the app; a bigger body is a
+/// client flooding everyone watching.
+pub const MAX_LIVE_BYTES: usize = 256 * 1024;
+
+/// What device ids reserved for runners start with.
+pub const RUNNER_DEVICE_PREFIX: &str = "runner-";
+
+/// The device id a hub's cloud runner says hello as.
+pub fn runner_device(hub_id: &str) -> String {
+    format!("{RUNNER_DEVICE_PREFIX}{hub_id}")
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Conn {
     device: Option<String>,
+    /// Who the host says is calling, when it knows.
+    user: Option<String>,
+    /// The only device id this connection may say hello as.
+    pinned: Option<String>,
     client: String,
     address: String,
     connected_at: DateTime<Utc>,
@@ -89,6 +115,8 @@ pub struct Hub<S> {
     runs_on: String,
     started_at: DateTime<Utc>,
     conns: BTreeMap<ConnId, Conn>,
+    /// Device id → the user who first said hello as it.
+    owners: BTreeMap<String, String>,
 }
 
 fn page(asked: u32, default: u32, max: u32) -> usize {
@@ -111,15 +139,31 @@ impl<S: HubStore> Hub<S> {
             runs_on: runs_on.to_string(),
             started_at: now,
             conns: BTreeMap::new(),
+            owners: BTreeMap::new(),
         }
     }
 
     /// A connection opened. `address` is for display only.
     pub fn connect(&mut self, conn: ConnId, address: &str, now: DateTime<Utc>) {
+        self.connect_as(conn, address, None, None, now);
+    }
+
+    /// A connection opened for `user`, whom the host verified. With
+    /// `pinned`, it may say hello only as that device.
+    pub fn connect_as(
+        &mut self,
+        conn: ConnId,
+        address: &str,
+        user: Option<&str>,
+        pinned: Option<&str>,
+        now: DateTime<Utc>,
+    ) {
         self.conns.insert(
             conn,
             Conn {
                 device: None,
+                user: user.map(str::to_string),
+                pinned: pinned.map(str::to_string),
                 client: String::new(),
                 address: address.to_string(),
                 connected_at: now,
@@ -140,6 +184,19 @@ impl<S: HubStore> Hub<S> {
             .iter()
             .flat_map(|s| self.watched_notice(s))
             .collect()
+    }
+
+    /// Notes that `device` belongs to `user` (what [`Hub::device_owners`]
+    /// said before the host restarted).
+    pub fn bind_device(&mut self, device: &str, user: &str) {
+        self.owners
+            .entry(device.to_string())
+            .or_insert_with(|| user.to_string());
+    }
+
+    /// Which user owns each device id, for the host to keep.
+    pub fn device_owners(&self) -> &BTreeMap<String, String> {
+        &self.owners
     }
 
     /// Connections that have said hello: the ones the host sends pushes to.
@@ -230,10 +287,36 @@ impl<S: HubStore> Hub<S> {
                     "hello needs a device id",
                 ));
             }
+            let refuse = |m: String| ServerEnvelope::error(id, pb::error::Code::Conflict, m);
+            match &c.pinned {
+                Some(p) if *p != h.device => {
+                    return Err(refuse(format!("this connection is {p}, not {}", h.device)));
+                }
+                None if c.user.is_some() && h.device.starts_with(RUNNER_DEVICE_PREFIX) => {
+                    return Err(refuse(format!("{} is a runner's device id", h.device)));
+                }
+                _ => {}
+            }
+            if let Some(user) = &c.user {
+                match self.owners.get(&h.device) {
+                    Some(owner) if owner != user => {
+                        return Err(refuse(format!(
+                            "device {} belongs to someone else",
+                            h.device
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.owners.insert(h.device.clone(), user.clone());
+                    }
+                }
+            }
+            let c = self.conns.get_mut(&conn).expect("looked up above");
             c.device = Some(h.device.clone());
             c.client = h.client.clone();
             c.synced_to = h.since;
         }
+        let c = self.conns.get(&conn).expect("looked up above");
         let Some(device) = c.device.clone() else {
             return Err(ServerEnvelope::error(
                 id,

@@ -152,14 +152,15 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 /// tab's own token: the person's MCP clients, from Settings.
 fn authed(s: &McpServer, headers: &HeaderMap) -> bool {
-    bearer(headers).is_some_and(|t| !s.token.is_empty() && t == s.token)
+    bearer(headers).is_some_and(|t| !s.token.is_empty() && crate::hub_tls::same_secret(t, &s.token))
 }
 
 /// This chat's own token.
 fn authed_chat(s: &McpServer, headers: &HeaderMap, session: &str) -> bool {
     !s.token.is_empty()
         && !session.is_empty()
-        && bearer(headers).is_some_and(|t| t == chat_token(&s.token, session))
+        && bearer(headers)
+            .is_some_and(|t| crate::hub_tls::same_secret(t, &chat_token(&s.token, session)))
 }
 
 /// `tab __tab_cli`: a chat's `gh` or `git` command, run by tab with the

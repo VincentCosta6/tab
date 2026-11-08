@@ -1216,13 +1216,23 @@ async fn hub_move_to_cloud(
 
 /// Brings this computer's work back from tab cloud into its own hub (see
 /// `LocalHub::move_to_local`). Connections set to run in tab cloud run on
-/// this computer again, so none stops. Returns how many rows it copied.
+/// this computer again, so none stops, and the secrets the hub kept for its
+/// cloud runner are removed first. Returns how many rows it copied.
 #[tauri::command]
-async fn hub_move_to_local(state: State<'_, AppState>) -> CmdResult<u64> {
+async fn hub_move_to_local(
+    state: State<'_, AppState>,
+    account: State<'_, account::AccountState>,
+) -> CmdResult<u64> {
     let hub = state
         .work_hub
         .clone()
         .ok_or_else(|| err("this computer's hub isn't running"))?;
+    let cfg = state.config.lock().await.clone();
+    if let Err(e) = cloud_runner::forget_cloud(&account, &state.store, &cfg).await {
+        // Moving back still works offline; the runner's secrets then stay
+        // until removed in Settings → Hub.
+        tracing::warn!(error = %e.message(), "couldn't remove the cloud runner's secrets");
+    }
     let store = state.store.clone();
     let rows = tauri::async_runtime::spawn_blocking(move || hub.move_to_local(&store))
         .await

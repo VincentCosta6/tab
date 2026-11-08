@@ -44,7 +44,11 @@ fn filters(paths: &[std::path::PathBuf]) -> String {
     out
 }
 
-pub(super) fn profile(policy: &Policy, proxy_port: Option<u16>) -> String {
+/// Keeps a sandboxed process from reading other processes' arguments and
+/// environment through `sysctl` (what `ps -E` uses).
+pub(super) const PROCARGS_RULE: &str = "(deny sysctl-read (sysctl-name-prefix \"kern.procargs\"))";
+
+pub(super) fn profile(policy: &Policy, proxy_port: Option<u16>, hide_procargs: bool) -> String {
     let mut p = String::from("(version 1)\n(allow default)\n");
     if !policy.protect.is_empty() {
         p.push_str(&format!("(deny file-write*{})\n", filters(&policy.protect)));
@@ -66,9 +70,19 @@ pub(super) fn profile(policy: &Policy, proxy_port: Option<u16>) -> String {
     if !policy.reveal.is_empty() {
         p.push_str(&format!("(allow file-read*{})\n", filters(&policy.reveal)));
     }
-    // Programs tab runs on the agent's behalf instead (the real `gh`).
+    // Programs tab runs on the agent's behalf instead (the real `gh`):
+    // neither started nor read, so a copy can't be started either.
     for b in &policy.block_exec {
-        p.push_str(&format!("(deny process-exec (literal {}))\n", quote(b)));
+        p.push_str(&format!(
+            "(deny process-exec file-read* (literal {}))\n",
+            quote(b)
+        ));
+    }
+    // Other processes' environments and arguments (`ps -E`): tab's own
+    // holds tokens the scrubbed child doesn't get.
+    if hide_procargs {
+        p.push_str(PROCARGS_RULE);
+        p.push('\n');
     }
     match (&policy.network, proxy_port) {
         (Network::Any, _) => {}

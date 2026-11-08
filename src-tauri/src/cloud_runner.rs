@@ -10,6 +10,11 @@
 //!
 //! The same store holds what the cloud runner's agents need: a harness's API
 //! key (`harness/<id>/<ENV_VAR>`) and git access (`git/token`).
+//!
+//! Nothing is sent that the person didn't enter for tab cloud: GitHub's
+//! connection signs in with the GitHub CLI on a computer, but its whole
+//! `gh` login (every repo, every scope) never goes to the cloud. To run
+//! there it needs a token of its own, ideally fine-grained and read-only.
 
 use tab_core::cloud::{self, pb};
 use tab_core::config::TabConfig;
@@ -96,23 +101,10 @@ pub async fn sync_connections(
         let id = f.descriptor().id;
         let c = cfg.connectors.get(&id);
         let cloud = c.is_some_and(|c| c.enabled && c.runs_on == RunsOn::Cloud);
-        let (plain, mut secrets) = match c {
+        let (plain, secrets) = match c {
             Some(c) => split(&id, &c.settings),
             None => Default::default(),
         };
-        // GitHub signs in through the GitHub CLI on this computer by
-        // default, which tab cloud can't use: send gh's token with it.
-        let gh_secret = cloud::connection_secret("github", "token");
-        if cloud
-            && id == "github"
-            && !secrets.iter().any(|(n, _)| *n == gh_secret)
-            && let Some(t) = tokio::task::spawn_blocking(tab_core::gh::token)
-                .await
-                .ok()
-                .flatten()
-        {
-            secrets.push((gh_secret, t));
-        }
         if cloud {
             store
                 .cloud_connection_set(&id, Some(&plain), now)
@@ -162,6 +154,34 @@ pub async fn sync_connections(
     Ok(())
 }
 
+/// Before this computer's work leaves tab cloud: nothing of it keeps running
+/// there. Connections stop running in the cloud, and every secret the hub
+/// keeps for its runner (sign-ins, harness keys, git access) is removed, so
+/// a runner still up has nothing to work with and stops when idle.
+pub async fn forget_cloud(
+    account: &AccountState,
+    store: &Store,
+    cfg: &TabConfig,
+) -> Result<(), CloudFailure> {
+    let Some(hub) = cfg.hub.cloud_hub.clone() else {
+        return Ok(());
+    };
+    let mut local = cfg.clone();
+    for c in local.connectors.values_mut() {
+        c.runs_on = RunsOn::ThisComputer;
+    }
+    sync_connections(account, store, &local).await?;
+    let token = account.token().await?;
+    let names = cloud::secret_names(account.cloud(), &token, &hub).await?;
+    if !names.is_empty() {
+        cloud::put_secrets(account.cloud(), &token, &hub, vec![], names).await?;
+    }
+    if let Ok(mut g) = SENT_SETUP.lock() {
+        *g = None;
+    }
+    Ok(())
+}
+
 /// Sets where a connection runs and saves it.
 #[tauri::command]
 pub async fn connection_runs_on(
@@ -185,12 +205,34 @@ pub async fn connection_runs_on(
         )
         .into());
     };
+    if runs_on == RunsOn::Cloud
+        && let Some(why) = needs_own_sign_in(&connection, c)
+    {
+        return Err(cloud::CloudError::new(pb::ErrorCode::BadRequest, why).into());
+    }
     c.runs_on = runs_on;
     // Send the secrets before this app stops running it, so nothing is
     // missed if the cloud can't be reached: the save fails instead.
     sync_connections(&account, &app.store, &next).await?;
     let saved = app.apply(next).await.map_err(CloudFailure::internal)?;
     Ok(crate::masked(&saved))
+}
+
+/// Why a connection can't run in tab cloud as it's set up: GitHub signs in
+/// with this computer's GitHub CLI unless it has a token of its own, and
+/// that login is never sent.
+fn needs_own_sign_in(
+    connection: &str,
+    c: &tab_core::config::ConnectorConfig,
+) -> Option<&'static str> {
+    let has_token = c
+        .settings
+        .get("token")
+        .and_then(|t| t.as_str())
+        .is_some_and(|t| !t.trim().is_empty());
+    (connection == "github" && !has_token).then_some(
+        "To run in tab cloud, GitHub needs a token of its own: tab doesn't send this computer's GitHub CLI sign-in, which reaches every repo you can. Add a fine-grained token with read access to the repos you follow in this connection's settings, then move it.",
+    )
 }
 
 /// A runner as the header and session views show it.
@@ -320,6 +362,17 @@ mod tests {
         cfg.agent.command = Some("/opt/claude".into());
         let s: serde_json::Value = serde_json::from_str(&agent_setup(&cfg)).unwrap();
         assert!(s["workdir"].is_null() && s["command"].is_null());
+    }
+
+    #[test]
+    fn github_needs_its_own_token_to_run_in_the_cloud() {
+        let mut c = tab_core::config::ConnectorConfig::default();
+        assert!(needs_own_sign_in("github", &c).is_some());
+        c.settings.insert("token".into(), json!("github_pat_x"));
+        assert!(needs_own_sign_in("github", &c).is_none());
+        assert!(
+            needs_own_sign_in("email", &tab_core::config::ConnectorConfig::default()).is_none()
+        );
     }
 
     #[test]

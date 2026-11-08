@@ -14,3 +14,4 @@ tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tab-core = { path = "../tab-core" }
+tab-hub = { path = "../tab-hub" }
