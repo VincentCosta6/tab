@@ -6,10 +6,10 @@ import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
-  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus,
+  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
 } from "./types";
 import { mockApi } from "./mock";
-import { HubListSchema, HubStatusSchema, decode } from "./protocol/cloud";
+import { HubListSchema, HubStatusSchema, RunnerStatusSchema, decode } from "./protocol/cloud";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -142,6 +142,22 @@ export const api = {
   cloudHubSetUp: async () => decode(HubStatusSchema, await call<ArrayBuffer>("cloud_hub_set_up")),
   /** Moves this computer's work into their private cloud hub and syncs with it from then on. Rejects with a CloudFailure. */
   hubMoveToCloud: () => call<MoveOutcome>("hub_move_to_cloud"),
+  /** Brings the work back from tab cloud into this computer's own hub and stops syncing. Resolves with the rows copied. */
+  hubMoveToLocal: () => call<number>("hub_move_to_local"),
+  /** This computer, the person's other computers and the cloud runner, as the hub knows them. */
+  runners: () => call<Runner[]>("runners"),
+  /** Jobs workflows handed to runners, newest first. */
+  jobsRecent: () => call<Job[]>("jobs_recent"),
+  /** Sets where a connection runs and saves the config. Rejects with a CloudFailure. */
+  connectionRunsOn: (connection: string, runsOn: RunsOn) => call<TabConfig>("connection_runs_on", { connection, runsOn }),
+  /** The hub's cloud runner. Rejects with a CloudFailure. */
+  cloudRunnerStatus: async () => decode(RunnerStatusSchema, await call<ArrayBuffer>("cloud_runner_status")),
+  /** Starts the hub's cloud runner now. Rejects with a CloudFailure. */
+  cloudRunnerWake: async () => decode(RunnerStatusSchema, await call<ArrayBuffer>("cloud_runner_wake")),
+  /** Names (never values) of the secrets the cloud hub keeps for its runner. Rejects with a CloudFailure. */
+  cloudSecretNames: () => call<string[]>("cloud_secret_names"),
+  /** Stores, or with null removes, a harness key (`harness/<id>/<ENV>`) or git access (`git/token`). Rejects with a CloudFailure. */
+  cloudSecretSet: (name: string, value: string | null) => call<string[]>("cloud_secret_set", { name, value }),
   storageClean: () => call<Swept>("storage_clean"),
   /** One checkout, or every one when no repo is given. */
   storageRemoveCheckouts: (repo?: string, number?: number) =>

@@ -16,6 +16,7 @@ import { UsageMeter } from "./modules/usage/UsageMeter";
 import { Updater } from "./modules/updates/Updater";
 import { AppUpdater } from "./modules/updates/AppUpdater";
 import { openSettings } from "./modules/settings/SettingsTab";
+import { AppHeader } from "./modules/shell/AppHeader";
 
 export default function App() {
   return (
@@ -103,9 +104,12 @@ function Shell() {
         </div>
       </nav>
       <main className="main">
-        <ErrorBoundary key={tab.id} label={tab.label}>
-          <Active />
-        </ErrorBoundary>
+        <AppHeader title={tab.label} icon={tab.icon} />
+        <div className="main-body">
+          <ErrorBoundary key={tab.id} label={tab.label}>
+            <Active />
+          </ErrorBoundary>
+        </div>
       </main>
       <BrowserDock />
       <DropOverlay />
