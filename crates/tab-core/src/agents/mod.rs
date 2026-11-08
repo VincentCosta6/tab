@@ -1198,7 +1198,10 @@ impl AgentHub {
                 "\nYou run in tab's sandbox. tab's own files, shell startup files and stored cloud and browser \
                  credentials are off limits, and in a pull request's checkout you can only change that checkout. \
                  A write that fails with \"Read-only file system\" or \"Operation not permitted\" on one of those \
-                 paths is the sandbox: tell the person what you needed instead of working around it.\n"
+                 paths is the sandbox: tell the person what you needed instead of working around it.\n\
+                 A sandbox can't be started inside this one, so Chrome and Chromium fail with \"sandbox \
+                 initialization failed\". Start them with --no-sandbox (Puppeteer: args: ['--no-sandbox']); \
+                 tab's sandbox still applies to the browser.\n"
             } else {
                 "\ntab's own files and stored credentials are off limits to your file tools. If an edit is refused \
                  for that reason, tell the person what you needed instead of working around it.\n"
