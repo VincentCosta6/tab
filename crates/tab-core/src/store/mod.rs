@@ -10,12 +10,12 @@ mod graph;
 mod http;
 pub mod hub_sync;
 mod items;
+mod jobs;
 mod previews;
 mod projects;
 mod sessions;
 mod usage;
 mod vectors;
-mod jobs;
 mod workflows;
 pub use jobs::CloudConnection;
 

@@ -106,23 +106,18 @@ impl RunnerCaps {
 }
 
 /// Where a job may run.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Placement {
     /// Any computer, or the cloud.
     Anywhere,
     /// Only the person's computers.
+    #[default]
     Computers,
     /// Only a tab cloud runner (paid plans).
     Cloud,
     /// A computer if one takes it within `minutes`, then the cloud too.
     PreferComputer { minutes: u32 },
-}
-
-impl Default for Placement {
-    fn default() -> Self {
-        Placement::Computers
-    }
 }
 
 /// The work a job asks for.
@@ -373,7 +368,10 @@ mod tests {
 
     #[test]
     fn lease_keys_name_what_they_guard() {
-        assert_eq!(workflow_run_lease("w", "ingested:i:1"), "workflow-run:w:ingested:i:1");
+        assert_eq!(
+            workflow_run_lease("w", "ingested:i:1"),
+            "workflow-run:w:ingested:i:1"
+        );
         assert_eq!(job_lease("j"), "job:j");
         assert_eq!(connection_lease("github"), "connection:github");
     }
@@ -383,10 +381,16 @@ mod tests {
         let now = t(1);
         let j = job(Placement::Computers);
         assert_eq!(j.can_take(&laptop(), false, now), Ok(()));
-        assert_eq!(j.can_take(&cloud(), false, now), Err(NotForYou::CloudNotAllowed));
+        assert_eq!(
+            j.can_take(&cloud(), false, now),
+            Err(NotForYou::CloudNotAllowed)
+        );
 
         let j = job(Placement::Cloud);
-        assert_eq!(j.can_take(&laptop(), false, now), Err(NotForYou::ComputersNotAllowed));
+        assert_eq!(
+            j.can_take(&laptop(), false, now),
+            Err(NotForYou::ComputersNotAllowed)
+        );
         assert_eq!(j.can_take(&cloud(), false, now), Ok(()));
 
         let j = job(Placement::Anywhere);
@@ -408,17 +412,26 @@ mod tests {
         let mut j = job(Placement::Anywhere);
         let mut bare = laptop();
         bare.repos.clear();
-        assert_eq!(j.can_take(&bare, false, now), Err(NotForYou::NoRepo("acme/api".into())));
+        assert_eq!(
+            j.can_take(&bare, false, now),
+            Err(NotForYou::NoRepo("acme/api".into()))
+        );
         assert!(j.can_take(&cloud(), false, now).is_ok());
 
         j.spec.harness = "codex".into();
-        assert_eq!(j.can_take(&laptop(), false, now), Err(NotForYou::NoHarness("codex".into())));
+        assert_eq!(
+            j.can_take(&laptop(), false, now),
+            Err(NotForYou::NoHarness("codex".into()))
+        );
         assert!(j.can_take(&cloud(), false, now).is_ok());
 
         let mut none = laptop();
         none.harnesses.clear();
         j.spec.harness.clear();
-        assert!(matches!(j.can_take(&none, false, now), Err(NotForYou::NoHarness(_))));
+        assert!(matches!(
+            j.can_take(&none, false, now),
+            Err(NotForYou::NoHarness(_))
+        ));
 
         j.spec.repo.clear();
         assert!(j.can_take(&bare, false, now).is_ok());
@@ -437,14 +450,19 @@ mod tests {
         let j = j.claimed("cloud", 8, t(5));
         assert_eq!(j.attempts, 2);
         // Out of attempts once it lapses again.
-        assert_eq!(j.can_take(&laptop(), false, t(9)), Err(NotForYou::OutOfAttempts));
+        assert_eq!(
+            j.can_take(&laptop(), false, t(9)),
+            Err(NotForYou::OutOfAttempts)
+        );
         assert!(j.given_up(false, t(9)).is_some());
         assert!(j.given_up(true, t(9)).is_none());
     }
 
     #[test]
     fn only_the_current_holder_may_write_the_result() {
-        let j = job(Placement::Anywhere).claimed("laptop", 7, t(1)).claimed("cloud", 8, t(3));
+        let j = job(Placement::Anywhere)
+            .claimed("laptop", 7, t(1))
+            .claimed("cloud", 8, t(3));
         assert!(!j.accepts_result_from("laptop", 7));
         assert!(!j.accepts_result_from("cloud", 7));
         assert!(j.accepts_result_from("cloud", 8));
@@ -453,7 +471,10 @@ mod tests {
     #[test]
     fn finished_and_late_jobs_are_left_alone() {
         let mut j = job(Placement::Anywhere);
-        assert_eq!(j.can_take(&laptop(), false, t(60)), Err(NotForYou::PastDeadline));
+        assert_eq!(
+            j.can_take(&laptop(), false, t(60)),
+            Err(NotForYou::PastDeadline)
+        );
         assert!(j.given_up(false, t(60)).unwrap().contains("deadline"));
         j.state = JobState::Done {
             runner: "laptop".into(),
@@ -479,7 +500,10 @@ mod tests {
         let j = job(Placement::PreferComputer { minutes: 15 }).claimed("laptop", 3, t(1));
         let back: Job = serde_json::from_value(serde_json::to_value(&j).unwrap()).unwrap();
         assert_eq!(back, j);
-        assert_eq!(serde_json::to_value(RunsOn::ThisComputer).unwrap(), "this_computer");
+        assert_eq!(
+            serde_json::to_value(RunsOn::ThisComputer).unwrap(),
+            "this_computer"
+        );
         assert_eq!(
             serde_json::from_str::<Placement>(r#"{"type":"cloud"}"#).unwrap(),
             Placement::Cloud

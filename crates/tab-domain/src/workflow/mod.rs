@@ -663,7 +663,10 @@ pub fn validate(w: &Workflow, catalog: &[ConnectorInfo], others: &[Workflow]) ->
                 refs.extend(template::refs(&Value::String(repo.clone())));
                 let known = ["claude_code", "opencode", "codex", "pi"];
                 if !harness.is_empty() && !known.contains(&harness.as_str()) {
-                    out.push(Issue::err(at, format!("{harness} isn't a harness tab knows.")));
+                    out.push(Issue::err(
+                        at,
+                        format!("{harness} isn't a harness tab knows."),
+                    ));
                 }
                 if matches!(placement, crate::runner::Placement::Cloud) {
                     out.push(Issue::warn(

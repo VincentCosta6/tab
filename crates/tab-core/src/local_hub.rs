@@ -688,8 +688,10 @@ impl LocalHub {
         self.awaiting_cloud.store(false, Ordering::Relaxed);
         let mut keys: std::collections::BTreeSet<(String, String)> =
             store.hub_local_keys()?.into_iter().collect();
-        let tables: std::collections::HashSet<&str> =
-            crate::store::hub_sync::SYNCED.iter().map(|(t, _)| *t).collect();
+        let tables: std::collections::HashSet<&str> = crate::store::hub_sync::SYNCED
+            .iter()
+            .map(|(t, _)| *t)
+            .collect();
         let head = self.head()?;
         let mut since = 0;
         while since < head {

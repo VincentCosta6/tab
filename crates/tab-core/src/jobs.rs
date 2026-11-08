@@ -20,10 +20,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+pub use tab_domain::runner::RunnerKind as Kind;
 use tab_domain::runner::{
     JOB_LEASE, JOB_RENEW, Job, JobResult, JobState, RunnerCaps, RunnerKind, job_lease,
 };
-pub use tab_domain::runner::RunnerKind as Kind;
 pub use tokio_util::sync::CancellationToken;
 
 use crate::agents::AgentHub;
@@ -87,9 +87,9 @@ impl Agents for Arc<AgentHub> {
         let session = match store.session_for_key(key)? {
             Some(s) => s,
             None => {
-                let kind = kind.or(self.config().kind).ok_or_else(|| {
-                    anyhow::anyhow!("no agent is set up on this runner")
-                })?;
+                let kind = kind
+                    .or(self.config().kind)
+                    .ok_or_else(|| anyhow::anyhow!("no agent is set up on this runner"))?;
                 // The model comes from the harness's setting on this
                 // runner; a per-job model needs a per-chat model setting.
                 let _ = model;
@@ -289,7 +289,9 @@ impl JobRunner {
                     .map(|(_, p)| p)
                     .unwrap_or_else(|| self.agents.default_folder()),
                 // A cloud runner clones into its own folder first.
-                RunnerKind::Cloud => clone_into(&self.agents.default_folder(), &job.spec.repo).await?,
+                RunnerKind::Cloud => {
+                    clone_into(&self.agents.default_folder(), &job.spec.repo).await?
+                }
             }
         };
         let kind = (!job.spec.harness.is_empty()).then(|| AgentKind::parse(&job.spec.harness));
@@ -304,10 +306,15 @@ impl JobRunner {
         ) {
             Ok(s) => s,
             Err(e) => {
-                self.finish(&job.id, &me, token, JobState::Failed {
-                    error: format!("couldn't start the agent: {e:#}"),
-                    finished_at: Utc::now(),
-                })?;
+                self.finish(
+                    &job.id,
+                    &me,
+                    token,
+                    JobState::Failed {
+                        error: format!("couldn't start the agent: {e:#}"),
+                        finished_at: Utc::now(),
+                    },
+                )?;
                 let _ = leases::release(&self.leases, &key).await;
                 return Ok(());
             }
@@ -329,21 +336,31 @@ impl JobRunner {
         loop {
             if Utc::now() >= job.deadline {
                 self.agents.stop(&session);
-                self.finish(&job.id, &me, token, JobState::Failed {
-                    error: "The agent didn't finish before the job's deadline.".into(),
-                    finished_at: Utc::now(),
-                })?;
+                self.finish(
+                    &job.id,
+                    &me,
+                    token,
+                    JobState::Failed {
+                        error: "The agent didn't finish before the job's deadline.".into(),
+                        finished_at: Utc::now(),
+                    },
+                )?;
                 break;
             }
             let s = self.store.session_get(&session)?;
             match s.as_ref().map(|s| s.status) {
                 Some(SessionStatus::Idle) => {
                     let result = self.result_of(&session)?;
-                    self.finish(&job.id, &me, token, JobState::Done {
-                        runner: me.clone(),
-                        result,
-                        finished_at: Utc::now(),
-                    })?;
+                    self.finish(
+                        &job.id,
+                        &me,
+                        token,
+                        JobState::Done {
+                            runner: me.clone(),
+                            result,
+                            finished_at: Utc::now(),
+                        },
+                    )?;
                     break;
                 }
                 Some(SessionStatus::Failed) | None => {
@@ -355,10 +372,15 @@ impl JobRunner {
                         .find(|m| m.kind == "error")
                         .map(|m| m.content)
                         .unwrap_or_else(|| "The agent stopped with an error.".into());
-                    self.finish(&job.id, &me, token, JobState::Failed {
-                        error: why,
-                        finished_at: Utc::now(),
-                    })?;
+                    self.finish(
+                        &job.id,
+                        &me,
+                        token,
+                        JobState::Failed {
+                            error: why,
+                            finished_at: Utc::now(),
+                        },
+                    )?;
                     break;
                 }
                 // Working, monitoring, or waiting on the person: keep it.
@@ -424,7 +446,11 @@ pub fn computer_name() -> String {
 }
 
 fn first_line(s: &str) -> String {
-    let l = s.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim();
+    let l = s
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or_default()
+        .trim();
     if l.chars().count() > 60 {
         format!("{}…", l.chars().take(60).collect::<String>())
     } else {
@@ -458,13 +484,21 @@ async fn clone_into(root: &str, repo: &str) -> anyhow::Result<String> {
     };
     if dir.join(".git").exists() {
         let out = git(&["fetch", "--prune", "origin"], &dir).output().await?;
-        anyhow::ensure!(out.status.success(), "git fetch failed: {}", String::from_utf8_lossy(&out.stderr));
+        anyhow::ensure!(
+            out.status.success(),
+            "git fetch failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     } else {
         std::fs::create_dir_all(dir.parent().unwrap_or(Path::new(root)))?;
         let out = git(&["clone", &url, &dir.to_string_lossy()], Path::new(root))
             .output()
             .await?;
-        anyhow::ensure!(out.status.success(), "git clone failed: {}", String::from_utf8_lossy(&out.stderr));
+        anyhow::ensure!(
+            out.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     Ok(dir.to_string_lossy().into_owned())
 }
@@ -503,8 +537,16 @@ mod tests {
                 cwd,
                 Utc::now(),
             )?;
-            self.0.message_add(&s.id, "assistant", "text", "Opened https://github.com/acme/api/pull/7", &serde_json::json!({}), Utc::now())?;
-            self.0.session_update(&s.id, Some(SessionStatus::Idle), None, Utc::now())?;
+            self.0.message_add(
+                &s.id,
+                "assistant",
+                "text",
+                "Opened https://github.com/acme/api/pull/7",
+                &serde_json::json!({}),
+                Utc::now(),
+            )?;
+            self.0
+                .session_update(&s.id, Some(SessionStatus::Idle), None, Utc::now())?;
             Ok(s.id)
         }
         fn stop(&self, _session: &str) {}
@@ -543,19 +585,33 @@ mod tests {
     #[tokio::test]
     async fn a_computer_takes_a_job_runs_it_and_writes_what_came_of_it() {
         let store = Arc::new(Store::in_memory().unwrap());
-        store.job_put(&job(Placement::Computers), Utc::now()).unwrap();
+        store
+            .job_put(&job(Placement::Computers), Utc::now())
+            .unwrap();
         let agents = Arc::new(Instant(store.clone(), Mutex::new(vec![])));
         let leases = InMemory::new("laptop");
-        let runner = JobRunner::new(store.clone(), agents.clone(), leases.clone(), RunnerKind::Computer, "Laptop");
+        let runner = JobRunner::new(
+            store.clone(),
+            agents.clone(),
+            leases.clone(),
+            RunnerKind::Computer,
+            "Laptop",
+        );
         runner.take(Utc::now()).await;
         let s = store.clone();
         until(move || s.job_get("j1").unwrap().unwrap().finished()).await;
         let j = store.job_get("j1").unwrap().unwrap();
-        let JobState::Done { runner: by, result, .. } = &j.state else {
+        let JobState::Done {
+            runner: by, result, ..
+        } = &j.state
+        else {
             panic!("{:?}", j.state)
         };
         assert_eq!(by, "laptop");
-        assert_eq!(result.pr_url.as_deref(), Some("https://github.com/acme/api/pull/7"));
+        assert_eq!(
+            result.pr_url.as_deref(),
+            Some("https://github.com/acme/api/pull/7")
+        );
         assert_eq!(j.attempts, 1);
         assert_eq!(*agents.1.lock().unwrap(), ["Fix the flaky test"]);
     }
@@ -563,16 +619,27 @@ mod tests {
     #[tokio::test]
     async fn a_job_held_by_another_runner_is_left_to_it() {
         let store = Arc::new(Store::in_memory().unwrap());
-        store.job_put(&job(Placement::Anywhere), Utc::now()).unwrap();
+        store
+            .job_put(&job(Placement::Anywhere), Utc::now())
+            .unwrap();
         let agents = Arc::new(Instant(store.clone(), Mutex::new(vec![])));
         let leases = InMemory::new("laptop");
         // The cloud runner got there first.
         assert!(leases.claim_as("cloud", "job:j1", JOB_LEASE).won);
-        let runner = JobRunner::new(store.clone(), agents.clone(), leases, RunnerKind::Computer, "Laptop");
+        let runner = JobRunner::new(
+            store.clone(),
+            agents.clone(),
+            leases,
+            RunnerKind::Computer,
+            "Laptop",
+        );
         runner.take(Utc::now()).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(agents.1.lock().unwrap().is_empty());
-        assert_eq!(store.job_get("j1").unwrap().unwrap().state, JobState::Waiting);
+        assert_eq!(
+            store.job_get("j1").unwrap().unwrap().state,
+            JobState::Waiting
+        );
     }
 
     #[tokio::test]
@@ -580,7 +647,13 @@ mod tests {
         let store = Arc::new(Store::in_memory().unwrap());
         store.job_put(&job(Placement::Cloud), Utc::now()).unwrap();
         let agents = Arc::new(Instant(store.clone(), Mutex::new(vec![])));
-        let runner = JobRunner::new(store.clone(), agents.clone(), InMemory::new("laptop"), RunnerKind::Computer, "Laptop");
+        let runner = JobRunner::new(
+            store.clone(),
+            agents.clone(),
+            InMemory::new("laptop"),
+            RunnerKind::Computer,
+            "Laptop",
+        );
         runner.take(Utc::now()).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(agents.1.lock().unwrap().is_empty());

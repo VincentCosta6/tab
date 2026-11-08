@@ -105,7 +105,11 @@ async fn call<M: Message + Default>(
     post: bool,
     path: &str,
 ) -> Result<M, CloudError> {
-    let method = if post { reqwest::Method::POST } else { reqwest::Method::GET };
+    let method = if post {
+        reqwest::Method::POST
+    } else {
+        reqwest::Method::GET
+    };
     send(cfg, &format!("Bearer {token}"), method, path, None).await
 }
 

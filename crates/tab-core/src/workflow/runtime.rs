@@ -20,16 +20,16 @@ use super::{
     describe_trigger, find_action, glob, template,
 };
 use crate::connector::Connector;
+use crate::engine::{Change, EngineEvent};
+use crate::gateway::GatewayError;
 use crate::leases::{self, Leases};
+use crate::model::{ConnectorInfo, Effect, QueueItem};
+use crate::ratelimit;
+use crate::store::Store;
 use tab_domain::runner::{
     DEFAULT_JOB_ATTEMPTS, DEFAULT_JOB_MINUTES, Job, JobSpec, JobState, WORKFLOW_RUN_LEASE,
     job_lease, workflow_run_lease,
 };
-use crate::engine::{Change, EngineEvent};
-use crate::gateway::GatewayError;
-use crate::model::{ConnectorInfo, Effect, QueueItem};
-use crate::ratelimit;
-use crate::store::Store;
 
 /// One action may take this long.
 const STEP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -318,7 +318,9 @@ impl Runtime {
             }
         };
         for run in waiting {
-            let Some(resume) = run.resume.clone() else { continue };
+            let Some(resume) = run.resume.clone() else {
+                continue;
+            };
             let job = match store.job_get(&resume.job) {
                 Ok(Some(j)) => j,
                 Ok(None) => continue, // not synced here yet
@@ -328,17 +330,24 @@ impl Runtime {
                 }
             };
             if !job.finished() {
-                let Some(why) = job.given_up(false, now) else { continue };
+                let Some(why) = job.given_up(false, now) else {
+                    continue;
+                };
                 // Only if nobody holds it: a runner working it renews.
                 let key = job_lease(&job.id);
-                let Ok(c) = leases::claim(&self.host.leases(), &key, chrono::Duration::seconds(30)).await else {
+                let Ok(c) =
+                    leases::claim(&self.host.leases(), &key, chrono::Duration::seconds(30)).await
+                else {
                     continue;
                 };
                 if c.won {
                     if let Ok(Some(mut j)) = store.job_get(&job.id)
                         && !j.finished()
                     {
-                        j.state = JobState::Failed { error: why, finished_at: now };
+                        j.state = JobState::Failed {
+                            error: why,
+                            finished_at: now,
+                        };
                         if let Err(e) = store.job_put(&j, now) {
                             tracing::warn!(error = %e, "failing a job failed");
                         }
@@ -396,7 +405,10 @@ impl Runtime {
         let mut ctx = resume.ctx;
         ctx["steps"][&job.step_id] = output;
         run.resume = None;
-        let keep_going = w.steps.get(resume.step).is_some_and(|s| s.continue_on_error);
+        let keep_going = w
+            .steps
+            .get(resume.step)
+            .is_some_and(|s| s.continue_on_error);
         if status == StepStatus::Failed && !keep_going {
             run.status = RunStatus::Failed;
             run.error = error;
@@ -407,7 +419,8 @@ impl Runtime {
         }
         run.status = RunStatus::Running;
         store.workflow_run_update(&run)?;
-        self.host.publish(EngineEvent::WorkflowRun { run: run.clone() });
+        self.host
+            .publish(EngineEvent::WorkflowRun { run: run.clone() });
         let _slot = self.slots.acquire().await?;
         self.execute(&w, &mut run, ctx, resume.step + 1).await;
         if run.status != RunStatus::Waiting {
@@ -585,7 +598,9 @@ impl Runtime {
                 Ok(_) => {}
                 // Offline: run it rather than drop it. Its trigger key keeps
                 // it from running twice here, and on others once it syncs.
-                Err(e) => tracing::warn!(workflow = %w.name, error = %e, "couldn't reach the hub to claim a workflow run; running it here"),
+                Err(e) => {
+                    tracing::warn!(workflow = %w.name, error = %e, "couldn't reach the hub to claim a workflow run; running it here")
+                }
             }
         }
         if saved && !store.workflow_run_insert(&run)? {
@@ -769,7 +784,8 @@ impl Runtime {
                     placement,
                     deadline_minutes,
                 } => {
-                    let text = |s: &str| match template::render(&Value::String(s.to_string()), &ctx) {
+                    let text = |s: &str| match template::render(&Value::String(s.to_string()), &ctx)
+                    {
                         Value::String(s) => s,
                         Value::Null => String::new(),
                         other => other.to_string(),
@@ -790,7 +806,11 @@ impl Runtime {
                         sr.error = Some("Save the workflow before running an agent step.".into());
                     } else {
                         let now = Utc::now();
-                        let minutes = if *deadline_minutes == 0 { DEFAULT_JOB_MINUTES } else { *deadline_minutes };
+                        let minutes = if *deadline_minutes == 0 {
+                            DEFAULT_JOB_MINUTES
+                        } else {
+                            *deadline_minutes
+                        };
                         let job = Job {
                             id: uuid::Uuid::new_v4().to_string(),
                             run_id: run.id.clone(),
@@ -807,12 +827,17 @@ impl Runtime {
                             Ok(()) => {
                                 sr.status = StepStatus::Waiting;
                                 sr.output = json!({ "job": job.id });
-                                run.resume = Some(Resume { job: job.id.clone(), step: index, ctx: ctx.clone() });
+                                run.resume = Some(Resume {
+                                    job: job.id.clone(),
+                                    step: index,
+                                    ctx: ctx.clone(),
+                                });
                                 stop = Some(RunStatus::Waiting);
                             }
                             Err(e) => {
                                 sr.status = StepStatus::Failed;
-                                sr.error = Some(format!("couldn't hand the step to a runner: {e:#}"));
+                                sr.error =
+                                    Some(format!("couldn't hand the step to a runner: {e:#}"));
                             }
                         }
                     }
@@ -1061,12 +1086,19 @@ mod tests {
         let job_id = run.resume.as_ref().unwrap().job.clone();
         let job = host.store.job_get(&job_id).unwrap().unwrap();
         assert_eq!(job.spec.prompt, "Fix the flaky test in Fix flaky tests");
-        assert_eq!((job.spec.repo.as_str(), job.spec.harness.as_str()), ("acme/api", "codex"));
+        assert_eq!(
+            (job.spec.repo.as_str(), job.spec.harness.as_str()),
+            ("acme/api", "codex")
+        );
 
         // Nothing happens while the job is open.
         rt.follow_jobs(Utc::now()).await;
         assert_eq!(
-            host.store.workflow_run_get(&run.id).unwrap().unwrap().status,
+            host.store
+                .workflow_run_get(&run.id)
+                .unwrap()
+                .unwrap()
+                .status,
             RunStatus::Waiting
         );
 
@@ -1089,11 +1121,22 @@ mod tests {
         assert_eq!(after.steps.len(), 2);
         assert_eq!(after.steps[0].output["branch"], "fix-flaky");
         assert_eq!(after.steps[0].output["runner"], "cloud");
-        assert_eq!(after.steps[1].output["said"], "Pinned the clock in the test");
+        assert_eq!(
+            after.steps[1].output["said"],
+            "Pinned the clock in the test"
+        );
 
         // Carrying on again does nothing.
         rt.follow_jobs(Utc::now()).await;
-        assert_eq!(host.store.workflow_run_get(&run.id).unwrap().unwrap().steps.len(), 2);
+        assert_eq!(
+            host.store
+                .workflow_run_get(&run.id)
+                .unwrap()
+                .unwrap()
+                .steps
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -1103,7 +1146,8 @@ mod tests {
         let run = rt.run_now(w, None, false).await.unwrap();
         let job_id = run.resume.unwrap().job;
         // Past the deadline with nobody holding it: failed, then the run.
-        let late = host.store.job_get(&job_id).unwrap().unwrap().deadline + chrono::Duration::minutes(1);
+        let late =
+            host.store.job_get(&job_id).unwrap().unwrap().deadline + chrono::Duration::minutes(1);
         rt.follow_jobs(late).await;
         assert!(matches!(
             host.store.job_get(&job_id).unwrap().unwrap().state,
@@ -1121,10 +1165,18 @@ mod tests {
         let w = agent_workflow(&host.store);
         let run = rt.run_now(w, None, false).await.unwrap();
         let job_id = run.resume.unwrap().job;
-        assert!(host.leases.claim_as("cloud", &job_lease(&job_id), chrono::Duration::minutes(5)).won);
-        let late = host.store.job_get(&job_id).unwrap().unwrap().deadline + chrono::Duration::minutes(1);
+        assert!(
+            host.leases
+                .claim_as("cloud", &job_lease(&job_id), chrono::Duration::minutes(5))
+                .won
+        );
+        let late =
+            host.store.job_get(&job_id).unwrap().unwrap().deadline + chrono::Duration::minutes(1);
         rt.follow_jobs(late).await;
-        assert_eq!(host.store.job_get(&job_id).unwrap().unwrap().state, JobState::Waiting);
+        assert_eq!(
+            host.store.job_get(&job_id).unwrap().unwrap().state,
+            JobState::Waiting
+        );
     }
 
     #[tokio::test]
@@ -1138,7 +1190,15 @@ mod tests {
         let (rt, host) = runtime(store, "laptop");
         // The other runner (sharing the hub's leases) claimed this slot.
         let key = "schedule:42";
-        assert!(host.leases.claim_as("desktop", &workflow_run_lease(&w.id, key), WORKFLOW_RUN_LEASE).won);
+        assert!(
+            host.leases
+                .claim_as(
+                    "desktop",
+                    &workflow_run_lease(&w.id, key),
+                    WORKFLOW_RUN_LEASE
+                )
+                .won
+        );
         let start = || Start {
             trigger: "schedule".into(),
             key: Some(key.into()),
@@ -1149,10 +1209,18 @@ mod tests {
         };
         let run = rt.clone().begin(&w, start()).await.unwrap();
         assert_eq!(run.status, RunStatus::Stopped);
-        assert!(host.store.workflow_runs(Some(&w.id), 10).unwrap().is_empty());
+        assert!(
+            host.store
+                .workflow_runs(Some(&w.id), 10)
+                .unwrap()
+                .is_empty()
+        );
 
         // A slot nobody claimed runs here, once.
-        let other = Start { key: Some("schedule:43".into()), ..start() };
+        let other = Start {
+            key: Some("schedule:43".into()),
+            ..start()
+        };
         let run = rt.clone().begin(&w, other).await.unwrap();
         assert_eq!(run.status, RunStatus::Succeeded);
         assert_eq!(run.runner, "laptop");
@@ -1163,17 +1231,38 @@ mod tests {
     async fn quitting_closes_only_this_runners_runs() {
         let (rt, host) = runtime(Store::in_memory().unwrap(), "laptop");
         let w = agent_workflow(&host.store);
-        let mut mine = rt.new_run(&w, &Start {
-            trigger: "t".into(), key: None, item_id: None, chain: vec![], ctx: Value::Null, dry_run: false,
-        }, RunStatus::Running);
+        let mut mine = rt.new_run(
+            &w,
+            &Start {
+                trigger: "t".into(),
+                key: None,
+                item_id: None,
+                chain: vec![],
+                ctx: Value::Null,
+                dry_run: false,
+            },
+            RunStatus::Running,
+        );
         mine.id = "mine".into();
         let mut theirs = mine.clone();
         theirs.id = "theirs".into();
         theirs.runner = "desktop".into();
         host.store.workflow_run_insert(&mine).unwrap();
         host.store.workflow_run_insert(&theirs).unwrap();
-        host.store.workflow_runs_abandon("laptop", Utc::now()).unwrap();
-        assert_eq!(host.store.workflow_run_get("mine").unwrap().unwrap().status, RunStatus::Failed);
-        assert_eq!(host.store.workflow_run_get("theirs").unwrap().unwrap().status, RunStatus::Running);
+        host.store
+            .workflow_runs_abandon("laptop", Utc::now())
+            .unwrap();
+        assert_eq!(
+            host.store.workflow_run_get("mine").unwrap().unwrap().status,
+            RunStatus::Failed
+        );
+        assert_eq!(
+            host.store
+                .workflow_run_get("theirs")
+                .unwrap()
+                .unwrap()
+                .status,
+            RunStatus::Running
+        );
     }
 }

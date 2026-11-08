@@ -1196,7 +1196,10 @@ async fn hub_move_to_cloud(
 /// this computer again, so none stops. Returns how many rows it copied.
 #[tauri::command]
 async fn hub_move_to_local(state: State<'_, AppState>) -> CmdResult<u64> {
-    let hub = state.work_hub.clone().ok_or_else(|| err("this computer's hub isn't running"))?;
+    let hub = state
+        .work_hub
+        .clone()
+        .ok_or_else(|| err("this computer's hub isn't running"))?;
     let store = state.store.clone();
     let rows = tauri::async_runtime::spawn_blocking(move || hub.move_to_local(&store))
         .await

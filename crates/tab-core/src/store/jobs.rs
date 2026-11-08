@@ -162,7 +162,8 @@ impl Store {
 
     pub fn cloud_connections(&self) -> anyhow::Result<Vec<CloudConnection>> {
         let conn = self.conn();
-        let mut st = conn.prepare("SELECT id, enabled, settings FROM cloud_connections ORDER BY id")?;
+        let mut st =
+            conn.prepare("SELECT id, enabled, settings FROM cloud_connections ORDER BY id")?;
         let out = st
             .query_map([], |r| {
                 Ok((
@@ -211,7 +212,8 @@ mod tests {
     fn jobs_round_trip_and_open_ones_are_listed_oldest_first() {
         let s = Store::in_memory().unwrap();
         let t0 = Utc::now();
-        s.job_put(&job("b", t0 + chrono::Duration::seconds(1)), t0).unwrap();
+        s.job_put(&job("b", t0 + chrono::Duration::seconds(1)), t0)
+            .unwrap();
         s.job_put(&job("a", t0), t0).unwrap();
         let open: Vec<_> = s.jobs_open().unwrap().into_iter().map(|j| j.id).collect();
         assert_eq!(open, ["a", "b"]);
@@ -247,9 +249,13 @@ mod tests {
         assert_eq!(s.runners().unwrap()[0].harnesses, ["claude_code"]);
 
         let settings = json!({ "repos": "acme/api" });
-        s.cloud_connection_set("github", settings.as_object(), now).unwrap();
+        s.cloud_connection_set("github", settings.as_object(), now)
+            .unwrap();
         let c = s.cloud_connections().unwrap();
-        assert_eq!((c[0].id.as_str(), c[0].settings["repos"].as_str()), ("github", Some("acme/api")));
+        assert_eq!(
+            (c[0].id.as_str(), c[0].settings["repos"].as_str()),
+            ("github", Some("acme/api"))
+        );
         s.cloud_connection_set("github", None, now).unwrap();
         assert!(s.cloud_connections().unwrap().is_empty());
     }

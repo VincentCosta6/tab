@@ -43,11 +43,14 @@ pub async fn release(leases: &Arc<dyn Leases>, key: &str) -> anyhow::Result<()> 
     tokio::task::spawn_blocking(move || l.release_blocking(&key)).await?
 }
 
+/// A lease's holder, fencing token and expiry.
+type Held = (String, u64, DateTime<Utc>);
+
 /// Leases kept in memory, for a single runner with no hub (tests, and an
 /// engine started without one): every claim by the same holder wins.
 #[derive(Default)]
 pub struct InMemory {
-    held: std::sync::Mutex<std::collections::HashMap<String, (String, u64, DateTime<Utc>)>>,
+    held: std::sync::Mutex<std::collections::HashMap<String, Held>>,
     holder: String,
 }
 
@@ -124,7 +127,10 @@ mod tests {
         let l = InMemory::new("a");
         let a = l.claim_blocking("k", Duration::seconds(30)).unwrap();
         assert!(a.won);
-        assert_eq!(l.claim_blocking("k", Duration::seconds(30)).unwrap().token, a.token);
+        assert_eq!(
+            l.claim_blocking("k", Duration::seconds(30)).unwrap().token,
+            a.token
+        );
         let b = l.claim_as("b", "k", Duration::seconds(30));
         assert!(!b.won);
         assert_eq!(b.holder, "a");

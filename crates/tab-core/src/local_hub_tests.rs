@@ -1078,7 +1078,10 @@ async fn moving_to_the_cloud_keeps_history_syncs_from_then_on_and_can_come_back(
     assert!(hub_item(&mac_hub, &c.id).is_some());
     assert!(in_cloud(&c.id).is_none());
     let (h, s) = (mac_hub.clone(), mac.clone());
-    assert!(blocking(move || h.move_to_local(&s)).await.is_err(), "already local");
+    assert!(
+        blocking(move || h.move_to_local(&s)).await.is_err(),
+        "already local"
+    );
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(dir2);
 }

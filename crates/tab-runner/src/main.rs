@@ -96,10 +96,20 @@ fn setup(store: &Store, secrets: &[(String, String)], work: &Path) -> Setup {
             ["git", "token"] => git_token = Some(value.clone()),
             ["setup", "agent"] => match serde_json::from_str(value) {
                 Ok(a) => agent = Some(a),
-                Err(e) => tracing::warn!(error = %e, "the agent setup didn't parse; using defaults"),
+                Err(e) => {
+                    tracing::warn!(error = %e, "the agent setup didn't parse; using defaults")
+                }
             },
             _ => {}
         }
+    }
+    // Without git access of its own, agents push with GitHub's sign-in.
+    if git_token.is_none() {
+        git_token = fields
+            .get("github")
+            .and_then(|f| f.get("token"))
+            .and_then(|t| t.as_str())
+            .map(str::to_string);
     }
     let mut agent = agent.unwrap_or_default();
     // Paths from the person's computer mean nothing here.
@@ -151,7 +161,9 @@ async fn secrets(cfg: &CloudConfig, token: &str) -> Vec<(String, String)> {
     loop {
         match cloud::runner_secrets(cfg, token).await {
             Ok(s) => return s,
-            Err(e) => tracing::warn!(error = %e, retry_in = wait, "couldn't read the hub's secrets"),
+            Err(e) => {
+                tracing::warn!(error = %e, retry_in = wait, "couldn't read the hub's secrets")
+            }
         }
         tokio::time::sleep(Duration::from_secs(wait)).await;
         wait = (wait * 2).min(60);
@@ -169,7 +181,9 @@ async fn main() -> anyhow::Result<()> {
     let env = Env::from_env()?;
     let work = env.data.join("work");
     std::fs::create_dir_all(&work)?;
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| env.data.clone());
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| env.data.clone());
 
     let store = Arc::new(Store::open(&env.data.join("tab.db"))?);
     let (events, _) = broadcast::channel::<EngineEvent>(1024);
@@ -199,7 +213,9 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!(hub = %env.hub, "cloud runner: syncing with the hub");
 
-    let api = CloudConfig { api: env.api.clone() };
+    let api = CloudConfig {
+        api: env.api.clone(),
+    };
     let mut current = setup(&store, &secrets(&api, &env.token).await, &work);
     apply_env(&current, &home);
 
@@ -288,8 +304,14 @@ mod tests {
         let agent = json!({ "kind": "codex", "workdir": "/Users/v/code", "command": "/opt/codex" });
         let secrets = vec![
             ("connection/github/token".to_string(), "ghp_x".to_string()),
-            ("connection/email/password".to_string(), "not set up here".to_string()),
-            ("harness/codex/OPENAI_API_KEY".to_string(), "sk-x".to_string()),
+            (
+                "connection/email/password".to_string(),
+                "not set up here".to_string(),
+            ),
+            (
+                "harness/codex/OPENAI_API_KEY".to_string(),
+                "sk-x".to_string(),
+            ),
             ("git/token".to_string(), "ghp_git".to_string()),
             ("setup/agent".to_string(), agent.to_string()),
         ];
@@ -297,11 +319,22 @@ mod tests {
         let gh = &s.config.connectors["github"];
         assert_eq!(gh.settings["token"], "ghp_x");
         assert_eq!(gh.settings["repos"], "acme/api");
-        assert!(!s.config.connectors.contains_key("email"), "only connections set to run here");
+        assert!(
+            !s.config.connectors.contains_key("email"),
+            "only connections set to run here"
+        );
         assert_eq!(s.env["OPENAI_API_KEY"], "sk-x");
         assert_eq!(s.git_token.as_deref(), Some("ghp_git"));
         assert_eq!(s.config.agent.kind, Some(tab_core::model::AgentKind::Codex));
         assert_eq!(s.config.agent.workdir.as_deref(), Some("/data/work"));
         assert_eq!(s.config.agent.command, None);
+    }
+
+    #[test]
+    fn agents_push_with_githubs_sign_in_when_theres_no_git_access_of_their_own() {
+        let store = Store::in_memory().unwrap();
+        let secrets = vec![("connection/github/token".to_string(), "ghp_gh".to_string())];
+        let s = setup(&store, &secrets, Path::new("/data/work"));
+        assert_eq!(s.git_token.as_deref(), Some("ghp_gh"));
     }
 }

@@ -15,8 +15,8 @@ use tab_core::cloud::{self, pb};
 use tab_core::config::TabConfig;
 use tab_core::connectors::registry;
 use tab_core::model::SettingKind;
-use tab_core::store::Store;
 use tab_core::runner::RunsOn;
+use tab_core::store::Store;
 use tauri::State;
 use tauri::ipc::Response;
 
@@ -29,7 +29,10 @@ const RUNNER_SECRET_PREFIXES: &[&str] = &["harness/", "git/"];
 fn split(
     id: &str,
     settings: &serde_json::Map<String, serde_json::Value>,
-) -> (serde_json::Map<String, serde_json::Value>, Vec<(String, String)>) {
+) -> (
+    serde_json::Map<String, serde_json::Value>,
+    Vec<(String, String)>,
+) {
     let secret: Vec<String> = registry()
         .into_iter()
         .map(|f| f.descriptor())
@@ -93,10 +96,23 @@ pub async fn sync_connections(
         let id = f.descriptor().id;
         let c = cfg.connectors.get(&id);
         let cloud = c.is_some_and(|c| c.enabled && c.runs_on == RunsOn::Cloud);
-        let (plain, secrets) = match c {
+        let (plain, mut secrets) = match c {
             Some(c) => split(&id, &c.settings),
             None => Default::default(),
         };
+        // GitHub signs in through the GitHub CLI on this computer by
+        // default, which tab cloud can't use: send gh's token with it.
+        let gh_secret = cloud::connection_secret("github", "token");
+        if cloud
+            && id == "github"
+            && !secrets.iter().any(|(n, _)| *n == gh_secret)
+            && let Some(t) = tokio::task::spawn_blocking(tab_core::gh::token)
+                .await
+                .ok()
+                .flatten()
+        {
+            secrets.push((gh_secret, t));
+        }
         if cloud {
             store
                 .cloud_connection_set(&id, Some(&plain), now)
@@ -106,8 +122,16 @@ pub async fn sync_connections(
             store
                 .cloud_connection_set(&id, None, now)
                 .map_err(CloudFailure::internal)?;
-            for d in registry().into_iter().map(|f| f.descriptor()).filter(|d| d.id == id) {
-                for s in d.settings.into_iter().filter(|s| s.kind == SettingKind::Secret) {
+            for d in registry()
+                .into_iter()
+                .map(|f| f.descriptor())
+                .filter(|d| d.id == id)
+            {
+                for s in d
+                    .settings
+                    .into_iter()
+                    .filter(|s| s.kind == SettingKind::Secret)
+                {
                     remove.push(cloud::connection_secret(&id, &s.key));
                 }
             }
@@ -128,7 +152,11 @@ pub async fn sync_connections(
         *g = Some((hub.clone(), setup));
     }
     // Wake the runner so it picks the change up now.
-    if cfg.connectors.values().any(|c| c.enabled && c.runs_on == RunsOn::Cloud) {
+    if cfg
+        .connectors
+        .values()
+        .any(|c| c.enabled && c.runs_on == RunsOn::Cloud)
+    {
         let _ = cloud::wake_runner(account.cloud(), &token, &hub).await;
     }
     Ok(())
@@ -195,7 +223,9 @@ pub async fn runners(app: State<'_, crate::AppState>) -> Result<Vec<RunnerView>,
 
 /// Jobs workflows handed to runners, newest first.
 #[tauri::command]
-pub async fn jobs_recent(app: State<'_, crate::AppState>) -> Result<Vec<tab_core::runner::Job>, String> {
+pub async fn jobs_recent(
+    app: State<'_, crate::AppState>,
+) -> Result<Vec<tab_core::runner::Job>, String> {
     app.store.jobs_recent(50).map_err(|e| e.to_string())
 }
 
@@ -296,7 +326,10 @@ mod tests {
     fn secret_fields_are_split_from_the_rest() {
         let settings = json!({ "token": "ghp_x", "repos": "acme/api", "empty": "" });
         let (plain, secrets) = split("github", settings.as_object().unwrap());
-        assert_eq!(secrets, [("connection/github/token".to_string(), "ghp_x".to_string())]);
+        assert_eq!(
+            secrets,
+            [("connection/github/token".to_string(), "ghp_x".to_string())]
+        );
         assert_eq!(plain.get("repos"), Some(&json!("acme/api")));
         assert!(!plain.contains_key("token"));
     }
