@@ -769,3 +769,114 @@ fn importing_moves_a_hub_over_the_wire() {
     let h = send(&mut cloud, 3, 2, page(0, 1), t(10));
     assert!(matches!(body(&h), Res::Error(e) if e.message.contains("already has")));
 }
+
+// ---- Who a device is ----
+
+/// Where the host says who is calling, a device id belongs to the first
+/// user to say hello as it: someone else can't take it over and publish
+/// into its sessions or hold its leases.
+#[test]
+fn device_ids_belong_to_the_user_who_said_them_first() {
+    let mut hub = Hub::new(MemStore::new(), "cloud", t(0));
+    hub.connect_as(MAC, "", Some("alice"), None, t(0));
+    assert!(matches!(
+        body(&send(&mut hub, MAC, 1, hello("mac", 0), t(0))),
+        Res::Welcome(_)
+    ));
+    send(
+        &mut hub,
+        MAC,
+        2,
+        Req::Apply(pb::Apply {
+            ops: vec![session_row("s1", "mac")],
+        }),
+        t(1),
+    );
+    assert_eq!(
+        hub.device_owners().get("mac").map(String::as_str),
+        Some("alice")
+    );
+
+    // Bob says he's the mac: refused, so he can't publish as it.
+    hub.connect_as(PHONE, "", Some("bob"), None, t(2));
+    let (code, msg) = error(&send(&mut hub, PHONE, 1, hello("mac", 0), t(2)));
+    assert_eq!(code, pb::error::Code::Conflict as i32);
+    assert!(msg.contains("someone else"), "{msg}");
+    let (_, msg) = error(&send(&mut hub, PHONE, 2, publish("s1", json!({})), t(2)));
+    assert!(msg.contains("hello"), "{msg}");
+
+    // Alice again, on another socket: still hers. After a restart the host
+    // restores who owns what.
+    hub.connect_as(LAPTOP, "", Some("alice"), None, t(3));
+    assert!(matches!(
+        body(&send(&mut hub, LAPTOP, 1, hello("mac", 0), t(3))),
+        Res::Welcome(_)
+    ));
+    let mut fresh = Hub::new(MemStore::new(), "cloud", t(4));
+    for (d, u) in hub.device_owners() {
+        fresh.bind_device(d, u);
+    }
+    fresh.connect_as(PHONE, "", Some("bob"), None, t(4));
+    assert!(
+        error(&send(&mut fresh, PHONE, 1, hello("mac", 0), t(4)))
+            .1
+            .contains("someone else")
+    );
+
+    // Without a verified user (the desktop's own hub), ids are as before.
+    let mut local = Hub::new(MemStore::new(), "local", t(0));
+    local.connect(MAC, "", t(0));
+    assert!(matches!(
+        body(&send(&mut local, MAC, 1, hello("mac", 0), t(0))),
+        Res::Welcome(_)
+    ));
+    assert!(local.device_owners().is_empty());
+}
+
+/// The cloud runner says hello only as the device id its hub gave it, and
+/// nobody else can say that id.
+#[test]
+fn a_runner_is_pinned_to_its_own_device_id() {
+    let runner = runner_device("hub1");
+    let mut hub = Hub::new(MemStore::new(), "cloud", t(0));
+    hub.connect_as(MAC, "", Some("runner"), Some(&runner), t(0));
+    let (_, msg) = error(&send(&mut hub, MAC, 1, hello("mac", 0), t(0)));
+    assert!(msg.contains(&runner), "{msg}");
+    assert!(matches!(
+        body(&send(&mut hub, MAC, 2, hello(&runner, 0), t(0))),
+        Res::Welcome(_)
+    ));
+    hub.connect_as(PHONE, "", Some("alice"), None, t(0));
+    let (_, msg) = error(&send(&mut hub, PHONE, 1, hello("runner-other", 0), t(0)));
+    assert!(msg.contains("runner"), "{msg}");
+}
+
+/// Live events and steering are capped, so one client can't flood every
+/// watcher.
+#[test]
+fn live_bodies_are_capped() {
+    let mut hub = live_hub(MemStore::new());
+    let big = vec![b'x'; MAX_LIVE_BYTES + 1];
+    let h = send(
+        &mut hub,
+        MAC,
+        9,
+        Req::Publish(pb::Publish {
+            session: "s1".into(),
+            event_json: big.clone(),
+        }),
+        t(2),
+    );
+    assert_eq!(error(&h).0, pb::error::Code::BadRequest as i32);
+    let h = send(
+        &mut hub,
+        PHONE,
+        9,
+        Req::Steer(pb::Steer {
+            session: "s1".into(),
+            body_json: big,
+        }),
+        t(2),
+    );
+    assert_eq!(error(&h).0, pb::error::Code::BadRequest as i32);
+}

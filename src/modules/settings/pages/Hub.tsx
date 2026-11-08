@@ -305,7 +305,7 @@ function CloudRunnerSection() {
           <SecretRow key={`${h.harness}/${v.name}`} label={`${h.name} · ${v.name}`} help={v.help} set={has.has(`harness/${h.harness}/${v.name}`)}
             onSave={(val) => setSecret(`harness/${h.harness}/${v.name}`, val)} />
         )))}
-        <SecretRow label="GitHub access" help="A token that can push branches and open pull requests on the repos agents work on." set={has.has("git/token")} onSave={(val) => setSecret("git/token", val)} />
+        <SecretRow label="GitHub access" help="A fine-grained token limited to the repos agents work on, with Contents: read and write. The cloud runner pushes the branch an agent commits to; the agent itself never sees the token." set={has.has("git/token")} onSave={(val) => setSecret("git/token", val)} />
       </Card>
     </Section>
   );

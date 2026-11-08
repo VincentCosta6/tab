@@ -171,7 +171,7 @@ fn seatbelt_profile_orders_rules() {
         vec!["/home/me/.aws".into()],
         Network::Domains(vec!["crates.io".into()]),
     );
-    let s = seatbelt::profile(&p, Some(4242));
+    let s = seatbelt::profile(&p, Some(4242), true);
     let deny = s.find("(deny file-write* (subpath \"/\"))").unwrap();
     let allow = s
         .find("(allow file-write* (literal \"/work\") (subpath \"/work\"))")
@@ -186,8 +186,19 @@ fn seatbelt_profile_orders_rules() {
     let q = seatbelt::profile(
         &policy(vec!["/a\"b".into()], vec![], vec![], Network::Any),
         None,
+        false,
     );
     assert!(q.contains(r#""/a\"b""#), "{q}");
+    assert!(s.contains(seatbelt::PROCARGS_RULE), "{s}");
+    assert!(!q.contains("kern.procargs"), "{q}");
+    // A program tab runs instead can't be started or copied.
+    let mut b = policy(vec![], vec![], vec![], Network::Any);
+    b.block_exec.push("/opt/homebrew/bin/gh".into());
+    let g = seatbelt::profile(&b, None, false);
+    assert!(
+        g.contains("(deny process-exec file-read* (literal \"/opt/homebrew/bin/gh\"))"),
+        "{g}"
+    );
 }
 
 #[test]
@@ -263,6 +274,21 @@ fn policies_protect_tab_and_hide_credentials() {
     assert!(chat.protect.contains(&data));
     assert!(chat.hide.contains(&config.join("config.json")));
     assert!(chat.hide.contains(&data.join("tab.db")));
+    // The tab cloud sign-in, the local hub's records and its TLS key are
+    // hidden under every policy, not only read-only.
+    let review = s.review_policy(&data.join("pr-1"), &tmp("code"));
+    let iso = s.isolated_policy(&[data.join("run")], Network::None);
+    for p in [&chat, &review, &iso] {
+        for f in [
+            config.join("account.json"),
+            data.join("hub.db"),
+            data.join("hub.db-wal"),
+            data.join("hub.db-shm"),
+            data.join("hub-tls"),
+        ] {
+            assert!(p.hide.contains(&f), "{} isn't hidden", f.display());
+        }
+    }
     assert_eq!(chat.network, Network::Any);
     if let Some(h) = home() {
         let h = real(&h);
@@ -302,6 +328,8 @@ fn a_dev_build_guards_the_installed_app_too() {
     assert!(chat.protect.contains(&prod));
     assert!(chat.hide.contains(&prod.join("config.json")));
     assert!(chat.hide.contains(&prod.join("tab.db")));
+    assert!(chat.hide.contains(&prod.join("account.json")));
+    assert!(chat.hide.contains(&prod.join("hub.db")));
 }
 
 #[cfg(unix)]
@@ -528,4 +556,214 @@ async fn blocked_programs_cannot_start() {
     p.block_exec.push(real(&prog));
     let (_, out) = sh(&s, &p, &dir, "/bin/sh", &script).await;
     assert!(!out.contains("ran") && out.contains("after"), "{out}");
+}
+
+/// tab's own secrets can't be read by anything it starts, under every
+/// policy, where the sandbox is enforced: the cloud sign-in, the local
+/// hub's copy of every record and its TLS key, and a credential file that
+/// didn't exist yet when the process started.
+#[cfg(unix)]
+#[tokio::test]
+async fn tabs_own_secrets_are_unreadable_under_every_policy() {
+    let (data, config) = (tmp("own-data"), tmp("own-config"));
+    let s = Sandbox::new(
+        SandboxConfig::default(),
+        Some(data.clone()),
+        Some(config.clone()),
+    );
+    if !s.enforced() {
+        eprintln!("no sandbox tab can start here; skipping");
+        return;
+    }
+    std::fs::write(config.join("account.json"), "refresh-token-xyz").unwrap();
+    std::fs::write(data.join("hub.db"), "every-record-xyz").unwrap();
+    std::fs::create_dir_all(data.join("hub-tls")).unwrap();
+    std::fs::write(data.join("hub-tls/key.der"), "hub-key-xyz").unwrap();
+    let work = tmp("own-work");
+    let policies = [
+        s.chat_policy(),
+        s.review_policy(&work, &tmp("own-code")),
+        s.isolated_policy(std::slice::from_ref(&work), Network::None),
+    ];
+    for p in &policies {
+        for f in [
+            config.join("account.json"),
+            data.join("hub.db"),
+            data.join("hub-tls/key.der"),
+        ] {
+            let (_, out) = sh(&s, p, &work, "/bin/sh", &format!("cat '{}'", f.display())).await;
+            assert!(!out.contains("xyz"), "{} was readable: {out}", f.display());
+        }
+    }
+    // Missing when the sandbox starts, written later: still hidden.
+    std::fs::remove_file(config.join("account.json")).unwrap();
+    let p = &policies[0];
+    let mut child = s
+        .command(
+            Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "sleep 1; cat \"$0\"".into(),
+                config.join("account.json").into(),
+            ],
+            &work,
+            p,
+        )
+        .await
+        .unwrap();
+    child.cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = child.spawn().unwrap();
+    std::fs::write(config.join("account.json"), "late-token-xyz").unwrap();
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut out)
+        .await
+        .unwrap();
+    assert!(
+        !out.contains("xyz"),
+        "a sign-in written mid-chat was readable"
+    );
+}
+
+/// Under bubblewrap a process can't read tab's environment through
+/// `/proc/<tab's pid>/environ`: it has its own PID namespace and `/proc`.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn tabs_own_environment_is_out_of_reach() {
+    let s = Sandbox::new(SandboxConfig::default(), None, None);
+    if !s.enforced() || !bwrap_pid() {
+        eprintln!("no PID namespace here; skipping");
+        return;
+    }
+    // SAFETY: nothing in these tests reads this variable concurrently.
+    unsafe { std::env::set_var("TAB_TEST_PARENT_TOKEN", "parent-only-xyz") };
+    let me = std::process::id();
+    let tmpd = std::env::temp_dir();
+    let p = s.isolated_policy(&[], Network::None);
+    let (_, out) = sh(
+        &s,
+        &p,
+        &tmpd,
+        "/bin/sh",
+        &format!("cat /proc/{me}/environ; echo; echo [$TAB_TEST_PARENT_TOKEN]"),
+    )
+    .await;
+    assert!(out.contains("[]"), "{out}");
+    assert!(
+        !out.contains("parent-only-xyz"),
+        "tab's environment showed through /proc"
+    );
+}
+
+/// What a runner keeps in memory reaches what it starts only as far as each
+/// one's trust allows, and never through tab's own environment.
+#[cfg(unix)]
+#[tokio::test]
+async fn spawn_env_goes_through_trust() {
+    let s = Sandbox::new(
+        SandboxConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        None,
+        None,
+    );
+    s.set_spawn_env(
+        [
+            ("ANTHROPIC_API_KEY".to_string(), "sk-model".to_string()),
+            ("GH_TOKEN".to_string(), "ghp-person".to_string()),
+        ]
+        .into(),
+    );
+    assert!(std::env::var_os("ANTHROPIC_API_KEY").is_none_or(|v| v != "sk-model"));
+    let script = "echo \"[$ANTHROPIC_API_KEY][$GH_TOKEN]\"";
+    let tmpd = std::env::temp_dir();
+    let (_, chat) = sh(&s, &s.chat_policy(), &tmpd, "/bin/sh", script).await;
+    assert_eq!(chat.trim(), "[sk-model][ghp-person]");
+    let (_, review) = sh(&s, &s.review_policy(&tmpd, &tmpd), &tmpd, "/bin/sh", script).await;
+    assert_eq!(review.trim(), "[sk-model][]");
+    let (_, iso) = sh(
+        &s,
+        &s.isolated_policy(&[], Network::None),
+        &tmpd,
+        "/bin/sh",
+        script,
+    )
+    .await;
+    assert_eq!(iso.trim(), "[][]");
+}
+
+/// A runner that requires the sandbox refuses to start anything without it.
+#[tokio::test]
+async fn strict_sandboxes_refuse_to_run_unenforced() {
+    let s = Sandbox::new(
+        SandboxConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        None,
+        None,
+    );
+    s.require_enforcement(true);
+    let exe = std::env::current_exe().unwrap();
+    let r = s
+        .command(&exe, &[], &std::env::temp_dir(), &s.chat_policy())
+        .await;
+    assert!(r.is_err(), "started without the sandbox");
+}
+
+/// Under bubblewrap a domain list is enforced: with no bridge the process
+/// has no network at all, never all of it.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn domain_lists_never_mean_open_network_on_linux() {
+    let s = Sandbox::new(SandboxConfig::default(), None, None);
+    if !s.enforced() || bridge::helper().is_some() {
+        return;
+    }
+    let port = origin().await;
+    let p = policy(
+        vec![],
+        vec![],
+        vec![],
+        Network::Domains(vec!["example.com".into()]),
+    );
+    if !Path::new("/bin/bash").exists() {
+        return;
+    }
+    let probe = format!("exec 3<>/dev/tcp/127.0.0.1/{port} && echo reached");
+    let (_, out) = sh(&s, &p, &std::env::temp_dir(), "/bin/bash", &probe).await;
+    assert!(!out.contains("reached"), "the host was reachable");
+    // And Claude Code isn't told commands may run without asking.
+    assert_eq!(
+        s.claude_settings(&p)["permissions"]["allow"],
+        serde_json::json!([])
+    );
+}
+
+/// The proxy also answers on its Unix socket, which is what a bridged
+/// sandbox reaches.
+#[cfg(unix)]
+#[tokio::test]
+async fn proxy_answers_on_its_unix_socket() {
+    let port = origin().await;
+    let h = proxy::start_on(vec!["localhost".into()], true)
+        .await
+        .unwrap();
+    let sock = h.socket.clone().unwrap();
+    let mut s = tokio::net::UnixStream::connect(&sock).await.unwrap();
+    s.write_all(
+        format!("GET http://localhost:{port}/x HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut out = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut out)).await;
+    assert!(String::from_utf8_lossy(&out).starts_with("HTTP/1.1 200 OK"));
+    let dir = sock.parent().unwrap().to_path_buf();
+    drop(h);
+    assert!(!dir.exists(), "the socket's folder outlived the proxy");
 }

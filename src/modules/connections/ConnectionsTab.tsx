@@ -345,7 +345,7 @@ function RunsOnCard({ c }: { c: ConnectorInfo }) {
           </button>
           <button role="radio" aria-checked={runsOn === "cloud"} className={cx("runs-on-option", runsOn === "cloud" && "active")} disabled={busy || !moved} onClick={() => void pick("cloud")}>
             <Icon name="cloud" size={18} />
-            <span><strong>tab cloud</strong><small>Keeps running when every computer is off. Its sign-in is kept encrypted in your hub.</small></span>
+            <span><strong>tab cloud</strong><small>Keeps running when every computer is off. The sign-in you entered for it is kept encrypted in your hub; your GitHub CLI login never leaves this computer.</small></span>
           </button>
         </div>
         {!moved && (

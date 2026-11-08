@@ -6,24 +6,32 @@
 //! the list gets a 403 that says why.
 //!
 //! On macOS the sandbox also blocks every other outbound connection, so the
-//! list is enforced. On Linux, and in containers, a process that ignores
-//! the proxy settings isn't stopped; tab says so in Settings.
+//! list is enforced. On Linux the process gets a network namespace of its
+//! own with nothing in it but loopback, and reaches this proxy through a
+//! Unix socket bound into the sandbox ([`super::bridge`]), so the list is
+//! enforced there too. In containers, a process that ignores the proxy
+//! settings isn't stopped; tab says so in Settings.
 
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 /// A running proxy; it stops when dropped.
 pub struct Handle {
     pub port: u16,
+    /// Where it also listens, for a sandbox with no network of its own.
+    pub socket: Option<std::path::PathBuf>,
     stop: CancellationToken,
 }
 
 impl Drop for Handle {
     fn drop(&mut self) {
         self.stop.cancel();
+        if let Some(dir) = self.socket.as_ref().and_then(|s| s.parent()) {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -44,11 +52,56 @@ pub fn allowed(domains: &[String], host: &str) -> bool {
 }
 
 pub async fn start(domains: Vec<String>) -> anyhow::Result<Handle> {
+    start_on(domains, false).await
+}
+
+/// Also listens on a Unix socket in a new folder only this user can open,
+/// for a sandbox whose network namespace can't reach the host's loopback.
+pub async fn start_on(domains: Vec<String>, unix: bool) -> anyhow::Result<Handle> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
     let stop = CancellationToken::new();
     let s = stop.clone();
     let domains = std::sync::Arc::new(domains);
+    #[cfg(unix)]
+    let socket = if unix {
+        use std::os::unix::fs::DirBuilderExt;
+        let dir = std::env::temp_dir().join(format!("tab-net-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        let path = super::real(&dir).join("proxy.sock");
+        let ul = tokio::net::UnixListener::bind(&path)?;
+        let (s, domains) = (stop.clone(), domains.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = s.cancelled() => break,
+                    r = ul.accept() => {
+                        let Ok((sock, _)) = r else { continue };
+                        let domains = domains.clone();
+                        let s = s.clone();
+                        tokio::spawn(async move {
+                            tokio::select! {
+                                _ = s.cancelled() => {}
+                                r = serve(sock, &domains) => {
+                                    if let Err(e) = r {
+                                        tracing::debug!(error = %e, "proxy connection ended");
+                                    }
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        Some(path)
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let socket = {
+        let _ = unix;
+        None
+    };
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -71,7 +124,7 @@ pub async fn start(domains: Vec<String>) -> anyhow::Result<Handle> {
             }
         }
     });
-    Ok(Handle { port, stop })
+    Ok(Handle { port, socket, stop })
 }
 
 /// Points a process's HTTP clients at the proxy.
@@ -95,7 +148,10 @@ pub fn point_at(cmd: &mut tokio::process::Command, port: u16) {
     }
 }
 
-async fn serve(mut sock: TcpStream, domains: &[String]) -> anyhow::Result<()> {
+async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
+    mut sock: S,
+    domains: &[String],
+) -> anyhow::Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let head_end = loop {
         let mut chunk = [0u8; 4096];

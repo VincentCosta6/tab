@@ -13,6 +13,12 @@
 //! of it (its last message, and any pull request it mentions), but only if
 //! it still holds the lease with the same fencing token: a runner whose
 //! lease lapsed and was taken by another can't overwrite that one's work.
+//!
+//! A cloud runner's agents work on code nobody at the keyboard checked, in
+//! a sandbox with no git host token. The runner clones the job's GitHub
+//! repo itself, and when the agent is done pushes the branch it committed
+//! to, with the hub's git access ([`JobRunner::set_git_token`]) handed to
+//! that one git command and nothing else.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -116,6 +122,8 @@ pub struct JobRunner {
     /// Jobs this runner is working.
     busy: Mutex<HashSet<String>>,
     harnesses: Mutex<Option<(std::time::Instant, Vec<String>)>>,
+    /// A cloud runner's git access, kept in memory only.
+    git_token: Mutex<Option<String>>,
 }
 
 impl JobRunner {
@@ -134,7 +142,18 @@ impl JobRunner {
             name: name.into(),
             busy: Default::default(),
             harnesses: Default::default(),
+            git_token: Default::default(),
         })
+    }
+
+    /// The GitHub token a cloud runner clones and pushes with. It goes to
+    /// the runner's own git commands, never to an agent.
+    pub fn set_git_token(&self, token: Option<String>) {
+        *self.git_token.lock().unwrap() = token;
+    }
+
+    fn git_token(&self) -> Option<String> {
+        self.git_token.lock().unwrap().clone()
     }
 
     /// Looks for jobs until `cancel`.
@@ -290,19 +309,44 @@ impl JobRunner {
                     .unwrap_or_else(|| self.agents.default_folder()),
                 // A cloud runner clones into its own folder first.
                 RunnerKind::Cloud => {
-                    clone_into(&self.agents.default_folder(), &job.spec.repo).await?
+                    match clone_into(
+                        &self.agents.default_folder(),
+                        &job.spec.repo,
+                        self.git_token().as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(dir) => dir,
+                        Err(e) => {
+                            self.finish(
+                                &job.id,
+                                &me,
+                                token,
+                                JobState::Failed {
+                                    error: format!("{e:#}"),
+                                    finished_at: Utc::now(),
+                                },
+                            )?;
+                            let _ = leases::release(&self.leases, &key).await;
+                            return Ok(());
+                        }
+                    }
                 }
             }
         };
         let kind = (!job.spec.harness.is_empty()).then(|| AgentKind::parse(&job.spec.harness));
         let title = format!("Workflow job: {}", first_line(&job.spec.prompt));
+        let prompt = match self.kind {
+            RunnerKind::Computer => job.spec.prompt.clone(),
+            RunnerKind::Cloud => format!("{}{CLOUD_NOTE}", job.spec.prompt),
+        };
         let session = match self.agents.start(
             &format!("job:{}", job.id),
             kind,
             &job.spec.model,
             &title,
             &cwd,
-            &job.spec.prompt,
+            &prompt,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -350,7 +394,20 @@ impl JobRunner {
             let s = self.store.session_get(&session)?;
             match s.as_ref().map(|s| s.status) {
                 Some(SessionStatus::Idle) => {
-                    let result = self.result_of(&session)?;
+                    let mut result = self.result_of(&session)?;
+                    if self.kind == RunnerKind::Cloud && !job.spec.repo.is_empty() {
+                        match push_branch(Path::new(&cwd), self.git_token().as_deref()).await {
+                            Ok(Some(b)) => result.branch = Some(b),
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::warn!(job = %job.id, error = %e, "pushing the job's branch failed");
+                                result.summary = format!(
+                                    "{}\n\n(tab couldn't push the branch: {e:#})",
+                                    result.summary
+                                );
+                            }
+                        }
+                    }
                     self.finish(
                         &job.id,
                         &me,
@@ -458,32 +515,83 @@ fn first_line(s: &str) -> String {
     }
 }
 
-/// Clones `owner/name` (or a URL) under `root/repos/` for a cloud runner,
-/// or fetches it if it's there already. Uses the git credentials the cloud
-/// runner was started with.
-async fn clone_into(root: &str, repo: &str) -> anyhow::Result<String> {
-    let url = if repo.contains("://") || repo.starts_with("git@") {
-        repo.to_string()
-    } else {
-        format!("https://github.com/{repo}.git")
+/// What a cloud job's agent is told about where it works.
+const CLOUD_NOTE: &str = "\n\n---\nYou're running in tab cloud, in a sandbox without git or GitHub credentials. \
+When you're done, commit your work on a new branch (not the default branch); tab pushes that branch \
+for you. Don't try to push or open a pull request yourself.";
+
+/// `owner/name` from what a job names: `owner/name` or a
+/// `https://github.com/owner/name` URL. Anything else is refused, so a
+/// templated value can't point the runner, and its git access, elsewhere.
+pub fn github_repo(repo: &str) -> anyhow::Result<(String, String)> {
+    let r = repo.trim();
+    let path = r
+        .strip_prefix("https://github.com/")
+        .unwrap_or(r)
+        .trim_end_matches('/')
+        .trim_end_matches(".git");
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s != "."
+            && s != ".."
+            && s.len() <= 100
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     };
-    let name = repo
-        .trim_end_matches(".git")
-        .rsplit(['/', ':'])
-        .take(2)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("__");
-    let dir = Path::new(root).join("repos").join(name);
-    let git = |args: &[&str], cwd: &Path| {
-        let mut c = tokio::process::Command::new("git");
-        c.args(args).current_dir(cwd);
-        c
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        [owner, name] if ok(owner) && ok(name) && !owner.starts_with('-') => {
+            Ok(((*owner).to_string(), (*name).to_string()))
+        }
+        _ => anyhow::bail!(
+            "a cloud job's repo must be a GitHub repo, owner/name; {repo:?} isn't one"
+        ),
+    }
+}
+
+/// A git command for the runner itself, with `token` (if any) answering
+/// only GitHub's credential prompts, for this one command. Nothing is
+/// written to disk and no other credential store is asked.
+fn git(args: &[&str], cwd: &Path, token: Option<&str>) -> tokio::process::Command {
+    let mut c = tokio::process::Command::new("git");
+    c.args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ALLOW_PROTOCOL", "https")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_COUNT", "2")
+        // Empty first: forget any helper configured elsewhere.
+        .env("GIT_CONFIG_KEY_0", "credential.helper")
+        .env("GIT_CONFIG_VALUE_0", "")
+        .env("GIT_CONFIG_KEY_1", "credential.https://github.com.helper")
+        .env(
+            "GIT_CONFIG_VALUE_1",
+            if token.is_some() {
+                "!f() { test \"$1\" = get && printf 'username=x-access-token\\npassword=%s\\n' \"$TAB_GIT_TOKEN\"; }; f"
+            } else {
+                ""
+            },
+        )
+        .kill_on_drop(true);
+    match token {
+        Some(t) => c.env("TAB_GIT_TOKEN", t),
+        None => c.env_remove("TAB_GIT_TOKEN"),
     };
+    c
+}
+
+/// Clones a GitHub repo under `root/repos/` for a cloud runner, or fetches
+/// it if it's there already.
+async fn clone_into(root: &str, repo: &str, token: Option<&str>) -> anyhow::Result<String> {
+    let (owner, name) = github_repo(repo)?;
+    let url = format!("https://github.com/{owner}/{name}.git");
+    let dir = Path::new(root)
+        .join("repos")
+        .join(format!("{owner}__{name}"));
     if dir.join(".git").exists() {
-        let out = git(&["fetch", "--prune", "origin"], &dir).output().await?;
+        let out = git(&["fetch", "--prune", "origin"], &dir, token)
+            .output()
+            .await?;
         anyhow::ensure!(
             out.status.success(),
             "git fetch failed: {}",
@@ -491,9 +599,13 @@ async fn clone_into(root: &str, repo: &str) -> anyhow::Result<String> {
         );
     } else {
         std::fs::create_dir_all(dir.parent().unwrap_or(Path::new(root)))?;
-        let out = git(&["clone", &url, &dir.to_string_lossy()], Path::new(root))
-            .output()
-            .await?;
+        let out = git(
+            &["clone", "--", &url, &dir.to_string_lossy()],
+            Path::new(root),
+            token,
+        )
+        .output()
+        .await?;
         anyhow::ensure!(
             out.status.success(),
             "git clone failed: {}",
@@ -501,6 +613,42 @@ async fn clone_into(root: &str, repo: &str) -> anyhow::Result<String> {
         );
     }
     Ok(dir.to_string_lossy().into_owned())
+}
+
+/// Pushes the branch the agent left checked out, if it isn't the default
+/// branch and has commits the remote doesn't. Returns the branch pushed.
+async fn push_branch(dir: &Path, token: Option<&str>) -> anyhow::Result<Option<String>> {
+    let out = |args: &'static [&'static str]| {
+        let dir = dir.to_path_buf();
+        async move {
+            let o = git(args, &dir, None).output().await?;
+            anyhow::Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
+        }
+    };
+    let branch = out(&["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+    let default = out(&["rev-parse", "--abbrev-ref", "origin/HEAD"]).await?;
+    let default = default.strip_prefix("origin/").unwrap_or(&default);
+    if branch.is_empty() || branch == "HEAD" || branch == default {
+        return Ok(None);
+    }
+    let ahead = out(&["rev-list", "--count", "origin/HEAD..HEAD"]).await?;
+    if ahead.parse::<u64>().unwrap_or(0) == 0 {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        token.is_some(),
+        "tab cloud has no git access to push with; add it in Settings → tab cloud"
+    );
+    let refspec = format!("HEAD:refs/heads/{branch}");
+    let o = git(&["push", "--", "origin", &refspec], dir, token)
+        .output()
+        .await?;
+    anyhow::ensure!(
+        o.status.success(),
+        "git push failed: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    Ok(Some(branch))
 }
 
 #[cfg(test)]
@@ -657,6 +805,58 @@ mod tests {
         runner.take(Utc::now()).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(agents.1.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cloud_jobs_only_name_github_repos() {
+        assert_eq!(
+            github_repo("acme/api").unwrap(),
+            ("acme".to_string(), "api".to_string())
+        );
+        assert_eq!(
+            github_repo("https://github.com/acme/api.git").unwrap(),
+            ("acme".to_string(), "api".to_string())
+        );
+        for bad in [
+            "",
+            "acme",
+            "acme/api/extra",
+            "git@evil.com:acme/api",
+            "https://evil.com/acme/api",
+            "ext::sh -c touch% /tmp/x",
+            "file:///etc",
+            "-uacme/api",
+            "acme/..",
+            "acme/api; rm -rf /",
+            "acme/{{item.body}}",
+        ] {
+            assert!(github_repo(bad).is_err(), "{bad:?} was taken");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_runners_git_token_reaches_only_its_own_git_commands() {
+        let tmp = std::env::temp_dir();
+        let out = git(
+            &["config", "--get", "credential.https://github.com.helper"],
+            &tmp,
+            Some("ghp_secret"),
+        )
+        .output()
+        .await
+        .unwrap();
+        let helper = String::from_utf8_lossy(&out.stdout);
+        assert!(helper.contains("TAB_GIT_TOKEN"), "{helper}");
+        assert!(!helper.contains("ghp_secret"), "the token is in the config");
+        let none = git(
+            &["config", "--get", "credential.https://github.com.helper"],
+            &tmp,
+            None,
+        )
+        .output()
+        .await
+        .unwrap();
+        assert!(String::from_utf8_lossy(&none.stdout).trim().is_empty());
     }
 
     #[test]

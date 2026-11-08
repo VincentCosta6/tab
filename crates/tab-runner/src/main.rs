@@ -18,6 +18,21 @@
 //! Configured by environment (set by the hub when it starts the container):
 //! `TAB_CLOUD_URL`, `TAB_HUB_ID`, `TAB_RUNNER_TOKEN`, and `TAB_DATA` (a
 //! writable folder, `/data` by default).
+//!
+//! Agents here run prompts that may come from anyone's PR or email, so the
+//! runner keeps everything worth stealing away from them:
+//!
+//! - Every agent and command runs in tab's sandbox (bubblewrap, in its own
+//!   PID namespace), and the runner starts none at all if the sandbox isn't
+//!   working. tab's data folder (`tab.db`, `hub.db`) is hidden from them.
+//! - The hub's secrets stay in this process's memory. Harness keys go to
+//!   each agent's own environment when it starts; the git token goes only
+//!   to the runner's own git commands, and agents get the review policy, so
+//!   no GitHub token reaches them. The runner token leaves the environment
+//!   as soon as it's read, and the process isn't dumpable, so nothing of the
+//!   same user can read it from `/proc`.
+//! - It goes by the device id its hub gives it (`runner-<hub id>`) and
+//!   starts from an empty data folder each time, keeping only clones.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -33,6 +48,7 @@ use tab_core::gateway::Gateway;
 use tab_core::jobs::{CancellationToken, JobRunner};
 use tab_core::local_hub::LocalHub;
 use tab_core::runner::RunnerKind;
+use tab_core::sandbox::{self, Sandbox, SandboxConfig};
 use tab_core::store::Store;
 use tokio::sync::broadcast;
 
@@ -103,14 +119,8 @@ fn setup(store: &Store, secrets: &[(String, String)], work: &Path) -> Setup {
             _ => {}
         }
     }
-    // Without git access of its own, agents push with GitHub's sign-in.
-    if git_token.is_none() {
-        git_token = fields
-            .get("github")
-            .and_then(|f| f.get("token"))
-            .and_then(|t| t.as_str())
-            .map(str::to_string);
-    }
+    // Git access is only what was given as git access (`git/token`), never
+    // the GitHub connection's sign-in, which is the person's whole login.
     let mut agent = agent.unwrap_or_default();
     // Paths from the person's computer mean nothing here.
     agent.command = None;
@@ -142,20 +152,6 @@ fn setup(store: &Store, secrets: &[(String, String)], work: &Path) -> Setup {
     }
 }
 
-/// Lets git (and `gh`) reach GitHub with the person's token.
-fn use_git_token(token: &str, home: &Path) -> anyhow::Result<()> {
-    std::fs::write(
-        home.join(".git-credentials"),
-        format!("https://x-access-token:{token}@github.com\n"),
-    )?;
-    let cfg = home.join(".gitconfig");
-    std::fs::write(
-        &cfg,
-        "[credential]\n\thelper = store\n[user]\n\tname = tab cloud\n\temail = runner@tabqueue.com\n",
-    )?;
-    Ok(())
-}
-
 async fn secrets(cfg: &CloudConfig, token: &str) -> Vec<(String, String)> {
     let mut wait = 2;
     loop {
@@ -170,22 +166,79 @@ async fn secrets(cfg: &CloudConfig, token: &str) -> Vec<(String, String)> {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Everything in the data folder but the clones: the last run's `tab.db`
+/// and `hub.db` hold every synced record, and the hub is the source of
+/// truth anyway.
+fn start_clean(data: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(data)?;
+    for e in std::fs::read_dir(data)? {
+        let e = e?;
+        if e.file_name() == "work" {
+            continue;
+        }
+        let p = e.path();
+        if e.file_type()?.is_dir() {
+            std::fs::remove_dir_all(&p)?;
+        } else {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    // Inside an agent's sandbox: the bridge to tab's proxy.
+    let mut args = std::env::args_os().skip(1);
+    if args
+        .next()
+        .is_some_and(|a| a == sandbox::bridge::SUBCOMMAND)
+    {
+        std::process::exit(sandbox::bridge::main(args.collect()));
+    }
+    sandbox::harden_process(true);
+    let env = Env::from_env()?;
+    // SAFETY: no other thread has started yet.
+    unsafe { std::env::remove_var("TAB_RUNNER_TOKEN") };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(env))
+}
+
+async fn run(env: Env) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,tab_core=info".into()),
         )
         .init();
-    let env = Env::from_env()?;
+    start_clean(&env.data)?;
     let work = env.data.join("work");
     std::fs::create_dir_all(&work)?;
-    let home = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| env.data.clone());
+
+    // Nothing starts outside the sandbox here, and tab's own files in the
+    // data folder are hidden from whatever does.
+    let sb = Sandbox::new(
+        SandboxConfig::default(),
+        Some(env.data.clone()),
+        Some(env.data.clone()),
+    );
+    sb.require_enforcement(true);
+    if let Ok(exe) = std::env::current_exe() {
+        sandbox::bridge::set_helper(exe);
+    }
+    let sb = Arc::new(sb);
+    sandbox::install(sb.clone());
+    let status = sb.status().await;
+    if !status.enforced {
+        tracing::error!(
+            backend = ?status.backend,
+            "tab's sandbox isn't working in this container; agent jobs and workflow commands will fail"
+        );
+    }
 
     let store = Arc::new(Store::open(&env.data.join("tab.db"))?);
+    store.set_device_id(&tab_hub::runner_device(&env.hub))?;
     let (events, _) = broadcast::channel::<EngineEvent>(1024);
     let hub = LocalHub::open(&env.data.join("hub.db"))?;
     // Everything goes to the cloud hub, never this container's hub.db.
@@ -217,7 +270,7 @@ async fn main() -> anyhow::Result<()> {
         api: env.api.clone(),
     };
     let mut current = setup(&store, &secrets(&api, &env.token).await, &work);
-    apply_env(&current, &home);
+    sb.set_spawn_env(current.env.clone());
 
     let agents = AgentHub::new(
         store.clone(),
@@ -225,14 +278,17 @@ async fn main() -> anyhow::Result<()> {
         current.config.agent.clone(),
         env.data.join("agents"),
     );
-    JobRunner::new(
+    // Every job here works on a clone of someone's repo.
+    agents.review_under(&work);
+    let jobs = JobRunner::new(
         store.clone(),
         Arc::new(agents.clone()),
         hub.clone(),
         RunnerKind::Cloud,
         "tab cloud",
-    )
-    .start(CancellationToken::new());
+    );
+    jobs.set_git_token(current.git_token.clone());
+    jobs.clone().start(CancellationToken::new());
 
     let gateway = Arc::new(Gateway::new(store.clone()));
     let start = |cfg: &TabConfig| -> EngineHandle {
@@ -259,7 +315,8 @@ async fn main() -> anyhow::Result<()> {
                 connections = next.config.connectors.len(),
                 "cloud runner: setup changed; restarting the engine"
             );
-            apply_env(&next, &home);
+            sb.set_spawn_env(next.env.clone());
+            jobs.set_git_token(next.git_token.clone());
             agents.set_config(next.config.agent.clone()).await;
             engine.shutdown();
             engine = start(&next.config);
@@ -269,24 +326,6 @@ async fn main() -> anyhow::Result<()> {
     engine.shutdown();
     agents.shutdown();
     Ok(())
-}
-
-fn apply_env(s: &Setup, home: &Path) {
-    for (k, v) in &s.env {
-        // SAFETY: set before the harnesses start and between engine
-        // restarts; nothing else in this process reads these concurrently
-        // in a way that matters (each harness reads them when it spawns).
-        unsafe { std::env::set_var(k, v) };
-    }
-    if let Some(t) = &s.git_token {
-        unsafe {
-            std::env::set_var("GH_TOKEN", t);
-            std::env::set_var("GITHUB_TOKEN", t);
-        }
-        if let Err(e) = use_git_token(t, home) {
-            tracing::warn!(error = %e, "couldn't set up git access");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -331,10 +370,27 @@ mod tests {
     }
 
     #[test]
-    fn agents_push_with_githubs_sign_in_when_theres_no_git_access_of_their_own() {
+    fn git_access_is_never_the_github_connections_sign_in() {
         let store = Store::in_memory().unwrap();
         let secrets = vec![("connection/github/token".to_string(), "ghp_gh".to_string())];
         let s = setup(&store, &secrets, Path::new("/data/work"));
-        assert_eq!(s.git_token.as_deref(), Some("ghp_gh"));
+        assert_eq!(s.git_token, None);
+    }
+
+    #[test]
+    fn each_start_keeps_only_the_clones() {
+        let d = std::env::temp_dir().join(format!("tab-runner-clean-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("work/repos/acme__api")).unwrap();
+        std::fs::create_dir_all(d.join("agents/sessions")).unwrap();
+        std::fs::write(d.join("tab.db"), "old").unwrap();
+        std::fs::write(d.join("hub.db-wal"), "old").unwrap();
+        start_clean(&d).unwrap();
+        let left: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, vec![std::ffi::OsString::from("work")]);
+        assert!(d.join("work/repos/acme__api").is_dir());
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }
