@@ -501,3 +501,28 @@ fn step_lists_and_questions_sync_with_their_input() {
         .collect();
     assert_eq!(metas, [todos, ask, steps]);
 }
+
+#[test]
+fn hub_page_counts_only_synced_tables_and_they_arrive_on_the_other_copy() {
+    for (_, table) in SYNCED_SUMMARY {
+        assert!(
+            SYNCED.iter().any(|(t, _)| t == table),
+            "{table} is listed as synced on the Hub page but isn't in SYNCED"
+        );
+    }
+    let (a, b) = (store(), store());
+    populate(&a);
+    sync(&a, &b);
+    let count = |s: &Store, what: &str| {
+        s.hub_synced_counts()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.what == what)
+            .unwrap()
+            .count
+    };
+    for what in ["Queue items", "Projects", "Project notes", "Workflows"] {
+        assert!(count(&a, what) > 0, "{what}");
+        assert_eq!(count(&a, what), count(&b, what), "{what}");
+    }
+}

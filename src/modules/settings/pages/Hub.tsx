@@ -21,6 +21,7 @@ export function HubPage() {
       <HubsSection />
       <RunnersSection />
       {moved && <CloudRunnerSection />}
+      <WhatSyncsSection />
       <LocalHubDetails />
     </>
   );
@@ -347,6 +348,38 @@ function SecretRow({ label, help, set, onSave }: { label: string; help: string; 
   );
 }
 
+/**
+ * What's in the hub, by kind, so it's plain that projects, notes and the
+ * knowledge graph sync with the queue, and what stays on this computer.
+ * Counted from this computer's copy, which matches the hub once nothing is
+ * waiting.
+ */
+function WhatSyncsSection() {
+  const status = useQuery({ queryKey: ["hub-status"], queryFn: api.hubStatus, refetchInterval: 2000 });
+  const h = status.data;
+  if (!h) return null;
+  const where = h.cloud_hub ? "tab cloud" : "this computer's hub";
+  return (
+    <Section title="What syncs" description={`Everything here is kept in ${where}, so every device on it sees the same.`}>
+      <Card>
+        {h.synced.map((c) => (
+          <FormRow key={c.what} label={c.what}>
+            <span className="mono">{c.count.toLocaleString()}</span>
+          </FormRow>
+        ))}
+        <FormRow label="Sync" help="Local changes not yet in the hub, and the last hub change this computer has.">
+          {h.pending === 0
+            ? <Badge tone="success">Up to date · change {h.pulled_to.toLocaleString()}</Badge>
+            : <Badge tone="warning">{h.pending.toLocaleString()} waiting</Badge>}
+        </FormRow>
+        <p className="subtle" style={{ margin: "var(--space-2) 0 0" }}>
+          Stays on this computer: caches, search indexes (rebuilt on each device), usage counts, and agents' tool output.
+        </p>
+      </Card>
+    </Section>
+  );
+}
+
 /** The hub running inside the app: where it is, who's connected, what it holds. */
 function LocalHubDetails() {
   const status = useQuery({ queryKey: ["hub-status"], queryFn: api.hubStatus, refetchInterval: 2000 });
@@ -361,11 +394,9 @@ function LocalHubDetails() {
   }
   const others = h.connections.filter((c) => !c.this_app);
   const cpuOfMachine = h.cpu_percent == null ? null : h.cpu_percent / Math.max(1, h.cpus);
-  return (
-    <Section
-      title="This computer's hub"
-      description="It runs inside this app, so what it holds stays on this computer. Other devices on your network can connect to it here."
-    >
+  const moved = !!h.cloud_hub;
+  const details = (
+    <>
       <Card>
         <FormRow label="Runs on" help={h.started_at ? `Started ${timeAgo(h.started_at)}${/^\d/.test(timeAgo(h.started_at)) ? " ago" : ""}` : undefined}>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -409,9 +440,6 @@ function LocalHubDetails() {
         <FormRow label="Files" help="Chat attachments, kept by the hub while a message refers to them.">
           <span className="mono">{(h.files ?? 0).toLocaleString()} · {bytes(h.file_bytes ?? 0)}</span>
         </FormRow>
-        <FormRow label="Waiting to sync" help="Local changes not yet recorded in the hub. Normally 0.">
-          <span className="mono">{h.pending.toLocaleString()}</span>
-        </FormRow>
       </Card>
       <Card>
         <FormRow label="Connections" help={others.length ? undefined : "Only this app. Phones and other computers will show up here."}>
@@ -427,6 +455,27 @@ function LocalHubDetails() {
           </FormRow>
         ))}
       </Card>
+    </>
+  );
+  if (moved) {
+    return (
+      <Section
+        title="This computer's old hub"
+        description="Not in use since your work moved to tab cloud. It keeps the copy it had at the move and no longer changes, so its numbers leave out anything newer. Nothing is missing: see What syncs above."
+      >
+        <details className="hub-old-details">
+          <summary className="subtle">Show its details</summary>
+          {details}
+        </details>
+      </Section>
+    );
+  }
+  return (
+    <Section
+      title="This computer's hub"
+      description="It runs inside this app, so what it holds stays on this computer. Other devices on your network can connect to it here."
+    >
+      {details}
     </Section>
   );
 }
