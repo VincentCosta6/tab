@@ -57,6 +57,8 @@ export const api = {
   },
   imageRead: (path: string) => call<ArrayBuffer>("image_read", { path }),
   fileRead: (path: string) => call<ArrayBuffer>("file_read", { path }),
+  /** Per path, `[modified ms, size]`, or null once the file is gone. */
+  fileStamps: (paths: string[]) => call<([number, number] | null)[]>("file_stamps", { paths }),
   fileOpen: (path: string, reveal = false) => call<void>("file_open", { path, reveal }),
   startDictation: () => call<void>("start_dictation"),
   agentActivity: () => call<AgentActivity[]>("agent_activity"),

@@ -283,6 +283,11 @@ async fn handle_git(
                 (CliEffect::Write, format!("create {}", u.short()))
             } else if fast_forward(&session.cwd, &u.old, &u.new).await {
                 (CliEffect::Write, format!("update {}", u.short()))
+            } else if own_branch(&s.store, &session.id, &repo, u) {
+                (
+                    CliEffect::Write,
+                    format!("force-update {} (its own branch)", u.short()),
+                )
             } else {
                 (
                     CliEffect::Destructive,
@@ -398,6 +403,9 @@ async fn handle_git(
             started,
             (!ok).then(|| status.to_string()),
         );
+        if ok {
+            remember_branches(&s.store, &session.id, &repo, &pushed);
+        }
         if ok && !pushed.is_empty() {
             let change = tab_domain::CliChange {
                 connector: tool.connector.clone(),
@@ -431,6 +439,39 @@ async fn handle_git(
     }
     out.body(axum::body::Body::from_stream(resp.bytes_stream()))
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+/// Whether a chat may rewrite this branch without asking: it created the
+/// branch, and the branch is still at the commit the chat last pushed, so
+/// nobody else's commits would be lost.
+fn own_branch(store: &Store, session: &str, repo: &str, u: &broker::RefUpdate) -> bool {
+    u.name.starts_with("refs/heads/")
+        && matches!(
+            store.session_branch_head(session, repo, &u.name),
+            Ok(Some(head)) if head == u.old
+        )
+}
+
+/// After a push goes through, tracks the branches the chat created and
+/// what it last pushed to them.
+fn remember_branches(store: &Store, session: &str, repo: &str, pushed: &[broker::RefUpdate]) {
+    for u in pushed.iter().filter(|u| u.name.starts_with("refs/heads/")) {
+        let r = if u.deletes() {
+            store.session_branch_forget(session, repo, &u.name)
+        } else if u.creates()
+            || matches!(
+                store.session_branch_head(session, repo, &u.name),
+                Ok(Some(_))
+            )
+        {
+            store.session_branch_set(session, repo, &u.name, &u.new)
+        } else {
+            Ok(())
+        };
+        if let Err(e) = r {
+            tracing::warn!("couldn't record pushed branch {}: {e}", u.name);
+        }
+    }
 }
 
 /// Whether `new` keeps `old`'s history (a fast-forward). GitHub doesn't
@@ -2390,6 +2431,50 @@ mod tests {
             .unwrap();
         assert_eq!((r.code, r.stdout_text()), (0, String::new()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn chats_may_rewrite_only_branches_they_created_and_alone_pushed_to() {
+        let store = Store::in_memory().unwrap();
+        let mk = || {
+            store
+                .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+                .unwrap()
+                .id
+        };
+        let (me, other) = (mk(), mk());
+        let up = |old: &str, new: &str, name: &str| broker::RefUpdate {
+            old: old.repeat(40),
+            new: new.repeat(40),
+            name: name.into(),
+        };
+        let mine = "refs/heads/mine";
+
+        // A branch someone else made isn't the chat's, even after it pushes to it.
+        remember_branches(&store, &me, "o/r", &[up("1", "2", "refs/heads/main")]);
+        assert!(!own_branch(
+            &store,
+            &me,
+            "o/r",
+            &up("2", "3", "refs/heads/main")
+        ));
+
+        // One it created is, for that chat and repo only.
+        remember_branches(&store, &me, "o/r", &[up("0", "a", mine)]);
+        assert!(own_branch(&store, &me, "O/R", &up("a", "b", mine)));
+        assert!(!own_branch(&store, &other, "o/r", &up("a", "b", mine)));
+        assert!(!own_branch(&store, &me, "o/other", &up("a", "b", mine)));
+
+        // It follows the chat's own pushes, force pushes included.
+        remember_branches(&store, &me, "o/r", &[up("a", "b", mine)]);
+        assert!(own_branch(&store, &me, "o/r", &up("b", "c", mine)));
+
+        // Someone else pushed since (the branch isn't where the chat left it): ask.
+        assert!(!own_branch(&store, &me, "o/r", &up("d", "c", mine)));
+
+        // Deleting it forgets it.
+        remember_branches(&store, &me, "o/r", &[up("b", "0", mine)]);
+        assert!(!own_branch(&store, &me, "o/r", &up("b", "c", mine)));
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ import { Button, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
 import { Markdown } from "../../design/markdown";
 import { Attachments } from "../../design/ImageViewer";
+import { FileTray } from "../../design/FileStage";
 import { MarkdownFiles } from "../../design/markdown";
 import { saveAttachment } from "../../lib/images";
 import { AgentNotice } from "./AgentNotice";
@@ -90,6 +91,7 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
       {/* The body stays mounted while hidden, so switching back doesn't reload it. */}
       {body && <div className="chat-body" hidden={!showBody}>{body}</div>}
       {(!body || !showBody) && <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />}
+      {(!body || !showBody) && <FileTray />}
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
       <Composer chat={chat} onSend={send} placeholder={`Ask about this, or tell the agent what to do…`} />
     </div>
@@ -103,7 +105,7 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
 export function SandboxPill() {
   const { data } = useQuery({ queryKey: ["sandbox"], queryFn: api.sandboxStatus, staleTime: 60_000 });
   if (!data?.enabled) return null;
-  const github = "gh and git reach GitHub through tab with your GitHub connection; force pushes, merges and deletes ask you first.";
+  const github = "gh and git reach GitHub through tab with your GitHub connection; force pushes (except to a branch this chat created), merges and deletes ask you first.";
   return (
     <span className={cx("sandbox-pill", !data.enforced && "limited")} title={`${data.summary} ${github}`}>
       <Icon name="shield" size={11} /> {data.enforced ? "Sandboxed" : "Limited sandbox"}
@@ -192,7 +194,7 @@ function ContextMeter({ messages }: { messages: SessionMessage[] }) {
     <div className="cw" ref={ref}>
       <button className="cw-chip" onClick={() => setOpen(!open)} title={`Context: ${k(used)} of ${k(size)} · cache ${cacheText(cache, left)}`}>
         <span className="cw-ring" style={{ ["--p" as string]: `${pct}%` }} data-tone={tone} />
-        {k(used)}
+        <span className="cw-used">{k(used)}</span>
         {cache !== "none" && <span className={cx("cw-cache", `cache-${cache}`)}>{cache === "cold" ? "cold" : clock(left)}</span>}
       </button>
       {open && (
@@ -1077,7 +1079,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
           {chat?.messages && <ContextMeter messages={chat.messages} />}
         </span>
         {running && chat?.session && (
-          <Button size="sm" icon="stop" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
+          <Button size="sm" icon="stop" className="composer-stop" title="Stop the agent" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
         )}
         <Button size="sm" variant="primary" icon="arrow-up" disabled={(!text.trim() && !images.length) || uploading > 0} onClick={submit}>{running ? "Steer" : "Send"}</Button>
       </div>

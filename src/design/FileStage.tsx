@@ -1,9 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, inTauri } from "../lib/api";
 import { fileName, isImagePath, isLocalPath, openImages, useImageSrc } from "../lib/images";
-import { StageContext, type Stage, type StageFile } from "../lib/stage";
+import { StageContext, useStage, type Stage, type StageFile } from "../lib/stage";
+import type { ThreadFile } from "../lib/threadFiles";
 import { Button, cx } from "./components";
 import { Icon } from "./icons";
 import { Markdown, MarkdownFiles } from "./markdown";
@@ -27,8 +28,8 @@ const FIRST_TEXT = 200_000;
 const extOf = (path: string) => /\.([A-Za-z0-9]+)$/.exec(path.split(/[?#]/)[0])?.[1].toLowerCase() ?? "";
 const dirOf = (path: string) => path.replace(/[\\/][^\\/]*$/, "");
 
-type Kind = "image" | "video" | "audio" | "pdf" | "svg" | "markdown" | "html" | "text" | "other";
-function kindOf(path: string): Kind {
+export type Kind = "image" | "video" | "audio" | "pdf" | "svg" | "markdown" | "html" | "text" | "other";
+export function kindOf(path: string): Kind {
   const ext = extOf(path);
   if (isImagePath(path) || /^data:image\//.test(path)) return "image";
   if (VIDEO.has(ext)) return "video";
@@ -42,19 +43,48 @@ function kindOf(path: string): Kind {
   return "other";
 }
 
+const POLL_MS = 2_000;
+const UPDATED_MS = 4_000;
+
 /**
  * Wraps a chat (and anything beside it) so files opened from it take the
  * middle of the pane, with the chat docked on the right to keep talking.
  * The chat stays mounted throughout, so the draft and scroll survive.
+ *
+ * `files` are the chat's files: the stage steps through them, and while it
+ * is mounted it watches them on disk, so a file the agent rewrites reloads
+ * wherever it shows (here, the tray, the rail).
  */
-export function StageHost({ className, children }: { className?: string; children: ReactNode }) {
-  const [state, setState] = useState<{ files: StageFile[]; index: number } | null>(null);
+export function StageHost({ className, files = [], children }: { className?: string; files?: ThreadFile[]; children: ReactNode }) {
+  const [state, setState] = useState<{ path: string; list: StageFile[] | null } | null>(null);
   const [width, setWidth] = useState(() => {
     try { return clampChat(Number(localStorage.getItem(WIDTH_KEY)) || 440); } catch { return 440; }
   });
-  const stage = useMemo<Stage>(() => ({
-    open: (files, index = 0) => setState({ files: files.map((f) => (typeof f === "string" ? { path: f } : f)), index }),
-  }), []);
+  const updated = useFileWatch(files, state?.path);
+
+  // A path on the stage that the agent has since replaced shows its version.
+  const byPath = useMemo(() => {
+    const m = new Map<string, ThreadFile>();
+    for (const f of files) {
+      m.set(f.path, f);
+      if (f.original) m.set(f.original, f);
+    }
+    return m;
+  }, [files]);
+  const filesRef = useRef(byPath);
+  filesRef.current = byPath;
+  const current = state ? byPath.get(state.path)?.path ?? state.path : null;
+  const list: StageFile[] = state?.list ?? files;
+  const index = Math.max(0, list.findIndex((f) => f.path === current));
+
+  const open = useCallback((picked: (string | StageFile)[], i = 0) => {
+    const all = picked.map((f) => (typeof f === "string" ? { path: f } : f));
+    const path = all[i]?.path;
+    if (!path) return;
+    // One of the chat's files: step through all of them, kept current as the chat goes.
+    setState({ path, list: filesRef.current.has(path) ? null : all });
+  }, []);
+  const stage = useMemo<Stage>(() => ({ open, files, current, updated }), [open, files, current, updated]);
 
   const hostRef = useRef<HTMLDivElement>(null);
   // While dragging, the width goes straight onto the element once per frame
@@ -85,17 +115,30 @@ export function StageHost({ className, children }: { className?: string; childre
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   }, [width]);
-  const onStep = useCallback((d: number) => setState((s) => s && { ...s, index: (s.index + d + s.files.length) % s.files.length }), []);
+  const listRef = useRef(list);
+  listRef.current = list;
+  const onStep = useCallback((d: number) => setState((s) => {
+    const l = listRef.current;
+    if (!s || !l.length) return s;
+    const at = l.findIndex((f) => f.path === (filesRef.current.get(s.path)?.path ?? s.path));
+    return { ...s, path: l[(Math.max(0, at) + d + l.length) % l.length].path };
+  }), []);
+  const onPick = useCallback((path: string) => setState((s) => s && { ...s, path }), []);
   const onClose = useCallback(() => setState(null), []);
+  const file = current ? list.find((f) => f.path === current) ?? { path: current } : null;
 
   return (
     <StageContext.Provider value={stage}>
       <div ref={hostRef} className={cx(className, "stage-host", state && "staged")} style={state ? ({ "--stage-chat-w": `${width}px` } as React.CSSProperties) : undefined}>
-        {state && (
+        {file && (
           <FileView
-            files={state.files}
-            index={state.index}
+            file={file}
+            files={list}
+            index={index}
+            replaced={byPath.get(current!)?.original}
+            fresh={updated.has(file.path)}
             onStep={onStep}
+            onPick={onPick}
             onClose={onClose}
             onResize={startDrag}
           />
@@ -106,8 +149,57 @@ export function StageHost({ className, children }: { className?: string; childre
   );
 }
 
-function FileView({ files, index, onStep, onClose, onResize }: { files: StageFile[]; index: number; onStep: (d: number) => void; onClose: () => void; onResize: (e: React.MouseEvent) => void }) {
-  const file = files[index];
+/**
+ * Polls the chat's files (and the one on show) for changes on disk. A change
+ * refetches that file's bytes, so every view of it reloads, and marks it
+ * updated for a few seconds.
+ */
+function useFileWatch(files: ThreadFile[], extra: string | undefined): ReadonlySet<string> {
+  const qc = useQueryClient();
+  const [updated, setUpdated] = useState<ReadonlySet<string>>(() => new Set());
+  const stamps = useRef(new Map<string, string>());
+  const key = useMemo(() => {
+    const paths = files.map((f) => f.path).filter(isLocalPath).slice(-63);
+    if (extra && isLocalPath(extra) && !paths.includes(extra)) paths.push(extra);
+    return paths.join("\n");
+  }, [files, extra]);
+
+  useEffect(() => {
+    if (!inTauri || !key) return;
+    const paths = key.split("\n");
+    let alive = true;
+    const timers: number[] = [];
+    const check = async () => {
+      if (document.hidden) return;
+      const got = await api.fileStamps(paths).catch(() => null);
+      if (!alive || !got) return;
+      const changed: string[] = [];
+      paths.forEach((p, i) => {
+        const now = got[i] ? got[i]!.join(":") : "gone";
+        const before = stamps.current.get(p);
+        stamps.current.set(p, now);
+        if (before !== undefined && before !== now) changed.push(p);
+      });
+      if (!changed.length) return;
+      for (const p of changed) {
+        qc.invalidateQueries({ queryKey: ["file", p] });
+        qc.invalidateQueries({ queryKey: ["image", p] });
+      }
+      setUpdated((u) => new Set([...u, ...changed]));
+      timers.push(window.setTimeout(() => alive && setUpdated((u) => new Set([...u].filter((p) => !changed.includes(p)))), UPDATED_MS));
+    };
+    void check();
+    const id = window.setInterval(check, POLL_MS);
+    return () => {
+      alive = false;
+      window.clearInterval(id);
+      timers.forEach(clearTimeout);
+    };
+  }, [key, qc]);
+  return updated;
+}
+
+function FileView({ file, files, index, replaced, fresh, onStep, onPick, onClose, onResize }: { file: StageFile; files: StageFile[]; index: number; replaced?: string; fresh: boolean; onStep: (d: number) => void; onPick: (path: string) => void; onClose: () => void; onResize: (e: React.MouseEvent) => void }) {
   const kind = kindOf(file.path);
   const name = file.name || fileName(file.path);
   const local = isLocalPath(file.path);
@@ -139,7 +231,13 @@ function FileView({ files, index, onStep, onClose, onResize }: { files: StageFil
     <section className="stage-file" ref={ref} tabIndex={-1} aria-label={`Viewing ${name}`}>
       <header className="stage-bar">
         <Icon name={kind === "image" ? "image" : kind === "video" ? "video" : kind === "html" ? "globe" : kind === "text" ? "code" : "file"} size={14} />
-        <span className="stage-name" title={file.path}>{name}</span>
+        {files.length > 1 ? (
+          <FileSwitcher files={files} current={file.path} name={name} onPick={onPick} />
+        ) : (
+          <span className="stage-name" title={file.path}>{name}</span>
+        )}
+        {replaced && <span className="stage-tag" title={`The agent's version of ${replaced}`}>Edited</span>}
+        {fresh && <span className="stage-tag stage-tag-fresh">Updated</span>}
         {files.length > 1 && (
           <span className="stage-count">
             <button onClick={() => onStep(-1)} aria-label="Previous file" title="Previous (←)"><Icon name="arrow-left" size={13} /></button>
@@ -154,7 +252,7 @@ function FileView({ files, index, onStep, onClose, onResize }: { files: StageFil
           </button>
         )}
         {kind === "image" && (
-          <button onClick={() => openImages(files.filter((f) => kindOf(f.path) === "image").map((f) => ({ src: f.path, name: f.name })), Math.max(0, files.filter((f) => kindOf(f.path) === "image").indexOf(file)))} title="Full screen"><Icon name="maximize" size={14} /></button>
+          <button onClick={() => openImages(files.filter((f) => kindOf(f.path) === "image").map((f) => ({ src: f.path, name: f.name })), Math.max(0, files.filter((f) => kindOf(f.path) === "image").findIndex((f) => f.path === file.path)))} title="Full screen"><Icon name="maximize" size={14} /></button>
         )}
         {local && inTauri && <button onClick={() => openExternally(false)} title="Open in its app"><Icon name="external" size={14} /></button>}
         {local && inTauri && <button onClick={() => openExternally(true)} title="Show in folder"><Icon name="folder-open" size={14} /></button>}
@@ -323,6 +421,103 @@ function OtherContent({ name, canOpen, onOpen, onReveal }: { name: string; canOp
           <Button size="sm" icon="folder-open" onClick={onReveal}>Show in folder</Button>
         </div>
       )}
+    </div>
+  );
+}
+
+const KIND_ICON: Record<Kind, string> = { image: "image", video: "video", audio: "video", pdf: "file", svg: "image", markdown: "file", html: "globe", text: "code", other: "file" };
+
+/** The file's name in the stage bar; a menu of the chat's other files to swap to. */
+function FileSwitcher({ files, current, name, onPick }: { files: StageFile[]; current: string; name: string; onPick: (path: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && (e.stopPropagation(), setOpen(false));
+    window.addEventListener("mousedown", away);
+    window.addEventListener("keydown", esc, true);
+    return () => (window.removeEventListener("mousedown", away), window.removeEventListener("keydown", esc, true));
+  }, [open]);
+  return (
+    <span className="menu-anchor stage-switch" ref={ref}>
+      <button className="stage-name stage-name-btn" title={current} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <span>{name}</span>
+        <Icon name="chevron-down" size={12} />
+      </button>
+      {open && (
+        <div className="menu stage-menu" role="menu">
+          {files.map((f) => (
+            <button key={f.path} role="menuitemradio" aria-checked={f.path === current} className={cx("menu-item", f.path === current && "active")} title={f.path} onClick={() => (onPick(f.path), setOpen(false))}>
+              <FilePreview path={f.path} size="xs" />
+              <span>{f.name || fileName(f.path)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
+
+/**
+ * A small look at a file: images as a thumbnail, text, markdown and code as
+ * their first lines, anything else as its kind's icon and extension.
+ */
+export function FilePreview({ path, size = "md" }: { path: string; size?: "xs" | "sm" | "md" }) {
+  const kind = kindOf(path);
+  const textual = kind === "text" || kind === "markdown";
+  const img = useImageSrc(kind === "image" ? path : null);
+  const { data } = useQuery({
+    queryKey: ["file", path],
+    queryFn: () => api.fileRead(path),
+    enabled: textual && size !== "xs",
+    staleTime: 5_000,
+    gcTime: 60_000,
+  });
+  const snippet = useMemo(() => (data ? new TextDecoder().decode(data.slice(0, 1200)) : null), [data]);
+  return (
+    <span className={cx("file-preview", `file-preview-${size}`)} aria-hidden>
+      {img ? (
+        <img src={img} alt="" />
+      ) : snippet && size !== "xs" ? (
+        <span className="file-preview-text">{snippet}</span>
+      ) : (
+        <>
+          <Icon name={KIND_ICON[kind]} size={size === "xs" ? 12 : 16} />
+          {size !== "xs" && extOf(path) && <span className="file-preview-ext">{extOf(path)}</span>}
+        </>
+      )}
+    </span>
+  );
+}
+
+/**
+ * The chat's files pinned above the composer, as small previews: click one
+ * to put it on the stage. The one on show is outlined; one that just
+ * changed on disk pulses.
+ */
+export function FileTray() {
+  const stage = useStage();
+  if (!stage?.files.length) return null;
+  const { files, current, updated, open } = stage;
+  return (
+    <div className="file-tray" role="list" aria-label="Files in this chat">
+      {files.map((f, i) => (
+        <button
+          key={f.path}
+          role="listitem"
+          className={cx("file-tile", f.path === current && "active", updated.has(f.path) && "fresh")}
+          title={`${f.path}${f.original ? "\nThe agent's version of " + f.original : ""}`}
+          onClick={(e) => {
+            if (e.altKey && inTauri) return void api.fileOpen(f.path, true).catch(() => {});
+            open(files, i);
+          }}
+        >
+          <FilePreview path={f.path} size="sm" />
+          <span className="file-tile-name">{f.name}</span>
+          {f.original && <span className="file-tile-tag">Edited</span>}
+        </button>
+      ))}
     </div>
   );
 }

@@ -267,6 +267,9 @@ struct Parser {
     strict: bool,
     /// What loaded anyway, from the init line. Non-empty stops the turn.
     leaked: Vec<String>,
+    /// Open calls that only wait on something outside (CI, a deploy):
+    /// while any runs the chat shows Monitoring, not Working.
+    waits: HashSet<String>,
 }
 
 /// Whether a chat runs strict: when the person chose it, and always for an
@@ -337,6 +340,7 @@ impl Parser {
             interrupted: false,
             strict: false,
             leaked: Vec::new(),
+            waits: HashSet::new(),
         }
     }
 
@@ -435,6 +439,10 @@ impl Parser {
                             if self.once(format!("tool:{id}")) {
                                 self.open_tools.lock().unwrap().insert(id.clone());
                                 let name = block["name"].as_str().unwrap_or("tool");
+                                if super::is_wait(name, &block["input"]) {
+                                    self.waits.insert(id.clone());
+                                    hub.update(&sid, Some(SessionStatus::Monitoring), None);
+                                }
                                 if crate::links::is_creator(name, &block["input"]) {
                                     self.create_calls.insert(id.clone());
                                 }
@@ -463,6 +471,9 @@ impl Parser {
                     if block["type"] == "tool_result" {
                         if let Some(id) = block["tool_use_id"].as_str() {
                             self.open_tools.lock().unwrap().remove(id);
+                            if self.waits.remove(id) && self.waits.is_empty() {
+                                hub.update(&sid, Some(SessionStatus::Working), None);
+                            }
                         }
                         let text = match &block["content"] {
                             Value::String(s) => s.clone(),
@@ -651,6 +662,32 @@ mod tests {
         assert!(!p.finished);
         let s = store.session_get(&s.id).unwrap().unwrap();
         assert_eq!(s.status, SessionStatus::Working);
+    }
+
+    #[tokio::test]
+    async fn a_foreground_ci_watch_shows_monitoring_until_it_returns() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let mut p = Parser::new(hub.clone(), s.id.clone());
+        hub.update(&s.id, Some(SessionStatus::Working), None);
+        let status = || store.session_get(&s.id).unwrap().unwrap().status;
+        p.handle(&json!({"type":"assistant","message":{"id":"m1","content":[
+            {"type":"tool_use","id":"t1","name":"Bash","input":{"command":"gh pr checks 89 --watch"}}
+        ]}}));
+        assert_eq!(status(), SessionStatus::Monitoring);
+        p.handle(&json!({"type":"user","message":{"content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"All checks passed"}
+        ]}}));
+        assert_eq!(status(), SessionStatus::Working);
     }
 
     #[test]

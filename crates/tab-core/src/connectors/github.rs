@@ -198,7 +198,7 @@ pub fn clis() -> Vec<tab_domain::CliInfo> {
     };
     let git = CliInfo {
         name: "git".into(),
-        description: "git, signed in to github.com as this connection. tab forwards fetches and pushes to GitHub and asks before force pushes and branch deletes.".into(),
+        description: "git, signed in to github.com as this connection. tab forwards fetches and pushes to GitHub and asks before branch deletes and force pushes, except force pushes to a branch the chat created.".into(),
         auth: CliAuth::GitEndpoint {
             url: "https://github.com/".into(),
             remotes: ["https://github.com/", "git@github.com:", "ssh://git@github.com/"]

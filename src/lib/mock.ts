@@ -8,7 +8,7 @@ import { create, toBinary } from "@bufbuild/protobuf";
 import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
 import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, RunnerState, RunnerStatusSchema, type HubStatus } from "./protocol/cloud";
 import type {
-  Account, AgentKind, GhLoginCode, GhStatus, Harness, LspServer, ModelOption,
+  Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, ProjectRepo, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
@@ -306,12 +306,14 @@ export const mockApi = {
           return sorted(items.filter((i) => args.states.includes(i.state) && `${i.title} ${i.body} ${i.actor} ${i.context}`.toLowerCase().includes(q)));
         }
         case "github_link_summary":
+          if (args.what === "pull" && showcasePulls[`${args.repo}#${args.id}`]) return showcasePulls[`${args.repo}#${args.id}`];
           return args.what === "pull"
             ? { title: "Retry webhook deliveries with exponential backoff", state: "open", author: "dana-k", checks: "passing", updated_at: new Date(Date.now() - 3_600_000).toISOString(), merge_state: "blocked", review_decision: "review_required", open_threads: 2 }
             : { title: "Sample " + args.what, state: "open", author: "sam", checks: null, updated_at: null };
         case "start_dictation": throw "Dictation needs the desktop app.";
         case "attachment_save": return `${URL.createObjectURL(new Blob([args.bytes]))}#${args.name}`;
         case "file_open": return null;
+        case "file_stamps": return (args.paths as string[]).map(() => null);
         case "image_read": return await (await fetch(String(args.path))).arrayBuffer();
         case "file_read": return await (await fetch(String(args.path))).arrayBuffer();
         case "item_by_url": {
@@ -384,7 +386,7 @@ export const mockApi = {
         case "create_task": return createTask(args.task.title, args.task.body ?? null);
         case "chat_open": {
           const session = sessions.find((s) => s.item_id === args.itemId) ?? null;
-          return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: false } satisfies Chat;
+          return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: session?.status === "working" } satisfies Chat;
         }
         case "chat_send": {
           const item = args.itemId ? items.find((i) => i.id === args.itemId)! : createTask(String(args.text).split("\n")[0].slice(0, 80), null, args.projectId ?? null);
@@ -699,6 +701,49 @@ function simulateTurn(session: Session, item: QueueItem, text: string, attachmen
     status(session, "idle");
   })();
 }
+
+/**
+ * `?showcase`: the incident item opens on a finished turn and a second one
+ * caught mid-work (plan, tool calls, tests running), for screenshots
+ * of the chat on tabqueue.com.
+ */
+const showcasePulls: Record<string, LinkSummary> = {
+  "acme/payments#488": { title: "Cut cart cache TTL to 5s for price freshness", state: "merged", author: "marco-r", checks: "passing", updated_at: ago(70) },
+  "acme/payments#493": { title: "Restore cart cache TTL behind cart_cache_ttl flag", state: "open", author: "you", checks: "pending", updated_at: ago(1), merge_state: "blocked", review_decision: "review_required", open_threads: 0 },
+};
+
+function showcase() {
+  const item = items.find((i) => i.title.includes("#incident-checkout"));
+  if (!item) return;
+  const session: Session = { id: "sess-showcase", item_id: item.id, agent: "claude_code", agent_session_id: "4f1c-showcase", title: "Checkout latency after the 14:10 deploy", status: "working", cwd: "~/src/payments", created_at: ago(6), updated_at: ago(0) };
+  sessions.push(session);
+  const tool = (content: string, name: string, input: unknown, result?: string) => {
+    post(session, "assistant", "tool", content, { tool: name, input });
+    if (result !== undefined) post(session, "tool", "tool_result", result);
+  };
+  post(session, "user", "text", "What changed in the 14:10 deploy? Is the cart cache the cause?");
+  tool("mcp__tab__tab_search: 14:10 deploy checkout", "mcp__tab__tab_search", { query: "14:10 deploy checkout" }, "3 results");
+  tool("git log --oneline --since=13:30 origin/main", "Bash", { command: "git log --oneline --since=13:30 origin/main", description: "List commits in the deploy" }, "a41c2e9 Cut cart cache TTL to 5s for price freshness (#488)\n7be0d13 Bump tracing to 0.1.41");
+  tool("Read src/cart/cache.rs", "Read", { file_path: "src/cart/cache.rs" }, "const CART_TTL: Duration = Duration::from_secs(5);");
+  tool("mcp__tab__tab_add_found: #incident-checkout thread", "mcp__tab__tab_add_found", { title: "#incident-checkout thread" }, "Added under found.");
+  post(session, "assistant", "text",
+    "Yes. The 14:10 deploy shipped one real change:\n\nhttps://github.com/acme/payments/pull/488\n\nIt cut `CART_TTL` from **300s to 5s**, so almost every `/checkout` call now misses the cache and rebuilds the cart from Postgres. That matches the p99 jump from 400ms to 1.7s in the incident thread, which I filed under Found.\n\nThe safe fix is to restore 300s behind a flag, so pricing can still opt into the short TTL.");
+  post(session, "system", "result", "", { cost_usd: 0.034, duration_ms: 14200, context: { model: "claude-opus-5-5", window: 200000, used: 46800, first_call: 22400, cache_read: 41200, cache_write: 4300, fresh_input: 1300, output: 1100, tab_context: 2600 } });
+  post(session, "user", "text", "Restore the TTL behind a flag, open a PR, and let Priya know in the thread.");
+  tool("mcp__tab__tab_steps", "mcp__tab__tab_steps", { steps: [
+    { title: "Find the TTL change", status: "completed" },
+    { title: "Restore 300s behind a flag", status: "completed" },
+    { title: "Run the cart tests", status: "in_progress", activeForm: "Running the cart tests" },
+    { title: "Open a PR", status: "pending" },
+    { title: "Let Priya know in #incident-checkout", status: "pending" },
+  ] });
+  tool("git switch -c fix/cart-cache-ttl", "Bash", { command: "git switch -c fix/cart-cache-ttl", description: "Make a branch" }, "Switched to a new branch 'fix/cart-cache-ttl'");
+  tool("Edit src/cart/cache.rs", "Edit", { file_path: "src/cart/cache.rs" }, "Updated src/cart/cache.rs");
+  tool("Edit src/flags.rs", "Edit", { file_path: "src/flags.rs" }, "Updated src/flags.rs");
+  post(session, "assistant", "text", "`CART_TTL` is back to 300s behind the `cart_cache_ttl` flag, so pricing can still opt into 5s. Running the tests before I open the PR.");
+  tool("cargo test -p cart", "Bash", { command: "cargo test -p cart", description: "Run the cart tests" });
+}
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("showcase")) showcase();
 
 /** The demo items' entities as a graph, with projects as nodes. */
 /** Keys of graph nodes the person deleted, so the mock graph forgets them. */

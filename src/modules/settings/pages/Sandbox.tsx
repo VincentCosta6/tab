@@ -26,7 +26,7 @@ function SandboxSection({ config, onChange }: { config: TabConfig["sandbox"]; on
         <FormRow label="On this computer">
           <span className="subtle">{s ? <>{s.summary}{s.fix && <> {s.fix}</>}</> : "Checking…"}</span>
         </FormRow>
-        <FormRow label="GitHub in chats" help="gh and git reach GitHub through tab, signed in with your GitHub connection. Force pushes, merges and deletes ask you first, and agents never see the token.">
+        <FormRow label="GitHub in chats" help="gh and git reach GitHub through tab, signed in with your GitHub connection. Force pushes (except to a branch the chat created), merges and deletes ask you first, and agents never see the token.">
           <span className="subtle">Always on while the sandbox is on.</span>
         </FormRow>
         <FormRow label="SSH keys in chats" help="Off keeps ~/.ssh and your SSH agent out of chats, so GitHub is only reachable through tab. Leave on if agents push to other hosts over SSH.">

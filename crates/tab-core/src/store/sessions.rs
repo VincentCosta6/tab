@@ -146,6 +146,47 @@ impl Store {
             .flatten())
     }
 
+    /// The commit a session last pushed to a branch it created, if it did.
+    pub fn session_branch_head(
+        &self,
+        id: &str,
+        repo: &str,
+        git_ref: &str,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .conn()
+            .query_row(
+                "SELECT head FROM session_branches WHERE session_id = ?1 AND repo = ?2 AND ref = ?3",
+                params![id, repo, git_ref],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Records the commit a session pushed to its own branch.
+    pub fn session_branch_set(
+        &self,
+        id: &str,
+        repo: &str,
+        git_ref: &str,
+        head: &str,
+    ) -> anyhow::Result<()> {
+        self.conn().execute(
+            "INSERT INTO session_branches (session_id, repo, ref, head) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (session_id, repo, ref) DO UPDATE SET head = excluded.head",
+            params![id, repo, git_ref, head],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_branch_forget(&self, id: &str, repo: &str, git_ref: &str) -> anyhow::Result<()> {
+        self.conn().execute(
+            "DELETE FROM session_branches WHERE session_id = ?1 AND repo = ?2 AND ref = ?3",
+            params![id, repo, git_ref],
+        )?;
+        Ok(())
+    }
+
     pub fn sessions_recent(&self, limit: usize) -> anyhow::Result<Vec<Session>> {
         let conn = self.conn();
         let rows = conn
