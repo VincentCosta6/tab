@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tab · TAB Annihilates Backlogs</title>
+<meta name="description" content="One ranked, keyboard-driven queue for everything that needs you: PR reviews, CI failures, Slack mentions, email and agents waiting on input. Work any item with Claude Code, Codex, OpenCode or Pi.">
+<link rel="canonical" href="https://tabqueue.com/">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<meta property="og:title" content="tab · TAB Annihilates Backlogs">
+<meta property="og:description" content="One ranked queue for everything that needs you, with an agent on every item.">
+<meta property="og:url" content="https://tabqueue.com/">
+<meta property="og:image" content="https://tabqueue.com/img/app-chat.png">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#111113">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/favicon.svg" alt="" width="26" height="26">tab</a>
+    <nav class="nav">
+      <a href="#how">How it works</a>
+      <a href="#agents">Agents</a>
+      <a href="#review">Review</a>
+      <a href="/pricing/">Pricing</a>
+      <a class="nav-icon" href="https://github.com/VincentCosta6/tab" aria-label="tab on GitHub" title="tab on GitHub"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg></a>
+      <a class="btn primary" href="#download">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <div class="hero wrap">
+    <svg class="logo-hero" viewBox="0 0 1024 1024" role="img" aria-label="tab: three lanes of work converging into one queue">
+      <defs>
+        <linearGradient id="logo-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#26262b"/><stop offset="1" stop-color="#121214"/></linearGradient>
+        <filter id="bloom" x="-50%" y="-80%" width="200%" height="260%"><feGaussianBlur stdDeviation="28"/></filter>
+      </defs>
+      <rect width="1024" height="1024" rx="230" fill="url(#logo-bg)"/>
+      <g fill="none" stroke-linecap="round" stroke-width="64">
+        <path d="M220 300 C 420 300, 440 512, 600 512" stroke="#7dd3fc"/>
+        <path d="M220 724 C 420 724, 440 512, 600 512" stroke="#f9a8d4"/>
+        <path d="M220 512 H 600" stroke="#fcd34d"/>
+      </g>
+      <g>
+        <g class="flow" opacity="0">
+      <circle r="46" fill="#7dd3fc" filter="url(#bloom)"/>
+      <circle r="24" fill="#fff"/>
+      <animateMotion dur="3s" begin="0s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.4;1" calcMode="spline" keySplines="0.45 0 0.55 1;0 0 1 1" path="M220 300 C 420 300, 440 512, 600 512"/>
+      <animate attributeName="opacity" dur="3s" begin="0s" repeatCount="indefinite" keyTimes="0;0.04;0.38;0.4;1" values="0;1;1;0;0"/>
+    </g>
+        <rect class="flow" x="560" y="432" width="270" height="160" rx="80" fill="#7dd3fc" filter="url(#bloom)" opacity="0">
+          <animate attributeName="opacity" dur="3s" begin="0s" repeatCount="indefinite" keyTimes="0;0.39;0.43;0.62;1" values="0;0;0.9;0;0"/>
+        </rect>
+        <g class="flow" opacity="0">
+      <circle r="46" fill="#fcd34d" filter="url(#bloom)"/>
+      <circle r="24" fill="#fff"/>
+      <animateMotion dur="3s" begin="1s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.4;1" calcMode="spline" keySplines="0.45 0 0.55 1;0 0 1 1" path="M220 512 H 600"/>
+      <animate attributeName="opacity" dur="3s" begin="1s" repeatCount="indefinite" keyTimes="0;0.04;0.38;0.4;1" values="0;1;1;0;0"/>
+    </g>
+        <rect class="flow" x="560" y="432" width="270" height="160" rx="80" fill="#fcd34d" filter="url(#bloom)" opacity="0">
+          <animate attributeName="opacity" dur="3s" begin="1s" repeatCount="indefinite" keyTimes="0;0.39;0.43;0.62;1" values="0;0;0.9;0;0"/>
+        </rect>
+        <g class="flow" opacity="0">
+      <circle r="46" fill="#f9a8d4" filter="url(#bloom)"/>
+      <circle r="24" fill="#fff"/>
+      <animateMotion dur="3s" begin="2s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.4;1" calcMode="spline" keySplines="0.45 0 0.55 1;0 0 1 1" path="M220 724 C 420 724, 440 512, 600 512"/>
+      <animate attributeName="opacity" dur="3s" begin="2s" repeatCount="indefinite" keyTimes="0;0.04;0.38;0.4;1" values="0;1;1;0;0"/>
+    </g>
+        <rect class="flow" x="560" y="432" width="270" height="160" rx="80" fill="#f9a8d4" filter="url(#bloom)" opacity="0">
+          <animate attributeName="opacity" dur="3s" begin="2s" repeatCount="indefinite" keyTimes="0;0.39;0.43;0.62;1" values="0;0;0.9;0;0"/>
+        </rect>
+      </g>
+      <rect x="580" y="452" width="230" height="120" rx="60" fill="#fff"/>
+    </svg>
+    <p class="tagline"><b>TAB</b> Annihilates Backlogs</p>
+    <h1>Everything that needs you, <span class="mark">in one queue.</span></h1>
+    <p class="lede">PR reviews, CI failures, Slack mentions, email, meeting action items and agents waiting on input. tab pulls it in, ranks it, and puts your coding agent on every item.</p>
+    <div class="cta" id="download">
+      <a class="btn primary" href="https://github.com/VincentCosta6/tab/releases/latest" data-download="mac">Download for macOS</a>
+      <a class="btn" href="https://github.com/VincentCosta6/tab/releases/latest" data-download="windows">Download for Windows</a>
+    </div>
+    <p class="fine" data-version>Free for local use · Apple silicon and Windows x64</p>
+    <div class="shot">
+      <div class="shot-bar"><i></i><i></i><i></i></div>
+      <img src="/img/app-chat.png" width="2880" height="1800" alt="tab's queue on the left, ranked by urgency. On the right, Claude Code is mid-turn on a checkout incident: it found the PR that caused it, restored the cache TTL behind a flag, and is running the tests, with its plan pinned below the chat.">
+    </div>
+  </div>
+
+  <div class="sources wrap">
+    Pulls in work from
+    <ul><li>GitHub</li><li>Slack</li><li>Gmail</li><li>Jira</li><li>Zoom</li><li>your agents</li></ul>
+  </div>
+
+  <section id="how">
+    <div class="wrap">
+      <p class="label">How it works</p>
+      <h2>Stop checking six apps to find out what's on fire.</h2>
+      <p class="section-lede">tab is a work queue for engineers, designers and PMs. It does the triage, so you can do the work.</p>
+      <div class="steps">
+        <div class="card"><span class="step-n" style="background: var(--info)">1</span><h3>Connect</h3><p>Connections bring in review requests, failing builds, mentions, email, meeting follow-ups and agents that are blocked on you.</p></div>
+        <div class="card"><span class="step-n" style="background: var(--warning)">2</span><h3>Rank</h3><p>A score you can read, refined by your own instructions through Claude Haiku. What's urgent rises to the top. Noise sinks.</p></div>
+        <div class="card"><span class="step-n" style="background: var(--pink)">3</span><h3>Annihilate</h3><p>Open any item and work it with an agent that already has the context. Approve its steps, mark it done, and move to the next one.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split">
+      <div>
+        <p class="label">An agent on every item</p>
+        <h2>Watch it work. Steer it <span style="white-space: nowrap">mid-turn.</span></h2>
+        <p class="section-lede">Each item gets its own agent session that picks up where you left off. You see what it's doing, what it knows, and what it costs.</p>
+        <ul class="points">
+          <li><svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" fill="none" stroke="#86efac" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span><b>Its plan, live.</b> Steps tick off while the agent works, with the command it's running right now.</span></li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" fill="none" stroke="#86efac" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span><b>Rich links.</b> PRs it mentions show their title, state and checks right in the reply.</span></li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" fill="none" stroke="#86efac" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span><b>Context and cache.</b> See how full the context window is, and how long the prompt cache stays warm.</span></li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" fill="none" stroke="#86efac" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span><b>Context that finds itself.</b> Agents attach the ticket, PR or thread they're working from, and file what might matter under Found.</span></li>
+        </ul>
+      </div>
+      <div class="shot"><img src="/img/app-cache.png" width="1200" height="1000" alt="The context window popover in a chat: 47k of 200k tokens used, split into agent setup, tab context and conversation, with the prompt cache warm for 5 more minutes and 88% of the last call read from cache."></div>
+    </div>
+  </section>
+
+  <section id="agents">
+    <div class="wrap">
+      <p class="label">Bring your own agent</p>
+      <h2>Works with the agent you already use.</h2>
+      <p class="section-lede">tab drives each agent's own CLI with the sign-in you already have, so there's nothing new to sign up for and no markup on your usage. Pick one per chat, and switch models any time.</p>
+      <div class="harnesses">
+        <div class="card harness">
+          <div class="harness-head"><img src="/img/claude.svg" alt=""><h3>Claude Code</h3><code class="cmd">claude</code></div>
+          <p>tab drives the official Claude Code CLI with your own login, so your usage stays within Anthropic's terms.</p>
+          <div class="models"><span>Opus 5.5</span><span>Sonnet 5.5</span><span>Haiku 5.5</span><span>Fable 5.1</span></div>
+        </div>
+        <div class="card harness">
+          <div class="harness-head"><img src="/img/codex.svg" alt=""><h3>Codex</h3><code class="cmd">codex</code></div>
+          <p>OpenAI's coding agent. tab runs the Codex CLI with your ChatGPT sign-in or API key and streams each turn.</p>
+          <div class="models"><span>GPT-6.1 Sol</span><span>GPT-6 Astra</span><span>GPT-6 Luna</span></div>
+        </div>
+        <div class="card harness">
+          <div class="harness-head"><img src="/img/opencode.svg" alt=""><h3>OpenCode</h3><code class="cmd">opencode</code></div>
+          <p>Open source and works with any model provider. tab starts its server and streams every session.</p>
+          <div class="models"><span>Anthropic</span><span>OpenAI</span><span>Google</span><span>Ollama</span><span>OpenRouter</span></div>
+        </div>
+        <div class="card harness">
+          <div class="harness-head"><img src="/img/pi.svg" alt=""><h3>Pi</h3><code class="cmd">pi</code></div>
+          <p>A small, open source agent that works with most model providers. tab keeps each chat as a Pi session.</p>
+          <div class="models"><span>Anthropic</span><span>OpenAI</span><span>and more</span></div>
+        </div>
+      </div>
+      <p class="harness-note">Every agent gets tab's tools over MCP: search your queue, attach context, create tasks. Tool approvals come to you in the chat. Nothing runs with permissions bypassed.</p>
+    </div>
+  </section>
+
+  <section id="review">
+    <div class="wrap">
+      <p class="label">Code review</p>
+      <h2>Review PRs without leaving the queue.</h2>
+      <p class="section-lede">Press <kbd>r</kbd> on a review request to get a side-by-side diff with syntax highlighting, threads and line comments that post straight to GitHub. Ask AI about any file, or have it fix the comments.</p>
+      <div class="shot" style="margin-top: 40px"><div class="shot-bar"><i></i><i></i><i></i></div><img src="/img/app-review.png" width="2880" height="1680" alt="A pull request open in tab's review view: the changed files on the left, a split diff of src/capture.ts, and a review thread from dana-k on line 19 with Reply, Fix list and Resolve."></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split flip">
+      <div class="score">
+        <div class="score-title">CI failing on main: checkout-service</div>
+        <p class="subtle" style="margin: 4px 0 10px">Why it's ranked here</p>
+        <div class="score-line"><span>kind github.ci_failed</span><span>65</span></div>
+        <div class="score-line"><span>On the default branch</span><span>+15</span></div>
+        <div class="score-line"><span>Blocks 3 open PRs</span><span>+10</span></div>
+        <div class="score-line muted"><span>Claude Haiku: "payments is my priority this week"</span><span>+6</span></div>
+        <div class="score-line total"><span>Score</span><span>96</span></div>
+      </div>
+      <div>
+        <p class="label">Ranking you can read</p>
+        <h2>No black box deciding your day.</h2>
+        <p class="section-lede">Every item shows the math behind its place in the queue. Tune the rules, or tell tab what matters in plain words.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split">
+      <div>
+        <p class="label">Keyboard first</p>
+        <h2>Clear the queue without touching the mouse.</h2>
+        <p class="section-lede">Move, finish, snooze and open from the home row. Hover actions sit on top of the row, so nothing shifts under your cursor.</p>
+      </div>
+      <div class="keys">
+        <div class="key"><kbd>j</kbd><kbd>k</kbd>Move</div>
+        <div class="key"><kbd>e</kbd>Done, next</div>
+        <div class="key"><kbd>s</kbd>Snooze</div>
+        <div class="key"><kbd>o</kbd>Open</div>
+        <div class="key"><kbd>r</kbd>Review the PR</div>
+        <div class="key"><kbd>n</kbd>New chat</div>
+        <div class="key"><kbd>/</kbd>Search everything</div>
+        <div class="key"><kbd>1</kbd>–<kbd>4</kbd>Snooze for</div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="cloud">
+        <p class="label">tab cloud</p>
+        <h2>Your queue on every device.</h2>
+        <p class="section-lede">tab runs its own hub on your machine. Sign in with Apple or Google and move it to tab cloud to keep every device in sync.</p>
+        <ul class="points">
+          <li><svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" fill="none" stroke="#86efac" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>A private hub with its own storage and its own data key</span></li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" fill="none" stroke="#86efac" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Changes sync to every desktop as they happen</span></li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" fill="none" stroke="#86efac" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Pick a region close to you</span></li>
+          <li><svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 8.5l3 3 7-7" fill="none" stroke="#86efac" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Move back to a local hub any time</span></li>
+        </ul>
+        <div class="cta"><a class="btn primary" href="/pricing/">See plans</a></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="final">
+    <div class="wrap">
+      <h2>Annihilate your backlog.</h2>
+      <p class="section-lede">Download tab, pick your agent, and connect your first source in under a minute.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/VincentCosta6/tab/releases/latest" data-download="auto">Download tab</a>
+        <a class="btn" href="https://github.com/VincentCosta6/tab">View on GitHub</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/favicon.svg" alt="" width="20" height="20">tab</a>
+    <nav>
+      <a href="/pricing/">Pricing</a>
+      <a href="https://github.com/VincentCosta6/tab">GitHub</a>
+      <a href="https://github.com/VincentCosta6/tab/releases">Releases</a>
+    </nav>
+    <span>© 2026 tab</span>
+  </div>
+</footer>
+
+<script src="/download.js" defer></script>
+</body>
+</html>
