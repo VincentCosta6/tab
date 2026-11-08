@@ -266,21 +266,14 @@ jobs:
           node scripts/release/build-config.mjs "$dir/tauri.release.json"
           echo "RELEASE_CONFIG=$dir/tauri.release.json" >> "$GITHUB_ENV"
 
-      # Sign-in: the tab Supabase project, baked in at build time
-      # (tab_core::account). Neither is secret. Missing means the build can't
-      # sign in, and says so.
+      # Sign-in: builds use tab's own Supabase project by default
+      # (tab_core::account). These variables override it, e.g. for staging.
       - name: Sign-in config
         shell: bash
         env:
           TAB_SUPABASE_URL: ${{ vars.TAB_SUPABASE_URL }}
-          TAB_SUPABASE_ANON_KEY: ${{ vars.TAB_SUPABASE_ANON_KEY }}
         run: |
-          if [ -n "$TAB_SUPABASE_URL" ] && [ -n "$TAB_SUPABASE_ANON_KEY" ]; then
-            echo "- Sign-in: $TAB_SUPABASE_URL" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "::warning::No sign-in: set the TAB_SUPABASE_URL and TAB_SUPABASE_ANON_KEY variables. This build can't use tab cloud."
-            echo "- **No sign-in** (no TAB_SUPABASE_URL / TAB_SUPABASE_ANON_KEY)" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "- Sign-in: ${TAB_SUPABASE_URL:-tab's own Supabase project (default)}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build and upload
         id: build

@@ -33,24 +33,42 @@ pub struct SupabaseConfig {
     pub anon_key: String,
 }
 
+/// tab's own Supabase project (tab-prod). Neither value is secret: the
+/// publishable key is meant to ship inside apps. Every build signs in here
+/// unless `TAB_SUPABASE_URL` and `TAB_SUPABASE_ANON_KEY` point elsewhere.
+pub const DEFAULT_SUPABASE_URL: &str = "https://keyimpyykjgropteihtg.supabase.co";
+pub const DEFAULT_SUPABASE_ANON_KEY: &str = "sb_publishable_4clSvjbo6A0ox9AkMzAiZw_zkLlx2hk";
+
 impl SupabaseConfig {
     /// From `TAB_SUPABASE_URL` and `TAB_SUPABASE_ANON_KEY`: at run time if
-    /// set, else baked in at build time. `None` if either is missing, and
-    /// sign-in is turned off.
+    /// set, else baked in at build time, else tab's own project. Setting
+    /// either to `off` turns sign-in off.
     pub fn from_env() -> Option<Self> {
-        let get = |run: Option<String>, built: Option<&str>| {
-            run.or(built.map(String::from))
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
-        let url = get(
+        Self::resolve(
             std::env::var("TAB_SUPABASE_URL").ok(),
             option_env!("TAB_SUPABASE_URL"),
-        )?;
-        let anon_key = get(
             std::env::var("TAB_SUPABASE_ANON_KEY").ok(),
             option_env!("TAB_SUPABASE_ANON_KEY"),
-        )?;
+        )
+    }
+
+    fn resolve(
+        url_run: Option<String>,
+        url_built: Option<&str>,
+        key_run: Option<String>,
+        key_built: Option<&str>,
+    ) -> Option<Self> {
+        let get = |run: Option<String>, built: Option<&str>, default: &str| {
+            let set = |v: &str| Some(v.trim().to_string()).filter(|v| !v.is_empty());
+            let v = run
+                .as_deref()
+                .and_then(set)
+                .or_else(|| built.and_then(set))
+                .unwrap_or_else(|| default.to_string());
+            (v != "off").then_some(v)
+        };
+        let url = get(url_run, url_built, DEFAULT_SUPABASE_URL)?;
+        let anon_key = get(key_run, key_built, DEFAULT_SUPABASE_ANON_KEY)?;
         Some(Self {
             url: url.trim_end_matches('/').to_string(),
             anon_key,
@@ -476,6 +494,23 @@ pub fn remove(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_defaults_to_tab_prod() {
+        let c = SupabaseConfig::resolve(None, None, None, None).unwrap();
+        assert_eq!(c.url, DEFAULT_SUPABASE_URL);
+        assert_eq!(c.anon_key, DEFAULT_SUPABASE_ANON_KEY);
+        let c = SupabaseConfig::resolve(
+            Some("https://x.supabase.co/".into()),
+            Some("https://built.supabase.co"),
+            Some(" ".into()),
+            Some("built-key"),
+        )
+        .unwrap();
+        assert_eq!(c.url, "https://x.supabase.co");
+        assert_eq!(c.anon_key, "built-key");
+        assert!(SupabaseConfig::resolve(Some("off".into()), None, None, None).is_none());
+    }
 
     fn cfg() -> SupabaseConfig {
         SupabaseConfig {

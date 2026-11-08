@@ -48,7 +48,7 @@ export function SignInButtons({ onSignedIn }: { onSignedIn?: (a: Account) => voi
   };
 
   if (status && !status.configured) {
-    return <p className="subtle sign-in-note">Sign-in isn't set up in this build of tab. Release builds include it.</p>;
+    return <p className="subtle sign-in-note">Sign-in is turned off in this build of tab.</p>;
   }
   return (
     <div className="sign-in">
