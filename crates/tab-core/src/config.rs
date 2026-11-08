@@ -331,13 +331,18 @@ impl Default for TabConfig {
 pub struct HubConfig {
     #[serde(default)]
     pub mode: HubMode,
+    /// The cloud hub this computer's work moved into, by id. Set by the
+    /// move; while set (and `mode` is cloud), `tab.db` syncs with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_hub: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HubMode {
-    /// tab's cloud hub, reached by signing in to a tab account. Until the
-    /// cloud hub is live the app keeps running its own hub as well.
+    /// tab's cloud hub, reached by signing in to a tab account. Work
+    /// syncs with it once this computer has moved there (`cloud_hub`);
+    /// until then it stays in the app's own hub.
     Cloud,
     /// The hub inside the desktop app, on this computer only. Installs from
     /// before the choice existed stay here.

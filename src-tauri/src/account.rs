@@ -10,6 +10,7 @@ use tab_core::account::{
     self, AccountStatus, AccountView, CancellationToken, Provider, SupabaseConfig,
 };
 use tab_core::cloud::{self, CloudConfig, CloudError};
+use tab_core::cloud_link::{self, CloudLink, TokenSource};
 use tauri::State;
 use tauri::ipc::Response;
 
@@ -22,6 +23,41 @@ pub struct AccountState {
 }
 
 impl AccountState {
+    /// A connection to cloud hub `hub_id` as the signed-in person, which
+    /// gets a fresh token each time it connects.
+    pub fn link(&self, hub_id: &str) -> Option<std::sync::Arc<CloudLink>> {
+        let cfg = self.supabase.clone()?;
+        let path = self.path.clone();
+        let token: TokenSource = std::sync::Arc::new(move || {
+            let (cfg, path) = (cfg.clone(), path.clone());
+            Box::pin(async move {
+                account::access_token(&cfg, &path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?
+                    .ok_or_else(|| anyhow::anyhow!("not signed in"))
+            })
+        });
+        Some(CloudLink::start(
+            cloud_link::sync_url(&self.cloud.api, hub_id),
+            hub_id.to_string(),
+            token,
+        ))
+    }
+
+    /// The signed-in person's personal hub, if it's ready.
+    pub async fn ready_hub(&self) -> Result<String, CloudFailure> {
+        let token = cloud_token(self).await?;
+        let status = cloud::hub_status(&self.cloud, &token).await?;
+        match status.hub {
+            Some(h) if h.state == cloud::pb::HubState::Ready as i32 => Ok(h.hub_id),
+            _ => Err(CloudError::new(
+                cloud::pb::ErrorCode::NotFound,
+                "Your private hub isn't set up yet. Set it up first, then move.",
+            )
+            .into()),
+        }
+    }
+
     pub fn new(config_dir: &std::path::Path) -> Self {
         Self {
             path: account::session_path(config_dir),
@@ -99,6 +135,12 @@ pub async fn account_sign_out(state: State<'_, AccountState>) -> Result<(), Stri
 pub struct CloudFailure {
     code: i32,
     message: String,
+}
+
+impl CloudFailure {
+    pub fn internal(e: impl std::fmt::Display) -> Self {
+        CloudError::new(cloud::pb::ErrorCode::Internal, e.to_string()).into()
+    }
 }
 
 impl From<CloudError> for CloudFailure {

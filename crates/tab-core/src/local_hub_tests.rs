@@ -216,8 +216,12 @@ async fn another_device_syncs_both_ways() {
     .await
     .unwrap();
     assert!(matches!(next(&mut ws).await.body, Some(Res::Applied(_))));
-    // It lands in tab.db and the UI hears about it.
-    assert_eq!(store.get(&it.id).unwrap().unwrap().state, ItemState::Done);
+    // It lands in tab.db (sync runs on a blocking thread, so shortly) and
+    // the UI hears about it.
+    until("the phone's change", || {
+        store.get(&it.id).unwrap().unwrap().state == ItemState::Done
+    })
+    .await;
     let ev = tokio::time::timeout(Duration::from_secs(2), ui.recv())
         .await
         .unwrap()
@@ -916,4 +920,146 @@ async fn a_phone_watches_a_session_this_app_runs_and_answers_its_prompt() {
         .unwrap();
     assert_eq!(decision, crate::agents::Decision::Allow);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A stand-in for tab cloud: tab's hub behind `/v1/hubs/{id}/sync`, the way
+/// the hub Durable Object serves it (minus accounts).
+async fn fake_cloud() -> (String, Arc<Mutex<tab_hub::Hub<SqliteStore>>>) {
+    use axum::extract::Path as UrlPath;
+    type Cloud = Arc<Mutex<tab_hub::Hub<SqliteStore>>>;
+    let hub: Cloud = Arc::new(Mutex::new(tab_hub::Hub::new(
+        SqliteStore::in_memory().unwrap(),
+        "cloud",
+        Utc::now(),
+    )));
+    async fn sync(
+        ws: WebSocketUpgrade,
+        headers: axum::http::HeaderMap,
+        UrlPath(_id): UrlPath<String>,
+        State((hub, next)): State<(Cloud, Arc<AtomicU64>)>,
+    ) -> Response {
+        if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer t0k") {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        ws.on_upgrade(move |mut socket| async move {
+            let conn = next.fetch_add(1, Ordering::Relaxed);
+            hub.lock().unwrap().connect(conn, "", Utc::now());
+            while let Some(Ok(Message::Binary(b))) = socket.recv().await {
+                let h = hub.lock().unwrap().handle_frame(conn, &b, Utc::now());
+                if socket
+                    .send(Message::Binary(encode(&h.reply).into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            hub.lock().unwrap().disconnect(conn);
+        })
+    }
+    let app = Router::new()
+        .route("/v1/hubs/{id}/sync", get(sync))
+        .with_state((hub.clone(), Arc::new(AtomicU64::new(1))));
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (format!("http://{addr}"), hub)
+}
+
+fn link_to(api: &str) -> Arc<CloudLink> {
+    CloudLink::start(
+        crate::cloud_link::sync_url(api, "h1"),
+        "h1".into(),
+        Arc::new(|| Box::pin(async { Ok("t0k".to_string()) })),
+    )
+}
+
+/// Runs a blocking hub call off the runtime, as the app does.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(f).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn moving_to_the_cloud_keeps_history_and_syncs_from_then_on() {
+    let (api, cloud) = fake_cloud().await;
+
+    // This computer, with work in its own hub.
+    let (mac_hub, dir) = temp_hub("move-mac");
+    let mac = Arc::new(Store::in_memory().unwrap());
+    mac_hub.introduce(&mac).unwrap();
+    let a = add(&mac, "1", "Before the move");
+    mac_hub.sync(&mac).unwrap();
+    let local_log = mac_hub
+        .hub
+        .lock()
+        .unwrap()
+        .store()
+        .changes_since(0, 1000)
+        .unwrap();
+    assert!(!local_log.is_empty());
+
+    // Move: the cloud gets the same log, change for change.
+    let mut seen = vec![];
+    let (h, s, link) = (mac_hub.clone(), mac.clone(), link_to(&api));
+    let (outcome, seen) = blocking(move || {
+        let o = h.move_to_cloud(link, &s, |done, total| seen.push((done, total)));
+        (o, seen)
+    })
+    .await;
+    let n = local_log.len() as u64;
+    assert_eq!(outcome.unwrap(), MoveOutcome::Moved { changes: n });
+    assert_eq!(seen.last(), Some(&(n, n)));
+    assert_eq!(
+        cloud
+            .lock()
+            .unwrap()
+            .store()
+            .changes_since(0, 1000)
+            .unwrap(),
+        local_log
+    );
+
+    // From now on changes go to the cloud, and hub.db keeps its copy.
+    let b = add(&mac, "2", "After the move");
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    blocking(move || h.sync(&s)).await.unwrap();
+    let in_cloud = |id: &str| {
+        cloud
+            .lock()
+            .unwrap()
+            .store()
+            .get("items", &json!([id]).to_string())
+            .unwrap()
+    };
+    assert!(in_cloud(&b.id).is_some());
+    assert!(hub_item(&mac_hub, &b.id).is_none());
+
+    // A second computer that picks tab cloud joins the same hub and gets
+    // everything; its changes reach the first one.
+    let (pc_hub, dir2) = temp_hub("move-pc");
+    let pc = Arc::new(Store::in_memory().unwrap());
+    pc_hub.introduce(&pc).unwrap();
+    let (h, s, link) = (pc_hub.clone(), pc.clone(), link_to(&api));
+    let outcome = blocking(move || h.move_to_cloud(link, &s, |_, _| {}))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, MoveOutcome::Joined { .. }));
+    assert_eq!(title_in(&pc, &a.id).as_deref(), Some("Before the move"));
+    assert_eq!(title_in(&pc, &b.id).as_deref(), Some("After the move"));
+    pc.set_state(&a.id, ItemState::Done, None, when()).unwrap();
+    let (h, s) = (pc_hub.clone(), pc.clone());
+    blocking(move || h.sync(&s)).await.unwrap();
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    blocking(move || h.sync(&s)).await.unwrap();
+    assert_eq!(mac.get(&a.id).unwrap().unwrap().state, ItemState::Done);
+
+    // Moving again is refused.
+    let (h, s, link) = (mac_hub.clone(), mac.clone(), link_to(&api));
+    assert!(
+        blocking(move || h.move_to_cloud(link, &s, |_, _| {}))
+            .await
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
 }

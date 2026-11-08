@@ -1141,6 +1141,45 @@ async fn hub_status(state: State<'_, AppState>) -> CmdResult<Option<HubStatusVie
         .map_err(err)
 }
 
+/// Moves this computer's work into the signed-in person's private cloud
+/// hub, then syncs with it from now on (see `LocalHub::move_to_cloud`).
+/// Reports progress as `tab://hub-move` events (`[done, total]`).
+#[tauri::command]
+async fn hub_move_to_cloud(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    account: State<'_, account::AccountState>,
+) -> Result<tab_core::local_hub::MoveOutcome, account::CloudFailure> {
+    let hub = state
+        .work_hub
+        .clone()
+        .ok_or_else(|| account::CloudFailure::internal("this computer's hub isn't running"))?;
+    let hub_id = account.ready_hub().await?;
+    let link = account
+        .link(&hub_id)
+        .ok_or_else(|| account::CloudFailure::internal("sign-in is turned off in this build"))?;
+    let store = state.store.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        hub.move_to_cloud(link, &store, |done, total| {
+            let _ = app.emit("tab://hub-move", [done, total]);
+        })
+    })
+    .await
+    .map_err(account::CloudFailure::internal)?
+    .map_err(account::CloudFailure::internal)?;
+    // Remembered, so the next launch syncs with the cloud too.
+    let mut current = state.config.lock().await;
+    let mut next = current.clone();
+    next.hub.mode = tab_core::config::HubMode::Cloud;
+    next.hub.cloud_hub = Some(hub_id);
+    next.save(&state.config_path)
+        .map_err(account::CloudFailure::internal)?;
+    *current = next;
+    drop(current);
+    let _ = state.events.send(EngineEvent::ConfigChanged);
+    Ok(outcome)
+}
+
 #[tauri::command]
 async fn mcp_info(state: State<'_, AppState>) -> CmdResult<McpInfo> {
     let url = state.mcp_url.lock().unwrap().clone();
@@ -2337,7 +2376,15 @@ fn folder_problem(path: String) -> Option<String> {
 
 #[tauri::command]
 async fn save_config(state: State<'_, AppState>, config: TabConfig) -> CmdResult<TabConfig> {
-    let next = unmask(config, &*state.config.lock().await);
+    let current = state.config.lock().await;
+    let mut next = unmask(config, &current);
+    // Only moving sets the cloud hub, and once moved, work stays there
+    // (moving back isn't built yet): Settings can't undo either.
+    next.hub.cloud_hub = current.hub.cloud_hub.clone();
+    if next.hub.cloud_hub.is_some() {
+        next.hub.mode = tab_core::config::HubMode::Cloud;
+    }
+    drop(current);
     state.apply(next).await.map(|c| masked(&c)).map_err(err)
 }
 
@@ -2688,6 +2735,37 @@ pub fn run() {
                     }
                 });
             }
+            // Moved to tab cloud before: sync with it, not hub.db.
+            let cloud_hub = match (&config.hub.mode, &config.hub.cloud_hub) {
+                (tab_core::config::HubMode::Cloud, Some(id)) => Some(id.clone()),
+                _ => None,
+            };
+            if let (Some(h), Some(id)) = (&work_hub, &cloud_hub) {
+                h.expect_cloud();
+                let link = app.state::<account::AccountState>().link(id);
+                let (h, store) = (h.clone(), store.clone());
+                tauri::async_runtime::spawn(async move {
+                    let Some(link) = link else {
+                        tracing::error!("hub: moved to tab cloud, but sign-in is off in this build");
+                        return;
+                    };
+                    // Until it connects (offline, signed out), changes wait.
+                    let mut wait = 2;
+                    loop {
+                        let (h, s, l) = (h.clone(), store.clone(), link.clone());
+                        match tauri::async_runtime::spawn_blocking(move || h.use_cloud(l, &s)).await {
+                            Ok(Ok(())) => {
+                                tracing::info!("hub: syncing with tab cloud");
+                                break;
+                            }
+                            Ok(Err(e)) => tracing::warn!(error = %e, retry_in = wait, "hub: tab cloud isn't reachable yet"),
+                            Err(e) => tracing::error!(error = %e, "hub: connecting to tab cloud panicked"),
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                        wait = (wait * 2).min(60);
+                    }
+                });
+            }
             tauri::async_runtime::block_on(async {
                 if let Some(h) = &work_hub {
                     h.follow(store.clone(), events.clone());
@@ -2807,6 +2885,7 @@ pub fn run() {
             account::account_cancel_sign_in,
             account::account_sign_out,
             account::cloud_hub_status,
+            hub_move_to_cloud,
             account::cloud_hubs,
             account::cloud_hub_set_up,
             gh_status,

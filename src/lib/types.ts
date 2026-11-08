@@ -480,7 +480,8 @@ export interface TabConfig {
   storage: { keep_days: number; max_gb: number | null };
   sandbox: SandboxConfig;
   /** Where the hub runs. Mirrors tab_core::config::HubConfig. */
-  hub?: { mode: HubMode };
+  /** `cloud_hub`: the cloud hub this computer moved into (set by the move). */
+  hub?: { mode: HubMode; cloud_hub?: string };
   onboarded: boolean;
 }
 
@@ -577,6 +578,9 @@ export interface CheckoutUsage { repo: string; number: number; last_used: string
 export interface StorageUsage { attachments: DirSize; sessions: DirSize; workspaces: DirSize; checkouts: CheckoutUsage[] }
 export interface Swept { removed: number; bytes: number }
 
+/** How moving to tab cloud went. Mirrors tab_core::local_hub::MoveOutcome. */
+export type MoveOutcome = { kind: "moved"; changes: number } | { kind: "joined"; head: number };
+
 /** Settings → Hub. Mirrors tab_core::local_hub::HubStatusView. */
 export interface HubConnection {
   id: number;
@@ -611,4 +615,7 @@ export interface HubStatus {
   memory_bytes: number | null;
   cpus: number;
   pending: number;
+  /** The cloud hub this computer's work syncs with, once moved; the rest describes this computer's own hub. */
+  cloud_hub: string | null;
+  cloud_connected: boolean;
 }
