@@ -1150,6 +1150,10 @@ impl AgentHub {
              put its absolute path in backticks, like `/full/path/shot.png`: tab shows images inline and \
              other files as a card they can open. Don't just describe it; show it.\n\
              - If the work splits into follow-ups, create them with tab_create_task.\n\
+             - Waiting on CI, a deploy or anything else slow: don't block on it with sleep or a --watch \
+             command in the foreground. If you can, start the wait in the background (e.g. \
+             run_in_background), say what you're waiting for and end your turn; tab shows the chat as \
+             Monitoring and you pick back up when it finishes.\n\
              - tab_search matches by keyword and by meaning. Give it a window (within_days, or since/until) \
              and project: \"current\" when the person means recent or this project's work; it widens on its \
              own if the window is too narrow.\n\
@@ -1495,6 +1499,36 @@ pub(crate) fn summarize_tool(tool: &str, input: &serde_json::Value) -> String {
     }
 }
 
+/// Whether a tool call only waits on something outside the chat: watching
+/// CI or a deploy, a long sleep, a polling loop. The chat shows Monitoring
+/// while one runs, since the agent isn't doing anything itself.
+pub(crate) fn is_wait(tool: &str, input: &serde_json::Value) -> bool {
+    if tool != "Bash" || input["run_in_background"].as_bool() == Some(true) {
+        return false;
+    }
+    let Some(cmd) = input["command"].as_str() else {
+        return false;
+    };
+    let words: Vec<&str> = cmd
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |w: &str| words.contains(&w);
+    let runs = |seq: [&str; 3]| words.windows(3).any(|w| w == seq);
+    let watch = runs(["gh", "run", "watch"]) || runs(["gh", "pr", "checks"]) && has("--watch");
+    let rollout = runs(["kubectl", "rollout", "status"]);
+    let polling = (has("until") || has("while")) && has("sleep");
+    // Only a long sleep: a short one is usually a pause between real steps.
+    let long_sleep = words.windows(2).any(|w| {
+        w[0] == "sleep"
+            && w[1]
+                .trim_end_matches('s')
+                .parse::<f64>()
+                .is_ok_and(|n| n >= 30.0)
+    });
+    watch || rollout || polling || long_sleep
+}
+
 /// Whether a reply ends by asking the person something: its last line
 /// (ignoring trailing markdown) ends with a question mark.
 fn ends_with_question(text: &str) -> bool {
@@ -1503,6 +1537,41 @@ fn ends_with_question(text: &str) -> bool {
         .rfind(|l| !l.is_empty() && !l.starts_with("```"))
         .map(|l| l.trim_end_matches(['*', '_', '`', ')', '"', '\'', ' ']))
         .is_some_and(|l| l.ends_with('?'))
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::is_wait;
+    use serde_json::json;
+
+    fn bash(cmd: &str) -> bool {
+        is_wait("Bash", &json!({ "command": cmd }))
+    }
+
+    #[test]
+    fn spots_commands_that_only_wait() {
+        assert!(bash(
+            "sleep 20; gh pr checks 89 --repo o/r --watch --interval 15 2>&1 | tail -4"
+        ));
+        assert!(bash("gh run watch 123 --exit-status"));
+        assert!(bash("until curl -sf https://x; do sleep 5; done"));
+        assert!(bash("sleep 120"));
+        assert!(bash("kubectl rollout status deploy/web"));
+    }
+
+    #[test]
+    fn leaves_real_work_alone() {
+        assert!(!bash("gh pr checks 89"));
+        assert!(!bash("gh run view 123 --log-failed"));
+        assert!(!bash("sleep 2 && curl localhost:3000"));
+        assert!(!bash("cargo test --workspace"));
+        assert!(!bash("pnpm vitest --watch=false"));
+        assert!(!is_wait(
+            "Bash",
+            &json!({ "command": "gh run watch 1", "run_in_background": true })
+        ));
+        assert!(!is_wait("Read", &json!({ "file_path": "sleep 100" })));
+    }
 }
 
 #[cfg(test)]
