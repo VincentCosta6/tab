@@ -33,7 +33,49 @@
 
 <main>
   <div class="hero wrap">
-    <span class="eyebrow"><b>TAB</b> Annihilates Backlogs</span>
+    <svg class="logo-hero" viewBox="0 0 1024 1024" role="img" aria-label="tab: three lanes of work converging into one queue">
+      <defs>
+        <linearGradient id="logo-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#26262b"/><stop offset="1" stop-color="#121214"/></linearGradient>
+        <filter id="bloom" x="-50%" y="-80%" width="200%" height="260%"><feGaussianBlur stdDeviation="28"/></filter>
+      </defs>
+      <rect width="1024" height="1024" rx="230" fill="url(#logo-bg)"/>
+      <g fill="none" stroke-linecap="round" stroke-width="64">
+        <path d="M220 300 C 420 300, 440 512, 600 512" stroke="#7dd3fc"/>
+        <path d="M220 724 C 420 724, 440 512, 600 512" stroke="#f9a8d4"/>
+        <path d="M220 512 H 600" stroke="#fcd34d"/>
+      </g>
+      <g>
+        <g class="flow" opacity="0">
+      <circle r="46" fill="#7dd3fc" filter="url(#bloom)"/>
+      <circle r="24" fill="#fff"/>
+      <animateMotion dur="3s" begin="0s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.4;1" calcMode="spline" keySplines="0.45 0 0.55 1;0 0 1 1" path="M220 300 C 420 300, 440 512, 600 512"/>
+      <animate attributeName="opacity" dur="3s" begin="0s" repeatCount="indefinite" keyTimes="0;0.04;0.38;0.4;1" values="0;1;1;0;0"/>
+    </g>
+        <rect class="flow" x="560" y="432" width="270" height="160" rx="80" fill="#7dd3fc" filter="url(#bloom)" opacity="0">
+          <animate attributeName="opacity" dur="3s" begin="0s" repeatCount="indefinite" keyTimes="0;0.39;0.43;0.62;1" values="0;0;0.9;0;0"/>
+        </rect>
+        <g class="flow" opacity="0">
+      <circle r="46" fill="#fcd34d" filter="url(#bloom)"/>
+      <circle r="24" fill="#fff"/>
+      <animateMotion dur="3s" begin="1s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.4;1" calcMode="spline" keySplines="0.45 0 0.55 1;0 0 1 1" path="M220 512 H 600"/>
+      <animate attributeName="opacity" dur="3s" begin="1s" repeatCount="indefinite" keyTimes="0;0.04;0.38;0.4;1" values="0;1;1;0;0"/>
+    </g>
+        <rect class="flow" x="560" y="432" width="270" height="160" rx="80" fill="#fcd34d" filter="url(#bloom)" opacity="0">
+          <animate attributeName="opacity" dur="3s" begin="1s" repeatCount="indefinite" keyTimes="0;0.39;0.43;0.62;1" values="0;0;0.9;0;0"/>
+        </rect>
+        <g class="flow" opacity="0">
+      <circle r="46" fill="#f9a8d4" filter="url(#bloom)"/>
+      <circle r="24" fill="#fff"/>
+      <animateMotion dur="3s" begin="2s" repeatCount="indefinite" keyPoints="0;1;1" keyTimes="0;0.4;1" calcMode="spline" keySplines="0.45 0 0.55 1;0 0 1 1" path="M220 724 C 420 724, 440 512, 600 512"/>
+      <animate attributeName="opacity" dur="3s" begin="2s" repeatCount="indefinite" keyTimes="0;0.04;0.38;0.4;1" values="0;1;1;0;0"/>
+    </g>
+        <rect class="flow" x="560" y="432" width="270" height="160" rx="80" fill="#f9a8d4" filter="url(#bloom)" opacity="0">
+          <animate attributeName="opacity" dur="3s" begin="2s" repeatCount="indefinite" keyTimes="0;0.39;0.43;0.62;1" values="0;0;0.9;0;0"/>
+        </rect>
+      </g>
+      <rect x="580" y="452" width="230" height="120" rx="60" fill="#fff"/>
+    </svg>
+    <p class="tagline"><b>TAB</b> Annihilates Backlogs</p>
     <h1>Everything that needs you, <span class="mark">in one queue.</span></h1>
     <p class="lede">PR reviews, CI failures, Slack mentions, email, meeting action items and agents waiting on input. tab pulls it in, ranks it, and puts your coding agent on every item.</p>
     <div class="cta" id="download">
