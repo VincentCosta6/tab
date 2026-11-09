@@ -22,6 +22,11 @@
 //!   `tab_test_workflow`: build workflows. Agents draft and dry-run them;
 //!   only the person turns one on.
 //! * `approve`: Claude Code's `--permission-prompt-tool`; asks the person.
+//!
+//! It also fronts the remote MCP servers the person connected
+//! ([`crate::remote_mcp`]): `/mcp/<id>` forwards a chat's requests with the
+//! sign-in added and each tool's allowed / ask / off choice applied, and
+//! `/oauth/callback` is where the browser comes back after signing in.
 
 use std::sync::Arc;
 
@@ -86,6 +91,16 @@ pub trait EngineAccess: Send + Sync + 'static {
     async fn pages_changed(&self, connector: &str, pages: &[String]) {
         crate::connectors::forget_pages(connector, pages);
     }
+    /// Saves the person's choice for one tool of a remote MCP server
+    /// ("Always allow" in a chat).
+    async fn set_remote_tool_policy(
+        &self,
+        _server: &str,
+        _tool: &str,
+        _policy: crate::remote_mcp::ToolPolicy,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("connections can't be changed from here")
+    }
     /// Dry-runs a workflow, on an item if given. Nothing changes.
     async fn dry_run_workflow(
         &self,
@@ -115,11 +130,17 @@ pub async fn serve(server: Arc<McpServer>, port: u16) -> anyhow::Result<String> 
     }
     let listener = listener.ok_or_else(|| anyhow::anyhow!("no free port for the MCP server"))?;
     let url = format!("http://{}/mcp", listener.local_addr()?);
+    server
+        .hub
+        .remote_mcp()
+        .set_loopback(&format!("http://{}", listener.local_addr()?));
     let app = Router::new()
         .route(
             "/mcp",
             post(handle).get(|| async { StatusCode::METHOD_NOT_ALLOWED }),
         )
+        .route("/mcp/{server}", axum::routing::any(handle_remote))
+        .route("/oauth/callback", axum::routing::get(handle_oauth_callback))
         .route("/cli", post(handle_cli))
         .route(
             "/git/{session}/{connector}/{*rest}",
@@ -187,6 +208,167 @@ async fn handle_cli(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: S
     };
     let reply = s.run_cli(&session, req).await;
     axum::Json(reply).into_response()
+}
+
+/// Headers a chat's MCP client sends that the remote server needs too.
+const REMOTE_REQUEST_HEADERS: [&str; 5] = [
+    "content-type",
+    "accept",
+    "mcp-session-id",
+    "mcp-protocol-version",
+    "last-event-id",
+];
+
+/// A chat's request to a remote MCP server the person connected. tab adds
+/// the sign-in, so the agent never holds it, and applies the person's
+/// choice for each tool: off tools aren't listed and can't be called, and
+/// "ask" tools wait for the person in the chat.
+async fn handle_remote(
+    State(s): State<Arc<McpServer>>,
+    axum::extract::Path(server): axum::extract::Path<String>,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let id = headers
+        .get("x-tab-session")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if !authed_chat(&s, &headers, &id) {
+        return (StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
+    }
+    let Some(session) = s.store.session_get(&id).ok().flatten() else {
+        return (StatusCode::FORBIDDEN, "only tab's chats can use this").into_response();
+    };
+    if s.hub.policy(&session).trust != crate::sandbox::Trust::Person {
+        return (
+            StatusCode::FORBIDDEN,
+            "connected MCP servers are only for chats you drive",
+        )
+            .into_response();
+    }
+    let remote = s.hub.remote_mcp().clone();
+    if !remote.usable().contains(&server) {
+        return (StatusCode::NOT_FOUND, "that MCP server isn't connected").into_response();
+    }
+
+    // `Some(first page)` when the request lists tools.
+    let mut lists_tools = None;
+    if method == axum::http::Method::POST {
+        let Ok(req) = serde_json::from_slice::<Value>(&body) else {
+            return json_response(rpc_error(Value::Null, -32700, "parse error"));
+        };
+        let reqs: Vec<&Value> = match &req {
+            Value::Array(a) => a.iter().collect(),
+            v => vec![v],
+        };
+        for r in reqs {
+            match r["method"].as_str() {
+                Some("tools/list") => lists_tools = Some(r["params"]["cursor"].is_null()),
+                Some("tools/call") => {
+                    let tool = r["params"]["name"].as_str().unwrap_or_default();
+                    if let Some(why) = s
+                        .check_remote_tool(&session, &server, tool, &r["params"]["arguments"])
+                        .await
+                    {
+                        return json_response(json!({
+                            "jsonrpc": "2.0",
+                            "id": r["id"],
+                            "result": { "content": [{ "type": "text", "text": why }], "isError": true }
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let forward: Vec<(String, String)> = REMOTE_REQUEST_HEADERS
+        .iter()
+        .filter_map(|h| {
+            let v = headers.get(*h)?.to_str().ok()?;
+            Some((h.to_string(), v.to_string()))
+        })
+        .collect();
+    let Ok(m) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    };
+    let r = match remote
+        .send(
+            &server,
+            m,
+            &forward,
+            (!body.is_empty()).then(|| body.clone()),
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // A sign-in that stopped working shows in Connections.
+            let _ = s.events.send(EngineEvent::ConfigChanged);
+            return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+        }
+    };
+    let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let ct = crate::remote_mcp::content_type(r.headers());
+    let mut out = Response::builder().status(status);
+    for h in ["content-type", "mcp-session-id", "cache-control"] {
+        if let Some(v) = r.headers().get(h).and_then(|v| v.to_str().ok()) {
+            out = out.header(h, v);
+        }
+    }
+    let body = match lists_tools {
+        Some(first_page) if status.is_success() => {
+            let text = r.text().await.unwrap_or_default();
+            for m in crate::remote_mcp::messages(&ct, &text) {
+                if let Some(t) = m["result"]["tools"].as_array() {
+                    remote.saw_tools(&server, t, first_page);
+                }
+            }
+            axum::body::Body::from(crate::remote_mcp::rewrite(&ct, &text, |v| {
+                if let Some(t) = v["result"]["tools"].as_array_mut() {
+                    t.retain(|t| {
+                        remote.policy(&server, t["name"].as_str().unwrap_or_default())
+                            != crate::remote_mcp::ToolPolicy::Off
+                    });
+                }
+            }))
+        }
+        _ => axum::body::Body::from_stream(r.bytes_stream()),
+    };
+    out.body(body)
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+/// Where the browser lands after signing in to a remote MCP server.
+async fn handle_oauth_callback(
+    State(s): State<Arc<McpServer>>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    use crate::account::{html_escape, page};
+    let error = q
+        .get("error_description")
+        .or_else(|| q.get("error"))
+        .map(String::as_str);
+    let result = s
+        .hub
+        .remote_mcp()
+        .finish_sign_in(
+            q.get("state").map(String::as_str).unwrap_or_default(),
+            q.get("code").map(String::as_str),
+            error,
+        )
+        .await;
+    let _ = s.events.send(EngineEvent::ConfigChanged);
+    let html = match result {
+        Ok(name) => page(
+            &format!("Connected to {}", html_escape(&name)),
+            "You can close this tab and go back to tab.",
+        ),
+        Err(e) => page("Sign-in didn't finish", &html_escape(&e.to_string())),
+    };
+    ([("content-type", "text/html; charset=utf-8")], html).into_response()
 }
 
 fn upstream_client() -> &'static reqwest::Client {
@@ -834,6 +1016,55 @@ fn missing_required(info: &ConnectorInfo, cfg: &ConnectorConfig) -> Vec<String> 
 }
 
 impl McpServer {
+    /// Why a chat may not call a remote MCP tool, after asking the person
+    /// when that's their choice. `None` lets it through.
+    async fn check_remote_tool(
+        &self,
+        session: &Session,
+        server: &str,
+        tool: &str,
+        args: &Value,
+    ) -> Option<String> {
+        use crate::remote_mcp::ToolPolicy;
+        let remote = self.hub.remote_mcp();
+        let name = remote
+            .get(server)
+            .map(|c| c.name)
+            .unwrap_or_else(|| server.to_string());
+        match remote.policy(server, tool) {
+            ToolPolicy::Allow => None,
+            ToolPolicy::Off => Some(format!(
+                "{tool} is turned off for agents in tab (Connections → {name}). Don't try it another way; tell the person what you wanted to do."
+            )),
+            ToolPolicy::Ask => {
+                let full = format!("mcp__{server}__{tool}");
+                let summary = format!("{name}: {}", summarize_tool(&full, args));
+                match self
+                    .hub
+                    .request_approval(&session.id, &full, summary, args.clone())
+                    .await
+                {
+                    Decision::Allow | Decision::Answer(_) => None,
+                    Decision::AllowAlways => {
+                        if let Err(e) = self
+                            .engine
+                            .set_remote_tool_policy(server, tool, ToolPolicy::Allow)
+                            .await
+                        {
+                            tracing::warn!(server, tool, error = %e, "couldn't save always-allow");
+                        }
+                        None
+                    }
+                    Decision::Deny(why) => Some(if why.trim().is_empty() {
+                        "The person declined this.".into()
+                    } else {
+                        why
+                    }),
+                }
+            }
+        }
+    }
+
     /// Connector types with their actions. Falls back to the registry, not
     /// installed, when the engine can't say.
     async fn catalog(&self) -> Vec<ConnectorInfo> {
@@ -2701,5 +2932,334 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("could loop"), "{err}");
         assert_eq!(store.workflows().unwrap().len(), 1);
+    }
+
+    /// A remote MCP server that wants a sign-in, with its own authorization
+    /// server: tab signs in (discovery, registration, PKCE, the browser's
+    /// callback), then forwards a chat's requests with the token, refreshes
+    /// it when the server stops taking it, and applies each tool's choice.
+    #[tokio::test]
+    async fn fronts_a_remote_mcp_server_with_its_sign_in() {
+        use crate::remote_mcp::{RemoteMcpConfig, ToolPolicy};
+        use std::collections::HashMap;
+
+        #[derive(Clone)]
+        struct Fake {
+            base: Arc<std::sync::Mutex<String>>,
+            /// The access token the server takes right now.
+            valid: Arc<std::sync::Mutex<String>>,
+            refreshed: Arc<std::sync::atomic::AtomicUsize>,
+            verifier_seen: Arc<std::sync::Mutex<Option<String>>>,
+        }
+        let fake = Fake {
+            base: Default::default(),
+            valid: Arc::new(std::sync::Mutex::new("tok-1".into())),
+            refreshed: Default::default(),
+            verifier_seen: Default::default(),
+        };
+        async fn mcp(State(f): State<Fake>, headers: HeaderMap, body: String) -> Response {
+            let base = f.base.lock().unwrap().clone();
+            let good = format!("Bearer {}", f.valid.lock().unwrap());
+            if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(good.as_str()) {
+                let challenge = format!(
+                    "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\", scope=\"read write\""
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [("www-authenticate", challenge)],
+                    "",
+                )
+                    .into_response();
+            }
+            let req: Value = serde_json::from_str(&body).unwrap();
+            let id = req["id"].clone();
+            match req["method"].as_str().unwrap_or_default() {
+                "initialize" => (
+                    [
+                        ("mcp-session-id", "up-1"),
+                        ("content-type", "application/json"),
+                    ],
+                    json!({ "jsonrpc": "2.0", "id": id, "result": {
+                        "protocolVersion": "2025-06-18", "capabilities": {},
+                        "serverInfo": { "name": "Things" } } })
+                    .to_string(),
+                )
+                    .into_response(),
+                "tools/list" => {
+                    assert_eq!(
+                        headers.get("mcp-session-id").and_then(|v| v.to_str().ok()),
+                        Some("up-1")
+                    );
+                    let tools = json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": [
+                        { "name": "list_things", "annotations": { "readOnlyHint": true } },
+                        { "name": "make_thing" },
+                        { "name": "drop_thing" },
+                    ] } });
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!("event: message\ndata: {tools}\n\n"),
+                    )
+                        .into_response()
+                }
+                "tools/call" => json_response(json!({ "jsonrpc": "2.0", "id": id, "result": {
+                    "content": [{ "type": "text", "text": format!("did {}", req["params"]["name"].as_str().unwrap()) }] } })),
+                _ => StatusCode::ACCEPTED.into_response(),
+            }
+        }
+        let app = Router::new()
+            .route("/mcp", post(mcp))
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                axum::routing::get(|State(f): State<Fake>| async move {
+                    let base = f.base.lock().unwrap().clone();
+                    axum::Json(json!({ "resource": format!("{base}/mcp"), "authorization_servers": [base] }))
+                }),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server",
+                axum::routing::get(|State(f): State<Fake>| async move {
+                    let b = f.base.lock().unwrap().clone();
+                    axum::Json(json!({
+                        "issuer": b, "authorization_endpoint": format!("{b}/authorize"),
+                        "token_endpoint": format!("{b}/token"), "registration_endpoint": format!("{b}/register"),
+                        "code_challenge_methods_supported": ["S256"] }))
+                }),
+            )
+            .route(
+                "/register",
+                post(|axum::Json(v): axum::Json<Value>| async move {
+                    assert_eq!(v["token_endpoint_auth_method"], "none");
+                    assert!(v["redirect_uris"][0].as_str().unwrap().ends_with("/oauth/callback"));
+                    axum::Json(json!({ "client_id": "cid" }))
+                }),
+            )
+            .route(
+                "/token",
+                post(|State(f): State<Fake>, body: String| async move {
+                    let form: HashMap<String, String> = reqwest::Url::parse(&format!("http://x/?{body}"))
+                        .unwrap()
+                        .query_pairs()
+                        .into_owned()
+                        .collect();
+                    assert_eq!(form["client_id"], "cid");
+                    assert!(form["resource"].ends_with("/mcp"));
+                    match form["grant_type"].as_str() {
+                        "authorization_code" => {
+                            assert_eq!(form["code"], "code-1");
+                            *f.verifier_seen.lock().unwrap() = Some(form["code_verifier"].clone());
+                            axum::Json(json!({ "access_token": "tok-1", "refresh_token": "r1", "expires_in": 3600 }))
+                        }
+                        _ => {
+                            assert_eq!(form["refresh_token"], "r1");
+                            f.refreshed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            axum::Json(json!({ "access_token": "tok-2", "expires_in": 3600 }))
+                        }
+                    }
+                }),
+            )
+            .with_state(fake.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        *fake.base.lock().unwrap() = base.clone();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, mut rx) = tokio::sync::broadcast::channel(64);
+        let dir = std::env::temp_dir().join(format!("tab-remote-mcp-{}", uuid::Uuid::new_v4()));
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            dir.clone(),
+        );
+        let server = Arc::new(McpServer {
+            store: store.clone(),
+            hub: hub.clone(),
+            engine: Arc::new(NoEngine(store.clone())),
+            events,
+            token: "secret".into(),
+        });
+        let url = serve(server, 48_300).await.unwrap();
+        let remote = hub.remote_mcp().clone();
+        remote.set_servers(std::collections::BTreeMap::from([(
+            "things".to_string(),
+            RemoteMcpConfig {
+                name: "Things".into(),
+                url: format!("{base}/mcp"),
+                enabled: true,
+                sign_in: true,
+                catalog: None,
+                tools: std::collections::BTreeMap::from([(
+                    "drop_thing".to_string(),
+                    ToolPolicy::Off,
+                )]),
+            },
+        )]));
+        assert!(remote.usable().is_empty());
+        hub.set_mcp(crate::agents::McpEndpoint {
+            url: url.clone(),
+            token: "secret".into(),
+        });
+        let session = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        // Not signed in: chats don't get it.
+        assert!(hub.remote_servers(crate::sandbox::Trust::Person).is_empty());
+
+        // Sign in: tab finds the authorization server and registers itself.
+        let authorize = remote.begin_sign_in("things").await.unwrap();
+        let au = reqwest::Url::parse(&authorize).unwrap();
+        assert!(authorize.starts_with(&format!("{base}/authorize?")));
+        let q: HashMap<_, _> = au.query_pairs().into_owned().collect();
+        assert_eq!(q["client_id"], "cid");
+        assert_eq!(q["scope"], "read write");
+        let callback = reqwest::Url::parse(&q["redirect_uri"]).unwrap();
+        // The browser comes back with a code.
+        let page = reqwest::get(format!("{callback}?state={}&code=code-1", q["state"]))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(page.contains("Connected to Things"), "{page}");
+        assert!(
+            fake.verifier_seen
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|v| v.len() >= 43)
+        );
+        // The same link can't be used twice.
+        let again = reqwest::get(format!("{callback}?state={}&code=code-1", q["state"]))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(again.contains("didn't finish"), "{again}");
+        assert_eq!(remote.usable(), ["things"]);
+        assert_eq!(
+            hub.remote_servers(crate::sandbox::Trust::Person),
+            [("things".to_string(), format!("{url}/things"))]
+        );
+        // Review chats and jobs never get it.
+        assert!(hub.remote_servers(crate::sandbox::Trust::Agent).is_empty());
+
+        let client = reqwest::Client::new();
+        let token = chat_token("secret", &session.id);
+        let call = |body: Value, token: String| {
+            client
+                .post(format!("{url}/things"))
+                .bearer_auth(token)
+                .header("x-tab-session", &session.id)
+                .header("accept", "application/json, text/event-stream")
+                .json(&body)
+                .send()
+        };
+        // Another chat's token doesn't work.
+        let r = call(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+            "nope".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), 401);
+
+        let r = call(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+            token.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()["mcp-session-id"], "up-1");
+
+        // Off tools aren't listed; the stream stays a stream.
+        let r = client
+            .post(format!("{url}/things"))
+            .bearer_auth(&token)
+            .header("x-tab-session", &session.id)
+            .header("mcp-session-id", "up-1")
+            .json(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            r.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream")
+        );
+        let msgs = crate::remote_mcp::messages("text/event-stream", &r.text().await.unwrap());
+        let names: Vec<&str> = msgs[0]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["list_things", "make_thing"]);
+
+        let tool = |name: &str| json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": name, "arguments": {} } });
+        // Off: refused without reaching the server.
+        let v: Value = call(tool("drop_thing"), token.clone())
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["result"]["isError"], true);
+        assert!(
+            v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("turned off")
+        );
+        // Read-only: runs.
+        let r = call(tool("list_things"), token.clone())
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(r.contains("did list_things"), "{r}");
+
+        // The server stops taking the token: tab refreshes and retries once.
+        *fake.valid.lock().unwrap() = "tok-2".into();
+        let r = call(tool("list_things"), token.clone())
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(r.contains("did list_things"), "{r}");
+        assert_eq!(fake.refreshed.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Anything else asks the person first.
+        let pending = call(tool("make_thing"), token.clone());
+        let approve = async {
+            loop {
+                if let EngineEvent::ApprovalRequested { approval } = rx.recv().await.unwrap() {
+                    assert_eq!(approval.tool, "mcp__things__make_thing");
+                    assert!(
+                        approval.summary.starts_with("Things: "),
+                        "{}",
+                        approval.summary
+                    );
+                    hub.resolve_approval(&approval.id, Decision::Deny("not now".into()));
+                    break;
+                }
+            }
+        };
+        let (r, _) = tokio::join!(pending, approve);
+        let v: Value = r.unwrap().json().await.unwrap();
+        assert_eq!(v["result"]["isError"], true);
+        assert_eq!(v["result"]["content"][0]["text"], "not now");
+
+        // Signed out: chats lose it.
+        remote.sign_out("things");
+        assert!(remote.usable().is_empty());
+        let r = call(tool("list_things"), token).await.unwrap();
+        assert_eq!(r.status(), 404);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

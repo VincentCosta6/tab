@@ -66,6 +66,9 @@ const CACHE_VERSION = "2";
 export const keys = {
   items: (state: string, query: string) => ["items", state, query] as const,
   allItems: ["items"] as const,
+  mcpServers: ["mcp-servers"] as const,
+  mcpCatalog: ["mcp-catalog"] as const,
+  mcpTools: (id: string) => ["mcp-tools", id] as const,
   item: (id: string) => ["item", id] as const,
   preview: (id: string) => ["preview", id] as const,
   context: (id: string) => ["context", id] as const,
@@ -225,6 +228,7 @@ function LiveEvents() {
         case "config_changed":
           qc.invalidateQueries({ queryKey: keys.config });
           qc.invalidateQueries({ queryKey: keys.connectors });
+          qc.invalidateQueries({ queryKey: keys.mcpServers });
           break;
         case "approval_resolved": {
           const key = chatKeyForSession(qc, e.session_id);

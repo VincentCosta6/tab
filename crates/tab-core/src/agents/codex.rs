@@ -42,6 +42,8 @@ pub(super) struct Options<'a> {
     /// tab's MCP server: its url and this chat's session id. The token goes
     /// in `TAB_MCP_TOKEN`.
     pub mcp: Option<(&'a str, &'a str)>,
+    /// Remote MCP servers through tab, as `(name, url)`; same token.
+    pub remote: &'a [(String, String)],
     pub resume: Option<&'a str>,
 }
 
@@ -76,6 +78,16 @@ pub(super) fn args(o: &Options) -> Vec<String> {
             "mcp_servers.tab.http_headers={{ \"X-Tab-Session\" = {} }}",
             toml_str(session)
         ));
+        for (name, url) in o.remote {
+            config.push(format!("mcp_servers.{name}.url={}", toml_str(url)));
+            config.push(format!(
+                "mcp_servers.{name}.bearer_token_env_var=\"TAB_MCP_TOKEN\""
+            ));
+            config.push(format!(
+                "mcp_servers.{name}.http_headers={{ \"X-Tab-Session\" = {} }}",
+                toml_str(session)
+            ));
+        }
     }
     for c in config {
         a.extend(["-c".into(), c]);
@@ -116,16 +128,19 @@ pub(super) async fn run_turn(
         .map(|m| crate::mcp::chat_token(&m.token, &session.id));
     let model = cfg.model_for(AgentKind::Codex);
     let strict = strict(cfg.strict, policy.trust);
+    let remote = hub.remote_servers(policy.trust);
     let args = args(&Options {
         strict,
         enforced: crate::sandbox::current().enforced(),
         model,
         system,
         mcp: mcp.as_ref().map(|m| (m.url.as_str(), session.id.as_str())),
+        remote: &remote,
         resume: session.agent_session_id.as_deref(),
     });
     let mut events = Parser::new(hub.clone(), session.id.clone(), model);
     events.strict = strict;
+    events.allowed_mcp = remote.iter().map(|(name, _)| name.clone()).collect();
     let mut a = super::Args::default();
     a.args(&args);
     per_turn::run(
@@ -156,6 +171,8 @@ pub(super) struct Parser {
     finished: bool,
     /// Strict mode: only tab's MCP server may be called.
     pub(super) strict: bool,
+    /// Remote MCP servers tab added for this chat (strict allows them).
+    pub(super) allowed_mcp: Vec<String>,
     leaked: Option<String>,
 }
 
@@ -168,6 +185,7 @@ impl Parser {
             shown: HashSet::new(),
             finished: false,
             strict: false,
+            allowed_mcp: Vec::new(),
             leaked: None,
         }
     }
@@ -202,7 +220,9 @@ impl Parser {
     fn show_tool(&mut self, item: &Value) {
         if self.strict
             && item["type"] == "mcp_tool_call"
-            && let Some(server) = item["server"].as_str().filter(|s| *s != "tab")
+            && let Some(server) = item["server"]
+                .as_str()
+                .filter(|s| *s != "tab" && !self.allowed_mcp.iter().any(|a| a == s))
         {
             self.leaked = Some(format!("MCP server \"{server}\""));
         }
@@ -432,6 +452,7 @@ mod tests {
             model: None,
             system: "Be brief.",
             mcp: None,
+            remote: &[],
             resume: None,
         }
     }
@@ -454,6 +475,7 @@ mod tests {
             strict: true,
             enforced: true,
             mcp: Some(("http://127.0.0.1:9/mcp", "s1")),
+            remote: &[("linear".into(), "http://127.0.0.1:9/mcp/linear".into())],
             ..opts()
         });
         let at = a.iter().position(|x| x == "resume").unwrap();
@@ -467,6 +489,12 @@ mod tests {
                 .any(|w| w == ["--sandbox", "danger-full-access"])
         );
         assert!(a.contains(&"mcp_servers.tab.url=\"http://127.0.0.1:9/mcp\"".to_string()));
+        assert!(
+            a.contains(&"mcp_servers.linear.url=\"http://127.0.0.1:9/mcp/linear\"".to_string())
+        );
+        assert!(
+            a.contains(&"mcp_servers.linear.bearer_token_env_var=\"TAB_MCP_TOKEN\"".to_string())
+        );
         assert!(
             a.contains(&"mcp_servers.tab.http_headers={ \"X-Tab-Session\" = \"s1\" }".to_string())
         );

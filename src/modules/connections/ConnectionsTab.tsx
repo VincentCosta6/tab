@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, PageHeader, Section, StatusDot, Tabs, Toggle, cx } from "../../design/components";
 import { Brand, hasBrand } from "../../design/brands";
 import { Icon } from "../../design/icons";
@@ -14,6 +14,10 @@ import { openSettings } from "../settings/SettingsTab";
 import { startSetupChat } from "../work/Chat";
 import { ApiUsage } from "./ApiUsage";
 import { GhConnect } from "./GhConnect";
+import { AddByUrl, Caps, McpCatalogCard, McpDetail, McpInstalledRow, useConnect, useMcpCatalog, useMcpServers } from "./RemoteMcp";
+
+/** Connectors whose sign-in agents also use in chats (tab's own tools, `gh` and `git`). */
+const agentToolConnectors = new Set(["tab", "github"]);
 
 type View = "installed" | "marketplace" | "usage";
 
@@ -48,17 +52,37 @@ const shelves: { id: string; label: string }[] = [
 export function ConnectionsTab() {
   const { connectors } = useApp();
   const [view, setView] = useState<View>("installed");
+  // A connector id, or `mcp:<id>` for a remote MCP connection.
   const [open, setOpen] = useState<string | null>(null);
   const installed = connectors.filter((c) => c.enabled);
   const current = connectors.find((c) => c.id === open);
+  const { data: servers = [] } = useMcpServers();
+  const { data: catalog = [] } = useMcpCatalog();
+  const added = new Set(servers.map((x) => x.catalog).filter(Boolean));
+  const available = catalog.filter((e) => !added.has(e.id));
+  const colorOf = (catalogId?: string | null) => catalog.find((e) => e.id === catalogId)?.color;
+  const onConnected = useCallback((id: string) => setOpen(`mcp:${id}`), []);
+  const connect = useConnect(onConnected);
+  const taken = servers.map((x) => x.id);
 
   if (current) return <ConnectorDetail c={current} onBack={() => setOpen(null)} />;
+  if (open?.startsWith("mcp:")) {
+    const id = open.slice(4);
+    return <McpDetail id={id} color={colorOf(servers.find((x) => x.id === id)?.catalog)} onBack={() => setOpen(null)} />;
+  }
+  const connectEntry = (e: (typeof catalog)[number]) => {
+    let id = e.id;
+    for (let n = 2; taken.includes(id); n++) id = `${e.id}-${n}`;
+    void connect
+      .add({ id, name: e.name, url: e.url, signIn: true, catalog: e.id, color: e.color })
+      .catch((err) => connect.setError(String(err)));
+  };
 
   return (
     <div className="page">
       <PageHeader
         title="Connections"
-        subtitle="Everything tab knows comes in through a connection. Each one brings its own kinds of work, settings and rate budgets."
+        subtitle="Each connection can bring work into your queue, give agents tools to act there, or both."
         actions={<AssistButton />}
       />
       <div className="page-tabs">
@@ -66,8 +90,8 @@ export function ConnectionsTab() {
           value={view}
           onChange={setView}
           items={[
-            { value: "installed", label: "Installed", count: installed.length },
-            { value: "marketplace", label: "Marketplace", count: connectors.filter((c) => !c.enabled).length },
+            { value: "installed", label: "Installed", count: installed.length + servers.length },
+            { value: "marketplace", label: "Marketplace", count: connectors.filter((c) => !c.enabled).length + available.length },
             { value: "usage", label: "API usage" },
           ]}
         />
@@ -77,25 +101,41 @@ export function ConnectionsTab() {
           {installed.map((c) => (
             <InstalledRow key={c.id} c={c} onOpen={() => setOpen(c.id)} />
           ))}
+          {servers.map((x) => (
+            <McpInstalledRow key={x.id} s={x} color={colorOf(x.catalog)} onOpen={() => setOpen(`mcp:${x.id}`)} />
+          ))}
           <button className="connector-add" onClick={() => setView("marketplace")}>
             <Icon name="store" size={16} /> Browse the marketplace
           </button>
         </div>
       )}
+      {connect.error && <p className="chat-error">{connect.error}</p>}
       {view === "marketplace" &&
         shelves.map((shelf) => {
           const items = connectors.filter((c) => (c.category || "built_in") === shelf.id && !c.enabled);
-          if (!items.length) return null;
+          const remote = available.filter((e) => e.category === shelf.id);
+          if (!items.length && !remote.length) return null;
           return (
             <Section key={shelf.id} title={shelf.label}>
               <div className="connector-grid">
                 {items.map((c) => (
                   <MarketCard key={c.id} c={c} onOpen={() => setOpen(c.id)} />
                 ))}
+                {remote.map((e) => (
+                  <McpCatalogCard key={e.id} entry={e} onConnect={() => connectEntry(e)} />
+                ))}
               </div>
             </Section>
           );
         })}
+      {view === "marketplace" && (
+        <Section title="Advanced" description="Any service with a remote MCP server works too: tab signs in for you when it asks.">
+          <div className="connector-list">
+            <AddByUrl onAdd={connect.add} />
+          </div>
+        </Section>
+      )}
+      {connect.dialog}
       {view === "usage" && <ApiUsage />}
     </div>
   );
@@ -164,6 +204,7 @@ function MarketCard({ c, onOpen }: { c: ConnectorInfo; onOpen: () => void }) {
         {c.available && <Button size="sm" variant="primary" onClick={onOpen}>Install</Button>}
       </div>
       <p className="connector-desc">{c.description}</p>
+      <Caps queue={c.kinds.length > 0} tools={agentToolConnectors.has(c.id)} />
       {c.features.length > 0 && (
         <ul className="feature-list">
           {c.features.slice(0, 2).map((f) => (

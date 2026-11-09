@@ -8,6 +8,7 @@ import { create, toBinary } from "@bufbuild/protobuf";
 import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
 import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, RunnerState, RunnerStatusSchema, type HubStatus } from "./protocol/cloud";
 import type {
+  McpCatalogEntry, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, ProjectRepo, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
@@ -199,6 +200,8 @@ export const mockApi = {
     const r = await (async () => {
       const wf = workflowMock(cmd, args, { items: () => items, connectors: () => connectors, emit });
       if (wf !== NOT_HANDLED) return wf;
+      const mcp = mcpHandle(cmd, args);
+      if (mcp !== NOT_HANDLED) return mcp;
       switch (cmd) {
         case "agent_slash_commands": return ["compact", "context", "cost", "init", "review", "pr-comments", "security-review", "release-notes", "frontend-design", "deploy"];
         case "agent_activity": return sessions.filter((s) => s.item_id && items.find((i) => i.id === s.item_id)?.state !== "done").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));
@@ -615,6 +618,10 @@ export const mockApi = {
     ghCodeListeners.add(cb);
     return () => void ghCodeListeners.delete(cb);
   },
+  onMcpSignIn(cb: (e: McpSignInEvent) => void) {
+    mcpSignInListeners.add(cb);
+    return () => void mcpSignInListeners.delete(cb);
+  },
 };
 
 let mockCheckouts = [
@@ -632,6 +639,95 @@ let lspServers: LspServer[] = [
 
 let gh: GhStatus = { installed: false, path: null, version: null, logged_in: false, user: null, install_command: "brew install gh", error: null };
 const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
+
+// Remote MCP connections. Sign-ins finish on their own after a moment.
+const mcpCatalog: McpCatalogEntry[] = [
+  { id: "linear", name: "Linear", url: "https://mcp.linear.app/mcp", description: "Agents can find, create and update issues, projects and comments.", category: "work", color: "#5e6ad2" },
+  { id: "notion", name: "Notion", url: "https://mcp.notion.com/mcp", description: "Agents can search, read and edit pages and databases.", category: "work", color: "#191919" },
+  { id: "atlassian", name: "Jira & Confluence", url: "https://mcp.atlassian.com/v1/mcp", description: "Agents can search, comment on and move tickets, and read pages.", category: "work", color: "#1868db" },
+  { id: "sentry", name: "Sentry", url: "https://mcp.sentry.dev/mcp", description: "Agents can look up issues, stack traces and events.", category: "code", color: "#362d59" },
+  { id: "vercel", name: "Vercel", url: "https://mcp.vercel.com", description: "Agents can read deployments, build logs and project settings.", category: "code", color: "#000000" },
+  { id: "stripe", name: "Stripe", url: "https://mcp.stripe.com", description: "Agents can look up customers, payments, invoices and disputes.", category: "work", color: "#635bff" },
+];
+const mcpSignedIn = new Map<string, string>();
+const mcpSignInListeners = new Set<(e: McpSignInEvent) => void>();
+const mockMcpTools: Omit<McpTool, "policy" | "chosen">[] = [
+  { name: "list_issues", title: "List issues", description: "Search and filter issues.", read_only: true },
+  { name: "get_issue", title: "Get issue", description: "One issue with its comments.", read_only: true },
+  { name: "list_projects", title: "List projects", description: "Projects in the workspace.", read_only: true },
+  { name: "create_comment", title: "Comment", description: "Comment on an issue.", read_only: false },
+  { name: "update_issue", title: "Update issue", description: "Change status, assignee or estimate.", read_only: false },
+  { name: "create_issue", title: "Create issue", description: "Create an issue.", read_only: false },
+];
+function mcpServersInfo(): McpServerInfo[] {
+  return Object.entries(config.mcp_servers ?? {}).map(([id, c]) => ({
+    ...c,
+    id,
+    ready: c.enabled && (!c.sign_in || mcpSignedIn.has(id)),
+    signed_in_at: mcpSignedIn.get(id) ?? null,
+    error: null,
+    tool_count: !c.sign_in || mcpSignedIn.has(id) ? mockMcpTools.length : null,
+  }));
+}
+function mcpSetServers(next: Record<string, McpServerConfig>) {
+  config = { ...config, mcp_servers: next };
+  emit({ type: "config_changed" });
+}
+function mcpFinishSoon(id: string) {
+  setTimeout(() => {
+    mcpSignedIn.set(id, new Date().toISOString());
+    mcpSignInListeners.forEach((l) => l({ id, ok: true, error: null }));
+    emit({ type: "config_changed" });
+  }, 1800);
+}
+function mcpHandle(cmd: string, args: Record<string, any>): unknown {
+  const servers = config.mcp_servers ?? {};
+  switch (cmd) {
+    case "mcp_catalog": return mcpCatalog;
+    case "mcp_servers": return mcpServersInfo();
+    case "mcp_probe": {
+      let u: URL;
+      try { u = new URL(String(args.url).trim()); } catch { throw "That isn't a URL. It should look like https://example.com/mcp"; }
+      if (u.protocol !== "https:" && u.hostname !== "localhost") throw "MCP servers need an https:// address";
+      const host = u.hostname.replace(/^mcp\./, "").split(".")[0];
+      let id = host.toLowerCase().replace(/[^a-z0-9-]/g, "-") || "mcp";
+      while (servers[id]) id = id + "-2";
+      const probe: McpProbe = { url: u.toString(), name: host.charAt(0).toUpperCase() + host.slice(1), sign_in: !u.hostname.includes("open"), id };
+      return probe;
+    }
+    case "mcp_add": {
+      if (servers[args.id]) throw "There's already a connection called " + args.id + ".";
+      mcpSetServers({ ...servers, [args.id]: { name: args.name, url: args.url, enabled: true, sign_in: args.signIn, ...(args.catalog ? { catalog: args.catalog } : {}) } });
+      if (!args.signIn) return null;
+      mcpFinishSoon(args.id);
+      return args.url + "#authorize";
+    }
+    case "mcp_sign_in": mcpFinishSoon(args.id); return (servers[args.id]?.url ?? "") + "#authorize";
+    case "mcp_sign_out": mcpSignedIn.delete(args.id); emit({ type: "config_changed" }); return null;
+    case "mcp_remove": {
+      const rest = { ...servers };
+      delete rest[args.id];
+      mcpSignedIn.delete(args.id);
+      mcpSetServers(rest);
+      return null;
+    }
+    case "mcp_set_enabled": mcpSetServers({ ...servers, [args.id]: { ...servers[args.id], enabled: args.enabled } }); return null;
+    case "mcp_tools": {
+      const chosen = servers[args.id]?.tools ?? {};
+      return mockMcpTools.map((t) => ({ ...t, policy: chosen[t.name] ?? (t.read_only ? "allow" : "ask"), chosen: t.name in chosen }));
+    }
+    case "mcp_set_tool": {
+      const s = servers[args.id];
+      const tools = { ...(s.tools ?? {}) };
+      if (args.policy) tools[args.tool] = args.policy;
+      else delete tools[args.tool];
+      mcpSetServers({ ...servers, [args.id]: { ...s, tools } });
+      return null;
+    }
+  }
+  return NOT_HANDLED;
+}
+
 const upgradeListeners = new Set<(line: string) => void>();
 let mockUpgraded = false;
 const appUpdateListeners = new Set<(p: { downloaded: number; total: number | null }) => void>();

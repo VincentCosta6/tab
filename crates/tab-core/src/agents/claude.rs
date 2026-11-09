@@ -173,25 +173,35 @@ pub(super) async fn run_turn(
     if attachments.is_dir() {
         cmd.arg("--add-dir").arg(&attachments);
     }
+    let remote = hub.remote_servers(policy.trust);
     if let Some(mcp) = hub.mcp() {
         let mcp_file = dir.join("mcp.json");
-        let config = json!({
-            "mcpServers": {
-                "tab": {
-                    "type": "http",
-                    "url": mcp.url,
-                    "headers": {
-                        "Authorization": format!("Bearer {}", crate::mcp::chat_token(&mcp.token, &session.id)),
-                        "X-Tab-Session": session.id,
-                    }
-                }
-            }
+        let headers = json!({
+            "Authorization": format!("Bearer {}", crate::mcp::chat_token(&mcp.token, &session.id)),
+            "X-Tab-Session": session.id,
         });
+        let mut servers = serde_json::Map::new();
+        servers.insert(
+            "tab".into(),
+            json!({ "type": "http", "url": mcp.url, "headers": headers }),
+        );
+        // Connected remote servers, through tab, which signs them in.
+        for (name, url) in &remote {
+            servers.insert(
+                name.clone(),
+                json!({ "type": "http", "url": url, "headers": headers }),
+            );
+        }
+        let config = json!({ "mcpServers": servers });
         std::fs::write(&mcp_file, serde_json::to_vec_pretty(&config)?)?;
         cmd.arg("--mcp-config").arg(&mcp_file);
-        // Approvals come to tab; tab's own tools need none.
+        // Approvals come to tab; tab's own tools need none, and tab asks
+        // about remote tools itself, by the person's choice for each.
         cmd.args(["--permission-prompt-tool", "mcp__tab__approve"]);
-        cmd.args(["--allowedTools", "mcp__tab"]);
+        cmd.arg("--allowedTools").arg("mcp__tab");
+        for (name, _) in &remote {
+            cmd.arg(format!("mcp__{name}"));
+        }
     }
     if let Some(m) = cfg.model_for(AgentKind::ClaudeCode) {
         cmd.args(["--model", m]);
@@ -267,6 +277,7 @@ pub(super) async fn run_turn(
     parser.open_tools = open_tools;
     parser.unanswered = unanswered;
     parser.strict = strict;
+    parser.allowed_mcp = remote.into_iter().map(|(name, _)| name).collect();
     // Rough size of what tab adds to the system prompt (the item and its context).
     parser.tab_context_tokens = (system.len() / 4) as i64;
     // After the result the CLI normally exits right away. If it stays up,
@@ -367,6 +378,8 @@ struct Parser {
     strict: bool,
     /// What loaded anyway, from the init line. Non-empty stops the turn.
     leaked: Vec<String>,
+    /// Remote MCP servers tab added for this chat (strict allows them).
+    allowed_mcp: Vec<String>,
     /// Open calls that only wait on something outside (CI, a deploy):
     /// while any runs the chat shows Monitoring, not Working.
     waits: HashSet<String>,
@@ -394,13 +407,14 @@ fn isolation_args(chosen: bool, trust: Trust) -> Vec<&'static str> {
 }
 
 /// MCP servers and account plugins in Claude Code's init line that strict
-/// mode doesn't allow: anything but tab's own server.
-fn unexpected(init: &Value) -> Vec<String> {
+/// mode doesn't allow: anything but tab's own server and the remote servers
+/// tab added (`allowed`).
+fn unexpected(init: &Value, allowed: &[String]) -> Vec<String> {
     let servers = init["mcp_servers"].as_array().into_iter().flatten();
     let plugins = init["plugins"].as_array().into_iter().flatten();
     servers
         .filter_map(|s| s["name"].as_str())
-        .filter(|n| *n != "tab")
+        .filter(|n| *n != "tab" && !allowed.iter().any(|a| a == n))
         .map(|n| format!("MCP server \"{n}\""))
         .chain(
             plugins
@@ -441,6 +455,7 @@ impl Parser {
             interrupted: false,
             strict: false,
             leaked: Vec::new(),
+            allowed_mcp: Vec::new(),
             waits: HashSet::new(),
         }
     }
@@ -489,7 +504,7 @@ impl Parser {
         match kind {
             "system" if v["subtype"] == "init" => {
                 if self.strict {
-                    self.leaked = unexpected(v);
+                    self.leaked = unexpected(v, &self.allowed_mcp);
                 }
                 self.billing = crate::usage::billing_from_init(v);
                 if let Some(cmds) = v["slash_commands"].as_array() {
@@ -1115,13 +1130,17 @@ mod tests {
             "mcp_servers": [{ "name": "tab", "status": "connected" }],
             "plugins": [{ "name": "cc-plugin-telemetry", "source": "cc-plugin-telemetry@builtin" }],
         });
-        assert!(unexpected(&clean).is_empty());
+        assert!(unexpected(&clean, &[]).is_empty());
+        // Remote servers tab added itself are tab's connections.
+        let connected = json!({ "mcp_servers": [{ "name": "tab" }, { "name": "linear" }] });
+        assert!(unexpected(&connected, &["linear".into()]).is_empty());
+        assert_eq!(unexpected(&connected, &[]), ["MCP server \"linear\""]);
         let leaky = json!({
             "mcp_servers": [{ "name": "tab" }, { "name": "claude.ai Health", "status": "connected" }],
             "plugins": [{ "name": "cloudflare", "source": "cloudflare@synced" }],
         });
         assert_eq!(
-            unexpected(&leaky),
+            unexpected(&leaky, &[]),
             ["MCP server \"claude.ai Health\"", "plugin \"cloudflare\""]
         );
     }

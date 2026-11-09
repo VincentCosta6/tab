@@ -7,6 +7,7 @@ import type {
   AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
+  McpCatalogEntry, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy,
 } from "./types";
 import { mockApi } from "./mock";
 import { HubListSchema, HubStatusSchema, RunnerStatusSchema, decode } from "./protocol/cloud";
@@ -153,6 +154,24 @@ export const api = {
   runners: () => call<Runner[]>("runners"),
   /** Jobs workflows handed to runners, newest first. */
   jobsRecent: () => call<Job[]>("jobs_recent"),
+  /** Services tab knows the MCP server of. */
+  mcpCatalog: () => call<McpCatalogEntry[]>("mcp_catalog"),
+  /** Connected remote MCP servers and whether each is ready. */
+  mcpServers: () => call<McpServerInfo[]>("mcp_servers"),
+  /** What's at a URL: an MCP server, and does it want a sign-in? */
+  mcpProbe: (url: string) => call<McpProbe>("mcp_probe", { url }),
+  /** Adds a server. Resolves with the sign-in page to open, when it wants one. */
+  mcpAdd: (a: { id: string; name: string; url: string; signIn: boolean; catalog: string | null }) =>
+    call<string | null>("mcp_add", a),
+  /** Starts a sign-in again. Resolves with the page to open; `onMcpSignIn` says when it's done. */
+  mcpSignIn: (id: string) => call<string>("mcp_sign_in", { id }),
+  mcpSignOut: (id: string) => call<void>("mcp_sign_out", { id }),
+  mcpRemove: (id: string) => call<void>("mcp_remove", { id }),
+  mcpSetEnabled: (id: string, enabled: boolean) => call<void>("mcp_set_enabled", { id, enabled }),
+  /** A server's tools with the person's choices; `refresh` asks the server again. */
+  mcpTools: (id: string, refresh: boolean) => call<McpTool[]>("mcp_tools", { id, refresh }),
+  /** Allowed, ask or off for one tool; null goes back to the default. */
+  mcpSetTool: (id: string, tool: string, policy: ToolPolicy | null) => call<void>("mcp_set_tool", { id, tool, policy }),
   /** Sets where a connection runs and saves the config. Rejects with a CloudFailure. */
   connectionRunsOn: (connection: string, runsOn: RunsOn) => call<TabConfig>("connection_runs_on", { connection, runsOn }),
   /** The hub's cloud runner. Rejects with a CloudFailure. */
@@ -219,6 +238,13 @@ export async function onGhCode(cb: (c: GhLoginCode) => void): Promise<() => void
   if (!inTauri) return mockApi.onGhCode(cb);
   const { listen } = await import("@tauri-apps/api/event");
   return listen<GhLoginCode>("tab://gh-code", (e) => cb(e.payload));
+}
+
+/** A remote MCP sign-in finished in the browser (or failed). */
+export async function onMcpSignIn(cb: (e: McpSignInEvent) => void): Promise<() => void> {
+  if (!inTauri) return mockApi.onMcpSignIn(cb);
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<McpSignInEvent>("tab://mcp-sign-in", (e) => cb(e.payload));
 }
 
 /** Download progress while `appUpdateInstall` runs. */
