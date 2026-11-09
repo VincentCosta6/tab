@@ -76,7 +76,11 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack, on
   const qc = useQueryClient();
   const dark = useDark();
   const pull = usePull(repo, number, sample);
-  const pr = pull.data;
+  // The query cache is persisted, so a copy from an earlier visit can be days
+  // old: wait for this open's fetch before using it, unless it was just fetched.
+  const [recent] = useState(() => Date.now() - pull.dataUpdatedAt < 30_000);
+  const fresh = pull.isFetchedAfterMount || recent;
+  const pr = fresh ? pull.data : undefined;
   const boot = useWorkspace(pr);
   const src = useSource(pr, boot.ws);
   const act = useActions(pr);
@@ -200,7 +204,7 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack, on
         </div>
       </div>
     );
-  if (!pr || !ctx || boot.phase === "booting" || boot.phase === "error") return <Boot pr={pr} boot={boot} onBack={onBack} />;
+  if (!pr || !ctx || boot.phase === "booting" || boot.phase === "error") return <Boot pr={pr ?? pull.data} loading={!pr} boot={boot} onBack={onBack} />;
 
   const local = boot.phase === "ready";
   const files = ws?.files ?? pr.files.map((f) => f.filename);

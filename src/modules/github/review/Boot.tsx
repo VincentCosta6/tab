@@ -10,7 +10,8 @@ import { STEPS, type Boot as BootState, type StepId } from "./data";
 
 const LABEL: Record<StepId, string> = { clone: "Clone repository", fetch: "Fetch pull request", checkout: "Check out branch", index: "Index files" };
 
-export function Boot({ pr, boot, onBack }: { pr: PullReview | undefined; boot: BootState; onBack: () => void }) {
+/** `pr` may be a cached copy still being refreshed (`loading`): only its title is shown then. */
+export function Boot({ pr, loading, boot, onBack }: { pr: PullReview | undefined; loading?: boolean; boot: BootState; onBack: () => void }) {
   const [slow, setSlow] = useState(false);
   useEffect(() => {
     const t = window.setTimeout(() => setSlow(true), 2500);
@@ -31,7 +32,7 @@ export function Boot({ pr, boot, onBack }: { pr: PullReview | undefined; boot: B
             <h2>{pr ? pr.title : <span className="skeleton rv-skel-line" />}</h2>
           </div>
         </div>
-        {pr && (
+        {pr && !loading && (
           <div className="rv-boot-branches">
             <span className="rv-branch static"><Icon name="git-branch" size={12} /> {pr.base_ref}</span>
             <Icon name="arrow-left" size={13} />
@@ -40,10 +41,10 @@ export function Boot({ pr, boot, onBack }: { pr: PullReview | undefined; boot: B
           </div>
         )}
         <ol className="rv-boot-steps">
-          <li className={cx("rv-boot-step", pr ? "done" : "running")}>
-            <span className="rv-boot-icon">{pr ? <Icon name="check" size={13} /> : <span className="rv-spinner" />}</span>
+          <li className={cx("rv-boot-step", pr && !loading ? "done" : "running")}>
+            <span className="rv-boot-icon">{pr && !loading ? <Icon name="check" size={13} /> : <span className="rv-spinner" />}</span>
             <span className="rv-boot-label">Load pull request</span>
-            <span className="subtle rv-boot-msg">{pr ? `${pr.threads.length} threads · ${pr.checks.runs.length} checks` : "Asking GitHub…"}</span>
+            <span className="subtle rv-boot-msg">{pr && !loading ? `${pr.threads.length} threads · ${pr.checks.runs.length} checks` : "Asking GitHub…"}</span>
           </li>
           {STEPS.map((s) => {
             const st = boot.steps[s];
@@ -75,7 +76,7 @@ export function Boot({ pr, boot, onBack }: { pr: PullReview | undefined; boot: B
         ) : (
           <div className="rv-boot-foot subtle">
             <span>First open clones the repository on this computer; after that it's a quick fetch.</span>
-            {slow && pr && <button className="rv-link" onClick={boot.goRemote}>Skip and review without it</button>}
+            {slow && pr && !loading && <button className="rv-link" onClick={boot.goRemote}>Skip and review without it</button>}
           </div>
         )}
       </div>
