@@ -402,6 +402,10 @@ export const mockApi = {
             session = { id: `sess-${Date.now()}`, item_id: item.id, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: item.title, status: "working", cwd: "~/code", created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
             sessions.push(session);
           }
+          if (session.model == null) {
+            const agent = config.agent;
+            session.model = agent.models?.[session.agent] ?? (agent.kind === session.agent ? agent.model : null) ?? "";
+          }
           simulateTurn(session, item, String(args.text), args.attachments ?? []);
           return { item, session };
         }
@@ -452,6 +456,12 @@ export const mockApi = {
           for (const s of steps) { await new Promise((r) => setTimeout(r, 600)); upgradeListeners.forEach((l) => l(s)); }
           mockInstalled.add(args.kind as AgentKind);
           return undefined;
+        }
+        case "set_session_model": {
+          const session = sessions.find((s) => s.id === args.sessionId)!;
+          session.model = args.model ?? "";
+          emit({ type: "session_changed", session: { ...session } });
+          return { ...session };
         }
         case "set_agent_model": {
           const agent: AgentKind = args.agent ?? config.agent.kind ?? "claude_code";

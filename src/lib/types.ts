@@ -311,6 +311,8 @@ export interface Session {
   updated_at: string;
   /** The device that runs it. Other devices watch and steer it through the hub. */
   device?: string | null;
+  /** The model it runs on, set at its first message: "" for the harness's default, null for older chats that follow tab's. */
+  model?: string | null;
 }
 export interface SessionMessage {
   id: number;

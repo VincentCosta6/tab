@@ -119,7 +119,7 @@ pub(super) async fn run_turn(
     system: &str,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let cfg = hub.config();
+    let cfg = hub.config_for(session);
     let exe = super::agent_exe(&cfg, AgentKind::Codex)?;
     let policy = hub.policy(session);
     let mcp = hub.mcp();

@@ -6,8 +6,7 @@ use rusqlite::{OptionalExtension, Row, params};
 use super::{Store, parse_ts, ts};
 use crate::model::{AgentKind, Session, SessionMessage, SessionStatus};
 
-const COLS: &str =
-    "id, item_id, agent, agent_session_id, title, status, cwd, created_at, updated_at, device";
+const COLS: &str = "id, item_id, agent, agent_session_id, title, status, cwd, created_at, updated_at, device, model";
 
 fn row_to_session(r: &Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
@@ -21,6 +20,7 @@ fn row_to_session(r: &Row<'_>) -> rusqlite::Result<Session> {
         created_at: parse_ts(&r.get::<_, String>(7)?)?,
         updated_at: parse_ts(&r.get::<_, String>(8)?)?,
         device: r.get(9)?,
+        model: r.get(10)?,
     })
 }
 
@@ -214,6 +214,15 @@ impl Store {
                 params![id, status.map(|s| s.as_str()), agent_session_id, ts(now)],
             )?;
         }
+        self.session_get(id)
+    }
+
+    /// Sets the model a chat runs on (`""` for the harness's default).
+    pub fn session_set_model(&self, id: &str, model: &str) -> anyhow::Result<Option<Session>> {
+        self.conn().execute(
+            "UPDATE sessions SET model = ?2 WHERE id = ?1",
+            params![id, model.trim()],
+        )?;
         self.session_get(id)
     }
 
