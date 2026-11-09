@@ -2570,6 +2570,20 @@ async fn set_agent_model(
     Ok(masked(&next))
 }
 
+/// Switches one chat's model, from its next message. Other chats and the
+/// model new chats start on stay as they are.
+#[tauri::command]
+async fn set_session_model(
+    state: State<'_, AppState>,
+    session_id: String,
+    model: Option<String>,
+) -> CmdResult<Session> {
+    state
+        .hub
+        .set_session_model(&session_id, model.as_deref())
+        .map_err(err)
+}
+
 /// Sets the Claude Code permission mode from the chat composer; applies
 /// from the next message.
 #[tauri::command]
@@ -3024,6 +3038,7 @@ pub fn run() {
             folder_problem,
             connection_set_secrets,
             set_agent_model,
+            set_session_model,
             set_agent_mode,
             rate_pressure,
             item_context,

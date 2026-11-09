@@ -619,7 +619,7 @@ pub(super) async fn run_turn(
         "system": system,
     });
     if let Some((provider, model)) = hub
-        .config()
+        .config_for(session)
         .model_for(AgentKind::OpenCode)
         .and_then(|m| m.split_once('/'))
     {

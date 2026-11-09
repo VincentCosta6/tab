@@ -65,7 +65,7 @@ pub(super) async fn run_turn(
     system: &str,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let cfg = hub.config();
+    let cfg = hub.config_for(session);
     let exe = super::agent_exe(&cfg, AgentKind::Pi)?;
     let dir = hub.session_dir(&session.id)?;
     let system_file = dir.join("system.md");

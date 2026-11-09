@@ -998,22 +998,28 @@ function BarPicker({ value, options, onChange, title, className }: { value: stri
 
 /**
  * Which model this chat runs on, from every installed harness. Before the
- * chat starts any harness can be picked (and becomes the one new chats use);
- * after, it stays on its harness, and the pick applies from the next message
- * to that harness's chats.
+ * chat starts any harness can be picked, and the pick becomes what new chats
+ * start on. After, the chat keeps its own model on its harness: changing it
+ * applies from the next message to this chat only.
  */
 function ChatModelPicker({ chat }: { chat: Chat | undefined }) {
   const { data: config } = useConfig();
   const qc = useQueryClient();
-  const agent = chat?.session?.agent ?? config?.agent.kind;
+  const session = chat?.session;
+  const agent = session?.agent ?? config?.agent.kind;
   if (!config || !agent) return null;
-  const started = !!chat?.session;
+  // Older chats have no model of their own until their next message.
+  const own = session?.model;
+  const model = own != null ? own || null : modelFor(config.agent, agent);
   return (
     <ModelMenu
-      value={{ agent, model: modelFor(config.agent, agent) }}
-      lock={started ? agent : undefined}
-      title="Model for this chat, from the next message"
-      onChange={async (p) => qc.setQueryData(keys.config, await api.setAgentModel(p.model, p.agent, !started))}
+      value={{ agent, model }}
+      lock={session ? agent : undefined}
+      title={session ? "Model for this chat, from the next message" : "Model for this chat and new ones"}
+      onChange={async (p) => {
+        if (session) await api.setSessionModel(session.id, p.model);
+        else qc.setQueryData(keys.config, await api.setAgentModel(p.model, p.agent, true));
+      }}
     />
   );
 }

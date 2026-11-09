@@ -516,6 +516,32 @@ impl AgentHub {
         self.cfg.read().unwrap().clone()
     }
 
+    /// The config a chat's turn runs with: tab's, on the chat's own model.
+    pub fn config_for(&self, session: &Session) -> AgentConfig {
+        let mut cfg = self.config();
+        if let Some(m) = &session.model {
+            cfg.set_model(session.agent, Some(m.clone()));
+        }
+        cfg
+    }
+
+    /// Switches one chat's model (`None` for the harness's default), from
+    /// its next message. Other chats keep theirs.
+    pub fn set_session_model(
+        &self,
+        session_id: &str,
+        model: Option<&str>,
+    ) -> anyhow::Result<Session> {
+        let session = self
+            .store
+            .session_set_model(session_id, model.unwrap_or(""))?
+            .ok_or_else(|| anyhow::anyhow!("no such session"))?;
+        self.emit(EngineEvent::SessionChanged {
+            session: session.clone(),
+        });
+        Ok(session)
+    }
+
     pub fn set_mcp(&self, endpoint: McpEndpoint) {
         *self.mcp.write().unwrap() = Some(endpoint);
     }
@@ -1070,6 +1096,18 @@ impl AgentHub {
         {
             anyhow::bail!(why);
         }
+        // A chat keeps the model it starts on, whatever other chats pick later.
+        let session = match session.model {
+            Some(_) => session,
+            None => {
+                let m = self
+                    .config()
+                    .model_for(session.agent)
+                    .unwrap_or("")
+                    .to_string();
+                self.set_session_model(session_id, Some(&m))?
+            }
+        };
         let cancel = CancellationToken::new();
         {
             let mut running = self.running.lock().unwrap();
@@ -1864,6 +1902,44 @@ mod keyed_tests {
                 .unwrap()
                 .id,
             c.id
+        );
+    }
+
+    /// A chat keeps its own model: picking one in another chat, or changing
+    /// tab's default, leaves it alone. Older chats follow the default.
+    #[tokio::test]
+    async fn chats_keep_their_own_model() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = broadcast::channel(16);
+        let mut cfg = AgentConfig {
+            kind: Some(AgentKind::ClaudeCode),
+            ..Default::default()
+        };
+        cfg.set_model(AgentKind::ClaudeCode, Some("opus".into()));
+        let hub = AgentHub::new(store.clone(), tx, cfg.clone(), std::env::temp_dir());
+        let a = hub.session_for_key("a", "A", "/a", "").unwrap();
+        let b = hub.session_for_key("b", "B", "/b", "").unwrap();
+        assert_eq!(
+            hub.config_for(&a).model_for(AgentKind::ClaudeCode),
+            Some("opus")
+        );
+
+        let a = hub.set_session_model(&a.id, Some("sonnet")).unwrap();
+        let b = hub.set_session_model(&b.id, None).unwrap();
+        cfg.set_model(AgentKind::ClaudeCode, Some("haiku".into()));
+        hub.set_config(cfg).await;
+        assert_eq!(
+            hub.config_for(&a).model_for(AgentKind::ClaudeCode),
+            Some("sonnet")
+        );
+        assert_eq!(hub.config_for(&b).model_for(AgentKind::ClaudeCode), None);
+        let older = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        assert_eq!(older.model, None);
+        assert_eq!(
+            hub.config_for(&older).model_for(AgentKind::ClaudeCode),
+            Some("haiku")
         );
     }
 

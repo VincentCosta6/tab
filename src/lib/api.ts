@@ -91,6 +91,7 @@ export const api = {
   reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string, attachments: string[] = []) =>
     call<Session>("review_chat_send", { target, text, attachments }),
   /** Sets `agent`'s model. Before a chat starts, `forNewChats` also makes `agent` the harness new chats use. */
+  setSessionModel: (sessionId: string, model: string | null) => call<Session>("set_session_model", { sessionId, model }),
   setAgentModel: (model: string | null, agent?: AgentKind, forNewChats = false) => call<TabConfig>("set_agent_model", { model, agent: agent ?? null, forNewChats }),
   setAgentMode: (mode: string) => call<TabConfig>("set_agent_mode", { mode }),
   connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),

@@ -796,6 +796,11 @@ pub struct Session {
     /// Other devices watch and steer it through the hub.
     #[serde(default)]
     pub device: Option<String>,
+    /// The model this chat runs on, set when its first message is sent:
+    /// `""` for the harness's default, `None` for older chats that follow
+    /// tab's default.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
