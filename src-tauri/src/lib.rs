@@ -33,6 +33,7 @@ mod account;
 mod bundle_update;
 mod cloud_runner;
 mod dev;
+mod remote_mcp;
 mod updates;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
@@ -176,6 +177,14 @@ impl EngineAccess for LiveEngine {
         next.connectors.insert(id.to_string(), cfg);
         self.0.apply(next).await.map(|_| ())
     }
+    async fn set_remote_tool_policy(
+        &self,
+        server: &str,
+        tool: &str,
+        policy: tab_core::remote_mcp::ToolPolicy,
+    ) -> anyhow::Result<()> {
+        remote_mcp::set_tool(&self.0, server, tool, Some(policy)).await
+    }
     async fn dry_run_workflow(&self, w: Workflow, item_id: Option<String>) -> anyhow::Result<Run> {
         let guard = self.0.engine.read().await;
         guard
@@ -257,6 +266,7 @@ impl Core {
             self.hub.stop_opencode().await;
         }
         self.hub.set_config(next.agent.clone()).await;
+        self.hub.remote_mcp().set_servers(next.mcp_servers.clone());
         self.restart(&next).await;
         if ranking_changed && let Some(e) = self.engine.read().await.as_ref() {
             e.rerank_all()?;
@@ -2834,6 +2844,8 @@ pub fn run() {
                 data_dir.clone(),
             );
             dev::report_status(hub.clone());
+            hub.remote_mcp().set_servers(config.mcp_servers.clone());
+            remote_mcp::forward_sign_ins(app.handle().clone(), hub.remote_mcp().clone());
             let engine: SharedEngine = Arc::new(RwLock::new(None));
             let core = Arc::new(Core {
                 store: store.clone(),
@@ -3069,6 +3081,16 @@ pub fn run() {
             gh_status,
             usage_summary,
             gh_login,
+            remote_mcp::mcp_catalog,
+            remote_mcp::mcp_servers,
+            remote_mcp::mcp_probe,
+            remote_mcp::mcp_add,
+            remote_mcp::mcp_sign_in,
+            remote_mcp::mcp_sign_out,
+            remote_mcp::mcp_remove,
+            remote_mcp::mcp_set_enabled,
+            remote_mcp::mcp_tools,
+            remote_mcp::mcp_set_tool,
             gh_install,
             github_pull,
             github_file,

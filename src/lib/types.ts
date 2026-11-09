@@ -515,6 +515,8 @@ export interface TabConfig {
   connectors: Record<string, { enabled: boolean; settings: Record<string, unknown>; runs_on?: RunsOn }>;
   agent: AgentConfig;
   mcp: { port: number; token: string };
+  /** Remote MCP servers the person connected, by id. Mirrors tab_core::remote_mcp::RemoteMcpConfig. */
+  mcp_servers?: Record<string, McpServerConfig>;
   storage: { keep_days: number; max_gb: number | null };
   sandbox: SandboxConfig;
   /** Where the hub runs. Mirrors tab_core::config::HubConfig. */
@@ -524,6 +526,61 @@ export interface TabConfig {
 }
 
 export type HubMode = "cloud" | "local";
+
+/** Allowed runs without asking, ask waits for the person in the chat, off hides the tool. */
+export type ToolPolicy = "allow" | "ask" | "off";
+
+export interface McpServerConfig {
+  name: string;
+  url: string;
+  enabled: boolean;
+  /** The server wants a sign-in (OAuth). */
+  sign_in: boolean;
+  catalog?: string;
+  tools?: Record<string, ToolPolicy>;
+}
+
+/** Mirrors tab_core::remote_mcp::RemoteMcpInfo. */
+export interface McpServerInfo extends McpServerConfig {
+  id: string;
+  /** Signed in (or no sign-in needed): agents get its tools. */
+  ready: boolean;
+  signed_in_at: string | null;
+  error: string | null;
+  tool_count: number | null;
+}
+
+export interface McpCatalogEntry {
+  id: string;
+  name: string;
+  url: string;
+  description: string;
+  category: string;
+  color: string;
+}
+
+export interface McpProbe {
+  url: string;
+  name: string | null;
+  sign_in: boolean;
+  id: string;
+}
+
+export interface McpTool {
+  name: string;
+  title: string | null;
+  description: string | null;
+  read_only: boolean;
+  policy: ToolPolicy;
+  /** The person picked `policy` (rather than the default). */
+  chosen: boolean;
+}
+
+export interface McpSignInEvent {
+  id: string;
+  ok: boolean;
+  error: string | null;
+}
 
 /** The signed-in tab account, without its tokens. Mirrors tab_core::account::AccountView. */
 export interface Account {

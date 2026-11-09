@@ -149,13 +149,14 @@ fn strip_jsonc(text: &str) -> String {
     out
 }
 
-/// Servers OpenCode's `GET /mcp` reports as connected, other than tab's.
-fn connected_besides_tab(status: &Value) -> Vec<String> {
+/// Servers OpenCode's `GET /mcp` reports as connected, other than tab's
+/// and the remote servers tab added (`allowed`).
+fn connected_besides_tab(status: &Value, allowed: &[String]) -> Vec<String> {
     let mut out: Vec<String> = status
         .as_object()
         .into_iter()
         .flatten()
-        .filter(|(name, s)| *name != "tab" && s["status"] == "connected")
+        .filter(|(name, s)| *name != "tab" && !allowed.contains(name) && s["status"] == "connected")
         .map(|(name, _)| name.clone())
         .collect();
     out.sort();
@@ -216,6 +217,8 @@ async fn server(hub: &Arc<AgentHub>, session: Option<&Session>) -> anyhow::Resul
         .build()?;
     // A server the person runs themselves loads whatever they configured.
     let mut strict = false;
+    // Remote MCP servers tab added for this chat.
+    let mut ours: Vec<String> = Vec::new();
     let (base, child) = match cfg.opencode_url.as_deref().filter(|u| !u.trim().is_empty()) {
         Some(url) => (url.to_string(), None),
         None => {
@@ -268,6 +271,17 @@ async fn server(hub: &Arc<AgentHub>, session: Option<&Session>) -> anyhow::Resul
                         "headers": headers
                     }),
                 );
+                // Connected remote servers, through tab, for the chat's own
+                // server only (not the one for suggestions).
+                if session.is_some() {
+                    for (name, url) in hub.remote_servers(policy.trust) {
+                        ours.push(name.clone());
+                        servers.insert(
+                            name,
+                            json!({ "type": "remote", "url": url, "enabled": true, "headers": headers }),
+                        );
+                    }
+                }
                 let config = json!({ "mcp": servers });
                 cmd.env("OPENCODE_CONFIG_CONTENT", config.to_string());
             }
@@ -306,7 +320,8 @@ async fn server(hub: &Arc<AgentHub>, session: Option<&Session>) -> anyhow::Resul
             .await;
         match status {
             Ok(r) if r.status().is_success() => {
-                let leaked = connected_besides_tab(&r.json::<Value>().await.unwrap_or_default());
+                let leaked =
+                    connected_besides_tab(&r.json::<Value>().await.unwrap_or_default(), &ours);
                 if !leaked.is_empty() {
                     if let Some(mut c) = child {
                         c.kill_tree();
@@ -754,7 +769,8 @@ mod tests {
             "notes": { "status": "disabled" },
             "broken": { "status": "failed" },
         });
-        assert_eq!(connected_besides_tab(&status), ["health"]);
+        assert_eq!(connected_besides_tab(&status, &[]), ["health"]);
+        assert!(connected_besides_tab(&status, &["health".into()]).is_empty());
     }
 
     #[test]

@@ -23,6 +23,10 @@ pub struct TabConfig {
     pub agent: AgentConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    /// Remote MCP servers the person connected, by id (the server name
+    /// agents see). Their sign-ins live in the vault, not here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_servers: BTreeMap<String, crate::remote_mcp::RemoteMcpConfig>,
     #[serde(default)]
     pub storage: StorageConfig,
     /// What agents, language servers and workflow commands may touch.
@@ -318,6 +322,7 @@ impl Default for TabConfig {
             connectors: default_connectors(),
             agent: AgentConfig::default(),
             mcp: McpConfig::default(),
+            mcp_servers: Default::default(),
             storage: StorageConfig::default(),
             sandbox: Default::default(),
             hub: HubConfig::default(),

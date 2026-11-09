@@ -36,6 +36,10 @@ crates/tab-core/        The desktop engine. No Tauri dependency, fully unit test
                         under its old paths (tab_core::model, tab_core::links, ...).
   connector.rs          Connector + ConnectorFactory traits, ConnectorContext
   connectors/           github.rs, demo.rs, email.rs, ...
+  remote_mcp/           Remote MCP servers the person connects (Linear, Notion, a URL):
+                        OAuth sign-in (oauth.rs), sign-ins kept out of config (vault.rs)
+  mcp.rs                tab's MCP server for agents, plus /mcp/<id> (remote servers,
+                        signed in by tab) and /oauth/callback
   engine.rs             Wires connectors → store → ranker → events
   gateway.rs            Cache, rate limits, audit for every API call
   ranker/               ai.rs (Haiku layer) over tab-domain's rules
@@ -176,6 +180,8 @@ A `Connector` instance:
 | `metadata` | Free-form payload for plugin surfaces (PR number, repo, API URL). |
 
 **Adding a connector**: write a factory + connector in `crates/tab-core/src/connectors/`, add it to `registry()`, use only `Call`s through the gateway, emit canonical entity keys. No UI change unless you add a module.
+
+**Remote MCP connections (built).** Services with a remote MCP server (Linear, Notion, Sentry, Vercel, Stripe, Atlassian, or any URL) connect with one browser sign-in: tab finds the authorization server (RFC 9728 / 8414), registers itself (RFC 7591), signs in with PKCE back to `/oauth/callback` on its MCP server, and keeps the tokens out of `config.json` (DPAPI on Windows, the keychain on macOS, a private file elsewhere). Agents in chats the person drives get each server as `--mcp-config` entry `http://127.0.0.1:<port>/mcp/<id>`: tab adds the token, refreshes it, hides tools set to off and asks the person before tools set to ask. Because they come in through tab's own config, they work in strict chats. They give agents tools; they don't fill the queue yet. See `docs/connect-via-mcp.md`.
 
 **Third-party connectors (designed).** Out-of-process connectors speaking a small JSON-RPC protocol over stdio (descriptor, run → event notifications, preview, on_done). This keeps the core safe from plugin crashes and lets connectors be written in any language. The protocol is deliberately close to MCP so an MCP server can be wrapped as a connector.
 

@@ -289,7 +289,7 @@ async fn wait_for_code(listener: &TcpListener) -> Result<String, SignInError> {
     }
 }
 
-fn page(title: &str, body: &str) -> String {
+pub(crate) fn page(title: &str, body: &str) -> String {
     format!(
         "<!doctype html><meta charset=utf-8><title>tab</title>\
          <body style=\"font:15px system-ui;display:grid;place-items:center;height:90vh;margin:0\">\
@@ -297,7 +297,7 @@ fn page(title: &str, body: &str) -> String {
     )
 }
 
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

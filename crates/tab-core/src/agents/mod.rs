@@ -422,6 +422,8 @@ pub struct AgentHub {
     /// Chats under this folder work on code nobody here wrote (the cloud
     /// runner's clones), so they get the review policy.
     review_root: RwLock<Option<PathBuf>>,
+    /// Remote MCP servers the person connected (Linear, Notion, …).
+    remote: Arc<crate::remote_mcp::RemoteMcp>,
 }
 
 /// See [`AgentHub::set_file_sink`].
@@ -462,11 +464,13 @@ impl AgentHub {
         cfg: AgentConfig,
         dir: PathBuf,
     ) -> Arc<Self> {
+        let remote = crate::remote_mcp::RemoteMcp::new(dir.join("mcp-sign-ins"));
         Arc::new(Self {
             store,
             events,
             cfg: RwLock::new(cfg),
             mcp: RwLock::new(None),
+            remote,
             dir,
             running: Mutex::new(HashMap::new()),
             steering: Mutex::new(HashMap::new()),
@@ -518,6 +522,32 @@ impl AgentHub {
 
     pub(crate) fn mcp(&self) -> Option<McpEndpoint> {
         self.mcp.read().unwrap().clone()
+    }
+
+    /// The remote MCP servers the person connected.
+    pub fn remote_mcp(&self) -> &Arc<crate::remote_mcp::RemoteMcp> {
+        &self.remote
+    }
+
+    /// Remote MCP servers a chat gets, as `(name, url)` on tab's MCP
+    /// server, which signs each request in. Only chats the person drives:
+    /// an agent reading someone else's code or mail could be talked into
+    /// acting as them.
+    pub(crate) fn remote_servers(&self, trust: crate::sandbox::Trust) -> Vec<(String, String)> {
+        let Some(mcp) = self.mcp() else {
+            return Vec::new();
+        };
+        if trust != crate::sandbox::Trust::Person {
+            return Vec::new();
+        }
+        self.remote
+            .usable()
+            .into_iter()
+            .map(|id| {
+                let url = format!("{}/{id}", mcp.url.trim_end_matches('/'));
+                (id, url)
+            })
+            .collect()
     }
 
     pub(crate) fn emit(&self, e: EngineEvent) {

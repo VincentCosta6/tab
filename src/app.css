@@ -1155,3 +1155,44 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
 .done-offer-text strong { font-weight: 600; }
 .done-offer-text span { color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .done-offer-actions { display: flex; gap: var(--space-2); flex: none; }
+
+/* Connections: what each one does, and remote MCP connections. */
+.caps { display: flex; gap: 6px; flex-wrap: wrap; }
+.cap { display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px; border-radius: var(--radius-pill); border: 1px dashed var(--border-strong); color: var(--fg-subtle); font-size: var(--text-xs); }
+.cap.on { border-style: solid; color: var(--fg); background: var(--bg-sunken); }
+.cap.on svg { color: var(--tone-success-fg); }
+.mcp-mark { display: inline-grid; place-items: center; flex: none; border-radius: var(--radius-md); color: #fff; font-weight: 700; }
+.mcp-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; background: rgb(0 0 0 / 0.35); }
+.mcp-dialog { width: min(460px, calc(100vw - 32px)); display: grid; gap: var(--space-3); padding: var(--space-5); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-md); }
+.mcp-dialog-head { display: flex; gap: var(--space-3); align-items: center; }
+.mcp-dialog-title { font-weight: 600; font-size: var(--text-lg); }
+.mcp-dialog-foot { display: flex; justify-content: space-between; gap: var(--space-2); }
+.mcp-steps { display: grid; gap: 6px; font-size: var(--text-sm); }
+.mcp-steps > div { display: flex; gap: 8px; align-items: center; }
+.mcp-steps .done svg { color: var(--tone-success-fg); }
+.mcp-steps .now { font-weight: 600; }
+.mcp-steps .failed { color: var(--tone-danger-fg); }
+.mcp-steps .failed .mcp-spin { display: none; }
+.mcp-spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--border-strong); border-top-color: var(--focus); animation: mcp-spin 0.9s linear infinite; flex: none; }
+@keyframes mcp-spin { to { transform: rotate(360deg); } }
+.mcp-note { margin: 0; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); background: var(--bg-sunken); color: var(--fg-muted); font-size: var(--text-sm); }
+.mcp-field { display: grid; gap: 4px; font-size: var(--text-sm); font-weight: 500; }
+.mcp-field input { font-family: var(--font-mono); font-size: var(--text-sm); }
+.mcp-probe { display: grid; gap: 6px; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); font-size: var(--text-sm); }
+.mcp-probe-head { display: flex; gap: var(--space-2); align-items: center; }
+.mcp-probe .mcp-name { flex: 1; }
+.mcp-kv { display: grid; grid-template-columns: 140px 1fr; gap: 8px 16px; margin: 0; font-size: var(--text-sm); }
+.mcp-kv dt { color: var(--fg-subtle); }
+.mcp-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.mcp-tool { display: flex; align-items: center; gap: var(--space-3); padding: 8px var(--space-3); border-top: 1px solid var(--border); font-size: var(--text-sm); }
+.mcp-tool:first-child { border-top: 0; }
+.mcp-tool-main { flex: 1; min-width: 0; display: flex; gap: var(--space-2); align-items: baseline; }
+.mcp-tool-main code { font-family: var(--font-mono); font-size: var(--text-xs); flex: none; }
+.mcp-tool-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-tools-empty { padding: var(--space-4); text-align: center; }
+.mcp-tools-more { width: 100%; padding: var(--space-2); border: 0; border-top: 1px solid var(--border); background: transparent; color: var(--fg-subtle); cursor: pointer; }
+.mcp-tools-more:hover { color: var(--fg); background: var(--bg-hover); }
+.seg { display: inline-flex; gap: 2px; padding: 2px; background: var(--bg-sunken); border-radius: var(--radius-sm); flex: none; }
+.seg button { border: 0; background: transparent; padding: 2px 8px; border-radius: 3px; color: var(--fg-muted); font-size: var(--text-xs); cursor: pointer; }
+.seg button.on { background: var(--bg-raised); color: var(--fg); box-shadow: var(--shadow-sm); }
+.seg button:disabled { cursor: default; }

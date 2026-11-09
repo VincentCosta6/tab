@@ -43,6 +43,7 @@ pub mod mcp;
 pub mod named_files;
 pub mod ranker;
 pub mod ratelimit;
+pub mod remote_mcp;
 pub mod sandbox;
 pub mod shell_path;
 pub mod storage;
