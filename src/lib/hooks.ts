@@ -3,6 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { keys } from "./query";
+import { hidePending } from "../modules/work/optimistic";
 import type { AgentActivity, Chat, ItemState, TabConfig } from "./types";
 
 /** Why `path` can't be a work folder, checked as the person types. */
@@ -22,6 +23,8 @@ export function useItems(state: ItemState, query: string) {
     queryKey: keys.items(state, query.trim()),
     queryFn: () => (query.trim() ? api.searchItems(query, [state]) : api.listItems([state])),
     placeholderData: (prev) => prev,
+    // Rows just marked done (or snoozed, reopened) stay out until it's saved.
+    select: hidePending(state),
   });
 }
 

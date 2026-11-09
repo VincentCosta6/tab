@@ -5,7 +5,6 @@ import { Badge, Button, EmptyState, Tabs, TextInput, cx } from "../../design/com
 import { Brand, SourceGlyph, hasBrand } from "../../design/brands";
 import { FlapTitle } from "../../design/FlapTitle";
 import { Icon } from "../../design/icons";
-import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useAgentActivity, useItems } from "../../lib/hooks";
@@ -18,7 +17,7 @@ import { NewChat } from "./NewChat";
 import { ProjectChip, ProjectPicker, useRememberedProject } from "./Projects";
 import { SnoozeMenu, snoozeOptions } from "./SnoozeMenu";
 import { ScoreBreakdown } from "./ScoreBreakdown";
-import { confirmDone } from "./doneGuard";
+import { actOnItem, type ItemAction } from "./optimistic";
 
 const urgencyOrder: Urgency[] = ["now", "today", "this_week", "whenever"];
 const urgencyHeading: Record<Urgency, string> = { now: "Now", today: "Today", this_week: "This week", whenever: "Whenever" };
@@ -152,14 +151,12 @@ export function WorkTab() {
   );
 
   // Optimistic: the row leaves the list right away; the engine event confirms.
+  // If Done is called off (a guard the person declines) the row comes back.
   const act = useCallback(
-    async (item: QueueItem, action: "done" | "reopen" | { snooze: number }) => {
-      if (action === "done" && !(await confirmDone(item))) return;
+    async (item: QueueItem, action: ItemAction) => {
       advance(item.id, action === "done");
-      qc.setQueriesData<QueueItem[]>({ queryKey: keys.allItems }, (xs) => xs?.filter((x) => x.id !== item.id));
-      if (action === "done") await api.markDone(item.id);
-      else if (action === "reopen") await api.reopen(item.id);
-      else await api.snooze(item.id, action.snooze);
+      const ok = await actOnItem(qc, item, action).catch((e) => (console.warn("item action failed", e), false));
+      if (!ok) setSelected(item.id);
     },
     [advance, qc],
   );

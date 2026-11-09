@@ -16,7 +16,7 @@ import { parsePullUrl } from "../github/pulls";
 import { ChatView, DevicePill, SandboxPill, StrictPill } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
 import { ContextRail } from "./ContextRail";
-import { confirmDone } from "./doneGuard";
+import { actOnItem, type ItemAction } from "./optimistic";
 import { ReadModeSwitch, Reader, useHasRich, useReadMode } from "./Reader";
 import { ProjectPicker, useProjectTint } from "./Projects";
 import { SnoozeMenu } from "./SnoozeMenu";
@@ -47,22 +47,21 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
 
   const pull = item ? parsePullUrl(item.url) : null;
 
-  const settle = (id: string, done = false) => {
-    onActed(id, done);
-    qc.invalidateQueries({ queryKey: keys.allItems });
+  // Optimistic (see actOnItem): the pane and queue change before the engine
+  // answers. If Done is called off, the item is selected again.
+  const act = async (i: QueueItem, action: ItemAction) => {
+    if (action !== "reopen") onActed(i.id, action === "done");
+    const ok = await actOnItem(qc, i, action).catch((e) => (console.warn("item action failed", e), false));
+    if (!ok && action !== "reopen") onSelect(i.id);
   };
-  const done = async (i: QueueItem) => {
-    if (!(await confirmDone(i))) return;
-    settle(i.id, true);
-    await api.markDone(i.id);
-  };
-  const snooze = async (i: QueueItem, minutes: number) => (setSnoozeOpen(false), settle(i.id), await api.snooze(i.id, minutes));
+  const done = (i: QueueItem) => act(i, "done");
+  const snooze = (i: QueueItem, minutes: number) => (setSnoozeOpen(false), act(i, { snooze: minutes }));
   const move = async (i: QueueItem, projectId: string | null) => {
     const next = await api.itemSetProject(i.id, projectId);
     if (next) qc.setQueryData(keys.item(i.id), next);
     qc.invalidateQueries({ queryKey: keys.allItems });
   };
-  const reopen = async (i: QueueItem) => (await api.reopen(i.id), qc.invalidateQueries({ queryKey: keys.allItems }));
+  const reopen = (i: QueueItem) => act(i, "reopen");
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
