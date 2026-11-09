@@ -505,6 +505,18 @@ impl Parser {
             "system" if v["subtype"] == "init" => {
                 if self.strict {
                     self.leaked = unexpected(v, &self.allowed_mcp);
+                } else {
+                    // Their settings are out of reach; their names say
+                    // what Connections can offer to bring over.
+                    let names: Vec<String> = v["mcp_servers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|s| s["name"].as_str())
+                        .filter(|n| n.starts_with("claude.ai "))
+                        .map(str::to_string)
+                        .collect();
+                    hub.save_claude_ai_connectors(&names);
                 }
                 self.billing = crate::usage::billing_from_init(v);
                 if let Some(cmds) = v["slash_commands"].as_array() {

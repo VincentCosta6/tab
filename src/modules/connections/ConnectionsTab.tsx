@@ -14,6 +14,7 @@ import { openSettings } from "../settings/SettingsTab";
 import { startSetupChat } from "../work/Chat";
 import { ApiUsage } from "./ApiUsage";
 import { GhConnect } from "./GhConnect";
+import { ImportBanner, ImportDialog } from "./ClaudeImport";
 import { AddByUrl, Caps, McpCatalogCard, McpDetail, McpInstalledRow, useConnect, useMcpCatalog, useMcpServers } from "./RemoteMcp";
 
 /** Connectors whose sign-in agents also use in chats (tab's own tools, `gh` and `git`). */
@@ -64,6 +65,8 @@ export function ConnectionsTab() {
   const onConnected = useCallback((id: string) => setOpen(`mcp:${id}`), []);
   const connect = useConnect(onConnected);
   const taken = servers.map((x) => x.id);
+  const [importing, setImporting] = useState(false);
+  const importDialog = importing && <ImportDialog onClose={() => setImporting(false)} onOpen={(id) => setOpen(`mcp:${id}`)} />;
 
   if (current) return <ConnectorDetail c={current} onBack={() => setOpen(null)} />;
   if (open?.startsWith("mcp:")) {
@@ -96,6 +99,7 @@ export function ConnectionsTab() {
           ]}
         />
       </div>
+      {view !== "usage" && <ImportBanner onReview={() => setImporting(true)} />}
       {view === "installed" && (
         <div className="connector-list">
           {installed.map((c) => (
@@ -132,10 +136,14 @@ export function ConnectionsTab() {
         <Section title="Advanced" description="Any service with a remote MCP server works too: tab signs in for you when it asks.">
           <div className="connector-list">
             <AddByUrl onAdd={connect.add} />
+            <button className="connector-add" onClick={() => setImporting(true)}>
+              <Icon name="download" size={15} /> Import MCP servers from Claude Code
+            </button>
           </div>
         </Section>
       )}
       {connect.dialog}
+      {importDialog}
       {view === "usage" && <ApiUsage />}
     </div>
   );

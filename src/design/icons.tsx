@@ -71,6 +71,7 @@ const paths: Record<string, string> = {
   "check-circle": "M22 11.08V12a10 10 0 1 1-5.93-9.14M22 4 12 14.01l-3-3",
   "arrow-down": "M12 5v14M19 12l-7 7-7-7",
   upload: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12",
+  download: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3",
   heading: "M6 4v16M18 4v16M6 12h12",
   bold: "M6 4h8a4 4 0 0 1 0 8H6zM6 12h9a4 4 0 0 1 0 8H6z",
   italic: "M19 4h-9M14 20H5M15 4 9 20",

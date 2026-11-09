@@ -1,8 +1,17 @@
 # Connections via MCP — design sketch
 
 Status: phase 1 built (sign-in, keychain, the `/mcp/<id>` proxy, Add by URL,
-the catalog, per-tool allowed / ask / off for chats). Phases 2–5 are still
+the catalog, per-tool allowed / ask / off for chats). Phase 2 built (import
+from Claude Code, local-command servers run by tab, static header keys in the
+vault, the cloud eligibility check shown per server). Phases 3–5 are still
 designs.
+
+What phase 2 leaves out, on purpose:
+- The hint in the strict pill when a turn shows blocked servers.
+- Cloud eligibility is only shown; nothing runs in the cloud until phase 4.
+- Local servers run unsandboxed as tab's children (as Claude Code runs
+  them), with tab's own secrets scrubbed from their environment.
+- Legacy SSE servers and `headersHelper` scripts can't be imported.
 
 What phase 1 leaves out, on purpose:
 - Only the person's own chats get remote tools. Reviews and jobs (anything

@@ -3091,6 +3091,8 @@ pub fn run() {
             remote_mcp::mcp_set_enabled,
             remote_mcp::mcp_tools,
             remote_mcp::mcp_set_tool,
+            remote_mcp::mcp_import_scan,
+            remote_mcp::mcp_import,
             gh_install,
             github_pull,
             github_file,

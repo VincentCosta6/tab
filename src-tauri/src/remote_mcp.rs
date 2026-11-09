@@ -1,6 +1,9 @@
 //! Commands for remote MCP connections (Connections → Linear, Notion, a
 //! server by URL). See `tab_core::remote_mcp`.
 
+use std::path::PathBuf;
+
+use tab_core::remote_mcp::import::{self, Candidate};
 use tab_core::remote_mcp::{
     self, CatalogEntry, Probe, RemoteMcpConfig, RemoteMcpInfo, ToolPolicy, ToolView,
 };
@@ -68,7 +71,7 @@ pub async fn mcp_add(
             enabled: true,
             sign_in,
             catalog,
-            tools: Default::default(),
+            ..Default::default()
         },
     );
     state.apply(next).await.map_err(err)?;
@@ -99,14 +102,126 @@ pub async fn mcp_sign_out(state: State<'_, AppState>, id: String) -> CmdResult<(
     Ok(())
 }
 
-/// Removes the connection and forgets its sign-in.
+/// Removes the connection and forgets its sign-in and keys.
 #[tauri::command]
 pub async fn mcp_remove(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let mut next = state.config.lock().await.clone();
     next.mcp_servers.remove(&id);
     state.apply(next).await.map_err(err)?;
-    state.hub.remote_mcp().sign_out(&id);
+    state.hub.remote_mcp().forget(&id);
     Ok(())
+}
+
+fn home() -> Option<PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+
+/// The MCP servers in Claude Code (`~/.claude.json`, `.mcp.json` in known
+/// projects, claude.ai connectors), with what tab already has marked.
+async fn scan(core: &crate::Core) -> Vec<Candidate> {
+    let mut repos = Vec::new();
+    for p in core.store.projects().unwrap_or_default() {
+        for r in core.store.project_repos(&p.id).unwrap_or_default() {
+            repos.extend(r.path.map(PathBuf::from));
+        }
+    }
+    let existing = core.config.lock().await.mcp_servers.clone();
+    let claude_ai = core.hub.claude_ai_connectors();
+    let remote = core.hub.remote_mcp().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = home();
+        let src = import::read_sources(home.as_deref(), &repos, claude_ai);
+        import::scan(
+            &src,
+            &existing,
+            |id| remote.secrets(id),
+            home.as_deref(),
+            |k| std::env::var(k).ok(),
+        )
+    })
+    .await
+    .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn mcp_import_scan(state: State<'_, AppState>) -> CmdResult<Vec<Candidate>> {
+    Ok(scan(&state).await)
+}
+
+/// How one server's import went.
+#[derive(serde::Serialize)]
+pub struct ImportResult {
+    pub key: String,
+    pub id: String,
+    pub name: String,
+    /// It signs in with OAuth, so the person signs in again in tab.
+    pub sign_in: bool,
+    pub error: Option<String>,
+}
+
+/// Turns the chosen Claude Code servers (by `key`) into tab connections.
+/// Copies only: nothing in Claude Code changes. Keys go to the vault.
+#[tauri::command]
+pub async fn mcp_import(
+    state: State<'_, AppState>,
+    keys: Vec<String>,
+) -> CmdResult<Vec<ImportResult>> {
+    let found = scan(&state).await;
+    let remote = state.hub.remote_mcp().clone();
+    let mut next = state.config.lock().await.clone();
+    let mut out = Vec::new();
+    for key in keys {
+        let Some(c) = found.iter().find(|c| c.key == key && c.actionable()) else {
+            out.push(ImportResult {
+                key,
+                id: String::new(),
+                name: String::new(),
+                sign_in: false,
+                error: Some("It's no longer in Claude Code, or tab already has it.".into()),
+            });
+            continue;
+        };
+        let Some(mut cfg) = c.config.clone() else {
+            continue;
+        };
+        let fail = |e: String| ImportResult {
+            key: c.key.clone(),
+            id: c.id.clone(),
+            name: c.name.clone(),
+            sign_in: false,
+            error: Some(e),
+        };
+        // A plain URL: does it want a sign-in?
+        if c.kind == "remote" {
+            match remote.probe(&cfg.url, &[]).await {
+                Ok(p) => cfg.sign_in = p.sign_in,
+                Err(e) => {
+                    out.push(fail(e.to_string()));
+                    continue;
+                }
+            }
+        }
+        // Importing again keeps what the person chose in tab.
+        if let Some(old) = c.existing.as_ref().and_then(|id| next.mcp_servers.get(id)) {
+            cfg.enabled = old.enabled;
+            cfg.tools = old.tools.clone();
+            cfg.catalog = cfg.catalog.or_else(|| old.catalog.clone());
+        }
+        if let Err(e) = remote.set_secrets(&c.id, &c.secrets) {
+            out.push(fail(format!("Couldn't keep its keys: {e}")));
+            continue;
+        }
+        out.push(ImportResult {
+            key: c.key.clone(),
+            id: c.id.clone(),
+            name: cfg.name.clone(),
+            sign_in: cfg.sign_in,
+            error: None,
+        });
+        next.mcp_servers.insert(c.id.clone(), cfg);
+    }
+    state.apply(next).await.map_err(err)?;
+    Ok(out)
 }
 
 #[tauri::command]

@@ -14,6 +14,7 @@ import { api, onMcpSignIn, openUrl } from "../../lib/api";
 import { timeAgo } from "../../lib/format";
 import { keys } from "../../lib/query";
 import type { McpCatalogEntry, McpProbe, McpServerInfo, McpTool, Tone, ToolPolicy } from "../../lib/types";
+import { WhereItRuns } from "./ClaudeImport";
 
 export function useMcpServers() {
   return useQuery({ queryKey: keys.mcpServers, queryFn: api.mcpServers, staleTime: 0 });
@@ -346,18 +347,36 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
       </header>
       <div style={{ marginBottom: "var(--space-4)" }}><Caps queue={false} tools /></div>
       <p className="connector-desc large">
-        Agents in your chats can use {s.name}'s tools as you. tab signs each request in, so the agents never hold your sign-in. Chats on someone else's code (pull request reviews, jobs) don't get them.
+        {s.command
+          ? `Agents in your chats can use ${s.name}'s tools. tab runs it on this computer and passes each request on, so agents never start it or see its keys.`
+          : `Agents in your chats can use ${s.name}'s tools as you. tab signs each request in, so the agents never hold your sign-in.`}{" "}
+        Chats on someone else's code (pull request reviews, jobs) don't get them.
       </p>
       {error && <p className="chat-error">{error}</p>}
 
       <Section title="Connection">
         <Card>
           <dl className="mcp-kv">
-            <dt>Server</dt><dd><code>{s.url}</code></dd>
+            {s.command ? (
+              <>
+                <dt>Runs</dt><dd><code>{[s.command.command, ...(s.command.args ?? [])].join(" ")}</code></dd>
+                {s.command.cwd && (<><dt>In</dt><dd><code>{s.command.cwd}</code></dd></>)}
+              </>
+            ) : (
+              <><dt>Server</dt><dd><code>{s.url}</code></dd></>
+            )}
             <dt>Agents see it as</dt><dd><code>{s.id}</code></dd>
             <dt>Sign-in</dt>
-            <dd>{s.sign_in ? (s.signed_in_at ? `OAuth, no keys · renews on its own · signed in ${timeAgo(s.signed_in_at)}` : "OAuth, not signed in") : "None needed"}</dd>
-            <dt>Kept in</dt><dd>{s.sign_in ? "Your system's secure storage, on this computer only" : "Nothing to keep"}</dd>
+            <dd>
+              {s.sign_in
+                ? (s.signed_in_at ? `OAuth, no keys · renews on its own · signed in ${timeAgo(s.signed_in_at)}` : "OAuth, not signed in")
+                : s.headers?.length || s.command?.env?.length
+                  ? `Keys: ${[...(s.headers ?? []), ...(s.command?.env ?? [])].join(", ")}`
+                  : "None needed"}
+            </dd>
+            <dt>Kept in</dt><dd>{s.sign_in || s.keys ? "Your system's secure storage, on this computer only" : "Nothing to keep"}</dd>
+            <dt>Where it runs</dt><dd><WhereItRuns fit={s.cloud} /></dd>
+            {s.imported_from && (<><dt>Came from</dt><dd>Claude Code (a copy: changes there show up in Connections to import again)</dd></>)}
           </dl>
         </Card>
       </Section>
