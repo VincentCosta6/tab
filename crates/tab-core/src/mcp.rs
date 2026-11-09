@@ -3443,9 +3443,11 @@ mod tests {
         assert_eq!(tasks(), before);
 
         // A chat on an agent's own follow-up can't start more agents.
-        let mut cfg = AgentConfig::default();
-        cfg.kind = Some(AgentKind::ClaudeCode);
-        hub.set_config(cfg).await;
+        hub.set_config(AgentConfig {
+            kind: Some(AgentKind::ClaudeCode),
+            ..Default::default()
+        })
+        .await;
         let child_chat = store
             .session_create(Some(&child), AgentKind::ClaudeCode, "t", ".", Utc::now())
             .unwrap();
