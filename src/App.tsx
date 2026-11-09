@@ -13,8 +13,7 @@ import { QueryProvider } from "./lib/query";
 import { Onboarding } from "./modules/onboarding/Onboarding";
 import { tabs } from "./modules/registry";
 import { UsageMeter } from "./modules/usage/UsageMeter";
-import { Updater } from "./modules/updates/Updater";
-import { AppUpdater } from "./modules/updates/AppUpdater";
+import { UpdatesBadge } from "./modules/updates/UpdatesBadge";
 import { openSettings } from "./modules/settings/SettingsTab";
 import { AppHeader } from "./modules/shell/AppHeader";
 
@@ -86,6 +85,7 @@ function Shell() {
       <span className="nav-icon">
         {t.id === "work" ? <TabMark size={22} /> : <Icon name={t.icon} size={18} />}
         {t.id === "work" && <AgentBadge />}
+        {t.id === "settings" && <UpdatesBadge onOpen={() => openSettings("updates")} />}
       </span>
       <span>{t.label}</span>
     </button>
@@ -98,8 +98,6 @@ function Shell() {
       <nav className="nav">
         <div className="nav-group">{visible.filter((t) => !t.footer).map(navButton)}</div>
         <div className="nav-group nav-footer">
-          <AppUpdater />
-          <Updater />
           <UsageMeter onSettings={() => openSettings("agents")} />
           {visible.filter((t) => t.footer).map(navButton)}
         </div>

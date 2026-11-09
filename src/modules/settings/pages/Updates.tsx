@@ -2,9 +2,12 @@ import { Badge, Button, Card, FormRow, Meter, Section } from "../../../design/co
 import { Markdown } from "../../../design/markdown";
 import { timeAgo } from "../../../lib/format";
 import { percent, useAppUpdate, useInstall } from "../../updates/appUpdate";
+import { useAgentUpdate } from "../../updates/agentUpdate";
+import { AgentVersionRow } from "./AgentVersion";
 
-/** tab's own version, the hourly check, and installing a newer release. */
+/** tab's own version, the hourly check, and installing a newer release; and the agent CLI's. */
 export function UpdatesPage() {
+  const agent = useAgentUpdate();
   const { version, check } = useAppUpdate();
   const { state, install } = useInstall();
   const v = version.data;
@@ -50,6 +53,11 @@ export function UpdatesPage() {
           </FormRow>
         )}
       </Card>
+      {agent.health.data && (
+        <Card>
+          <AgentVersionRow label={agent.name} />
+        </Card>
+      )}
     </Section>
   );
 }

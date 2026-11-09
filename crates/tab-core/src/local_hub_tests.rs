@@ -1369,3 +1369,35 @@ async fn computers_on_one_cloud_hub_watch_and_steer_each_others_chats() {
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(dir2);
 }
+
+#[tokio::test]
+async fn projects_from_the_hub_refresh_the_ui() {
+    let (hub, dir) = temp_hub("projects");
+    let store = Arc::new(Store::in_memory().unwrap());
+    let p = store
+        .project_save(Some("p1"), "Billing", "blue", "folder", when())
+        .unwrap();
+    let n = store
+        .note_save(&p.id, "deploys", "Fridays", "agent", None, &[], when())
+        .unwrap();
+    let (events, mut ui) = broadcast::channel(16);
+    hub.follow(store.clone(), events);
+    hub.announce(
+        &store,
+        &[
+            ("projects".into(), json!([p.id]).to_string()),
+            ("project_notes".into(), json!([n.id]).to_string()),
+            ("project_notes".into(), json!(["gone"]).to_string()),
+        ],
+    );
+    let mut ids = vec![];
+    while let Ok(ev) = ui.try_recv() {
+        if let EngineEvent::ProjectChanged { project_id } = ev {
+            ids.push(project_id);
+        }
+    }
+    // One refresh for the project, however many of its rows came, and one
+    // for every project when a deleted note no longer says whose it was.
+    assert_eq!(ids, vec![String::new(), p.id.clone()]);
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -567,6 +567,36 @@ impl LocalHub {
         let Some((_, events)) = self.local.get() else {
             return;
         };
+        // Projects, their notes and repos: one refresh per project, however
+        // many rows came. A deleted note or repo no longer says whose it
+        // was; an empty id refreshes every project's.
+        let mut projects = std::collections::BTreeSet::new();
+        for (table, key) in changed {
+            let project = match table.as_str() {
+                "projects" => Some(
+                    serde_json::from_str::<Vec<serde_json::Value>>(key)
+                        .ok()
+                        .and_then(|k| k.into_iter().next())
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_default(),
+                ),
+                "project_notes" | "project_repos" => Some(
+                    store
+                        .hub_row(table, key)
+                        .ok()
+                        .flatten()
+                        .and_then(|r| r["project_id"].as_str().map(str::to_string))
+                        .unwrap_or_default(),
+                ),
+                _ => None,
+            };
+            if let Some(id) = project {
+                projects.insert(id);
+            }
+        }
+        for project_id in projects {
+            let _ = events.send(EngineEvent::ProjectChanged { project_id });
+        }
         for (table, key) in changed {
             let first = || {
                 serde_json::from_str::<Vec<serde_json::Value>>(key)
