@@ -1207,12 +1207,15 @@ async fn files_reach_other_computers_through_the_cloud() {
         dir.join("agents"),
     );
     mac_hub.attach_agents(agents.clone());
+    // In the chat's own folder: replies only share files from there (and
+    // the project's repos, code folders and attachments).
+    let work = dir.join("work").display().to_string();
     let chat = mac
         .session_create(
             None,
             crate::model::AgentKind::ClaudeCode,
             "Shots",
-            "/w",
+            &work,
             Utc::now(),
         )
         .unwrap();

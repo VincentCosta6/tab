@@ -687,8 +687,12 @@ impl AgentHub {
     }
 
     /// Where the chat's project's repos are checked out, with each one's
-    /// git worktrees.
+    /// git worktrees. An agent can name a repo's path itself (the
+    /// `tab_project_repo` tool, or a record synced from another device) and
+    /// write a checkout's worktree list, so anything wider than a code
+    /// folder is left out ([`crate::sandbox::Sandbox::too_wide`]).
     fn project_checkouts(&self, session: &Session) -> Vec<PathBuf> {
+        let sb = crate::sandbox::current();
         let project = session
             .item_id
             .as_deref()
@@ -703,7 +707,15 @@ impl AgentHub {
                 continue;
             };
             let root = crate::sandbox::real(Path::new(&path));
-            out.extend(crate::sandbox::worktrees(&root));
+            if sb.too_wide(&root) {
+                tracing::warn!(path = %root.display(), "a project repo's path is too wide to open to agents");
+                continue;
+            }
+            out.extend(
+                crate::sandbox::worktrees(&root)
+                    .into_iter()
+                    .filter(|w| !sb.too_wide(w)),
+            );
             out.push(root);
         }
         out
@@ -775,19 +787,55 @@ impl AgentHub {
         }
     }
 
+    /// Which files a chat's replies may share to the hub. tab reads them
+    /// itself, outside the sandbox, so a reply naming a file mustn't reach
+    /// anything the agent couldn't: only files (links resolved) under the
+    /// chat's own folder, its project's repos, Settings' code folders or
+    /// the attachments folder, and nothing the chat's sandbox hides
+    /// (credentials, tab's own files, other chats' folders), wherever the
+    /// sandbox is enforced or not.
+    fn shareable(&self, session: &Session) -> Box<dyn Fn(&Path) -> bool> {
+        let sb = crate::sandbox::current();
+        let mut policy = self.policy(session);
+        let cwd = crate::sandbox::real(Path::new(&session.cwd));
+        let mut roots = Vec::new();
+        if !sb.too_wide(&cwd) {
+            roots.push(cwd);
+        }
+        roots.extend(self.project_checkouts(session));
+        if policy.trust == crate::sandbox::Trust::Person {
+            roots.extend(sb.code_folders());
+        }
+        roots.push(crate::sandbox::real(&self.attachments_dir()));
+        // The roots are what the agent may use (its own folder is opened
+        // when it starts); what's hidden inside them still wins.
+        policy.open.extend(roots.iter().cloned());
+        let secrets = sb.tab_secrets();
+        let sessions = crate::sandbox::real(&self.sessions_dir());
+        Box::new(move |p: &Path| {
+            roots.iter().any(|r| p.starts_with(r))
+                && !sb.too_wide(p)
+                && !p.starts_with(&sessions)
+                && !secrets.iter().any(|s| p.starts_with(s))
+                && policy.allows(p, crate::sandbox::Access::Read)
+        })
+    }
+
     /// Puts the local files a reply names in the hub and records them in
     /// its `files`, so a device that isn't this one can show them.
     fn share_named_files(&self, session_id: &str, text: &str, meta: &mut serde_json::Value) {
         let Some(sink) = self.file_sink.get() else {
             return;
         };
-        let cwd = self
-            .store
-            .session_get(session_id)
-            .ok()
-            .flatten()
-            .map(|s| s.cwd);
-        let files = crate::named_files::share(text, cwd.as_deref(), |b| sink(b));
+        let Some(session) = self.store.session_get(session_id).ok().flatten() else {
+            return;
+        };
+        let cwd = Some(session.cwd.as_str());
+        if crate::named_files::paths_in_text(text, cwd).is_empty() {
+            return;
+        }
+        let shareable = self.shareable(&session);
+        let files = crate::named_files::share(text, cwd, |p| shareable(p), |b| sink(b));
         if files.is_empty() {
             return;
         }
@@ -1302,6 +1350,23 @@ impl AgentHub {
     /// The person's answer to an approval. Returns false if it was no longer pending.
     pub fn resolve_approval(&self, id: &str, decision: Decision) -> bool {
         match self.approvals.lock().unwrap().remove(id) {
+            Some((_, tx)) => tx.send(decision).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Answers approval `id` only if it's one of `session_id`'s, for
+    /// answers that come from elsewhere (another device steering one
+    /// chat mustn't answer another chat's).
+    pub fn resolve_approval_in(&self, session_id: &str, id: &str, decision: Decision) -> bool {
+        let mut approvals = self.approvals.lock().unwrap();
+        if !approvals
+            .get(id)
+            .is_some_and(|(a, _)| a.session_id == session_id)
+        {
+            return false;
+        }
+        match approvals.remove(id) {
             Some((_, tx)) => tx.send(decision).is_ok(),
             None => false,
         }

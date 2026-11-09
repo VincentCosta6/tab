@@ -1792,6 +1792,16 @@ impl McpServer {
                     }
                     format!("Removed {repo} from {}.", p.name)
                 } else {
+                    // A repo's path opens it to the project's chats, so it
+                    // can't be the home folder or anything else that wide.
+                    if let Some(path) = args["path"].as_str().map(str::trim)
+                        && std::path::Path::new(path).is_absolute()
+                        && crate::sandbox::current().too_wide(std::path::Path::new(path))
+                    {
+                        anyhow::bail!(
+                            "{path} is too wide to be a repo's checkout (it holds your home folder, tab's own files or credentials); give the repo's own folder"
+                        );
+                    }
                     let r = self.store.repo_save(
                         &p.id,
                         &repo,

@@ -653,6 +653,16 @@ impl RemoteMcp {
         let Some(tokens) = current(&record) else {
             anyhow::bail!("{} needs you to sign in again", cfg.name);
         };
+        // A sign-in is for the server it was made with: if the connection's
+        // address changed since, its token doesn't go to the new one.
+        if let Some(r) = &record
+            && !oauth::resource_matches(&r.discovered.resource, &cfg.url)
+        {
+            anyhow::bail!(
+                "{}'s address changed since you signed in; sign in again",
+                cfg.name
+            );
+        }
         if !force && !tokens.stale(Utc::now()) {
             return Ok(Some(tokens.access_token));
         }

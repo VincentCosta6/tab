@@ -307,6 +307,9 @@ impl JobRunner {
                     .into_iter()
                     .find(|(r, _)| r.eq_ignore_ascii_case(&job.spec.repo))
                     .map(|(_, p)| p)
+                    // A repo's path can come from an agent or another
+                    // device; one wider than a code folder isn't used.
+                    .filter(|p| !crate::sandbox::current().too_wide(Path::new(p)))
                     .unwrap_or_else(|| self.agents.default_folder()),
                 // A cloud runner clones into its own folder first.
                 RunnerKind::Cloud => {
@@ -397,7 +400,13 @@ impl JobRunner {
                 Some(SessionStatus::Idle) => {
                     let mut result = self.result_of(&session)?;
                     if self.kind == RunnerKind::Cloud && !job.spec.repo.is_empty() {
-                        match push_branch(Path::new(&cwd), self.git_token().as_deref()).await {
+                        match push_branch(
+                            Path::new(&cwd),
+                            &job.spec.repo,
+                            self.git_token().as_deref(),
+                        )
+                        .await
+                        {
                             Ok(Some(b)) => result.branch = Some(b),
                             Ok(None) => {}
                             Err(e) => {
@@ -552,33 +561,63 @@ pub fn github_repo(repo: &str) -> anyhow::Result<(String, String)> {
 /// A git command for the runner itself, with `token` (if any) answering
 /// only GitHub's credential prompts, for this one command. Nothing is
 /// written to disk and no other credential store is asked.
-fn git(args: &[&str], cwd: &Path, token: Option<&str>) -> tokio::process::Command {
-    let mut c = tokio::process::Command::new("git");
+///
+/// The runner runs git outside the sandbox, in checkouts a job's agent
+/// wrote to (`.git/config` and hooks included), so whatever the repository
+/// configures to run (hooks, `core.fsmonitor`, `core.sshCommand`, filters,
+/// proxies) is switched off first ([`crate::sandbox::broker::git_hardening`]),
+/// as for tab's other git commands outside the sandbox. The token is only
+/// given to git fetching from GitHub's own URL, or pushing from a
+/// repository tab made ([`push_branch`]).
+async fn git(args: &[&str], cwd: &Path, token: Option<&str>) -> tokio::process::Command {
+    let exe = which::which("git").unwrap_or_else(|_| "git".into());
+    let mut cfg: Vec<(String, String)> = vec![
+        // Empty first: forget any helper configured elsewhere.
+        ("credential.helper".into(), String::new()),
+        (
+            "credential.https://github.com.helper".into(),
+            if token.is_some() {
+                "!f() { test \"$1\" = get && printf 'username=x-access-token\\npassword=%s\\n' \"$TAB_GIT_TOKEN\"; }; f".into()
+            } else {
+                String::new()
+            },
+        ),
+        ("http.sslVerify".into(), "true".into()),
+    ];
+    if cwd.join(".git").exists() || cwd.join("HEAD").exists() {
+        cfg.extend(crate::sandbox::broker::git_hardening(&exe, cwd).await);
+    }
+    let mut c = tokio::process::Command::new(&exe);
     c.args(args)
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ALLOW_PROTOCOL", "https")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_COUNT", "2")
-        // Empty first: forget any helper configured elsewhere.
-        .env("GIT_CONFIG_KEY_0", "credential.helper")
-        .env("GIT_CONFIG_VALUE_0", "")
-        .env("GIT_CONFIG_KEY_1", "credential.https://github.com.helper")
-        .env(
-            "GIT_CONFIG_VALUE_1",
-            if token.is_some() {
-                "!f() { test \"$1\" = get && printf 'username=x-access-token\\npassword=%s\\n' \"$TAB_GIT_TOKEN\"; }; f"
-            } else {
-                ""
-            },
-        )
+        .env_remove("GIT_ASKPASS")
+        .env_remove("SSH_ASKPASS")
+        .env("GIT_CONFIG_COUNT", cfg.len().to_string())
         .kill_on_drop(true);
+    for (i, (k, v)) in cfg.iter().enumerate() {
+        c.env(format!("GIT_CONFIG_KEY_{i}"), k);
+        c.env(format!("GIT_CONFIG_VALUE_{i}"), v);
+    }
     match token {
         Some(t) => c.env("TAB_GIT_TOKEN", t),
         None => c.env_remove("TAB_GIT_TOKEN"),
     };
     c
+}
+
+/// Runs `git args` in `cwd`, failing with its stderr if git does.
+async fn git_ok(args: &[&str], cwd: &Path, token: Option<&str>, what: &str) -> anyhow::Result<()> {
+    let out = git(args, cwd, token).await.output().await?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git {what} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Ok(())
 }
 
 /// Clones a GitHub repo under `root/repos/` for a cloud runner, or fetches
@@ -590,39 +629,44 @@ async fn clone_into(root: &str, repo: &str, token: Option<&str>) -> anyhow::Resu
         .join("repos")
         .join(format!("{owner}__{name}"));
     if dir.join(".git").exists() {
-        let out = git(&["fetch", "--prune", "origin"], &dir, token)
-            .output()
-            .await?;
-        anyhow::ensure!(
-            out.status.success(),
-            "git fetch failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        // An earlier job's agent may have pointed `origin` elsewhere.
+        git_ok(
+            &["remote", "set-url", "--", "origin", &url],
+            &dir,
+            None,
+            "remote set-url",
+        )
+        .await?;
+        git_ok(&["fetch", "--prune", "origin"], &dir, token, "fetch").await?;
     } else {
         std::fs::create_dir_all(dir.parent().unwrap_or(Path::new(root)))?;
-        let out = git(
+        git_ok(
             &["clone", "--", &url, &dir.to_string_lossy()],
             Path::new(root),
             token,
+            "clone",
         )
-        .output()
         .await?;
-        anyhow::ensure!(
-            out.status.success(),
-            "git clone failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
     }
     Ok(dir.to_string_lossy().into_owned())
 }
 
 /// Pushes the branch the agent left checked out, if it isn't the default
 /// branch and has commits the remote doesn't. Returns the branch pushed.
-async fn push_branch(dir: &Path, token: Option<&str>) -> anyhow::Result<Option<String>> {
+///
+/// The push doesn't run in the agent's checkout: the branch is fetched
+/// (without the token) into an empty repository tab makes, and pushed from
+/// there to `repo` on GitHub, so nothing the agent wrote in `.git` runs
+/// with the token or decides where it goes.
+async fn push_branch(
+    dir: &Path,
+    repo: &str,
+    token: Option<&str>,
+) -> anyhow::Result<Option<String>> {
     let out = |args: &'static [&'static str]| {
         let dir = dir.to_path_buf();
         async move {
-            let o = git(args, &dir, None).output().await?;
+            let o = git(args, &dir, None).await.output().await?;
             anyhow::Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
         }
     };
@@ -640,16 +684,39 @@ async fn push_branch(dir: &Path, token: Option<&str>) -> anyhow::Result<Option<S
         token.is_some(),
         "tab cloud has no git access to push with; add it in Settings → tab cloud"
     );
-    let refspec = format!("HEAD:refs/heads/{branch}");
-    let o = git(&["push", "--", "origin", &refspec], dir, token)
-        .output()
-        .await?;
-    anyhow::ensure!(
-        o.status.success(),
-        "git push failed: {}",
-        String::from_utf8_lossy(&o.stderr)
-    );
-    Ok(Some(branch))
+    let head = out(&["rev-parse", "--verify", "HEAD^{commit}"]).await?;
+    let (owner, name) = github_repo(repo)?;
+    let url = format!("https://github.com/{owner}/{name}.git");
+    let scratch = std::env::temp_dir().join(format!("tab-push-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&scratch)?;
+    let pushed = async {
+        git_ok(&["init", "--bare", "-q", "."], &scratch, None, "init").await?;
+        // From the agent's checkout, without the token.
+        let from = dir.to_string_lossy().into_owned();
+        let src = format!("+refs/heads/{branch}:refs/heads/{branch}");
+        let mut fetch = git(&["fetch", "--no-tags", "--", &from, &src], &scratch, None).await;
+        fetch.env("GIT_ALLOW_PROTOCOL", "file");
+        let o = fetch.output().await?;
+        anyhow::ensure!(
+            o.status.success(),
+            "git fetch from the job's checkout failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        let at = format!("refs/heads/{branch}^{{commit}}");
+        let got = git(&["rev-parse", "--verify", &at], &scratch, None)
+            .await
+            .output()
+            .await?;
+        anyhow::ensure!(
+            String::from_utf8_lossy(&got.stdout).trim() == head,
+            "the job's branch changed while tab was pushing it"
+        );
+        let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+        git_ok(&["push", "--", &url, &refspec], &scratch, token, "push").await
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(&scratch);
+    pushed.map(|()| Some(branch))
 }
 
 #[cfg(test)]
@@ -843,6 +910,7 @@ mod tests {
             &tmp,
             Some("ghp_secret"),
         )
+        .await
         .output()
         .await
         .unwrap();
@@ -854,10 +922,54 @@ mod tests {
             &tmp,
             None,
         )
+        .await
         .output()
         .await
         .unwrap();
         assert!(String::from_utf8_lossy(&none.stdout).trim().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_checkouts_own_config_cant_run_programs_for_the_runner() {
+        let dir =
+            std::env::temp_dir().join(format!("tab-job-git-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(run(&dir, &["init", "-q", "."]).await.status.success());
+        // What an agent could leave in the checkout's .git/config.
+        for (k, v) in [
+            ("core.fsmonitor", "touch pwned"),
+            ("core.hooksPath", ".evil-hooks"),
+            ("core.sshCommand", "touch pwned"),
+            ("http.sslVerify", "false"),
+        ] {
+            assert!(run_cfg(&dir, k, v).await);
+        }
+        for k in ["core.fsmonitor", "core.sshCommand"] {
+            let o = run(&dir, &["config", "--get", k]).await;
+            assert!(
+                String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+                "{k} survived"
+            );
+        }
+        let o = run(&dir, &["config", "--get", "core.hooksPath"]).await;
+        assert!(!String::from_utf8_lossy(&o.stdout).contains(".evil-hooks"));
+        let o = run(&dir, &["config", "--get", "http.sslVerify"]).await;
+        assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "true");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    async fn run(dir: &Path, args: &[&str]) -> std::process::Output {
+        git(args, dir, None).await.output().await.unwrap()
+    }
+
+    /// Writes the checkout's own config, as an agent in it could.
+    async fn run_cfg(dir: &Path, k: &str, v: &str) -> bool {
+        tokio::process::Command::new("git")
+            .args(["config", "--local", k, v])
+            .current_dir(dir)
+            .status()
+            .await
+            .is_ok_and(|s| s.success())
     }
 
     #[test]

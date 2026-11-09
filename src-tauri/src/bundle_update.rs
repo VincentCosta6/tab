@@ -135,6 +135,30 @@ fn unpack(archive: &[u8], to: &Path) -> io::Result<()> {
                 format!("unexpected path in the update: {}", path.display()),
             ));
         }
+        // Links can't point out of the bundle (or later entries would be
+        // written through them), and hard links aren't expected at all.
+        match entry.header().entry_type() {
+            tar::EntryType::Link => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected hard link in the update: {}", path.display()),
+                ));
+            }
+            tar::EntryType::Symlink => {
+                let target = entry.link_name()?.unwrap_or_default().into_owned();
+                if !link_stays_inside(&rel, &target) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "a link in the update points outside it: {} -> {}",
+                            path.display(),
+                            target.display()
+                        ),
+                    ));
+                }
+            }
+            _ => {}
+        }
         let dest = to.join(&rel);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
@@ -142,6 +166,29 @@ fn unpack(archive: &[u8], to: &Path) -> io::Result<()> {
         entry.unpack(&dest)?;
     }
     Ok(())
+}
+
+/// Whether a link at `rel` (inside the bundle) to `target` stays inside
+/// the bundle: relative, and never climbing above its top.
+fn link_stays_inside(rel: &Path, target: &Path) -> bool {
+    if target.as_os_str().is_empty() {
+        return false;
+    }
+    let mut depth = rel.components().count().saturating_sub(1);
+    for c in target.components() {
+        match c {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    true
 }
 
 /// Exchanges `a` and `b` atomically. Fails with `Unsupported` off macOS and on
@@ -172,6 +219,17 @@ fn swap(a: &Path, b: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn links_must_stay_inside_the_bundle() {
+        let at = Path::new("Contents/Frameworks/X.framework/Current");
+        assert!(link_stays_inside(at, Path::new("Versions/A")));
+        assert!(link_stays_inside(at, Path::new("../../MacOS/tab")));
+        assert!(link_stays_inside(at, Path::new("../../../Info.plist")));
+        assert!(!link_stays_inside(at, Path::new("../../../../outside")));
+        assert!(!link_stays_inside(at, Path::new("/etc/passwd")));
+        assert!(!link_stays_inside(at, Path::new("")));
+    }
 
     fn archive(files: &[(&str, &str)]) -> Vec<u8> {
         let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
