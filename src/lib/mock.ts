@@ -165,7 +165,9 @@ let mockAccount: Account | null = typeof location !== "undefined" && new URLSear
 let mockHub: HubStatus | null = null;
 let mockHubFailed = false;
 // `?hub=cloud` starts the browser mock as if this computer moved to tab cloud.
-let mockMoved = typeof location !== "undefined" && new URLSearchParams(location.search).get("hub") === "cloud";
+let mockMoved = typeof location !== "undefined" && /^cloud/.test(new URLSearchParams(location.search).get("hub") ?? "");
+/** `?hub=cloud-offline`: moved, but tab cloud can't be reached. */
+const mockOffline = typeof location !== "undefined" && new URLSearchParams(location.search).get("hub") === "cloud-offline";
 let mockSecrets: string[] = ["harness/claude_code/ANTHROPIC_API_KEY"];
 const mockPlan = () => create(PlanSchema, { name: "trial", endsAt: timestampFromDate(new Date(Date.now() + 14 * 86400_000)), active: true });
 const mockCloudHub = (state: HubState): HubStatus =>
@@ -511,7 +513,11 @@ export const mockApi = {
             url: "wss://127.0.0.1:47850/hub", fingerprint: "sha256/3f1c9a0e5d7b2c48e6a1f0b9d3c7e2a5b8f4d1c6e9a2b7f0c3d8e5a1b6f9c2d4", http3: true, path: "C:\\Users\\vince\\AppData\\Roaming\\dev.tab.app\\hub.db",
             head: 18_422, records: 6_310, edges: 0, live_leases: 1, storage_bytes: 41_943_040, files: 38, file_bytes: 12_582_912,
             cpu_percent: 2.4 + Math.random() * 3, memory_bytes: 186_000_000 + Math.round(Math.random() * 4_000_000), cpus: 12, pending: 0,
-            cloud_hub: mockMoved ? "5e7ecedf5a07a215de6ad0cc9d6ca7080b0e32c07931566c24ac88cdf129feee" : null, cloud_connected: mockMoved,
+            cloud_hub: mockMoved ? "5e7ecedf5a07a215de6ad0cc9d6ca7080b0e32c07931566c24ac88cdf129feee" : null, ...(mockOffline && mockMoved
+              ? { cloud_connected: false, cloud_error: "HTTP error: 503 Service Unavailable", pending: 14 }
+              : { cloud_connected: mockMoved, cloud_error: null }),
+            pulled_to: 18_422,
+            synced: [{ what: "Queue items", count: 5_102 }, { what: "Chats", count: 812 }, { what: "Projects", count: 9 }, { what: "Notes", count: 41 }],
             connections: [
               { id: 0, device: "this-computer", client: "tab-desktop/0.1.0", address: "this app", connected_at: started, synced_to: 18_422, behind: 0, this_app: true },
               { id: 3, device: "pixel-8", client: "tab-mobile/0.1.0", address: "127.0.0.1:53122", connected_at: new Date(Date.now() - 600_000).toISOString(), synced_to: 18_410, behind: 12, this_app: false },

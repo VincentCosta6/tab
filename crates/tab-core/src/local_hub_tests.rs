@@ -122,6 +122,33 @@ fn status_reports_this_process() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn a_hub_waiting_for_tab_cloud_says_so() {
+    // After a restart on tab cloud, until it connects (offline, signed
+    // out), the status still names the cloud hub: it never looks like the
+    // work is only on this computer, so nothing offers to move it again.
+    let (hub, dir) = temp_hub("awaiting");
+    hub.expect_cloud("hub-1");
+    let st = hub.status().unwrap();
+    assert_eq!(st.cloud_hub.as_deref(), Some("hub-1"));
+    assert!(!st.cloud_connected);
+
+    // Moving back works without ever connecting, and then it's local.
+    // tab.db synced with the cloud before the restart.
+    let store = Store::open(&dir.join("tab.db")).unwrap();
+    store.hub_sync_install().unwrap();
+    let kept = add(&store, "1", "Kept here");
+    hub.move_to_local(&store).unwrap();
+    let st = hub.status().unwrap();
+    assert_eq!(st.cloud_hub, None);
+    assert_eq!(st.cloud_error, None);
+    assert!(
+        hub_item(&hub, &kept.id).is_some(),
+        "what was here is in hub.db"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 

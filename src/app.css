@@ -1,6 +1,6 @@
 /* Layout of the shell and the built-in modules. */
 
-.shell { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; height: 100%; }
+.shell { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr); height: 100%; }
 .nav { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-2); padding: var(--space-3) var(--space-2); background: var(--bg-sunken); border-right: 1px solid var(--border); }
 .nav-brand { display: grid; place-items: center; padding: var(--space-2) 0 var(--space-3); }
 .nav-group { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
@@ -8,11 +8,22 @@
 .nav-item { display: grid; justify-items: center; gap: 2px; padding: var(--space-2) 0; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg-muted); cursor: pointer; font-size: var(--text-xs); }
 .nav-item:hover { background: var(--bg-hover); color: var(--fg); }
 .nav-item.active { background: var(--bg-raised); color: var(--fg); box-shadow: var(--shadow-sm); }
-.main { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.main { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-rows: minmax(0, 1fr); }
 .main-body { min-width: 0; min-height: 0; overflow: hidden; }
 
 /* The app header: where you are, the hub, the chat on screen, the account. */
-.app-header { display: flex; align-items: center; gap: var(--space-3); height: 40px; padding: 0 var(--space-3) 0 var(--space-4); border-bottom: 1px solid var(--border); background: var(--bg); min-width: 0; }
+/* The window's title bar, across the whole window. macOS draws its traffic
+   lights over the left end (an overlay title bar); on Windows tab draws the
+   window buttons at the right end. */
+.app-header { grid-column: 1 / -1; display: flex; align-items: center; gap: var(--space-3); height: 40px; padding: 0 var(--space-3) 0 var(--space-4); border-bottom: 1px solid var(--border); background: var(--bg-sunken); min-width: 0; user-select: none; -webkit-user-select: none; }
+.app-header.os-macos { padding-left: 84px; }
+.app-header.os-windows { padding-right: 0; }
+.app-header-status button, .app-header-status .header-chip { -webkit-app-region: no-drag; }
+.window-buttons { display: flex; align-self: stretch; margin-left: var(--space-1); }
+.window-buttons button { display: grid; place-items: center; width: 46px; padding: 0; border: 0; background: transparent; color: var(--fg-muted); cursor: default; }
+.window-buttons button:hover { background: var(--bg-hover); color: var(--fg); }
+.window-buttons button.close:hover { background: #c42b1c; color: #fff; }
+.hub-error, .hub-card-error { display: block; margin-top: 2px; font-size: var(--text-xs); word-break: break-word; color: var(--tone-warning-fg); }
 .app-header-title { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); font-weight: 600; color: var(--fg); min-width: 0; }
 .app-header-title svg { color: var(--fg-subtle); flex: none; }
 .app-header-status { margin-left: auto; display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
@@ -27,6 +38,7 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .header-chip-state.tone-warning { color: var(--tone-warning-fg); }
 .header-chip-state.tone-danger { color: var(--tone-danger-fg); }
 .header-chip-state.tone-neutral { color: var(--fg-subtle); }
+.header-chip-state.tone-info { color: var(--tone-info-fg); }
 .header-chip-state.tone-success .header-dot { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent); }
 .header-account { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; cursor: pointer; }
 .header-account img, .header-account .account-initial { width: 26px; height: 26px; border-radius: 50%; font-size: var(--text-xs); }
@@ -507,6 +519,10 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 /* Context meter in the chat header */
 .transcript-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .sandbox-pill { display: inline-flex; flex: none; white-space: nowrap; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px; font-size: var(--text-xs); font-weight: 500; color: var(--tone-success-fg); background: var(--tone-success-bg); cursor: default; user-select: none; }
+.device-pill { display: inline-flex; flex: none; align-items: center; gap: 4px; max-width: 160px; padding: 2px 8px; border-radius: 999px; font-size: var(--text-xs); font-weight: 500; color: var(--fg-muted); background: var(--bg-hover); cursor: default; user-select: none; }
+.device-pill > svg { flex: none; }
+.device-pill-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-pill .header-dot { width: 6px; height: 6px; }
 .sandbox-pill.limited { color: var(--tone-warning-fg); background: var(--tone-warning-bg); }
 /* Strict sits next to Sandboxed: outlined and blue, so the two never read as one. */
 .strict-pill { display: inline-flex; flex: none; white-space: nowrap; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px; font-size: var(--text-xs); font-weight: 500; color: var(--tone-accent-fg); border: 1px solid color-mix(in srgb, var(--tone-accent-fg) 45%, transparent); background: transparent; cursor: default; user-select: none; }

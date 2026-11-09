@@ -243,7 +243,7 @@ async fn run(env: Env) -> anyhow::Result<()> {
     let (events, _) = broadcast::channel::<EngineEvent>(1024);
     let hub = LocalHub::open(&env.data.join("hub.db"))?;
     // Everything goes to the cloud hub, never this container's hub.db.
-    hub.expect_cloud();
+    hub.expect_cloud(&env.hub);
     let runner_token = env.token.clone();
     let token: TokenSource = Arc::new(move || {
         let t = runner_token.clone();

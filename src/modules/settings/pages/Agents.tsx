@@ -7,6 +7,7 @@ import { ModelMenu, modelFor, useInstalled } from "../../work/ModelMenu";
 import { orderHarnesses } from "../../../lib/harnesses";
 import { useDraft } from "../draft";
 import { AgentVersionRow } from "./AgentVersion";
+import { SandboxSettings } from "./Sandbox";
 
 export function AgentsPage() {
   const { draft, set } = useDraft();
@@ -64,6 +65,8 @@ export function AgentsPage() {
           )}
         </Card>
       </Section>
+
+      <SandboxSettings />
 
       <Section title="Chat titles" description="After the first few turns of a chat, a small model names it for what the thread is actually doing. It stops once it's confident, and never touches a title you've set yourself.">
         <Card>

@@ -4,7 +4,8 @@ import { api } from "../../../lib/api";
 import type { TabConfig } from "../../../lib/types";
 import { useDraft } from "../draft";
 
-export function SandboxPage() {
+/** The sandbox, as a section of Settings → Agents. */
+export function SandboxSettings() {
   const { draft, set } = useDraft();
   return <SandboxSection config={draft.sandbox} onChange={(v) => set((c) => void (c.sandbox = v))} />;
 }

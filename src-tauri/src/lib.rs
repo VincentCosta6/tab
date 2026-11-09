@@ -2752,6 +2752,12 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updates::PendingUpdate::default())
         .setup(|app| {
+            // On Windows tab draws its own title bar, window buttons and
+            // all (see AppHeader); macOS keeps its traffic lights over it.
+            #[cfg(target_os = "windows")]
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_decorations(false);
+            }
             let data_dir = app.path().app_data_dir()?;
             lsp::set_tools_dir(data_dir.join("tools"));
             let config_path = app.path().app_config_dir()?.join("config.json");
@@ -2886,7 +2892,7 @@ pub fn run() {
                 _ => None,
             };
             if let (Some(h), Some(id)) = (&work_hub, &cloud_hub) {
-                h.expect_cloud();
+                h.expect_cloud(id);
                 let (h, store, app, id) = (h.clone(), store.clone(), app.handle().clone(), id.clone());
                 tauri::async_runtime::spawn(async move {
                     // On the runtime: the link's socket is a task there.

@@ -64,6 +64,8 @@ pub struct CloudLink {
     watch: Arc<Mutex<Option<pb::Watch>>>,
     live: LiveSink,
     connected: Arc<std::sync::atomic::AtomicBool>,
+    /// Why the last attempt to connect failed, until one succeeds.
+    last_error: Arc<Mutex<Option<String>>>,
     token: TokenSource,
     /// Where file calls run; the caller's thread waits on them.
     rt: tokio::runtime::Handle,
@@ -142,6 +144,7 @@ impl CloudLink {
             watch: Default::default(),
             live: Default::default(),
             connected: Default::default(),
+            last_error: Default::default(),
             token: token.clone(),
             rt: tokio::runtime::Handle::current(),
         });
@@ -156,6 +159,7 @@ impl CloudLink {
                 watch: link.watch.clone(),
                 live: link.live.clone(),
                 connected: link.connected.clone(),
+                last_error: link.last_error.clone(),
             },
         ));
         link
@@ -163,6 +167,14 @@ impl CloudLink {
 
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
+    }
+
+    /// Why it couldn't connect last time, while it isn't connected.
+    pub fn last_error(&self) -> Option<String> {
+        if self.is_connected() {
+            return None;
+        }
+        self.last_error.lock().unwrap().clone()
     }
 
     /// Says hello (and again after every reconnect). Returns the hub's head.
@@ -353,6 +365,7 @@ struct Shared {
     watch: Arc<Mutex<Option<pb::Watch>>>,
     live: LiveSink,
     connected: Arc<std::sync::atomic::AtomicBool>,
+    last_error: Arc<Mutex<Option<String>>>,
 }
 
 /// What to do with a frame the hub sent unasked (request id 0).
@@ -387,6 +400,7 @@ async fn run(
         watch,
         live,
         connected,
+        last_error,
     } = sh;
     let mut attempt = 0usize;
     loop {
@@ -395,6 +409,7 @@ async fn run(
             Err(e) => {
                 let wait = BACKOFF[attempt.min(BACKOFF.len() - 1)];
                 tracing::warn!(error = %e, retry_in = wait, "cloud hub: couldn't connect");
+                *last_error.lock().unwrap() = Some(format!("{e:#}"));
                 attempt += 1;
                 // Requests made meanwhile fail rather than hang.
                 fail_all(&waiting);
@@ -405,6 +420,7 @@ async fn run(
             }
         };
         attempt = 0;
+        *last_error.lock().unwrap() = None;
         connected.store(true, Ordering::Relaxed);
         tracing::info!(%url, "cloud hub: connected");
         let (mut tx, mut rx) = ws.split();

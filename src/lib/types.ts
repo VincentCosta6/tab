@@ -654,6 +654,8 @@ export interface HubStatus {
   /** The cloud hub this computer's work syncs with, once moved; the rest describes this computer's own hub. */
   cloud_hub: string | null;
   cloud_connected: boolean;
+  /** Why tab cloud couldn't be reached or synced with, while that's so. */
+  cloud_error?: string | null;
   /** The last change of the hub in use (tab cloud once moved) this computer has. */
   pulled_to: number;
   /** What this computer holds that syncs, by kind. */

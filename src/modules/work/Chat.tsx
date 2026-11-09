@@ -1,5 +1,4 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { setViewedSession } from "../../lib/viewing";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
@@ -9,6 +8,7 @@ import { ImageThumb, Markdown, MarkdownFiles } from "../../design/markdown";
 import { fileName, isImagePath, saveAttachment } from "../../lib/images";
 import { filesInText, isShowable } from "../../lib/threadFiles";
 import { useStage } from "../../lib/stage";
+import { sessionLook } from "../shell/AppHeader";
 import { AgentNotice } from "./AgentNotice";
 import { Dictation } from "./Dictation";
 import { useDropTarget } from "./DropZone";
@@ -16,7 +16,7 @@ import { api } from "../../lib/api";
 import { useChat, useConfig, useHarnesses, useStream } from "../../lib/hooks";
 import { HarnessIcon, ModelMenu, modelFor } from "./ModelMenu";
 import { keys } from "../../lib/query";
-import type { AgentKind, Approval, Chat, QueueItem, SessionMessage, SessionStatus } from "../../lib/types";
+import type { AgentKind, Approval, Chat, QueueItem, Session, SessionMessage, SessionStatus } from "../../lib/types";
 
 
 export function openOnboarding() {
@@ -58,9 +58,6 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
   const { data: chat } = useChat(item.id);
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
-  // The header says where this chat runs and whether it's connected.
-  useEffect(() => setViewedSession(chat?.session ?? null), [chat?.session]);
-  useEffect(() => () => setViewedSession(null), []);
 
   const send = async (text: string, attachments: string[] = []) => {
     setError(null);
@@ -95,6 +92,25 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
       <Composer chat={chat} onSend={send} placeholder={`Ask about this, or tell the agent what to do…`} />
     </div>
+  );
+}
+
+/**
+ * Where this chat runs, as small as it gets: a computer or cloud, the
+ * device's name, and a dot for whether it's connected (the rest on hover).
+ */
+export function DevicePill({ session }: { session: Session }) {
+  const hub = useQuery({ queryKey: ["hub-status"], queryFn: api.hubStatus, refetchInterval: 5000 });
+  const runners = useQuery({ queryKey: ["runners"], queryFn: api.runners, refetchInterval: 30_000 });
+  const list = runners.data ?? [];
+  const l = sessionLook(session, list, hub.data ?? null);
+  const name = l.place === "This computer" ? list.find((r) => r.this_app)?.name || "This computer" : l.place;
+  return (
+    <span className="device-pill" title={`${l.label}. ${l.detail}`}>
+      <Icon name={l.icon} size={11} />
+      <span className="device-pill-name">{name}</span>
+      <span className={cx("header-chip-state", `tone-${l.tone}`)}><i className="header-dot" aria-hidden="true" /></span>
+    </span>
   );
 }
 
