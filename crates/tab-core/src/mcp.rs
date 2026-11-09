@@ -8,7 +8,9 @@
 //! * `tab_search`, `tab_get_item`: read the queue.
 //! * `tab_add_found`: file something relevant under the item's Found section.
 //! * `tab_attach_context`: attach a queue item (or link) as Context.
-//! * `tab_create_task`: create a tab task, optionally scheduled.
+//! * `tab_create_task`: create a tab task, optionally scheduled. From a
+//!   chat on a task, the new one is linked both ways (each in the other's
+//!   Context), and `start_agent` can put an agent on it right away.
 //! * `tab_graph_search`, `tab_graph_expand`: the knowledge graph (repos,
 //!   people, tickets, projects) and the items around each node.
 //! * `tab_project`, `tab_project_note`, `tab_project_update`,
@@ -846,14 +848,16 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_create_task",
-            "description": "Create a task in tab's queue, optionally scheduled for later.",
+            "description": "Create a task in tab's queue, optionally scheduled for later. From a chat on a task, the new task is linked both ways: it goes under this task's Context, and this task under its Context, so whoever picks it up sees where it came from.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string" },
-                "body": { "type": "string" },
+                "body": { "type": "string", "description": "What to do and why, with what the next agent needs: the repo, files, PRs, decisions made." },
                 "priority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
                 "due_in_minutes": { "type": "integer", "minimum": 1 },
                 "url": { "type": "string" },
-                "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." }
+                "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." },
+                "link": { "type": "boolean", "description": "Link it with this chat's task (default true)." },
+                "start_agent": { "type": "string", "description": "Only when the person asks for it: start an agent on the new task now, with this as its first message. Not for scheduled tasks." }
             }, "required": ["title"] }
         },
         {
@@ -1153,6 +1157,33 @@ impl McpServer {
             Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": r }),
             Err((code, m)) => rpc_error(id, code, &m),
         })
+    }
+
+    /// Whether this chat may start agents on new tasks: one the person
+    /// drives, on a task the person made. An agent's own follow-ups can't
+    /// start more agents, so one ask can't fan out without end.
+    fn may_start_agents(&self, session: Option<&str>) -> anyhow::Result<()> {
+        let s = session
+            .and_then(|id| self.store.session_get(id).ok().flatten())
+            .ok_or_else(|| anyhow::anyhow!("only a tab chat can start agents"))?;
+        anyhow::ensure!(
+            self.hub.policy(&s).trust == crate::sandbox::Trust::Person,
+            "only chats the person drives can start agents"
+        );
+        anyhow::ensure!(
+            self.hub.config().kind.is_some(),
+            "no agent is set up yet (Settings → Agent)"
+        );
+        let by_agent = s
+            .item_id
+            .as_deref()
+            .and_then(|i| self.store.get(i).ok().flatten())
+            .is_some_and(|i| i.event.metadata["created_by"] == "agent");
+        anyhow::ensure!(
+            !by_agent,
+            "this chat is on a task an agent created, so it can't start more agents; create the task and the person can start it"
+        );
+        Ok(())
     }
 
     fn session_item(&self, session: Option<&str>, args: &Value) -> anyhow::Result<String> {
@@ -1543,6 +1574,15 @@ impl McpServer {
                 let due_at = args["due_in_minutes"]
                     .as_i64()
                     .map(|m| Utc::now() + chrono::Duration::minutes(m.max(1)));
+                let start = s("start_agent").filter(|p| !p.trim().is_empty());
+                // Checked before anything is created, so a refusal leaves no task behind.
+                if start.is_some() {
+                    anyhow::ensure!(
+                        due_at.is_none(),
+                        "start_agent is for tasks to do now; a scheduled task waits for its time"
+                    );
+                    self.may_start_agents(session)?;
+                }
                 // Follow-ups land in the same project as the chat's task.
                 let project_id = self.project_arg(session, &args)?.map(|p| p.id);
                 let item = self
@@ -1558,10 +1598,41 @@ impl McpServer {
                         auto_title: false,
                     })
                     .await?;
-                Ok(text(format!(
-                    "Created task {} ({})",
-                    item.id, item.event.kind
-                )))
+                let mut said = format!("Created task {} ({})", item.id, item.event.kind);
+                let parent = self.session_item(session, &json!({})).ok();
+                if args["link"] != false
+                    && let Some(parent) = parent.as_deref().filter(|p| *p != item.id)
+                {
+                    let parent_title = self
+                        .store
+                        .get(parent)?
+                        .map(|p| p.event.title)
+                        .unwrap_or_else(|| "The task it came from".into());
+                    for (on, other, title) in [
+                        (parent, item.id.as_str(), item.event.title.clone()),
+                        (item.id.as_str(), parent, parent_title),
+                    ] {
+                        self.store.context_add(
+                            on,
+                            &NewContext {
+                                section: ContextSection::Context,
+                                ref_item_id: Some(other.to_string()),
+                                url: None,
+                                title,
+                                summary: None,
+                                added_by: "agent".into(),
+                            },
+                            Utc::now(),
+                        )?;
+                    }
+                    said.push_str(", linked with this task (each is in the other's Context)");
+                }
+                if let Some(prompt) = start {
+                    let chat = self.hub.session_for_item(&item.id)?;
+                    self.hub.send(&chat.id, &prompt)?;
+                    said.push_str(&format!(", and started an agent on it (chat {})", chat.id));
+                }
+                Ok(text(said))
             }
             "tab_graph_search" => {
                 let since = args["within_days"]
@@ -2107,6 +2178,7 @@ mod tests {
                 kind: "tab.task".into(),
                 title: t.title,
                 occurred_at: Utc::now(),
+                metadata: json!({ "created_by": t.created_by }),
                 ..Default::default()
             };
             match self.0.upsert(&e, Utc::now())? {
@@ -3261,5 +3333,131 @@ mod tests {
         let r = call(tool("list_things"), token).await.unwrap();
         assert_eq!(r.status(), 404);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A follow-up from a chat is linked with the chat's task both ways, and
+    /// starting an agent on it is refused where it isn't allowed, before
+    /// anything is created.
+    #[tokio::test]
+    async fn follow_ups_link_both_ways_and_guard_starting_agents() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let server = Arc::new(McpServer {
+            store: store.clone(),
+            hub: hub.clone(),
+            engine: Arc::new(NoEngine(store.clone())),
+            events,
+            token: "secret".into(),
+        });
+        let url = serve(server, 48_400).await.unwrap();
+        let parent = NoEngine(store.clone())
+            .create_task(NewTask {
+                title: "Build MCP connections".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let chat = store
+            .session_create(
+                Some(&parent.id),
+                AgentKind::ClaudeCode,
+                "t",
+                ".",
+                Utc::now(),
+            )
+            .unwrap();
+        let call = |args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tab_create_task","arguments":args}});
+        let text = |v: &Value| {
+            v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let tasks = || store.list(&[ItemState::Open]).unwrap().len();
+
+        let v = server_call(&url, &chat.id, call(json!({ "title": "Phase 2: import" }))).await;
+        let said = text(&v);
+        assert!(said.contains("linked with this task"), "{said}");
+        let child = said
+            .split_whitespace()
+            .nth(2)
+            .unwrap()
+            .trim_end_matches(',')
+            .to_string();
+        let on_parent = store.item_context(&parent.id).unwrap().unwrap().entries;
+        assert!(
+            on_parent
+                .iter()
+                .any(|e| e.ref_item.as_ref().is_some_and(|i| i.id == child)
+                    && e.section == ContextSection::Context)
+        );
+        let on_child = store.item_context(&child).unwrap().unwrap().entries;
+        assert!(
+            on_child
+                .iter()
+                .any(|e| e.ref_item.as_ref().is_some_and(|i| i.id == parent.id)
+                    && e.title == "Build MCP connections")
+        );
+
+        // link: false leaves both alone.
+        let v = server_call(
+            &url,
+            &chat.id,
+            call(json!({ "title": "Unrelated", "link": false })),
+        )
+        .await;
+        assert!(!text(&v).contains("linked"));
+        assert_eq!(
+            store
+                .item_context(&parent.id)
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+
+        let before = tasks();
+        // No agent set up: refused, and no task is made.
+        let v = server_call(
+            &url,
+            &chat.id,
+            call(json!({ "title": "Phase 3", "start_agent": "Go" })),
+        )
+        .await;
+        assert!(v.to_string().contains("no agent is set up"), "{v}");
+        // A scheduled task can't start now.
+        let v = server_call(
+            &url,
+            &chat.id,
+            call(json!({ "title": "Later", "due_in_minutes": 30, "start_agent": "Go" })),
+        )
+        .await;
+        assert!(v.to_string().contains("scheduled task waits"), "{v}");
+        assert_eq!(tasks(), before);
+
+        // A chat on an agent's own follow-up can't start more agents.
+        hub.set_config(AgentConfig {
+            kind: Some(AgentKind::ClaudeCode),
+            ..Default::default()
+        })
+        .await;
+        let child_chat = store
+            .session_create(Some(&child), AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let v = server_call(
+            &url,
+            &child_chat.id,
+            call(json!({ "title": "Deeper", "start_agent": "Go" })),
+        )
+        .await;
+        assert!(v.to_string().contains("task an agent created"), "{v}");
+        assert_eq!(tasks(), before);
     }
 }
