@@ -9,7 +9,7 @@ import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
 import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, RunnerState, RunnerStatusSchema, type HubStatus } from "./protocol/cloud";
 import type {
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
-  AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
+  AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, ProjectRepo, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
 
@@ -201,7 +201,7 @@ export const mockApi = {
       if (wf !== NOT_HANDLED) return wf;
       switch (cmd) {
         case "agent_slash_commands": return ["compact", "context", "cost", "init", "review", "pr-comments", "security-review", "release-notes", "frontend-design", "deploy"];
-        case "agent_activity": return sessions.filter((s) => s.item_id && s.status !== "idle").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));
+        case "agent_activity": return sessions.filter((s) => s.item_id && items.find((i) => i.id === s.item_id)?.state !== "done").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));
         case "graph_view": return mockGraph(args.projectId ?? null, args.days ?? null);
         case "graph_delete": {
           const g = mockGraph(null, null);
@@ -341,6 +341,7 @@ export const mockApi = {
           ] satisfies Block[]);
         }
         case "done_guards": return [];
+        case "context_status": return Object.fromEntries((args.ids as string[]).flatMap((id) => (mockContextStatus[id] ? [[id, mockContextStatus[id]]] : [])));
         case "mark_done": return setState(args.id, "done");
         case "snooze": return setState(args.id, "snoozed", new Date(Date.now() + args.minutes * 60_000).toISOString());
         case "reopen": return setState(args.id, "open");
@@ -752,6 +753,26 @@ function showcase() {
   tool("cargo test -p cart", "Bash", { command: "cargo test -p cart", description: "Run the cart tests" });
 }
 if (typeof location !== "undefined" && new URLSearchParams(location.search).has("showcase")) showcase();
+
+/** Task statuses by item, for `?statuses`: what the GitHub connector would report. */
+const mockContextStatus: Record<string, ContextStatus[]> = {};
+
+/** `?statuses`: idle chats on the first few items, one per row status. */
+function statusesDemo() {
+  // Skip the first: the app opens it, which reads its reply.
+  const open = items.filter((i) => i.state === "open").slice(1, 5);
+  const later = new Date(Date.now() + 60_000).toISOString();
+  const pr = (n: number, label: string, tone: ContextStatus["tone"], waiting_on: ContextStatus["waiting_on"]): ContextStatus =>
+    ({ source: "github", label, detail: `acme/api#${n}: ${label}`, tone, waiting_on, finished: waiting_on === "nobody", url: `https://github.com/acme/api/pull/${n}` });
+  open.forEach((item, k) => {
+    // The first finished a turn you haven't read; the rest you've read.
+    sessions.push({ id: `sess-status-${k}`, item_id: item.id, agent: "claude_code", agent_session_id: null, title: item.title, status: "idle", cwd: "~/code", created_at: ago(30), updated_at: k === 0 ? later : ago(30) });
+  });
+  if (open[1]) mockContextStatus[open[1].id] = [pr(114, "Review PR", "accent", "you")];
+  if (open[2]) mockContextStatus[open[2].id] = [pr(115, "In review", "info", "others")];
+  if (open[3]) mockContextStatus[open[3].id] = [pr(116, "Merged", "success", "nobody")];
+}
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("statuses")) statusesDemo();
 
 /** The demo items' entities as a graph, with projects as nodes. */
 /** Keys of graph nodes the person deleted, so the mock graph forgets them. */

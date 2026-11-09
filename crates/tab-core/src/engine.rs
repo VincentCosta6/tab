@@ -21,8 +21,8 @@ use crate::connectors;
 use crate::gateway::Gateway;
 use crate::gateway::GatewayError;
 use crate::model::{
-    Approval, ConnectorInfo, ConnectorStatus, DoneGuard, GuardLevel, IncomingEvent, ItemState,
-    NewTask, Preview, QueueItem, Session, SessionMessage, SessionStatus,
+    Approval, ConnectorInfo, ConnectorStatus, ContextStatus, DoneGuard, GuardLevel, IncomingEvent,
+    ItemState, NewTask, Preview, QueueItem, Session, SessionMessage, SessionStatus,
 };
 use crate::ranker::{Pipeline, Ranker};
 use crate::ratelimit;
@@ -269,6 +269,36 @@ impl Core {
                 .flatten(),
         );
         Ok(out)
+    }
+
+    /// Where the things in an item's Context stand, from every connector.
+    /// Like [`Self::done_guards`], a connector that errors or takes over 3s
+    /// is left out.
+    async fn context_status(&self, id: &str) -> anyhow::Result<Vec<ContextStatus>> {
+        let Some(ctx) = self.store.item_context(id)? else {
+            return Ok(Vec::new());
+        };
+        let asks = self.connectors.values().map(|c| {
+            let ctx = &ctx;
+            async move {
+                match tokio::time::timeout(Duration::from_secs(3), c.context_status(ctx)).await {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        tracing::warn!(connector = c.id(), error = %e, "context_status failed");
+                        Vec::new()
+                    }
+                    Err(_) => {
+                        tracing::warn!(connector = c.id(), "context_status timed out");
+                        Vec::new()
+                    }
+                }
+            }
+        });
+        Ok(futures_util::future::join_all(asks)
+            .await
+            .into_iter()
+            .flatten()
+            .collect())
     }
 
     async fn mark_done(&self, id: &str, by: &str) -> anyhow::Result<Option<QueueItem>> {
@@ -1024,6 +1054,24 @@ impl EngineHandle {
     /// UI to ask about; `Block` guards also make [`Self::mark_done`] refuse.
     pub async fn done_guards(&self, id: &str) -> anyhow::Result<Vec<DoneGuard>> {
         self.core.done_guards(id).await
+    }
+
+    /// Where the things in an item's Context stand ("In review", "Merged"),
+    /// as each connector sees them.
+    pub async fn context_status(&self, id: &str) -> anyhow::Result<Vec<ContextStatus>> {
+        self.core.context_status(id).await
+    }
+
+    /// [`Self::context_status`] for several items at once, for the queue.
+    /// Items with nothing to report, or whose lookup failed, are left out.
+    pub async fn context_statuses(&self, ids: &[String]) -> HashMap<String, Vec<ContextStatus>> {
+        let all =
+            futures_util::future::join_all(ids.iter().map(|id| self.core.context_status(id))).await;
+        ids.iter()
+            .zip(all)
+            .filter_map(|(id, s)| Some((id.clone(), s.ok()?)))
+            .filter(|(_, s)| !s.is_empty())
+            .collect()
     }
 
     /// Marks an item done and lets its connector react (e.g. mark the GitHub thread read).

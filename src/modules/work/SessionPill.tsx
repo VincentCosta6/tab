@@ -3,6 +3,7 @@
 
 import { cx } from "../../design/components";
 import type { SessionStatus, Tone } from "../../lib/types";
+import type { TaskStatus } from "./taskStatus";
 
 export const sessionLook: Record<SessionStatus, { label: string; tone: Tone }> = {
   working: { label: "Working", tone: "info" },
@@ -14,10 +15,15 @@ export const sessionLook: Record<SessionStatus, { label: string; tone: Tone }> =
 
 export function SessionPill({ status, title, className }: { status: SessionStatus; title?: string; className?: string }) {
   const s = sessionLook[status];
+  return <StatusPill status={{ kind: status, label: s.label, tone: s.tone, title: title ?? "" }} className={className} />;
+}
+
+/** A task's one status (see `taskStatus`): the agent's, or its Context's. */
+export function StatusPill({ status, className }: { status: TaskStatus; className?: string }) {
   return (
-    <span className={cx("session-pill", `is-${status}`, `tone-${s.tone}`, className)} title={title}>
+    <span className={cx("session-pill", `is-${status.kind}`, `tone-${status.tone}`, className)} title={status.title || undefined}>
       <i className="session-pulse" aria-hidden="true" />
-      {s.label}
+      {status.label}
     </span>
   );
 }

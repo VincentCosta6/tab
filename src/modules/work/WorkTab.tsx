@@ -8,7 +8,8 @@ import { Icon } from "../../design/icons";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useAgentActivity, useItems } from "../../lib/hooks";
-import { SessionPill, sessionLook } from "./SessionPill";
+import { SessionPill, StatusPill, sessionLook } from "./SessionPill";
+import { taskStatus, unread, useContextStatus, useMarkSeen, useSeen, type TaskStatus } from "./taskStatus";
 import { setHere, takePendingDone } from "../../lib/nav";
 import { keys } from "../../lib/query";
 import type { AgentActivity, ItemState, QueueItem, Urgency } from "../../lib/types";
@@ -235,6 +236,12 @@ export function WorkTab() {
   }, [move]);
 
   const activity = useAgentActivity();
+  const seen = useSeen();
+  // Opening a chat reads its latest reply.
+  const openId = selected && selected !== NEW ? selected : null;
+  useMarkSeen(openId, openId ? activity.get(openId) : undefined);
+  // Only items with a chat get a task status; that keeps the lookups few.
+  const contextStatus = useContextStatus(drawn.filter((i) => activity.has(i.id)).map((i) => i.id));
   const grouped = useMemo(() => {
     if (view !== "open" || query) return [{ urgency: null as Urgency | null, items: drawn }];
     return urgencyOrder
@@ -288,7 +295,7 @@ export function WorkTab() {
             <div key={g.urgency ?? "all"}>
               {g.urgency && <div className={cx("urgency-group", `urgency-${g.urgency}`)}>{urgencyHeading[g.urgency]}</div>}
               {g.items.map((i) => (
-                <QueueRow key={i.id} item={i} agent={activity.get(i.id)} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
+                <QueueRow key={i.id} item={i} agent={activity.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
               ))}
             </div>
           ))}
@@ -329,9 +336,11 @@ function byline(item: QueueItem): string {
   return [actor, same(item.context) ? null : item.context].filter(Boolean).join(" · ");
 }
 
-export function QueueRow({ item, agent, selected, leaving, onSelect, onAct, compact }: {
+export function QueueRow({ item, agent, status, selected, leaving, onSelect, onAct, compact }: {
   item: QueueItem;
   agent?: AgentActivity;
+  /** The task's one status; without it the row shows the agent's. */
+  status?: TaskStatus | null;
   selected: boolean;
   /** Animating out: "done" strikes it through first. */
   leaving?: Leaving;
@@ -355,7 +364,8 @@ export function QueueRow({ item, agent, selected, leaving, onSelect, onAct, comp
         <FlapTitle as="div" className="row-title" id={item.id} text={item.title} />
         <div className="row-meta">
           <span className="row-meta-main">
-            {agent && <SessionPill status={agent.status} title={`Chat ${sessionLook[agent.status].label.toLowerCase()} · updated ${timeAgo(agent.updated_at)}`} />}
+            {status ? <StatusPill status={agent ? { ...status, title: `${status.title} · chat updated ${timeAgo(agent.updated_at)}` } : status} />
+              : agent && <SessionPill status={agent.status} title={`Chat ${sessionLook[agent.status].label.toLowerCase()} · updated ${timeAgo(agent.updated_at)}`} />}
             <ProjectChip id={item.project_id} />
             <span className="row-byline">{byline(item)}</span>
           </span>

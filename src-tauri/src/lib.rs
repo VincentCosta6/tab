@@ -2362,6 +2362,21 @@ async fn done_guards(
     Ok(guards)
 }
 
+/// Where the things in each item's Context stand ("Review PR", "Merged"),
+/// for the queue rows. Items with nothing to report are left out; so is
+/// everything if the engine isn't running.
+#[tauri::command]
+async fn context_status(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> CmdResult<std::collections::HashMap<String, Vec<tab_core::model::ContextStatus>>> {
+    let guard = state.engine.read().await;
+    let Some(e) = guard.as_ref() else {
+        return Ok(Default::default());
+    };
+    Ok(e.context_statuses(&ids).await)
+}
+
 #[tauri::command]
 async fn snooze(
     state: State<'_, AppState>,
@@ -2985,6 +3000,7 @@ pub fn run() {
             item_preview,
             mark_done,
             done_guards,
+            context_status,
             snooze,
             reopen,
             list_connectors,

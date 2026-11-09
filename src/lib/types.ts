@@ -75,6 +75,12 @@ export interface MyPull { repo: string; number: number; url: string; summary: Li
 export interface LinkSummary { title: string; state: "open" | "draft" | "merged" | "closed" | ""; author: string | null; checks: "passing" | "failing" | "pending" | null; updated_at: string | null; merge_state?: string | null; review_decision?: string | null; open_threads?: number | null }
 
 /** A reason not to mark an item done yet, raised by a connector or by tab (`agent`). */
+/** Who has the next move on something in an item's Context. */
+export type WaitingOn = "you" | "others" | "nobody";
+
+/** Where something in an item's Context stands, from its connector ("Review PR", "Merged"). */
+export interface ContextStatus { source: string; label: string; detail: string | null; tone: Tone; waiting_on: WaitingOn; finished: boolean; url: string | null }
+
 export interface DoneGuard { source: string; level: "confirm" | "block"; title: string; detail: string | null; url: string | null }
 
 /** An item whose agent isn't idle. */
