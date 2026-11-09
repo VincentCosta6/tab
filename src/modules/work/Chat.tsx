@@ -13,7 +13,7 @@ import { AgentNotice } from "./AgentNotice";
 import { Dictation } from "./Dictation";
 import { useDropTarget } from "./DropZone";
 import { api } from "../../lib/api";
-import { useChat, useConfig, useHarnesses, useStream } from "../../lib/hooks";
+import { useChat, useConfig, useHarnesses, useModels, useStream } from "../../lib/hooks";
 import { HarnessIcon, ModelMenu, modelFor } from "./ModelMenu";
 import { keys } from "../../lib/query";
 import type { AgentKind, Approval, Chat, QueueItem, Session, SessionMessage, SessionStatus } from "../../lib/types";
@@ -1004,23 +1004,61 @@ function BarPicker({ value, options, onChange, title, className }: { value: stri
  */
 function ChatModelPicker({ chat }: { chat: Chat | undefined }) {
   const { data: config } = useConfig();
+  const { data: models = [] } = useModels();
   const qc = useQueryClient();
+  // A switch on a started chat waits here until the person confirms it.
+  const [pending, setPending] = useState<string | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
   const session = chat?.session;
   const agent = session?.agent ?? config?.agent.kind;
   if (!config || !agent) return null;
   // Older chats have no model of their own until their next message.
   const own = session?.model;
   const model = own != null ? own || null : modelFor(config.agent, agent);
+  const label = (m: string | null) => (m ? models.find((x) => x.agent === agent && x.id === m)?.label ?? m : "the default model");
+  const confirm = async () => {
+    if (!session || pending === undefined) return;
+    setBusy(true);
+    try {
+      await api.setSessionModel(session.id, pending);
+      setPending(undefined);
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <ModelMenu
-      value={{ agent, model }}
-      lock={session ? agent : undefined}
-      title={session ? "Model for this chat, from the next message" : "Model for this chat and new ones"}
-      onChange={async (p) => {
-        if (session) await api.setSessionModel(session.id, p.model);
-        else qc.setQueryData(keys.config, await api.setAgentModel(p.model, p.agent, true));
-      }}
-    />
+    <>
+      <ModelMenu
+        value={{ agent, model }}
+        lock={session ? agent : undefined}
+        title={session ? "Model for this chat, from the next message" : "Model for this chat and new ones"}
+        onChange={async (p) => {
+          if (session) setPending(p.model);
+          else qc.setQueryData(keys.config, await api.setAgentModel(p.model, p.agent, true));
+        }}
+      />
+      {pending !== undefined && (
+        <div
+          className="confirm-overlay"
+          role="dialog"
+          aria-label="Switch model"
+          onMouseDown={(e) => e.target === e.currentTarget && !busy && setPending(undefined)}
+          onKeyDown={(e) => e.key === "Escape" && !busy && setPending(undefined)}
+        >
+          <div className="confirm-dialog">
+            <div className="confirm-dialog-title">Switch this chat to {label(pending)}?</div>
+            <div className="subtle">
+              It's on {label(model)} now. The switch applies from your next message, to this chat only. The agent
+              starts without a warm cache, so that reply can cost more.
+            </div>
+            <div className="confirm-dialog-foot">
+              <Button variant="ghost" size="sm" onClick={() => setPending(undefined)} disabled={busy}>Cancel</Button>
+              <Button variant="primary" size="sm" autoFocus onClick={() => void confirm()} disabled={busy}>Switch model</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

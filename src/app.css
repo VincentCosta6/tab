@@ -1167,6 +1167,10 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
 .mcp-dialog-head { display: flex; gap: var(--space-3); align-items: center; }
 .mcp-dialog-title { font-weight: 600; font-size: var(--text-lg); }
 .mcp-dialog-foot { display: flex; justify-content: space-between; gap: var(--space-2); }
+.confirm-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; background: rgb(0 0 0 / 0.35); }
+.confirm-dialog { width: min(400px, calc(100vw - 32px)); display: grid; gap: var(--space-3); padding: var(--space-5); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-md); }
+.confirm-dialog-title { font-weight: 600; font-size: var(--text-lg); }
+.confirm-dialog-foot { display: flex; justify-content: flex-end; gap: var(--space-2); }
 .mcp-steps { display: grid; gap: 6px; font-size: var(--text-sm); }
 .mcp-steps > div { display: flex; gap: 8px; align-items: center; }
 .mcp-steps .done svg { color: var(--tone-success-fg); }
