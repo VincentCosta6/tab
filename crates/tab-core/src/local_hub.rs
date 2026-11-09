@@ -1466,7 +1466,14 @@ impl LocalHub {
                 message,
                 answers,
             } => {
-                agents.resolve_approval(&id, Decision::from_parts(&decision, message, answers));
+                // Only the steered chat's own approvals.
+                if !agents.resolve_approval_in(
+                    &session.id,
+                    &id,
+                    Decision::from_parts(&decision, message, answers),
+                ) {
+                    tracing::warn!(session = %session.id, from = %s.from, "hub: approval isn't this chat's, or was already answered");
+                }
                 Ok(())
             }
             SteerCommand::Interrupt => {

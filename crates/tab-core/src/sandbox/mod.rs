@@ -379,14 +379,32 @@ pub(crate) fn real(p: &Path) -> PathBuf {
 
 /// A checkout's other git worktrees, read from `.git/worktrees/*/gitdir`
 /// (each names the worktree's own `.git` file).
+///
+/// An agent that can write the checkout can write those files too, so a
+/// worktree only counts when its own `.git` file points back at the entry
+/// that named it: git writes both ends, and an agent can't write the far
+/// end in a folder it can't already reach.
 pub(crate) fn worktrees(root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(root.join(".git").join("worktrees")) else {
         return Vec::new();
     };
     entries
         .flatten()
-        .filter_map(|e| std::fs::read_to_string(e.path().join("gitdir")).ok())
-        .filter_map(|g| Path::new(g.trim()).parent().map(real))
+        .filter_map(|e| {
+            let entry = real(&e.path());
+            let gitdir = std::fs::read_to_string(entry.join("gitdir")).ok()?;
+            let dot_git = Path::new(gitdir.trim());
+            let back = std::fs::read_to_string(dot_git).ok()?;
+            let back = back.trim().strip_prefix("gitdir:")?.trim();
+            let back = match Path::new(back) {
+                b if b.is_absolute() => b.to_path_buf(),
+                b => dot_git.parent()?.join(b),
+            };
+            if real(&back) != entry {
+                return None;
+            }
+            dot_git.parent().map(real)
+        })
         .collect()
 }
 
@@ -575,6 +593,8 @@ const DATA_SECRETS: &[&str] = &[
     "hub.db-wal",
     "hub.db-shm",
     "hub-tls",
+    // Remote MCP sign-ins: OAuth access and refresh tokens.
+    "mcp-sign-ins",
 ];
 
 /// Hidden files that tools (or tab itself) may create while a process runs.
@@ -585,7 +605,7 @@ const MADE_BEFORE_HIDING: &[&str] = &[".git-credentials", ".netrc", "account.jso
 
 /// Hidden folders made (empty, this user only) before a process starts, for
 /// the same reason.
-const DIRS_MADE_BEFORE_HIDING: &[&str] = &["hub-tls"];
+const DIRS_MADE_BEFORE_HIDING: &[&str] = &["hub-tls", "mcp-sign-ins"];
 
 /// Credentials a person's own chat may use (to push and open PRs), but code
 /// nobody here wrote may not.
@@ -674,6 +694,34 @@ const HARNESSES: &[&str] = &[
     ".local/share/opencode",
     ".local/state/opencode",
     ".pi",
+];
+
+/// What in the harnesses' folders runs or instructs them later, outside
+/// any chat: settings (hooks, MCP servers), plugins, global instructions.
+/// Never writable from a chat, so an agent can't leave something behind
+/// for the person's next `claude` or `codex` in a terminal. Each harness's
+/// conversations and sign-in stay writable.
+const HARNESS_SETTINGS: &[&str] = &[
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/CLAUDE.md",
+    ".claude/hooks",
+    ".claude/plugins",
+    ".claude/agents",
+    ".claude/commands",
+    ".claude/skills",
+    ".claude/output-styles",
+    ".codex/config.toml",
+    ".codex/AGENTS.md",
+    ".config/opencode/opencode.json",
+    ".config/opencode/opencode.jsonc",
+    ".config/opencode/config.json",
+    ".config/opencode/AGENTS.md",
+    ".config/opencode/plugin",
+    ".config/opencode/plugins",
+    ".config/opencode/agent",
+    ".config/opencode/command",
+    ".pi/settings.json",
 ];
 
 /// Toolchain folders that are also written to: installs a project asks
@@ -940,8 +988,85 @@ impl Sandbox {
         // Someone else's code (a review, a language server, a workflow
         // command) gets its own folder only, not the person's other code.
         if p.trust == Trust::Person {
-            p.open.extend(self.user_paths(&self.config().folders));
+            p.open.extend(self.code_folders());
         }
+    }
+
+    /// Settings' "Folders agents can use", without any that are too wide
+    /// ([`Sandbox::too_wide`]).
+    pub fn code_folders(&self) -> Vec<PathBuf> {
+        self.user_paths(&self.config().folders)
+            .into_iter()
+            .filter(|f| !self.too_wide(f))
+            .collect()
+    }
+
+    /// bubblewrap can only make a path read-only if it exists when the
+    /// process starts, so a harness settings file an agent could create
+    /// mid-chat is made first, empty, where its harness is installed.
+    fn prepare_harness_settings(&self) {
+        for p in self.harness_settings() {
+            if p.exists() || !p.parent().is_some_and(Path::is_dir) {
+                continue;
+            }
+            let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let _ = match ext {
+                "json" | "jsonc" => std::fs::write(&p, "{}\n"),
+                "toml" | "md" => std::fs::write(&p, ""),
+                _ => std::fs::create_dir(&p),
+            };
+        }
+    }
+
+    /// [`HARNESS_SETTINGS`] under the home folder, and in `CODEX_HOME`.
+    fn harness_settings(&self) -> Vec<PathBuf> {
+        let mut out = self.under_home(HARNESS_SETTINGS);
+        if let Some(d) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty()) {
+            let d = real(Path::new(&d));
+            out.extend(["config.toml", "AGENTS.md"].map(|f| d.join(f)));
+        }
+        out
+    }
+
+    /// Whether opening `p` to an agent would open far more than a code
+    /// folder: the home folder or anything holding it, a confined root
+    /// (`/Users`, `/home`, an external drive's mount point), a filesystem
+    /// root, anything holding tab's own folders, or a place that holds
+    /// or is inside credentials, harness settings or shell startup files.
+    /// Every folder an agent gets opened to goes through this (where it
+    /// starts, its project's repos and their worktrees, Settings' folders),
+    /// since an agent can name some of them itself.
+    pub fn too_wide(&self, p: &Path) -> bool {
+        let p = real(p);
+        if !p.is_absolute() || p.parent().is_none() {
+            return true;
+        }
+        let holds_or_in = |o: &Path| o.starts_with(&p) || p.starts_with(o);
+        if self.home.as_ref().is_some_and(|h| h.starts_with(&p)) {
+            return true;
+        }
+        if CONFINED_ROOTS
+            .iter()
+            .map(|r| real(Path::new(r)))
+            .any(|r| r.starts_with(&p))
+        {
+            return true;
+        }
+        // Folders inside tab's own are fine (review checkouts live there);
+        // `protect` and `hide` still cover tab's files in them.
+        let mut tabs = self
+            .data_dir
+            .iter()
+            .chain(&self.config_dir)
+            .chain(&self.others);
+        if tabs.any(|d| d.starts_with(&p)) {
+            return true;
+        }
+        let mut sensitive = self.under_home(SECRETS);
+        sensitive.extend(self.under_home(GIT_SECRETS));
+        sensitive.extend(self.under_home(STARTUP));
+        sensitive.extend(self.harness_settings());
+        sensitive.iter().any(|s| holds_or_in(s))
     }
 
     /// Lets a confined process into the folder it starts in and the folder
@@ -954,8 +1079,7 @@ impl Sandbox {
             return p;
         }
         let cwd = real(cwd);
-        let too_wide = self.home.as_ref().is_some_and(|h| h.starts_with(&cwd))
-            || p.confine.iter().any(|r| r.starts_with(&cwd));
+        let too_wide = self.too_wide(&cwd) || p.confine.iter().any(|r| r.starts_with(&cwd));
         if !too_wide {
             p.open.push(cwd);
         } else if covers(&p.confine, &cwd) && !p.listed.contains(&cwd) {
@@ -982,6 +1106,7 @@ impl Sandbox {
         protect.extend(self.config_dir.clone());
         protect.extend(self.others.iter().cloned());
         protect.extend(self.under_home(STARTUP));
+        protect.extend(self.harness_settings());
         protect.extend(self.user_paths(&cfg.protected));
         let mut hide = self.under_home(SECRETS);
         hide.extend(self.tab_secrets());
@@ -1029,9 +1154,16 @@ impl Sandbox {
     pub fn review_policy(&self, checkout: &Path, workdir: &Path) -> Policy {
         let (mut protect, hide) = self.common(Trust::Agent);
         protect.push(real(workdir));
+        // `writable` wins over `protect`: never the home folder or wider
+        // (a job with no repo starts in the default folder).
+        let writable = if self.too_wide(checkout) {
+            Vec::new()
+        } else {
+            vec![real(checkout)]
+        };
         let mut p = Policy {
             protect,
-            writable: vec![real(checkout)],
+            writable,
             hide,
             reveal: Vec::new(),
             reveal_rw: Vec::new(),
@@ -1147,6 +1279,7 @@ impl Sandbox {
         let policy = &self.starting_in(policy, exe, cwd);
         if enabled && self.backend == Backend::Bubblewrap {
             prepare_hidden(policy);
+            self.prepare_harness_settings();
         }
         let (mut cmd, enforced) = match (enabled, self.backend) {
             (true, Backend::Seatbelt) => {

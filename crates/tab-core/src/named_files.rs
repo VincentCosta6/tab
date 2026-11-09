@@ -124,11 +124,15 @@ fn resolve(p: &str, base: Option<&str>) -> Option<String> {
 }
 
 /// Puts each existing file `text` names (up to [`MAX_NAMED`] bytes) into
-/// the hub through `put`, which returns its hash. Returns what to record in
+/// the hub through `put`, which returns its hash, when `allowed` accepts
+/// where it really is (links resolved). tab reads these files itself,
+/// outside any sandbox, on the word of an agent's reply, so `allowed` is
+/// what keeps a reply from naming a credential. Returns what to record in
 /// the message's `files`.
 pub fn share(
     text: &str,
     base: Option<&str>,
+    allowed: impl Fn(&Path) -> bool,
     mut put: impl FnMut(&[u8]) -> anyhow::Result<String>,
 ) -> Vec<FileRef> {
     let mut out = vec![];
@@ -136,13 +140,7 @@ pub fn share(
         if out.len() >= MAX_PER_REPLY {
             break;
         }
-        let Ok(meta) = std::fs::metadata(&path) else {
-            continue;
-        };
-        if !meta.is_file() || meta.len() > MAX_NAMED {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Some(bytes) = read_allowed(Path::new(&path), &allowed) else {
             continue;
         };
         match put(&bytes) {
@@ -156,6 +154,35 @@ pub fn share(
         }
     }
     out
+}
+
+/// Where `p` really is: links resolved, without Windows' `\\?\` prefix.
+fn resolved(p: &Path) -> Option<PathBuf> {
+    let r = std::fs::canonicalize(p).ok()?;
+    let s = r.display().to_string();
+    Some(s.strip_prefix(r"\\?\").map(PathBuf::from).unwrap_or(r))
+}
+
+/// The bytes of the regular file at `p`, if `allowed` accepts where it
+/// really is, both before and after reading it (so swapping a link in
+/// between doesn't get another file read).
+fn read_allowed(p: &Path, allowed: &impl Fn(&Path) -> bool) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let real = resolved(p)?;
+    if !allowed(&real) {
+        return None;
+    }
+    let file = std::fs::File::open(&real).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_NAMED {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.take(MAX_NAMED + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_NAMED || resolved(p)? != real {
+        return None;
+    }
+    Some(bytes)
 }
 
 #[cfg(test)]
@@ -190,11 +217,44 @@ mod tests {
         let png = dir.join("shot.png");
         std::fs::write(&png, b"png bytes").unwrap();
         let text = format!("`{}` and `/nope/missing.png`", png.display());
-        let refs = share(&text, None, |b| Ok(tab_domain::blob::hash(b)));
+        let refs = share(&text, None, |_| true, |b| Ok(tab_domain::blob::hash(b)));
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].hash, tab_domain::blob::hash(b"png bytes"));
         assert_eq!(refs[0].name, "shot.png");
         assert_eq!(refs[0].path.as_deref(), Some(png.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shares_only_what_is_allowed_where_it_really_is() {
+        let dir = std::env::temp_dir().join(format!("tab-named-{}", uuid::Uuid::new_v4().simple()));
+        let work = dir.join("work");
+        let secret = dir.join("secret");
+        std::fs::create_dir_all(work.join("out")).unwrap();
+        std::fs::create_dir_all(&secret).unwrap();
+        std::fs::write(secret.join("token.json"), b"token").unwrap();
+        std::fs::write(work.join("out/ok.png"), b"ok").unwrap();
+        let work_real = resolved(&work).unwrap();
+        let allowed = |p: &Path| p.starts_with(&work_real);
+        let put = |b: &[u8]| Ok(tab_domain::blob::hash(b));
+
+        // Named outright, or reached with `..`.
+        let text = format!(
+            "`{}` and `out/../../secret/token.json` and `out/ok.png`",
+            secret.join("token.json").display()
+        );
+        let refs = share(&text, work.to_str(), allowed, put);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "ok.png");
+
+        // A link inside the allowed folder to a file outside it.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(secret.join("token.json"), work.join("out/notes.json"))
+                .unwrap();
+            let refs = share("`out/notes.json`", work.to_str(), allowed, put);
+            assert!(refs.is_empty());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

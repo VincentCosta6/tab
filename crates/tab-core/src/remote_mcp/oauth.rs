@@ -105,6 +105,33 @@ fn origin(u: &Url) -> String {
     u.origin().ascii_serialization()
 }
 
+/// Whether `resource` (from a server's resource metadata, RFC 9728) names
+/// the server at `server`: the same scheme, host and port. RFC 9728 §3.3
+/// has the client check this, or a server could name another's resource
+/// and authorization server, get the person to sign in there, and be sent
+/// that token. Paths aren't compared: servers differ on whether they name
+/// their origin or their endpoint (and some have moved endpoints), and a
+/// token for one origin only goes back to that origin.
+pub fn resource_matches(resource: &str, server: &str) -> bool {
+    let (Ok(r), Ok(s)) = (Url::parse(resource), Url::parse(server)) else {
+        return false;
+    };
+    r.origin().is_tuple() && r.origin() == s.origin()
+}
+
+/// Whether a server-supplied OAuth address is safe to send the person or
+/// a secret to: https, or plain http only to this computer.
+pub fn secure_url(u: &str) -> bool {
+    let Ok(u) = Url::parse(u) else {
+        return false;
+    };
+    match u.scheme() {
+        "https" => u.host().is_some(),
+        "http" => matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
+        _ => false,
+    }
+}
+
 /// RFC 8414 / OIDC: where an issuer's metadata may be, in order.
 pub fn metadata_urls(issuer: &str) -> Vec<String> {
     let Ok(u) = Url::parse(issuer) else {
@@ -197,6 +224,14 @@ pub async fn discover(
         ),
         None => (server.to_string(), origin(&server_url), None),
     };
+    anyhow::ensure!(
+        resource_matches(&resource, server),
+        "{server} says it's {resource}, a different server, so tab won't sign in to it"
+    );
+    anyhow::ensure!(
+        secure_url(&issuer),
+        "{server}'s sign-in server ({issuer}) isn't https, so tab won't sign in to it"
+    );
     let scope = challenge
         .and_then(|c| challenge_param(c, "scope"))
         .or(scopes)
@@ -243,6 +278,16 @@ pub async fn discover(
             }
         }
     };
+    for u in [&d.authorization_endpoint, &d.token_endpoint]
+        .into_iter()
+        .chain(&d.registration_endpoint)
+    {
+        anyhow::ensure!(
+            secure_url(u),
+            "{} gave a sign-in address that isn't https ({u}), so tab won't sign in to it",
+            d.issuer
+        );
+    }
     Ok(d)
 }
 
@@ -470,6 +515,40 @@ mod tests {
                 "https://mcp.atlassian.com/.well-known/oauth-protected-resource",
             ]
         );
+    }
+
+    #[test]
+    fn resource_must_be_the_server_itself() {
+        let s = "https://mcp.linear.app/mcp";
+        assert!(resource_matches("https://mcp.linear.app/mcp", s));
+        assert!(resource_matches("https://mcp.linear.app/mcp/", s));
+        assert!(resource_matches("https://mcp.linear.app", s));
+        assert!(resource_matches("https://mcp.linear.app/", s));
+        // Another server's resource, or a sibling path.
+        assert!(resource_matches("https://mcp.linear.app/sse", s));
+        // Another server's resource.
+        assert!(!resource_matches(
+            "https://mcp.linear.app/mcp",
+            "https://evil.example/mcp"
+        ));
+        assert!(!resource_matches(
+            "https://mcp.linear.app.evil.example/mcp",
+            s
+        ));
+        assert!(!resource_matches("http://mcp.linear.app/mcp", s));
+        assert!(!resource_matches("https://mcp.linear.app:8443/mcp", s));
+        assert!(!resource_matches("not a url", s));
+    }
+
+    #[test]
+    fn sign_in_addresses_must_be_https() {
+        assert!(secure_url("https://mcp.linear.app/authorize"));
+        assert!(secure_url("http://127.0.0.1:7777/token"));
+        assert!(secure_url("http://localhost/token"));
+        assert!(!secure_url("http://mcp.linear.app/authorize"));
+        assert!(!secure_url("file:///etc/passwd"));
+        assert!(!secure_url("javascript:alert(1)"));
+        assert!(!secure_url("ms-settings:"));
     }
 
     #[test]

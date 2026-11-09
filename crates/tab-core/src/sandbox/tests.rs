@@ -996,6 +996,7 @@ const PRIVATE: &[&str] = &[
     "Library/Application Support/tab/tab.db",
     "Library/Application Support/tab/hub.db",
     "Library/Application Support/tab/account.json",
+    "Library/Application Support/tab/mcp-sign-ins/linear.json",
     "Library/Application Support/tab/hub-files/aa/aabb",
     "Library/Application Support/tab/sessions/22222222-other/mcp.json",
     // Code the chat wasn't given.
@@ -1013,7 +1014,9 @@ const NEEDED: &[(&str, bool, bool)] = &[
     (".zshrc", true, false),
     ("Library/Caches/pnpm/cache", true, true),
     // Claude Code's own settings, transcript and this folder's memory.
-    (".claude/settings.json", true, true),
+    // Its settings are read, never changed (hooks and MCP servers there
+    // would run in the person's next `claude` outside tab).
+    (".claude/settings.json", true, false),
     (".claude.json", true, true),
     (".claude.json.tmp.123.456", true, true),
     (
@@ -1319,4 +1322,111 @@ async fn a_chat_in_the_home_folder_can_list_it_but_not_read_it() {
         let (_, out) = sh(&s, &chat, &f.home, "/bin/sh", &script).await;
         assert!(!out.contains(&format!("contents of {rel}")), "read {rel}");
     }
+}
+
+#[test]
+fn folders_wider_than_code_are_too_wide() {
+    let f = FakeHome::new();
+    let s = f.sandbox();
+    for wide in [
+        f.home.clone(),
+        f.home.parent().unwrap().to_path_buf(),
+        PathBuf::from("/"),
+        f.home.join("Library"),
+        f.home.join("Library/Application Support"),
+        f.home.join(".config"),
+        f.home.join(".ssh"),
+        f.home.join(".aws"),
+        f.home.join(".claude/settings.json"),
+    ] {
+        assert!(s.too_wide(&wide), "{} should be too wide", wide.display());
+    }
+    for fine in [
+        f.cwd.clone(),
+        f.home.join("tmp/acme-worktree"),
+        f.data.join("workspaces/acme-pr-7"),
+    ] {
+        assert!(!s.too_wide(&fine), "{} should be fine", fine.display());
+    }
+}
+
+#[test]
+fn settings_folders_that_are_too_wide_stay_closed() {
+    let f = FakeHome::new();
+    let s = Sandbox::new(
+        SandboxConfig {
+            folders: vec!["~/".into(), "~/Documents/..".into(), "~/tmp".into()],
+            ..SandboxConfig::default()
+        },
+        Some(f.data.clone()),
+        Some(f.data.clone()),
+    )
+    .confining_home(&f.home);
+    let p = s.chat_policy();
+    assert!(!p.allows(&f.home.join("Documents/taxes.pdf"), Access::Read));
+    assert!(p.allows(&f.home.join("tmp/acme-worktree/src/lib.rs"), Access::Write));
+}
+
+#[test]
+fn a_review_never_writes_wider_than_its_checkout() {
+    let f = FakeHome::new();
+    let s = f.sandbox();
+    let p = s.review_policy(&f.home, &tmp("work"));
+    assert!(p.writable.is_empty());
+    assert!(!p.allows(&f.home.join(".zshrc"), Access::Write));
+}
+
+#[test]
+fn harness_settings_are_never_writable() {
+    let f = FakeHome::new();
+    let s = f.sandbox();
+    let chat = f.chat(&s);
+    for rel in [
+        ".claude/settings.json",
+        ".claude/CLAUDE.md",
+        ".claude/plugins/x/hooks.json",
+        ".codex/config.toml",
+        ".config/opencode/opencode.json",
+    ] {
+        assert!(
+            !chat.allows(&f.home.join(rel), Access::Write),
+            "chat can change {rel}"
+        );
+    }
+    // Its own conversation still is.
+    let own = f
+        .home
+        .join(".claude/projects/-Users-me-Clients-acme")
+        .join(format!("{OWN_CHAT}.jsonl"));
+    assert!(chat.allows(&own, Access::Write));
+}
+
+#[test]
+fn worktrees_count_only_when_both_ends_agree() {
+    let root = tmp("wt-root");
+    let real_wt = tmp("wt-real");
+    let fake_target = tmp("wt-fake");
+    std::fs::create_dir_all(root.join(".git/worktrees/good")).unwrap();
+    std::fs::create_dir_all(root.join(".git/worktrees/bad")).unwrap();
+    // A worktree git made: each end names the other.
+    std::fs::write(
+        root.join(".git/worktrees/good/gitdir"),
+        format!("{}\n", real_wt.join(".git").display()),
+    )
+    .unwrap();
+    std::fs::write(
+        real_wt.join(".git"),
+        format!("gitdir: {}\n", root.join(".git/worktrees/good").display()),
+    )
+    .unwrap();
+    // One an agent wrote, naming a folder that isn't a worktree of this
+    // checkout (its `.git` doesn't point back, or isn't there).
+    std::fs::write(
+        root.join(".git/worktrees/bad/gitdir"),
+        format!("{}\n", fake_target.join(".git").display()),
+    )
+    .unwrap();
+    assert_eq!(worktrees(&root), vec![real(&real_wt)]);
+    std::fs::write(fake_target.join(".git"), "gitdir: /somewhere/else\n").unwrap();
+    assert_eq!(worktrees(&root), vec![real(&real_wt)]);
 }
