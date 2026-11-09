@@ -669,6 +669,36 @@ pub struct DoneGuard {
     pub url: Option<String>,
 }
 
+/// Who has the next move on something in an item's Context.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingOn {
+    /// The person: review it, fix it, merge it, reply.
+    You,
+    /// Someone or something else: reviewers, CI, the other side of a thread.
+    Others,
+    /// Nobody: it's finished at the source.
+    Nobody,
+}
+
+/// Where something in an item's Context stands, in the connector's words,
+/// so a task's row can say "Changes requested" or "Merged" instead of only
+/// what its agent is doing. Any connector can report one for its links.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextStatus {
+    /// The connector that reported it.
+    pub source: String,
+    /// A pill's worth: "In review", "Changes requested", "Merged".
+    pub label: String,
+    /// What it's about and why, for a tooltip: "acme/api#12: Fix the badge".
+    pub detail: Option<String>,
+    pub tone: Tone,
+    pub waiting_on: WaitingOn,
+    /// Finished at the source (merged, closed, resolved).
+    pub finished: bool,
+    pub url: Option<String>,
+}
+
 /// Everything known around an item, rolled up for the chat view.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ItemContext {

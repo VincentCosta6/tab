@@ -76,6 +76,7 @@ export const keys = {
   config: ["config"] as const,
   projects: ["projects"] as const,
   agentActivity: ["agent-activity"] as const,
+  contextStatus: (ids: string[]) => ["context-status", ids] as const,
   notes: (projectId: string) => ["notes", projectId] as const,
   repos: (projectId: string) => ["project-repos", projectId] as const,
   projectItems: (projectId: string) => ["project-items", projectId] as const,
@@ -148,6 +149,7 @@ function LiveEvents() {
         case "context_changed":
           qc.invalidateQueries({ queryKey: keys.context(e.item_id) });
           qc.invalidateQueries({ queryKey: ["activity", e.item_id] });
+          qc.invalidateQueries({ queryKey: ["context-status"] });
           qc.invalidateQueries({ queryKey: ["linked-tasks"] });
           break;
         case "project_changed":
@@ -171,6 +173,7 @@ function LiveEvents() {
           // queue items at these pages (they arrive as preview_changed).
           for (const page of e.pages) {
             qc.invalidateQueries({ queryKey: ["link-preview", page] });
+            qc.invalidateQueries({ queryKey: ["context-status"] });
             for (const queryKey of pageQueries[e.connector]?.(page) ?? []) qc.invalidateQueries({ queryKey });
           }
           break;

@@ -22,8 +22,8 @@ use crate::connector::{Connector, ConnectorContext, ConnectorFactory};
 use crate::gateway::{Call, Gateway, GatewayError};
 use crate::model::{
     ActionField, ActionInfo, Block, ConnectorDescriptor, ConnectorStatus, ContextSection,
-    DoneGuard, Effect, EntityRef, Field, FieldType, GuardLevel, IncomingEvent, ItemContext,
-    KindInfo, Link, QueueItem, SettingField, SettingKind, Tone,
+    ContextStatus, DoneGuard, Effect, EntityRef, Field, FieldType, GuardLevel, IncomingEvent,
+    ItemContext, KindInfo, Link, QueueItem, SettingField, SettingKind, Tone, WaitingOn,
 };
 use crate::ratelimit::RateLimitSpec;
 
@@ -914,30 +914,8 @@ impl Connector for GithubConnector {
     /// An open PR in the item's Context means the work it tracks isn't
     /// finished. The item's own PR doesn't count: finishing it is what Done is for.
     async fn done_guards(&self, ctx: &ItemContext) -> anyhow::Result<Vec<DoneGuard>> {
-        let own = ctx.item.event.url.as_deref().and_then(pull_ref);
-        let mut pulls: Vec<(String, u64)> = Vec::new();
-        for e in &ctx.entries {
-            if e.section != ContextSection::Context
-                || e.ref_item.as_ref().is_some_and(|r| r.id == ctx.item.id)
-            {
-                continue;
-            }
-            let url = e
-                .url
-                .as_deref()
-                .or(e.ref_item.as_ref().and_then(|r| r.event.url.as_deref()));
-            if let Some(p) = url.and_then(pull_ref)
-                && Some(&p) != own.as_ref()
-                && !pulls.contains(&p)
-            {
-                pulls.push(p);
-            }
-        }
-        let gw = &self.gateway;
-        let sums = futures_util::future::join_all(pulls.iter().map(|(repo, n)| async move {
-            crate::connectors::github_review::link_summary(gw, repo, "pull", &n.to_string()).await
-        }))
-        .await;
+        let pulls = context_pulls(ctx);
+        let sums = self.pull_summaries(&pulls).await;
         let mut out = Vec::new();
         for ((repo, n), s) in pulls.iter().zip(sums) {
             let Ok(s) = s else { continue };
@@ -972,6 +950,19 @@ impl Connector for GithubConnector {
             });
         }
         Ok(out)
+    }
+
+    /// Each PR in the item's Context as "Review PR", "Changes requested",
+    /// "Merged" and so on. Same PRs as [`Self::done_guards`], same cached
+    /// summaries.
+    async fn context_status(&self, ctx: &ItemContext) -> anyhow::Result<Vec<ContextStatus>> {
+        let pulls = context_pulls(ctx);
+        let sums = self.pull_summaries(&pulls).await;
+        Ok(pulls
+            .iter()
+            .zip(sums)
+            .filter_map(|((repo, n), s)| Some(pull_status(repo, *n, &s.ok()?)))
+            .collect())
     }
 
     async fn is_resolved(&self, item: &QueueItem) -> anyhow::Result<bool> {
@@ -1043,6 +1034,93 @@ impl Connector for GithubConnector {
     }
 }
 
+impl GithubConnector {
+    /// Link summaries for these PRs, in order (cached for two minutes).
+    async fn pull_summaries(
+        &self,
+        pulls: &[(String, u64)],
+    ) -> Vec<anyhow::Result<crate::connectors::github_review::LinkSummary>> {
+        let gw = &self.gateway;
+        futures_util::future::join_all(pulls.iter().map(|(repo, n)| async move {
+            crate::connectors::github_review::link_summary(gw, repo, "pull", &n.to_string()).await
+        }))
+        .await
+    }
+}
+
+/// The PRs in an item's Context, other than the item's own PR (finishing
+/// that is what Done is for).
+fn context_pulls(ctx: &ItemContext) -> Vec<(String, u64)> {
+    let own = ctx.item.event.url.as_deref().and_then(pull_ref);
+    let mut pulls: Vec<(String, u64)> = Vec::new();
+    for e in &ctx.entries {
+        if e.section != ContextSection::Context
+            || e.ref_item.as_ref().is_some_and(|r| r.id == ctx.item.id)
+        {
+            continue;
+        }
+        let url = e
+            .url
+            .as_deref()
+            .or(e.ref_item.as_ref().and_then(|r| r.event.url.as_deref()));
+        if let Some(p) = url.and_then(pull_ref)
+            && Some(&p) != own.as_ref()
+            && !pulls.contains(&p)
+        {
+            pulls.push(p);
+        }
+    }
+    pulls
+}
+
+/// Where a PR in a task's Context stands. A PR there is the task's own
+/// work, so anything that needs a human (a review, a fix, the merge) is
+/// waiting on the person; reviewers and CI are the "others".
+fn pull_status(
+    repo: &str,
+    n: u64,
+    s: &crate::connectors::github_review::LinkSummary,
+) -> ContextStatus {
+    use WaitingOn::{Nobody, Others, You};
+    let decision = s.review_decision.as_deref().unwrap_or("");
+    let threads = s.open_threads.unwrap_or(0);
+    let (label, tone, waiting_on): (String, Tone, WaitingOn) = match s.state.as_str() {
+        "merged" => ("Merged".into(), Tone::Success, Nobody),
+        "closed" => ("Closed".into(), Tone::Neutral, Nobody),
+        "draft" => ("Draft PR".into(), Tone::Neutral, You),
+        _ if s.merge_state.as_deref() == Some("dirty") => {
+            ("Merge conflicts".into(), Tone::Danger, You)
+        }
+        _ if s.checks.as_deref() == Some("failing") => ("Checks failing".into(), Tone::Danger, You),
+        _ if decision == "changes_requested" => ("Changes requested".into(), Tone::Warning, You),
+        _ if threads > 0 => (
+            format!(
+                "{threads} open thread{}",
+                if threads == 1 { "" } else { "s" }
+            ),
+            Tone::Warning,
+            You,
+        ),
+        _ if s.checks.as_deref() == Some("pending") => {
+            ("Checks running".into(), Tone::Info, Others)
+        }
+        _ if decision == "review_required" => ("In review".into(), Tone::Info, Others),
+        _ if decision == "approved" => ("Ready to merge".into(), Tone::Success, You),
+        // Open, green, and no review required of anyone else: it's yours to
+        // review and merge.
+        _ => ("Review PR".into(), Tone::Accent, You),
+    };
+    ContextStatus {
+        source: "github".into(),
+        label,
+        detail: Some(format!("{repo}#{n}: {}", s.title)),
+        tone,
+        waiting_on,
+        finished: waiting_on == Nobody,
+        url: Some(format!("https://github.com/{repo}/pull/{n}")),
+    }
+}
+
 /// `https://github.com/o/r/pull/12[/files…]` → `("o/r", 12)`.
 fn pull_ref(url: &str) -> Option<(String, u64)> {
     let path = url
@@ -1057,6 +1135,99 @@ fn pull_ref(url: &str) -> Option<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_statuses() {
+        use crate::connectors::github_review::LinkSummary;
+        let pr = |state: &str,
+                  checks: Option<&str>,
+                  merge: Option<&str>,
+                  decision: Option<&str>,
+                  threads: u32| LinkSummary {
+            title: "Fix it".into(),
+            state: state.into(),
+            author: None,
+            checks: checks.map(Into::into),
+            updated_at: None,
+            merge_state: merge.map(Into::into),
+            review_decision: decision.map(Into::into),
+            open_threads: Some(threads),
+        };
+        let st = |s: LinkSummary| {
+            let c = pull_status("o/r", 7, &s);
+            (c.label, c.waiting_on, c.finished)
+        };
+        use WaitingOn::*;
+        assert_eq!(
+            st(pr("open", Some("passing"), Some("clean"), None, 0)),
+            ("Review PR".into(), You, false)
+        );
+        assert_eq!(
+            st(pr("open", Some("pending"), None, None, 0)),
+            ("Checks running".into(), Others, false)
+        );
+        assert_eq!(
+            st(pr(
+                "open",
+                Some("passing"),
+                Some("blocked"),
+                Some("review_required"),
+                0
+            )),
+            ("In review".into(), Others, false)
+        );
+        assert_eq!(
+            st(pr(
+                "open",
+                Some("passing"),
+                Some("clean"),
+                Some("approved"),
+                0
+            )),
+            ("Ready to merge".into(), You, false)
+        );
+        assert_eq!(
+            st(pr(
+                "open",
+                Some("passing"),
+                None,
+                Some("changes_requested"),
+                0
+            )),
+            ("Changes requested".into(), You, false)
+        );
+        assert_eq!(
+            st(pr("open", None, None, Some("review_required"), 2)),
+            ("2 open threads".into(), You, false)
+        );
+        // Something the person has to fix wins over waiting on reviewers.
+        assert_eq!(
+            st(pr(
+                "open",
+                Some("failing"),
+                None,
+                Some("review_required"),
+                0
+            )),
+            ("Checks failing".into(), You, false)
+        );
+        assert_eq!(
+            st(pr("open", Some("passing"), Some("dirty"), None, 0)),
+            ("Merge conflicts".into(), You, false)
+        );
+        assert_eq!(
+            st(pr("draft", Some("failing"), None, None, 0)),
+            ("Draft PR".into(), You, false)
+        );
+        assert_eq!(
+            st(pr("merged", None, None, None, 0)),
+            ("Merged".into(), Nobody, true)
+        );
+        assert_eq!(
+            st(pr("closed", None, None, None, 0)),
+            ("Closed".into(), Nobody, true)
+        );
+    }
 
     #[test]
     fn pull_refs() {
