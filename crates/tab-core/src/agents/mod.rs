@@ -102,18 +102,51 @@ pub fn install_method(kind: AgentKind, path: &str) -> (&'static str, &'static st
     .unwrap_or(("unknown", ""))
 }
 
-/// The newest published version of an agent CLI, from npm. Cached for six
-/// hours; `None` when offline.
-pub async fn latest_version(kind: AgentKind) -> Option<String> {
-    use std::sync::{LazyLock, Mutex};
+/// The newest version of an agent CLI that its update command would
+/// install. A winget or Homebrew install updates from that package manager,
+/// which can be a few releases behind npm; comparing it with npm would offer
+/// an update that `winget upgrade` can't find. Everything else (npm, the
+/// agent's own updater) follows npm. Cached for six hours per install
+/// method; `None` when offline.
+pub async fn latest_version(
+    kind: AgentKind,
+    install: Option<&str>,
+    upgrade: Option<&str>,
+) -> Option<String> {
     use std::time::Instant;
-    static CACHE: LazyLock<Mutex<std::collections::HashMap<AgentKind, (Instant, String)>>> =
-        LazyLock::new(Default::default);
-    if let Some((at, v)) = CACHE.lock().unwrap().get(&kind)
+    let source: &'static str = match install {
+        Some("winget") => "winget",
+        Some("brew") => "brew",
+        _ => "npm",
+    };
+    let at_key = (kind, source);
+    if let Some((at, v)) = LATEST.lock().unwrap().get(&at_key)
         && at.elapsed() < Duration::from_secs(6 * 3600)
     {
         return Some(v.clone());
     }
+    let version = match source {
+        "winget" => winget_latest(upgrade?).await,
+        "brew" => brew_latest(upgrade?).await,
+        _ => npm_latest(kind).await,
+    }?;
+    LATEST
+        .lock()
+        .unwrap()
+        .insert(at_key, (Instant::now(), version.clone()));
+    Some(version)
+}
+
+type LatestCache = HashMap<(AgentKind, &'static str), (std::time::Instant, String)>;
+static LATEST: std::sync::LazyLock<Mutex<LatestCache>> = std::sync::LazyLock::new(Default::default);
+
+/// Forgets the newest versions looked up, so the next check asks again
+/// (after an update, say).
+pub fn forget_latest(kind: AgentKind) {
+    LATEST.lock().unwrap().retain(|(k, _), _| *k != kind);
+}
+
+async fn npm_latest(kind: AgentKind) -> Option<String> {
     let package = catalog::harness(kind).install.npm.as_deref()?;
     let v: serde_json::Value = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -126,12 +159,65 @@ pub async fn latest_version(kind: AgentKind) -> Option<String> {
         .json()
         .await
         .ok()?;
-    let version = v["version"].as_str()?.to_string();
-    CACHE
-        .lock()
-        .unwrap()
-        .insert(kind, (Instant::now(), version.clone()));
-    Some(version)
+    Some(v["version"].as_str()?.to_string())
+}
+
+/// Runs a package manager's query and returns what it printed, if it worked.
+async fn query_output(program: &str, args: &[&str]) -> Option<String> {
+    let exe = which::which(program).ok()?;
+    let out = tokio::time::timeout(Duration::from_secs(20), command(&exe).args(args).output())
+        .await
+        .ok()?
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// What `winget upgrade <id>` would install: the package's newest version
+/// in winget's sources.
+async fn winget_latest(upgrade: &str) -> Option<String> {
+    let id = upgrade.split_whitespace().last()?;
+    let out = query_output(
+        "winget",
+        &[
+            "show",
+            "--id",
+            id,
+            "--exact",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ],
+    )
+    .await?;
+    winget_show_version(&out)
+}
+
+/// The `Version:` line of `winget show`.
+fn winget_show_version(out: &str) -> Option<String> {
+    out.lines()
+        .find_map(|l| l.trim().strip_prefix("Version:"))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// What `brew upgrade [--cask] <name>` would install.
+async fn brew_latest(upgrade: &str) -> Option<String> {
+    let cask = upgrade.contains("--cask");
+    let name = upgrade.split_whitespace().last()?;
+    let mut args = vec!["info", "--json=v2"];
+    if cask {
+        args.push("--cask");
+    }
+    args.push(name);
+    let v: serde_json::Value = serde_json::from_str(&query_output("brew", &args).await?).ok()?;
+    let version = if cask {
+        v["casks"][0]["version"].as_str()
+    } else {
+        v["formulae"][0]["versions"]["stable"].as_str()
+    }?;
+    // Casks can carry a build after a comma ("2.1.3,abc").
+    Some(version.split(',').next()?.to_string())
 }
 
 /// Drops ANSI escape sequences from installer output.
@@ -179,11 +265,28 @@ pub async fn run_upgrade(
     };
     let mut cmd = command(&exe);
     cmd.args(words);
-    if program == "winget" {
-        cmd.args(["--accept-source-agreements", "--accept-package-agreements"]);
+    let winget = program == "winget";
+    if winget {
+        cmd.args([
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+            "--disable-interactivity",
+        ]);
     }
-    run_streaming(cmd, cmdline, on_line).await
+    let r = run_streaming(cmd, cmdline, on_line).await;
+    // Whatever happened, the next check asks again rather than offering
+    // the same update from the cache.
+    forget_latest(kind);
+    match r {
+        // winget has nothing newer: it already has the newest winget offers.
+        Err(e) if winget && format!("{e}").contains(WINGET_NO_UPDATE) => Ok(()),
+        r => r,
+    }
 }
+
+/// `APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE`: `winget upgrade` found
+/// nothing newer. Rust prints the exit status in hex on Windows.
+const WINGET_NO_UPDATE: &str = "0x8a15002b";
 
 /// Installs `kind` the way its metadata says (npm when it's on PATH, else
 /// its installer script), passing each line it prints to `on_line`.
@@ -1428,7 +1531,7 @@ impl AgentHub {
         let kind = cfg.kind?;
         let mut p = probe(kind, cfg.command.as_deref()).await;
         if p.found {
-            p.latest = latest_version(kind).await;
+            p.latest = latest_version(kind, p.install.as_deref(), p.upgrade.as_deref()).await;
         }
         Some(p)
     }
@@ -1857,6 +1960,19 @@ mod link_tests {
 #[cfg(test)]
 mod install_tests {
     use super::*;
+
+    #[test]
+    fn winget_latest_reads_the_version_winget_offers() {
+        let out = "Found Claude Code [Anthropic.ClaudeCode]
+Version: 2.1.317
+Publisher: Anthropic PBC
+";
+        assert_eq!(winget_show_version(out).as_deref(), Some("2.1.317"));
+        assert_eq!(
+            winget_show_version("No package found matching input criteria."),
+            None
+        );
+    }
 
     #[test]
     fn update_command_follows_how_claude_code_was_installed() {

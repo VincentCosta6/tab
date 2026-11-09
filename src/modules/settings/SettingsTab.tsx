@@ -5,7 +5,7 @@ import { Button, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
 import type { TabConfig } from "../../lib/types";
-import { useAppUpdate } from "../updates/appUpdate";
+import { useUpdates } from "../updates/UpdatesBadge";
 import { DraftContext } from "./draft";
 import { AgentsPage } from "./pages/Agents";
 import { AccountPage } from "./pages/Account";
@@ -60,7 +60,7 @@ export function SettingsTab() {
   const [note, setNote] = useState<string | null>(null);
   const [pageId, setPageId] = useState(initialPage);
   const qc = useQueryClient();
-  const { check } = useAppUpdate();
+  const updates = useUpdates();
 
   useEffect(() => {
     api.getConfig().then((c) => (setSaved(c), setDraft(c)));
@@ -127,7 +127,7 @@ export function SettingsTab() {
             <Icon name={p.icon} size={15} />
             <span>{p.label}</span>
             {changed(p) && <span className="settings-nav-dot" title="Unsaved changes" />}
-            {p.id === "updates" && check.data && <span className="settings-nav-badge" title={`${check.data.version} available`}>1</span>}
+            {p.id === "updates" && updates.length > 0 && <span className="settings-nav-badge" title={`${updates.join(" and ")} available`}>{updates.length}</span>}
           </button>
         ))}
       </nav>

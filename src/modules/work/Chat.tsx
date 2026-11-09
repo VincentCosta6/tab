@@ -1163,7 +1163,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
 
   return (
     <div ref={drop.ref} className={cx("composer", drop.armed && "drop-armed", drop.targeted && "dragging")}>
-      <AgentNotice messages={chat?.messages} />
+      <AgentNotice messages={chat?.messages} starting={!chat?.session && !chat?.running} />
       {(images.length > 0 || uploading > 0) && (
         <div className="composer-images">
           <Attachments paths={images} size={56} onRemove={(p) => setImages((xs) => xs.filter((x) => x !== p))} />

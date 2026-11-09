@@ -151,8 +151,11 @@ function LiveEvents() {
           qc.invalidateQueries({ queryKey: ["linked-tasks"] });
           break;
         case "project_changed":
-          qc.invalidateQueries({ queryKey: keys.notes(e.project_id) });
-          qc.invalidateQueries({ queryKey: keys.repos(e.project_id) });
+          // From the hub, a deleted note or repo comes with no project id:
+          // refresh every project's.
+          qc.invalidateQueries({ queryKey: e.project_id ? keys.notes(e.project_id) : ["notes"] });
+          qc.invalidateQueries({ queryKey: e.project_id ? keys.repos(e.project_id) : ["project-repos"] });
+          qc.invalidateQueries({ queryKey: e.project_id ? keys.projectItems(e.project_id) : ["project-items"] });
           qc.invalidateQueries({ queryKey: keys.projects });
           break;
         case "workflows_changed":
