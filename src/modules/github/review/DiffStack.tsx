@@ -92,6 +92,14 @@ export function FileHeader({ file, threads: given, collapsed, onToggle, onOpen }
 
 const NO_THREADS: ReviewThread[] = [];
 
+// Sidebar jumps: the animation, how long the layout must hold still before
+// letting go, and the most time spent holding the target in place.
+const JUMP_MS = 280;
+const SETTLE_MS = 400;
+const HOLD_MS = 3000;
+/** The last jump done, so remounting the stack (switching tabs back) doesn't replay it. */
+let lastJump = 0;
+
 function StackItem({ file, threads, scrollRoot, register, autoMarked }: { file: PrFile; threads: ReviewThread[]; scrollRoot: React.RefObject<HTMLDivElement | null>; register: (path: string, el: HTMLElement | null, end: HTMLElement | null) => void; autoMarked: Set<string> }) {
   const { openFile, mode } = useReview();
   const viewed = isViewed(file);
@@ -205,10 +213,67 @@ export function DiffStack({ files, autoRead, scrollTo }: { files: PrFile[]; auto
     r.addEventListener("scroll", on, { passive: true });
     return () => r.removeEventListener("scroll", on);
   }, [autoRead, act, autoMarked, followers]);
+  // Jump to a file picked in the sidebar. Diffs mount (and change height) as
+  // the view moves, so a plain smooth scroll to where the file *was* lands in
+  // the wrong spot: the target is re-measured every frame, and held there
+  // until the layout settles or you take over. With auto-read on, the files
+  // the jump goes past count as read, as if you'd scrolled past them.
+  // Through refs: `act` changes with every PR update (the read marks below
+  // included), and re-running this effect would cancel the jump.
+  const autoReadRef = useRef(autoRead);
+  autoReadRef.current = autoRead;
+  const actRef = useRef(act);
+  actRef.current = act;
   useEffect(() => {
-    if (!scrollTo) return;
-    const el = items.current.get(scrollTo.path);
-    if (el && root.current) root.current.scrollTo({ top: el.offsetTop - 8, behavior: "smooth" });
+    const r = root.current;
+    if (!scrollTo || !r || scrollTo.nonce <= lastJump) return;
+    lastJump = scrollTo.nonce;
+    const target = () => items.current.get(scrollTo.path);
+    const first = target();
+    if (!first) return;
+
+    if (autoReadRef.current && first.offsetTop > r.scrollTop) {
+      const passed: string[] = [];
+      for (const f of filesRef.current) {
+        if (f.filename === scrollTo.path) break;
+        if (!isViewed(f) && !autoMarked.has(f.filename)) passed.push(f.filename);
+      }
+      if (passed.length) {
+        passed.forEach((p) => autoMarked.add(p));
+        actRef.current({ type: "mark_viewed_many", paths: passed, viewed: true }).catch(() => passed.forEach((p) => autoMarked.delete(p)));
+      }
+    }
+
+    const from = r.scrollTop;
+    const start = performance.now();
+    let last = NaN;
+    let settledAt = start;
+    let raf = 0;
+    const where = () => {
+      const el = target();
+      return el ? Math.max(0, Math.min(el.offsetTop - 8, r.scrollHeight - r.clientHeight)) : null;
+    };
+    const step = (now: number) => {
+      const to = where();
+      if (to == null) return stop();
+      if (to !== last) (last = to), (settledAt = now);
+      const t = Math.min(1, (now - start) / JUMP_MS);
+      const y = t < 1 ? from + (to - from) * (1 - (1 - t) ** 3) : to;
+      if (Math.abs(r.scrollTop - y) > 0.5) r.scrollTop = y;
+      if (t < 1 || (now - settledAt < SETTLE_MS && now - start < HOLD_MS)) raf = requestAnimationFrame(step);
+      else stop();
+    };
+    const takeOver = ["wheel", "pointerdown", "touchstart"] as const;
+    const stop = () => {
+      cancelAnimationFrame(raf);
+      takeOver.forEach((e) => r.removeEventListener(e, stop));
+      window.removeEventListener("keydown", stop);
+    };
+    takeOver.forEach((e) => r.addEventListener(e, stop, { passive: true }));
+    window.addEventListener("keydown", stop);
+    raf = requestAnimationFrame(step);
+    return stop;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTo]);
 
   if (!files.length) return <div className="empty"><Icon name="file" size={22} /><p>No files changed.</p></div>;
