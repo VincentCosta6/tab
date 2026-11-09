@@ -5,6 +5,7 @@
 .timeline-row:last-child::before { display: none; }
 .timeline-dot { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: var(--bg-sunken); color: var(--fg-muted); }
 .timeline-dot.tone-accent { background: var(--tone-accent-bg); color: var(--tone-accent-fg); }
+.timeline-dot.tone-merged { background: var(--tone-merged-bg); color: var(--tone-merged-fg); }
 .timeline-dot.tone-success { background: var(--tone-success-bg); color: var(--tone-success-fg); }
 .timeline-dot.tone-warning { background: var(--tone-warning-bg); color: var(--tone-warning-fg); }
 .timeline-dot.tone-danger { background: var(--tone-danger-bg); color: var(--tone-danger-fg); }

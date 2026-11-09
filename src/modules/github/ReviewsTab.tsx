@@ -5,10 +5,11 @@ import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
 import { timeAgo } from "../../lib/format";
 import { useItems } from "../../lib/hooks";
+import { goBack, offerDone } from "../../lib/nav";
 import type { MyPull } from "../../lib/types";
 import { QueueRow } from "../work/WorkTab";
 import { linkStatus } from "./preview";
-import { parsePullUrl, takePendingPull } from "./pulls";
+import { parsePullUrl, takePendingPull, type LinkedPull } from "./pulls";
 
 /** GitHub's own check marks: green tick, red cross, amber dot. */
 const checkMark = {
@@ -51,7 +52,7 @@ export function ReviewsTab() {
   const pulls = useMemo(() => items.filter((i) => parsePullUrl(i.url)), [items]);
   const [open, setOpen] = useState<string | null>(null);
   // A PR opened from a link, which may not be in the queue.
-  const [linked, setLinked] = useState<{ repo: string; number: number } | null>(null);
+  const [linked, setLinked] = useState<LinkedPull | null>(null);
   useEffect(() => {
     const take = () => {
       const p = takePendingPull();
@@ -70,12 +71,22 @@ export function ReviewsTab() {
   const queued = linked ? pulls.find((p) => { const q = parsePullUrl(p.url); return q?.repo === linked.repo && q.number === linked.number; }) : undefined;
   const pr = current ? parsePullUrl(current.url) : linked;
   const sample = (current ?? queued)?.source === "demo";
+  // Opened from a chat or the queue: Back goes there, and the task to offer
+  // closing after a merge is the item that was open, else the PR's own item.
+  const from = linked?.from && linked.from.tab !== "reviews" ? linked.from : null;
+  const task = (from?.tab === "work" && from.itemId) || (current ?? queued)?.id;
+  const back = () => {
+    setOpen(null);
+    setLinked(null);
+    if (from) goBack(from);
+  };
+  const merged = () => task && offerDone({ itemId: task, message: "Pull request merged", icon: "git-merge", tone: "merged", back: from ?? { tab: "reviews", itemId: null } });
 
   if (pr)
     return (
       <div className="review-page">
         <Suspense fallback={<div className="skeleton" />}>
-          <ReviewView key={`${pr.repo}#${pr.number}`} repo={pr.repo} number={pr.number} sample={sample} item={current ?? queued} onBack={() => (setOpen(null), setLinked(null))} />
+          <ReviewView key={`${pr.repo}#${pr.number}`} repo={pr.repo} number={pr.number} sample={sample} item={current ?? queued} onBack={back} onMerged={merged} />
         </Suspense>
       </div>
     );

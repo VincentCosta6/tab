@@ -44,6 +44,8 @@
   --tone-neutral-bg: #efeff1;
   --tone-accent-fg: #4f46e5;
   --tone-accent-bg: #ecebfd;
+  --tone-merged-fg: #8250df;
+  --tone-merged-bg: #fbefff;
   --tone-info-fg: #0369a1;
   --tone-info-bg: #e3f2fb;
   --tone-success-fg: #15803d;
@@ -81,6 +83,8 @@
     --tone-neutral-bg: #232327;
     --tone-accent-fg: #a5b4fc;
     --tone-accent-bg: #25264a;
+    --tone-merged-fg: #ab7df8;
+    --tone-merged-bg: #2a1d42;
     --tone-info-fg: #7dd3fc;
     --tone-info-bg: #0f2a3a;
     --tone-success-fg: #86efac;

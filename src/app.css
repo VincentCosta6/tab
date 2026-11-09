@@ -1123,3 +1123,35 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
 .secret-row .input { min-width: 220px; }
 .updater-log { margin: 0; max-height: 220px; overflow: auto; padding: var(--space-2); border-radius: var(--radius-md); background: var(--bg-sunken); font: 11px/1.45 var(--font-mono, ui-monospace, monospace); white-space: pre-wrap; word-break: break-word; }
 .agent-notice-actions { display: flex; gap: 6px; margin-top: 4px; }
+/* Done: the title strikes through, a check pops on the glyph, then the row
+   slides out and folds up (WorkTab drives the slide and fold). The next item
+   rises into the pane. */
+.row.leaving { overflow: hidden; pointer-events: none; }
+.row.leaving .row-actions { display: none; }
+.row.leaving-done { background: color-mix(in srgb, var(--tone-success-fg) 9%, var(--row-bg, transparent)); transition: background 160ms ease-out; }
+.row.leaving-done .row-title { justify-self: start; max-width: 100%; color: var(--fg-muted); transition: color 200ms ease-out;
+  background: linear-gradient(currentColor, currentColor) no-repeat 0 58% / 0 1.5px; animation: row-strike 240ms 40ms cubic-bezier(.3, 0, .2, 1) forwards; }
+@keyframes row-strike { to { background-size: 100% 1.5px; } }
+.row-check { position: absolute; inset: 0; display: grid; place-items: center; border-radius: 50%; background: var(--tone-success-fg); color: var(--bg-raised);
+  animation: row-check-pop 300ms cubic-bezier(.34, 1.56, .64, 1) both; }
+@keyframes row-check-pop { from { transform: scale(0.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.work-pane > .item-pane.arrived { animation: pane-arrive 280ms cubic-bezier(.2, .8, .2, 1) both; }
+@keyframes pane-arrive { from { opacity: 0; transform: translateY(10px); } }
+@media (prefers-reduced-motion: reduce) {
+  .row.leaving-done .row-title, .row-check, .work-pane > .item-pane.arrived { animation: none; }
+  .row.leaving-done .row-title { background-size: 100% 1.5px; }
+}
+
+/* Close-the-task offer, over any view (the review takeover included). */
+.done-offer { position: fixed; right: var(--space-5); bottom: var(--space-5); z-index: 80; display: flex; align-items: center; gap: var(--space-3);
+  max-width: min(520px, calc(100vw - 2 * var(--space-5))); padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  border: 1px solid var(--border); border-radius: var(--radius-lg, 12px); background: var(--bg-raised); box-shadow: var(--shadow-md);
+  animation: done-offer-in 240ms cubic-bezier(.2, .8, .2, 1) both; }
+.done-offer.leaving { animation: done-offer-out 160ms ease-in both; }
+@keyframes done-offer-in { from { opacity: 0; transform: translateY(12px) scale(0.98); } }
+@keyframes done-offer-out { to { opacity: 0; transform: translateY(8px); } }
+.done-offer-icon { flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: var(--tone-bg); color: var(--tone-fg); }
+.done-offer-text { display: grid; gap: 1px; min-width: 0; font-size: var(--text-sm); }
+.done-offer-text strong { font-weight: 600; }
+.done-offer-text span { color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.done-offer-actions { display: flex; gap: var(--space-2); flex: none; }

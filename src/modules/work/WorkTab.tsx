@@ -9,6 +9,7 @@ import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useAgentActivity, useItems } from "../../lib/hooks";
 import { SessionPill, sessionLook } from "./SessionPill";
+import { setHere, takePendingDone } from "../../lib/nav";
 import { keys } from "../../lib/query";
 import type { AgentActivity, ItemState, QueueItem, Urgency } from "../../lib/types";
 import { takePendingOpen } from "./Chat";
@@ -17,11 +18,15 @@ import { NewChat } from "./NewChat";
 import { ProjectChip, ProjectPicker, useRememberedProject } from "./Projects";
 import { SnoozeMenu, snoozeOptions } from "./SnoozeMenu";
 import { ScoreBreakdown } from "./ScoreBreakdown";
+import { api } from "../../lib/api";
 import { actOnItem, type ItemAction } from "./optimistic";
 
 const urgencyOrder: Urgency[] = ["now", "today", "this_week", "whenever"];
 const urgencyHeading: Record<Urgency, string> = { now: "Now", today: "Today", this_week: "This week", whenever: "Whenever" };
 const NEW = "__new__";
+type Leaving = "done" | "away";
+/** A row animating out, kept drawn after the optimistic update drops it from the list. */
+type Ghost = { kind: Leaving; item: QueueItem; after: string | null };
 const WIDTH_KEY = "tab.queueWidth";
 const DEFAULT_LIST_WIDTH = 420;
 const clampWidth = (w: number) => Math.round(Math.min(Math.max(w, 300), Math.max(320, window.innerWidth - 560)));
@@ -32,11 +37,15 @@ export function WorkTab() {
   const [view, setView] = useState<ItemState>("open");
   const [app, setApp] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const { data: all = [] } = useItems(view, query);
+  const { data: all = [], isSuccess: loaded } = useItems(view, query);
   // "All projects" (null) or one project; remembered across launches.
   const [project, setProject] = useRememberedProject("tab.queueProject");
   const items = useMemo(() => (project ? all.filter((i) => i.project_id === project) : all), [all, project]);
   const [selected, setSelected] = useState<string | null>(null);
+  // Rows animating out after Done, Snooze or Reopen: still drawn, no longer selectable.
+  const [leaving, setLeaving] = useState<ReadonlyMap<string, Ghost>>(() => new Map());
+  // The item that opened because the one before it was closed; it rises in.
+  const [arrived, setArrived] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const [listWidth, setListWidth] = useState(() => {
     try {
@@ -80,6 +89,18 @@ export function WorkTab() {
   }, [items]);
 
   const visible = useMemo(() => (app ? items.filter((i) => i.kind.startsWith(`${app}.`)) : items), [items, app]);
+  const live = useMemo(() => (leaving.size ? visible.filter((i) => !leaving.has(i.id)) : visible), [visible, leaving]);
+  // What's drawn: the list, with leaving rows put back where they were.
+  const drawn = useMemo(() => {
+    if (!leaving.size) return visible;
+    const out = [...visible];
+    for (const [id, g] of leaving) {
+      if (out.some((i) => i.id === id)) continue;
+      out.splice(g.after ? out.findIndex((i) => i.id === g.after) + 1 : 0, 0, g.item);
+    }
+    return out;
+  }, [visible, leaving]);
+  useEffect(() => setHere({ itemId: selected === NEW ? null : selected }), [selected]);
 
   // A new filter or search keeps the open item while it's still in the list,
   // so typing doesn't rebuild the right pane; once the results leave it out,
@@ -93,11 +114,11 @@ export function WorkTab() {
   useEffect(() => {
     if (recheck.current === null) return;
     setSelected((s) => {
-      if (s === NEW || (s && visible.some((i) => i.id === s))) return s;
+      if (s === NEW || (s && live.some((i) => i.id === s))) return s;
       recheck.current = null;
-      return visible[0]?.id ?? null;
+      return live[0]?.id ?? null;
     });
-  }, [visible]);
+  }, [live]);
   // A chat started elsewhere (e.g. "Set up with assistant" in Connections).
   useEffect(() => {
     const open = () => {
@@ -115,19 +136,19 @@ export function WorkTab() {
     return () => window.removeEventListener("tab:open-item", open);
   }, [qc]);
   useEffect(() => {
-    if (!selected && visible.length) setSelected(visible[0].id);
-  }, [visible, selected]);
+    if (!selected && live.length) setSelected(live[0].id);
+  }, [live, selected]);
 
   const move = useCallback(
     (delta: number) => {
-      const idx = visible.findIndex((i) => i.id === selected);
-      const next = visible[Math.max(0, Math.min(visible.length - 1, idx + delta))];
+      const idx = live.findIndex((i) => i.id === selected);
+      const next = live[Math.max(0, Math.min(live.length - 1, idx + delta))];
       if (next) {
         setSelected(next.id);
         document.getElementById(`row-${next.id}`)?.scrollIntoView({ block: "nearest" });
       }
     },
-    [visible, selected],
+    [live, selected],
   );
 
   /**
@@ -138,28 +159,66 @@ export function WorkTab() {
   const advance = useCallback(
     (id: string, done = false) => {
       if (id !== selected) return;
-      if (done) {
-        const top = visible.find((i) => i.id !== id);
-        setSelected(top?.id ?? NEW);
-        return;
+      let next: string | null;
+      if (done) next = live.find((i) => i.id !== id)?.id ?? NEW;
+      else {
+        const idx = live.findIndex((i) => i.id === id);
+        next = (live[idx + 1] ?? live[idx - 1])?.id ?? null;
       }
-      const idx = visible.findIndex((i) => i.id === id);
-      const next = visible[idx + 1] ?? visible[idx - 1];
-      setSelected(next?.id ?? null);
+      setSelected(next);
+      setArrived(next);
+      if (next && next !== NEW) document.getElementById(`row-${next}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     },
-    [visible, selected],
+    [live, selected],
   );
 
-  // Optimistic: the row leaves the list right away; the engine event confirms.
-  // If Done is called off (a guard the person declines) the row comes back.
+  const dropGhost = useCallback((id: string) => setLeaving((m) => {
+    if (!m.has(id)) return m;
+    const n = new Map(m);
+    n.delete(id);
+    return n;
+  }), []);
+
+  // Optimistic: the next item opens and the row animates out right away; the
+  // engine event confirms. If Done is called off (a guard the person
+  // declines) the row comes back.
   const act = useCallback(
     async (item: QueueItem, action: ItemAction) => {
-      advance(item.id, action === "done");
+      if (leaving.has(item.id)) return;
+      const done = action === "done";
+      const idx = visible.findIndex((i) => i.id === item.id);
+      setLeaving((m) => new Map(m).set(item.id, { kind: done ? "done" : "away", item, after: idx > 0 ? visible[idx - 1].id : null }));
+      advance(item.id, done);
+      const anim = animateOut(item.id, done);
       const ok = await actOnItem(qc, item, action).catch((e) => (console.warn("item action failed", e), false));
-      if (!ok) setSelected(item.id);
+      if (!ok) {
+        document.getElementById(`row-${item.id}`)?.getAnimations().forEach((a) => a.cancel());
+        dropGhost(item.id);
+        setSelected(item.id);
+        return;
+      }
+      await anim;
+      dropGhost(item.id);
     },
-    [advance, qc],
+    [advance, dropGhost, leaving, visible, qc],
   );
+
+  // Closed from somewhere else (a merged PR's "Close task"): select it, so
+  // closing it opens the next one, then close it like the Done button.
+  const [closing, setClosing] = useState<string | null>(() => takePendingDone());
+  useEffect(() => {
+    const on = () => setClosing(takePendingDone());
+    window.addEventListener("tab:done-item", on);
+    return () => window.removeEventListener("tab:done-item", on);
+  }, []);
+  useEffect(() => {
+    if (!closing || !loaded) return;
+    const item = live.find((i) => i.id === closing);
+    if (item && selected !== closing) return setSelected(closing);
+    setClosing(null);
+    if (item) void act(item, "done");
+    else void api.itemDetail(closing).then((d) => d?.item && actOnItem(qc, d.item, "done")).catch((e) => console.warn("item action failed", e));
+  }, [closing, loaded, live, selected, act, qc]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -177,11 +236,11 @@ export function WorkTab() {
 
   const activity = useAgentActivity();
   const grouped = useMemo(() => {
-    if (view !== "open" || query) return [{ urgency: null as Urgency | null, items: visible }];
+    if (view !== "open" || query) return [{ urgency: null as Urgency | null, items: drawn }];
     return urgencyOrder
-      .map((u) => ({ urgency: u as Urgency | null, items: visible.filter((i) => (i.ranking?.urgency ?? "today") === u) }))
+      .map((u) => ({ urgency: u as Urgency | null, items: drawn.filter((i) => (i.ranking?.urgency ?? "today") === u) }))
       .filter((g) => g.items.length);
-  }, [visible, view, query]);
+  }, [drawn, view, query]);
 
   return (
     <div className="work" style={{ gridTemplateColumns: `${listWidth}px 1fr` }}>
@@ -220,7 +279,7 @@ export function WorkTab() {
           </div>
         </div>
         <div className="queue-list" role="listbox" aria-label="Work queue">
-          {!visible.length && (
+          {!drawn.length && (
             <EmptyState icon={query ? "search" : "check"} title={query ? "No matches" : view === "open" ? "Queue is clear" : `Nothing ${view}`}>
               {query ? "Search covers titles, bodies, people and places." : view === "open" ? "New work from your connections lands here, ranked." : undefined}
             </EmptyState>
@@ -229,7 +288,7 @@ export function WorkTab() {
             <div key={g.urgency ?? "all"}>
               {g.urgency && <div className={cx("urgency-group", `urgency-${g.urgency}`)}>{urgencyHeading[g.urgency]}</div>}
               {g.items.map((i) => (
-                <QueueRow key={i.id} item={i} agent={activity.get(i.id)} selected={i.id === selected} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
+                <QueueRow key={i.id} item={i} agent={activity.get(i.id)} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
               ))}
             </div>
           ))}
@@ -249,7 +308,7 @@ export function WorkTab() {
             else go();
           }} />
         ) : selected ? (
-          <ItemPane key={selected} id={selected} onActed={advance} onSelect={(id) => ((recheck.current = null), setSelected(id))} />
+          <ItemPane key={selected} id={selected} arrived={arrived === selected} onAct={act} onSelect={(id) => ((recheck.current = null), setSelected(id))} />
         ) : (
           <EmptyState icon="inbox" title="Nothing selected">Pick something from the queue, or start a new chat.</EmptyState>
         )}
@@ -270,10 +329,12 @@ function byline(item: QueueItem): string {
   return [actor, same(item.context) ? null : item.context].filter(Boolean).join(" · ");
 }
 
-export function QueueRow({ item, agent, selected, onSelect, onAct, compact }: {
+export function QueueRow({ item, agent, selected, leaving, onSelect, onAct, compact }: {
   item: QueueItem;
   agent?: AgentActivity;
   selected: boolean;
+  /** Animating out: "done" strikes it through first. */
+  leaving?: Leaving;
   onSelect: () => void;
   onAct?: (a: "done" | "reopen" | { snooze: number }) => void;
   compact?: boolean;
@@ -284,10 +345,11 @@ export function QueueRow({ item, agent, selected, onSelect, onAct, compact }: {
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
   const [showScore, setShowScore] = useState(false);
   return (
-    <div id={compact ? undefined : `row-${item.id}`} role="option" aria-selected={selected} className={cx("row", selected && "selected", menu && "menu-open", compact && "compact")} onClick={onSelect}
+    <div id={compact ? undefined : `row-${item.id}`} role="option" aria-selected={selected} className={cx("row", selected && "selected", menu && "menu-open", compact && "compact", leaving && "leaving", leaving === "done" && "leaving-done")} onClick={onSelect}
       onContextMenu={(e) => (e.preventDefault(), setMenu(false), setCtx({ x: e.clientX, y: e.clientY }))}>
       <span className="row-glyph">
         <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={compact ? 24 : 28} />
+        {leaving === "done" && <span className="row-check"><Icon name="check" size={compact ? 13 : 15} /></span>}
       </span>
       <div className="row-main">
         <FlapTitle as="div" className="row-title" id={item.id} text={item.title} />
@@ -378,4 +440,21 @@ function RowContextMenu({ at, done, canAct, onClose, onAct, onScore }: {
       <button role="menuitem" onClick={onScore}>View score</button>
     </div>
   );
+}
+
+/**
+ * A closed row's exit. Done strikes the title through and pops a check on
+ * the glyph (CSS, from the leaving-done class), then the row slides right and
+ * folds away so the rows below glide up. Snooze and Reopen skip the strike.
+ */
+async function animateOut(id: string, done: boolean) {
+  const el = document.getElementById(`row-${id}`);
+  if (!el || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const h = el.offsetHeight;
+  try {
+    await el.animate([{ transform: "none", opacity: 1 }, { transform: "translateX(56px)", opacity: 0 }], { duration: 220, delay: done ? 360 : 0, easing: "cubic-bezier(.5, 0, .9, .4)", fill: "forwards" }).finished;
+    await el.animate([{ height: `${h}px` }, { height: "0px", paddingTop: "0px", paddingBottom: "0px" }], { duration: 180, easing: "cubic-bezier(.4, 0, .2, 1)", fill: "forwards" }).finished;
+  } catch {
+    /* cancelled: Done was called off and the row is back */
+  }
 }

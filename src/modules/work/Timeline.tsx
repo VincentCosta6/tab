@@ -17,7 +17,7 @@ const look: Record<string, [icon: string, tone: Tone]> = {
   woke: ["clock", "info"],
   done: ["check", "success"],
   reopened: ["undo", "neutral"],
-  finished_upstream: ["git-merge", "success"],
+  finished_upstream: ["git-merge", "merged"],
   project: ["folder", "neutral"],
   linked: ["link", "accent"],
   session_started: ["bot", "accent"],

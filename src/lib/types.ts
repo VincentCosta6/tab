@@ -1,6 +1,6 @@
 // Mirrors tab-core's model (crates/tab-core/src/model.rs). Keep in sync.
 
-export type Tone = "neutral" | "accent" | "info" | "success" | "warning" | "danger";
+export type Tone = "neutral" | "accent" | "merged" | "info" | "success" | "warning" | "danger";
 
 /** A one-word state for a card or pill, with an icon for tight spots. */
 export interface Status { label: string; tone: Tone; icon?: string }
