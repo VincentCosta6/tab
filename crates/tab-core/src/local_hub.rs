@@ -120,6 +120,11 @@ pub struct LocalHub {
     /// (changes queue up) rather than go to `hub.db`, whose sequence
     /// numbers stopped matching at the move.
     awaiting_cloud: std::sync::atomic::AtomicBool,
+    /// The cloud hub `tab.db` belongs to while it waits to connect, so the
+    /// status says tab cloud (not this computer) from the first moment.
+    cloud_expected: Mutex<Option<String>>,
+    /// Why the cloud hub couldn't be reached or synced with, last time.
+    cloud_error: Mutex<Option<String>>,
     /// Files the cloud hub is known to have.
     uploaded: Mutex<std::collections::HashSet<String>>,
     /// Files that couldn't go up yet; tried again on each sync.
@@ -171,6 +176,8 @@ pub struct HubStatusView {
     pub cloud_hub: Option<String>,
     /// Whether that cloud hub is connected right now.
     pub cloud_connected: bool,
+    /// Why it couldn't be reached or synced with, while that's so.
+    pub cloud_error: Option<String>,
     /// The last change of the hub in use (cloud once moved) this copy has.
     pub pulled_to: u64,
     /// What this copy holds that syncs, by kind (projects, notes, graph…).
@@ -235,6 +242,8 @@ impl LocalHub {
             cloud: Default::default(),
             syncing: Mutex::new(()),
             awaiting_cloud: Default::default(),
+            cloud_expected: Default::default(),
+            cloud_error: Default::default(),
             uploaded: Default::default(),
             to_upload: Default::default(),
             misses: Default::default(),
@@ -681,7 +690,11 @@ impl LocalHub {
                     if m.awaiting_cloud.load(Ordering::Relaxed) {
                         return Ok(());
                     }
-                    m.sync(&st)
+                    let r = m.sync(&st);
+                    if m.cloud_link().is_some() {
+                        *m.cloud_error.lock().unwrap() = r.as_ref().err().map(|e| format!("{e:#}"));
+                    }
+                    r
                 })
                 .await;
                 match done {
@@ -718,9 +731,11 @@ impl LocalHub {
         });
     }
 
-    /// This computer moved to tab cloud before: hold sync until
-    /// [`LocalHub::use_cloud`] connects. Call before [`LocalHub::follow`].
-    pub fn expect_cloud(&self) {
+    /// This computer moved to tab cloud hub `hub_id` before: hold sync
+    /// until [`LocalHub::use_cloud`] connects. Call before
+    /// [`LocalHub::follow`].
+    pub fn expect_cloud(&self, hub_id: &str) {
+        *self.cloud_expected.lock().unwrap() = Some(hub_id.to_string());
         self.awaiting_cloud.store(true, Ordering::Relaxed);
     }
 
@@ -810,9 +825,19 @@ impl LocalHub {
     /// its copy, and other computers syncing with it carry on.
     pub fn move_to_local(&self, store: &Store) -> anyhow::Result<u64> {
         let _turn = self.syncing.lock().unwrap();
-        anyhow::ensure!(self.cloud_link().is_some(), "not syncing with tab cloud");
-        self.sync(store)?;
+        let waiting = self.awaiting_cloud.load(Ordering::Relaxed);
+        anyhow::ensure!(
+            self.cloud_link().is_some() || waiting,
+            "not syncing with tab cloud"
+        );
+        // Still waiting to connect: what's here is all there is to bring
+        // back, and what's waiting to go is queued again below.
+        if !waiting {
+            self.sync(store)?;
+        }
         *self.cloud.write().unwrap() = None;
+        *self.cloud_expected.lock().unwrap() = None;
+        *self.cloud_error.lock().unwrap() = None;
         self.awaiting_cloud.store(false, Ordering::Relaxed);
         // Watch on this app's own hub again.
         let watching: Vec<String> = self.watching.lock().unwrap().iter().cloned().collect();
@@ -857,8 +882,23 @@ impl LocalHub {
 
     /// Syncs `tab.db` with the cloud hub behind `link` (this computer moved
     /// before). Blocks; run it on a blocking thread.
+    /// Does nothing once the work has moved back to this computer.
     pub fn use_cloud(self: &Arc<Self>, link: Arc<CloudLink>, store: &Store) -> anyhow::Result<()> {
         let _turn = self.syncing.lock().unwrap();
+        if self.cloud_expected.lock().unwrap().is_none() {
+            return Ok(());
+        }
+        let r = self.connect_cloud(link.clone(), store);
+        // The socket's own reason (signed out, refused) says more than "not
+        // connected".
+        *self.cloud_error.lock().unwrap() = r
+            .as_ref()
+            .err()
+            .map(|e| link.last_error().unwrap_or_else(|| format!("{e:#}")));
+        r
+    }
+
+    fn connect_cloud(self: &Arc<Self>, link: Arc<CloudLink>, store: &Store) -> anyhow::Result<()> {
         self.cloud_hello(&link, store)?;
         self.link_cloud(link);
         self.upload_all_soon();
@@ -1036,8 +1076,15 @@ impl LocalHub {
                 .get()
                 .and_then(|(s, _)| s.hub_outbox_len().ok())
                 .unwrap_or(0),
-            cloud_hub: self.cloud_link().map(|l| l.hub_id.clone()),
+            cloud_hub: self
+                .cloud_link()
+                .map(|l| l.hub_id.clone())
+                .or_else(|| self.cloud_expected.lock().unwrap().clone()),
             cloud_connected: self.cloud_link().is_some_and(|l| l.is_connected()),
+            cloud_error: self
+                .cloud_link()
+                .and_then(|l| l.last_error())
+                .or_else(|| self.cloud_error.lock().unwrap().clone()),
             pulled_to: self
                 .local
                 .get()

@@ -12,7 +12,6 @@ import { AccountPage } from "./pages/Account";
 import { HubPage } from "./pages/Hub";
 import { McpPage } from "./pages/Mcp";
 import { RankingPage } from "./pages/Ranking";
-import { SandboxPage } from "./pages/Sandbox";
 import { StoragePage } from "./pages/Storage";
 import { UpdatesPage } from "./pages/Updates";
 
@@ -29,9 +28,8 @@ interface Page {
 const pages: Page[] = [
   { id: "account", label: "Account", icon: "user", component: AccountPage, edits: (c) => c.profile },
   { id: "hub", label: "Hub", icon: "cloud", component: HubPage, edits: (c) => c.hub },
-  { id: "agents", label: "Agents", icon: "bot", component: AgentsPage, edits: (c) => c.agent },
+  { id: "agents", label: "Agents", icon: "bot", component: AgentsPage, edits: (c) => [c.agent, c.sandbox] },
   { id: "ranking", label: "Ranking", icon: "filter", component: RankingPage, edits: (c) => c.ranking },
-  { id: "sandbox", label: "Sandbox", icon: "shield", component: SandboxPage, edits: (c) => c.sandbox },
   { id: "storage", label: "Storage", icon: "folder", component: StoragePage, edits: (c) => c.storage },
   { id: "mcp", label: "MCP server", icon: "terminal", component: McpPage },
   { id: "updates", label: "Updates", icon: "refresh", component: UpdatesPage },
@@ -98,7 +96,9 @@ export function SettingsTab() {
 
   if (!draft || !saved || !ctx) return <div className="page"><div className="skeleton" /></div>;
 
-  const page = pages.find((p) => p.id === (pageId === "general" ? "account" : pageId)) ?? pages[0];
+  // Pages that moved: General became Account, Sandbox is part of Agents.
+  const moved: Record<string, string> = { general: "account", sandbox: "agents" };
+  const page = pages.find((p) => p.id === (moved[pageId] ?? pageId)) ?? pages[0];
   const changed = (p: Page) => !!p.edits && JSON.stringify(p.edits(draft)) !== JSON.stringify(p.edits(saved));
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
 

@@ -7,6 +7,7 @@ import { bytes, timeAgo } from "../../../lib/format";
 import { HubState, RunnerState, asFailure } from "../../../lib/protocol/cloud";
 import type { HubMode, Tone } from "../../../lib/types";
 import { CloudHubLine, CloudHubSetup, SignInButtons, localDrawbacks, useAccount, useCloudHub } from "../../account/Account";
+import { hubLook } from "../../shell/AppHeader";
 import { useDraft } from "../draft";
 
 /**
@@ -39,23 +40,29 @@ function HubsSection() {
   const signedIn = !!account?.account;
   const cloudHub = useCloudHub(signedIn);
   const [settingUp, setSettingUp] = useState(false);
+  // Picking tab cloud only opens the steps: nothing is saved until the move,
+  // which saves it itself. A saved "cloud" with no move behind it (older
+  // builds saved the pick) opens them too.
+  const [picked, setPicked] = useState<HubMode>(draft.hub?.mode ?? "local");
   const h = local.data;
   const moved = !!h?.cloud_hub;
-  const mode: HubMode = moved ? "cloud" : (draft.hub?.mode ?? "local");
+  const mode: HubMode = moved ? "cloud" : picked;
   const hubReady = cloudHub.data?.hub?.state === HubState.READY;
-  const use = (m: HubMode) => set((c) => void (c.hub = { ...c.hub, mode: m }));
+  const use = (m: HubMode) => {
+    setPicked(m);
+    if (m === "local" && draft.hub?.mode === "cloud") set((c) => void (c.hub = { ...c.hub, mode: "local" }));
+  };
+  const look = hubLook(h ?? null, [], signedIn);
 
   const headline = moved
-    ? "Your work syncs with tab cloud."
+    ? "Your work is kept in tab cloud."
     : mode === "cloud"
-      ? "You picked tab cloud, but your work is still only on this computer."
+      ? "Moving to tab cloud: your work is still only on this computer."
       : "Your work is kept on this computer only.";
   const detail = moved
-    ? h!.cloud_connected
-      ? "Every computer you sign in on sees the same queue, chats and projects."
-      : "Not connected right now. Changes you make wait here and sync when it reconnects."
+    ? look.detail
     : mode === "cloud"
-      ? "Finish the steps below to start syncing."
+      ? "Three steps, all here. Nothing changes until the last one."
       : "Nothing syncs, and other computers and your phone can't see it.";
 
   return (
@@ -64,12 +71,23 @@ function HubsSection() {
         <div className="hub-row">
           <Icon name={moved || mode === "cloud" ? "cloud" : "folder"} size={20} />
           <div className="hub-row-main">
-            <strong>{headline}</strong> {moved && (h!.cloud_connected ? <Badge tone="success">Connected</Badge> : <Badge tone="warning">Offline</Badge>)}
+            <strong>{headline}</strong> {moved && <Badge tone={look.tone}>{look.label}</Badge>}
             <div className="subtle">{detail}</div>
+            {moved && !h!.cloud_connected && h!.cloud_error && <div className="subtle mono hub-error">{h!.cloud_error}</div>}
           </div>
           {!moved && mode === "local" && <Button size="sm" variant="primary" icon="cloud" onClick={() => use("cloud")}>Use tab cloud</Button>}
-          {!moved && mode === "cloud" && <Button size="sm" variant="ghost" onClick={() => use("local")}>Keep it on this computer</Button>}
+          {!moved && mode === "cloud" && <Button size="sm" variant="ghost" onClick={() => use("local")}>Cancel</Button>}
         </div>
+
+        {moved && !signedIn && !h!.cloud_connected && (
+          <div className="hub-row">
+            <div className="hub-row-main">
+              <strong>Sign in to keep syncing</strong>
+              <div className="subtle">Use the account your hub belongs to. Nothing is lost meanwhile.</div>
+              <div style={{ maxWidth: 320, marginTop: "var(--space-2)" }}><SignInButtons /></div>
+            </div>
+          </div>
+        )}
 
         {!moved && mode === "cloud" && (
           <ol className="hub-steps">
@@ -92,7 +110,7 @@ function HubsSection() {
           </ol>
         )}
 
-        {moved && <CloudHubLine />}
+        {moved && signedIn && <CloudHubLine inUse />}
         {moved && <MoveToLocal />}
         {mode === "local" && !moved && (
           <ul className="hub-drawbacks hub-row-note">

@@ -94,6 +94,7 @@ function Shell() {
   const Active = tab.component;
   return (
     <div className="shell">
+      <AppHeader title={tab.label} icon={tab.icon} />
       <nav className="nav">
         <div className="nav-group">{visible.filter((t) => !t.footer).map(navButton)}</div>
         <div className="nav-group nav-footer">
@@ -104,7 +105,6 @@ function Shell() {
         </div>
       </nav>
       <main className="main">
-        <AppHeader title={tab.label} icon={tab.icon} />
         <div className="main-body">
           <ErrorBoundary key={tab.id} label={tab.label}>
             <Active />

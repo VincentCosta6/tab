@@ -13,7 +13,7 @@ import { isPinned, useThreadFiles } from "../../lib/threadFiles";
 import { keys } from "../../lib/query";
 import type { QueueItem } from "../../lib/types";
 import { parsePullUrl } from "../github/pulls";
-import { ChatView, SandboxPill, StrictPill } from "./Chat";
+import { ChatView, DevicePill, SandboxPill, StrictPill } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
 import { ContextRail } from "./ContextRail";
 import { confirmDone } from "./doneGuard";
@@ -137,6 +137,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
               ))}
             </div>
             <div className="pane-pills">
+              {chat?.session && <DevicePill session={chat.session} />}
               <SandboxPill />
               <StrictPill kind={chat?.session?.agent} />
             </div>
