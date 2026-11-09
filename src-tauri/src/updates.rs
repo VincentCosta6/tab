@@ -109,20 +109,45 @@ pub async fn app_update_install<R: Runtime>(
         .ok_or("There's no update to install. Check for updates first.")?;
     let mut downloaded = 0u64;
     let events = app.clone();
+    // Downloading also checks the update's signature.
     let result = update
-        .download_and_install(
+        .download(
             move |chunk, total| {
                 downloaded += chunk as u64;
                 let _ = events.emit("tab://app-update", Progress { downloaded, total });
             },
             || {},
         )
-        .await;
+        .await
+        .map_err(err)
+        .and_then(|bytes| install(&update, &bytes));
     if let Err(e) = result {
         // Keep it, so trying again doesn't need another check.
         *pending.0.lock().unwrap() = Some(update);
-        return Err(err(e));
+        return Err(e);
     }
     tracing::info!(version = %update.version, "update installed, restarting");
     app.restart()
+}
+
+/// Installs a downloaded update. On macOS it goes inside the current
+/// `tab.app`, so the Dock pin and app blockers still recognise tab
+/// (see bundle_update); the plugin's own install, which replaces the whole
+/// bundle, is the fallback, e.g. when /Applications needs an admin password.
+/// Windows' installer already updates tab in place.
+fn install(update: &Update, bytes: &[u8]) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if let Some(bundle) = tauri::utils::platform::current_exe()
+        .ok()
+        .and_then(|exe| crate::bundle_update::bundle_of(&exe))
+    {
+        match crate::bundle_update::install(&bundle, bytes) {
+            Ok(()) => return Ok(()),
+            Err(crate::bundle_update::Error::Untouched(e)) => {
+                tracing::warn!(error = %e, "couldn't update tab.app in place, replacing it instead");
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    update.install(bytes).map_err(err)
 }

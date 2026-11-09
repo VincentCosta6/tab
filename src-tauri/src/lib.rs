@@ -30,6 +30,7 @@ use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tauri::{Emitter, Manager, State};
 
 mod account;
+mod bundle_update;
 mod cloud_runner;
 mod dev;
 mod updates;
