@@ -14,7 +14,7 @@ const checkStatus: Record<string, Status> = {
  * needed, and finally ready to merge.
  */
 export function linkStatus(s: LinkSummary): Status | null {
-  if (s.state === "merged") return { label: "Merged", tone: "accent", icon: "git-merge" };
+  if (s.state === "merged") return { label: "Merged", tone: "merged", icon: "git-merge" };
   if (s.state === "closed") return { label: "Closed", tone: "neutral", icon: "git-pull-request-closed" };
   if (s.merge_state === "dirty") return { label: "Conflicts", tone: "danger", icon: "alert" };
   if (s.checks === "failing") return checkStatus.failing;

@@ -10,6 +10,7 @@ import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useChat, useItem } from "../../lib/hooks";
 import { isPinned, useThreadFiles } from "../../lib/threadFiles";
+import { offerDone } from "../../lib/nav";
 import { keys } from "../../lib/query";
 import type { QueueItem } from "../../lib/types";
 import { parsePullUrl } from "../github/pulls";
@@ -25,7 +26,14 @@ import { Timeline } from "./Timeline";
 const ReviewView = lazy(() => import("../github/review/Workspace"));
 
 /** An item: header and actions, its rolled-up context, and a chat with an agent about it. */
-export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: string, done?: boolean) => void; onSelect: (id: string) => void }) {
+export function ItemPane({ id, arrived, onAct, onSelect }: {
+  id: string;
+  /** Opened because the item before it was closed: it rises in. */
+  arrived?: boolean;
+  /** Done and Snooze go through Work, which animates the row out and opens the next item. */
+  onAct: (item: QueueItem, action: ItemAction) => void;
+  onSelect: (id: string) => void;
+}) {
   const { kind } = useApp();
   const qc = useQueryClient();
   const { data: item } = useItem(id);
@@ -48,20 +56,16 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   const pull = item ? parsePullUrl(item.url) : null;
 
   // Optimistic (see actOnItem): the pane and queue change before the engine
-  // answers. If Done is called off, the item is selected again.
-  const act = async (i: QueueItem, action: ItemAction) => {
-    if (action !== "reopen") onActed(i.id, action === "done");
-    const ok = await actOnItem(qc, i, action).catch((e) => (console.warn("item action failed", e), false));
-    if (!ok && action !== "reopen") onSelect(i.id);
-  };
-  const done = (i: QueueItem) => act(i, "done");
-  const snooze = (i: QueueItem, minutes: number) => (setSnoozeOpen(false), act(i, { snooze: minutes }));
+  // answers. Done and Snooze go through Work so the row animates out and the
+  // next item opens; Reopen keeps this item open.
+  const done = (i: QueueItem) => onAct(i, "done");
+  const snooze = (i: QueueItem, minutes: number) => (setSnoozeOpen(false), onAct(i, { snooze: minutes }));
   const move = async (i: QueueItem, projectId: string | null) => {
     const next = await api.itemSetProject(i.id, projectId);
     if (next) qc.setQueryData(keys.item(i.id), next);
     qc.invalidateQueries({ queryKey: keys.allItems });
   };
-  const reopen = (i: QueueItem) => act(i, "reopen");
+  const reopen = (i: QueueItem) => void actOnItem(qc, i, "reopen").catch((e) => console.warn("item action failed", e));
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -82,7 +86,13 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
     return (
       <div className="rv-takeover">
         <Suspense fallback={<div className="pane-loading"><div className="skeleton" /></div>}>
-          <ReviewView repo={pull.repo} number={pull.number} sample={item.source === "demo"} onBack={() => setReviewing(false)} />
+          <ReviewView
+            repo={pull.repo}
+            number={pull.number}
+            sample={item.source === "demo"}
+            onBack={() => setReviewing(false)}
+            onMerged={() => item.state !== "done" && offerDone({ itemId: item.id, message: "Pull request merged", icon: "git-merge", tone: "merged", back: { tab: "work", itemId: item.id } })}
+          />
         </Suspense>
       </div>
     );
@@ -90,7 +100,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   const k = kind(item.kind);
   const r = item.ranking;
   return (
-    <div className={cx("item-pane", tint.className)} style={tint.style}>
+    <div className={cx("item-pane", tint.className, arrived && "arrived")} style={tint.style}>
       <header className="item-head">
         <div className="item-head-glyph">
           <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={34} />

@@ -9,10 +9,12 @@ import { cx } from "./design/components";
 import { ErrorBoundary } from "./design/ErrorBoundary";
 import { AppProvider, useApp } from "./lib/app-context";
 import { useAgentActivity, useConfig } from "./lib/hooks";
+import { setHere } from "./lib/nav";
 import { QueryProvider } from "./lib/query";
 import { Onboarding } from "./modules/onboarding/Onboarding";
 import { tabs } from "./modules/registry";
 import { UsageMeter } from "./modules/usage/UsageMeter";
+import { DoneOffer } from "./modules/work/DoneOffer";
 import { UpdatesBadge } from "./modules/updates/UpdatesBadge";
 import { openSettings } from "./modules/settings/SettingsTab";
 import { AppHeader } from "./modules/shell/AppHeader";
@@ -44,9 +46,17 @@ function Shell() {
 
   useEffect(() => {
     const work = () => setActive("work");
+    const show = (e: Event) => setActive((e as CustomEvent<string>).detail);
     window.addEventListener("tab:open-item", work);
-    return () => window.removeEventListener("tab:open-item", work);
+    window.addEventListener("tab:show", show);
+    return () => {
+      window.removeEventListener("tab:open-item", work);
+      window.removeEventListener("tab:show", show);
+    };
   }, []);
+
+  // So a view opened from a link knows where to go back to.
+  useEffect(() => setHere({ tab: tab.id }), [tab.id]);
 
   // GitHub PR links open in Reviews while that tab is available.
   const reviews = visible.some((t) => t.id === "reviews");
@@ -111,6 +121,7 @@ function Shell() {
       </main>
       <BrowserDock />
       <DropOverlay />
+      <DoneOffer />
       {onboarding && <Onboarding onClose={() => setOnboarding(false)} />}
     </div>
   );

@@ -71,7 +71,8 @@ function useDark() {
 
 let nonce = 0;
 
-export default function ReviewWorkspace({ repo, number, sample, item, onBack }: { repo: string; number: number; sample: boolean; item?: QueueItem; onBack: () => void }) {
+/** `onMerged` runs once a merge from here goes through, so the host can offer closing the task. */
+export default function ReviewWorkspace({ repo, number, sample, item, onBack, onMerged }: { repo: string; number: number; sample: boolean; item?: QueueItem; onBack: () => void; onMerged?: () => void }) {
   const qc = useQueryClient();
   const dark = useDark();
   const pull = usePull(repo, number, sample);
@@ -214,7 +215,7 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack }: 
   return (
     <Ctx.Provider value={ctx}>
       <div className="rv">
-        <Header onBack={onBack} local={local} onRefresh={() => qc.invalidateQueries({ queryKey: keys.pull(repo, number) })} refreshing={pull.isFetching} />
+        <Header onBack={onBack} onMerged={onMerged} local={local} onRefresh={() => qc.invalidateQueries({ queryKey: keys.pull(repo, number) })} refreshing={pull.isFetching} />
         <LinkedWork url={pr.url} />
         {item && <ContextDrawer item={item} onSelect={openItem} />}
         <FixBanner ai={ctx.ai} local={boot.phase !== "remote"} />

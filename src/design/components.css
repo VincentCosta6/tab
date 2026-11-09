@@ -25,6 +25,7 @@
 
 [class*="tone-"] { --tone-fg: var(--tone-neutral-fg); --tone-bg: var(--tone-neutral-bg); }
 .tone-accent { --tone-fg: var(--tone-accent-fg); --tone-bg: var(--tone-accent-bg); }
+.tone-merged { --tone-fg: var(--tone-merged-fg); --tone-bg: var(--tone-merged-bg); }
 .tone-info { --tone-fg: var(--tone-info-fg); --tone-bg: var(--tone-info-bg); }
 .tone-success { --tone-fg: var(--tone-success-fg); --tone-bg: var(--tone-success-bg); }
 .tone-warning { --tone-fg: var(--tone-warning-fg); --tone-bg: var(--tone-warning-bg); }

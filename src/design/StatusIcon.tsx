@@ -10,6 +10,7 @@ const toneIcon: Record<Tone, string> = {
   warning: "alert",
   info: "circle-dot",
   accent: "circle-dot",
+  merged: "git-merge",
   neutral: "dot",
 };
 
