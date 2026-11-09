@@ -20,6 +20,9 @@ jobs:
       - run: "cargo test -p tab-core --lib sandbox::"
         env:
           TAB_REQUIRE_SANDBOX: "1"
+      # In-place app updates swap bundle folders with a macOS-only call. The
+      # app crate needs a dist folder to compile; the UI isn't under test.
+      - run: mkdir -p dist && cargo test -p tab --lib bundle_update::
 
   check:
     runs-on: ubuntu-latest
