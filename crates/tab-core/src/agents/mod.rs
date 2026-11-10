@@ -20,6 +20,7 @@ mod opencode;
 mod per_turn;
 mod pi;
 mod small;
+pub mod steward;
 mod suggest;
 mod titler;
 
@@ -38,7 +39,7 @@ use tokio_util::sync::CancellationToken;
 use crate::NewContext;
 use crate::config::AgentConfig;
 use crate::engine::EngineEvent;
-use crate::model::{AgentKind, Approval, ContextSection, Session, SessionStatus};
+use crate::model::{AgentKind, Approval, ContextSection, ProjectNote, Session, SessionStatus};
 use crate::store::Store;
 
 /// How long an approval waits for the person before it is denied.
@@ -1528,12 +1529,13 @@ impl AgentHub {
              that isn't listed, add it with tab_project_repo (with its local path if you know it). If the \
              project has no description, or the person tells you what it is or how to work in it, write it with \
              tab_project_update (about, rules); each replaces the whole field, so keep what's still true. \
-             When you learn a durable fact (how it deploys, who owns what, where things live, a decision \
-             and why), save it with tab_project_note under a short topic, citing the items \
-             it came from. Writing the same topic again replaces the note, so keep it current rather than \
-             adding new ones. Skip anything that's only true for this one task, and never note one-off \
-             events (sign-ins, verifications, receipts, codes), credentials or personal account details: \
-             every future chat reads these.\n\
+             Project notes are rare: every future chat reads them. Save one with tab_project_note only \
+             for a fact the next chat on an unrelated task would need and couldn't get from the repo (where \
+             it's checked out, a non-obvious way to build or deploy, an environment limit, who owns what, a \
+             decision and why). Never write up what you built or how a feature works, file maps, PR \
+             changelogs, task status, one-off events, credentials or personal details: the code and git \
+             hold those. The project's steward reviews each note and may rewrite or turn it down; accept \
+             its answer.\n\
              - When the person asks to link, file or move something into a project, use tab_set_project; \
              a note is not a link.\n\
              - When the person wants to connect a service (email, GitHub, ...), set it up for them: \
@@ -1620,19 +1622,9 @@ impl AgentHub {
                 "Project: {} (call tab_project for what it is, its rules, repos and recent work)\n",
                 p.name
             ));
-            let notes = self.store.project_notes(&p.id).unwrap_or_default();
-            if !notes.is_empty() {
-                out.push_str("Project notes, from earlier chats:\n");
-                for n in notes.iter().take(20) {
-                    out.push_str(&format!(
-                        "- {} ({}, {}): {}\n",
-                        n.topic,
-                        n.added_by,
-                        n.updated_at.format("%Y-%m-%d"),
-                        n.text.chars().take(500).collect::<String>()
-                    ));
-                }
-            }
+            out.push_str(&notes_block(
+                &self.store.project_notes(&p.id).unwrap_or_default(),
+            ));
         }
         if let Some(b) = &e.body {
             out.push_str(&format!(
@@ -1846,6 +1838,37 @@ async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
     p
 }
 
+/// Notes shown in full at the start of a chat; the rest are named only.
+const NOTES_IN_PROMPT: usize = 12;
+
+/// The project's notes as a chat starts with them: the person's first, then
+/// the newest agent notes, each in full up to [`NOTES_IN_PROMPT`]. Any more
+/// are listed by topic so the agent knows to read them with tab_project.
+fn notes_block(notes: &[ProjectNote]) -> String {
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut ordered: Vec<&ProjectNote> = notes.iter().filter(|n| n.added_by != "agent").collect();
+    ordered.extend(notes.iter().filter(|n| n.added_by == "agent"));
+    let mut out = String::from("Project notes:\n");
+    for n in ordered.iter().take(NOTES_IN_PROMPT) {
+        let text: String = n.text.chars().take(steward::MAX_NOTE_CHARS + 1).collect();
+        out.push_str(&format!("- {}: {}\n", n.topic, text.trim()));
+    }
+    let rest: Vec<&str> = ordered
+        .iter()
+        .skip(NOTES_IN_PROMPT)
+        .map(|n| n.topic.as_str())
+        .collect();
+    if !rest.is_empty() {
+        out.push_str(&format!(
+            "More notes, in tab_project: {}\n",
+            rest.join(", ")
+        ));
+    }
+    out
+}
+
 /// Short, human summary of a tool call for an approval card.
 pub(crate) fn summarize_tool(tool: &str, input: &serde_json::Value) -> String {
     let s = |k: &str| input.get(k).and_then(|v| v.as_str());
@@ -1934,6 +1957,49 @@ mod wait_tests {
             &json!({ "command": "gh run watch 1", "run_in_background": true })
         ));
         assert!(!is_wait("Read", &json!({ "file_path": "sleep 100" })));
+    }
+}
+
+#[cfg(test)]
+mod notes_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn note(topic: &str, by: &str) -> ProjectNote {
+        ProjectNote {
+            id: topic.into(),
+            project_id: "p".into(),
+            topic: topic.into(),
+            text: format!("fact about {topic}"),
+            added_by: by.into(),
+            session_id: None,
+            sources: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn person_notes_lead_and_extras_are_named_only() {
+        assert_eq!(notes_block(&[]), "");
+        let mut notes: Vec<ProjectNote> = (0..NOTES_IN_PROMPT + 2)
+            .map(|i| note(&format!("a{i}"), "agent"))
+            .collect();
+        notes.push(note("owners", "user"));
+        let s = notes_block(&notes);
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(
+            lines[1], "- owners: fact about owners",
+            "the person's note comes first"
+        );
+        assert_eq!(lines.len(), 1 + NOTES_IN_PROMPT + 1);
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .starts_with("More notes, in tab_project: a11, a12, a13")
+        );
+        assert!(!s.contains("2026"), "no dates or authors");
     }
 }
 
