@@ -1233,3 +1233,9 @@ label.import-row { cursor: pointer; }
 .where-runs .on { color: var(--fg); }
 .where-runs .on svg { color: var(--tone-success-fg); }
 .where-runs .off { color: var(--fg-subtle); }
+.mcp-queue { display: flex; flex-direction: column; gap: var(--space-3); }
+.mcp-queue-row { display: flex; align-items: center; gap: var(--space-3); }
+.mcp-queue-row > .connector-status { margin-left: auto; }
+.mcp-queue-query { display: flex; gap: var(--space-2); align-items: center; }
+.mcp-queue-query > :first-child { flex: 1; min-width: 0; }
+.mcp-queue-note { margin: 0; }

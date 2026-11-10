@@ -216,6 +216,7 @@ impl Core {
             Ok(sources) => {
                 for source in sources {
                     if source != "tab"
+                        && !tab_core::remote_mcp::sync::syncs(cfg, &source)
                         && (cfg.connector(&source).is_none()
                             || !tab_core::connectors::known(&source))
                     {
@@ -237,7 +238,8 @@ impl Core {
             self.store.clone(),
             self.gateway.clone(),
             self.events.clone(),
-        );
+        )
+        .with_mcp(cfg, self.hub.remote_mcp());
         let next = match self.leases.lock().unwrap().clone() {
             Some(l) => next.with_leases(l),
             None => next,
@@ -3174,6 +3176,7 @@ pub fn run() {
             remote_mcp::email_sign_out,
             remote_mcp::mcp_remove,
             remote_mcp::mcp_set_enabled,
+            remote_mcp::mcp_set_queue,
             remote_mcp::mcp_tools,
             remote_mcp::mcp_set_tool,
             remote_mcp::mcp_import_scan,

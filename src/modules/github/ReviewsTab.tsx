@@ -32,11 +32,14 @@ function MyPullRow({ p, onOpen }: { p: MyPull; onOpen: () => void }) {
           {s.title}
           {mark && <span className={mark.cls} title={mark.title} style={{ marginLeft: 6, verticalAlign: "-2px" }}><Icon name={mark.icon} size={14} /></span>}
         </div>
-        <div className="row-meta">{p.repo} #{p.number}</div>
-      </div>
-      <div className="row-side">
-        {s.updated_at && <span className="row-time">{timeAgo(s.updated_at)}</span>}
-        {status && <Badge tone={status.tone} icon={status.icon}>{status.label}</Badge>}
+        <div className="row-meta">
+          <span className="row-meta-main">
+            {status && <Badge tone={status.tone} icon={status.icon}>{status.label}</Badge>}
+            <span className="row-byline">{p.repo} #{p.number}</span>
+          </span>
+          {s.additions != null && s.deletions != null && <span className="row-time" style={{ fontVariantNumeric: "tabular-nums" }} title="Lines added and removed"><span className="text-success">+{s.additions}</span> <span className="text-danger">−{s.deletions}</span></span>}
+          {s.updated_at && <span className="row-time">{timeAgo(s.updated_at)}</span>}
+        </div>
       </div>
     </div>
   );

@@ -1013,10 +1013,10 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_project_note",
-            "description": "Save a durable fact about a project for future chats: how it deploys, who owns what, where something lives, a decision and why. One note per topic: writing a topic again replaces it. Cite the items it came from. Every future chat in the project reads these, so never note one-off events (a sign-in, a verification, a receipt, a code), credentials, codes, or personal account details. To put an item in a project, use tab_set_project instead.",
+            "description": "Rarely needed. Save a fact every future chat in the project needs that it can't get from the repo: where it's checked out and how to set up a working copy, a non-obvious way to build, test or deploy, an environment limit or gotcha, who owns what, a decision and why that the code doesn't show. Never a summary of what you built or how a feature works, file maps, PR changelogs, task status, one-off events, credentials or personal details: git and the code already hold those. The project's steward reviews each note and may rewrite, merge or turn it down; if it does, accept that and carry on. One note per topic: writing a topic again replaces it. To put an item in a project, use tab_set_project instead.",
             "inputSchema": { "type": "object", "properties": {
                 "topic": { "type": "string", "description": "A short, stable topic, e.g. \"deploys\", \"owners\", \"staging env\"." },
-                "text": { "type": "string", "description": "The fact, in one to three sentences." },
+                "text": { "type": "string", "description": "The fact, in one or two sentences." },
                 "source_item_ids": { "type": "array", "items": { "type": "string" } },
                 "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." },
                 "delete": { "type": "boolean", "description": "Remove the note on this topic instead, e.g. when it's no longer true." }
@@ -1233,7 +1233,7 @@ impl McpServer {
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "tab", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "tab is the person's work queue. Search it, read items, file what you find under Found, attach context and create tasks, and set up connections (email, GitHub, ...) for the person. When the person mentions something you don't recognise, call tab_graph_search before asking them. Leave durable facts about a project with tab_project_note."
+                "instructions": "tab is the person's work queue. Search it, read items, file what you find under Found, attach context and create tasks, and set up connections (email, GitHub, ...) for the person. When the person mentions something you don't recognise, call tab_graph_search before asking them. Project notes (tab_project_note) are rare and reviewed: only facts every future chat needs that the repo doesn't already say."
             })),
             "ping" => Ok(json!({})),
             "tools/list" => Ok(json!({ "tools": with_load_hints(tools()) })),
@@ -1947,22 +1947,89 @@ impl McpServer {
                             .collect()
                     })
                     .unwrap_or_default();
-                let n = self.store.note_save(
-                    &p.id,
-                    &topic,
-                    &body,
-                    "agent",
-                    session,
-                    &sources,
-                    Utc::now(),
-                )?;
+                // Every future chat reads these, so the project's steward
+                // judges each one before it's kept.
+                let task_item = session
+                    .and_then(|s| self.store.session_get(s).ok().flatten())
+                    .and_then(|s| s.item_id)
+                    .and_then(|i| self.store.get(&i).ok().flatten());
+                let proposal = crate::agents::steward::Proposal {
+                    topic: &topic,
+                    text: &body,
+                    task: task_item.as_ref().map(|i| i.event.title.as_str()),
+                };
+                let verdict = match crate::agents::steward::review(&self.hub, &p, proposal, session)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "the project steward couldn't review a note");
+                        return Ok(text(format!(
+                            "Not saved: {}'s steward couldn't review the note ({e}). Notes are optional; \
+                                 carry on without it.",
+                            p.name
+                        )));
+                    }
+                };
+                let now = Utc::now();
+                let (asked_topic, asked) = (topic.clone(), body.clone());
+                let (topic, body, reason, retired) = match verdict {
+                    // No agent set up to review it (e.g. an outside MCP
+                    // client before onboarding): keep it as written.
+                    None => (topic, body, None, vec![]),
+                    Some(v) if !v.saves() => {
+                        if let Some(i) = &task_item {
+                            let _ = self.store.activity_add(
+                                &i.id,
+                                now,
+                                "note_rejected",
+                                &format!("Steward turned down a note on “{topic}”"),
+                                Some("steward"),
+                                json!({ "project_id": p.id, "topic": topic, "text": body, "reason": v.reason }),
+                            );
+                        }
+                        return Ok(text(format!(
+                            "Not saved: {}'s steward turned it down. {} Don't propose it again in other words.",
+                            p.name, v.reason
+                        )));
+                    }
+                    Some(v) => (v.topic, v.text, Some(v.reason), v.retire),
+                };
+                let n = self
+                    .store
+                    .note_save(&p.id, &topic, &body, "agent", session, &sources, now)?;
+                let notes = self.store.project_notes(&p.id)?;
+                for t in &retired {
+                    if let Some(old) = notes.iter().find(|o| &o.topic == t) {
+                        self.store.note_delete(&old.id)?;
+                    }
+                }
+                if let Some(i) = &task_item {
+                    let _ = self.store.activity_add(
+                        &i.id,
+                        now,
+                        "note_saved",
+                        &format!("Saved a note on “{}”", n.topic),
+                        Some(if reason.is_some() { "steward" } else { "agent" }),
+                        json!({ "project_id": p.id, "topic": n.topic, "text": n.text, "reason": reason, "retired": retired }),
+                    );
+                }
                 let _ = self.events.send(EngineEvent::ProjectChanged {
                     project_id: p.id.clone(),
                 });
-                Ok(text(format!(
-                    "Saved the \"{}\" note on {}.",
-                    n.topic, p.name
-                )))
+                let mut msg = format!("Saved the \"{}\" note on {}", n.topic, p.name);
+                if n.text != asked.trim() || !n.topic.eq_ignore_ascii_case(asked_topic.trim()) {
+                    msg.push_str(&format!(", as the steward rewrote it: {}", n.text));
+                } else {
+                    msg.push('.');
+                }
+                if !retired.is_empty() {
+                    msg.push_str(&format!(" Retired: {}.", retired.join(", ")));
+                }
+                if let Some(r) = reason {
+                    msg.push_str(&format!(" ({r})"));
+                }
+                Ok(text(msg))
             }
             "tab_list_connections" => {
                 let mut out = Vec::new();

@@ -72,7 +72,7 @@ export interface QueueItem {
 /** One of your open pull requests, straight from GitHub. */
 export interface MyPull { repo: string; number: number; url: string; summary: LinkSummary }
 
-export interface LinkSummary { title: string; state: "open" | "draft" | "merged" | "closed" | ""; author: string | null; checks: "passing" | "failing" | "pending" | null; updated_at: string | null; merge_state?: string | null; review_decision?: string | null; open_threads?: number | null }
+export interface LinkSummary { title: string; state: "open" | "draft" | "merged" | "closed" | ""; author: string | null; checks: "passing" | "failing" | "pending" | null; updated_at: string | null; merge_state?: string | null; review_decision?: string | null; open_threads?: number | null; additions?: number | null; deletions?: number | null }
 
 /** A reason not to mark an item done yet, raised by a connector or by tab (`agent`). */
 /** Who has the next move on something in an item's Context. */
@@ -547,6 +547,19 @@ export interface McpServerConfig {
   headers?: string[];
   /** Where it was imported from (Claude Code). */
   imported_from?: string;
+  /** False when the person turned off filling the queue from it. */
+  queue?: boolean;
+  /** What the queue watches, for recipes that ask (Notion: a search). */
+  queue_query?: string;
+}
+
+/** Mirrors tab_core::remote_mcp::QueueState. */
+export interface McpQueueState {
+  on: boolean;
+  last_sync: string | null;
+  error: string | null;
+  /** Open things it found last time. */
+  found: number | null;
 }
 
 /** Mirrors tab_core::remote_mcp::LocalCommand. Env values are in secure storage. */
@@ -577,6 +590,8 @@ export interface McpServerInfo extends McpServerConfig {
   cloud: McpCloudFit;
   /** It has header or environment values in secure storage. */
   keys: boolean;
+  /** Filling the queue from it; null when tab has no recipe for it (agent tools only). */
+  queue_sync: McpQueueState | null;
 }
 
 /** A server found in Claude Code. Mirrors tab_core::remote_mcp::import::Candidate. */
@@ -614,6 +629,11 @@ export interface McpCatalogEntry {
   description: string;
   category: string;
   color: string;
+  /** tab has a sync recipe for it, so its work fills the queue. */
+  fills_queue: boolean;
+  kinds: KindInfo[];
+  /** For recipes that watch a search the person picks: the placeholder. */
+  queue_query?: string;
 }
 
 export interface McpProbe {
