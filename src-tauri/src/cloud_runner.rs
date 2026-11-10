@@ -230,6 +230,11 @@ fn needs_own_sign_in(
         .get("token")
         .and_then(|t| t.as_str())
         .is_some_and(|t| !t.trim().is_empty());
+    if connection == "email" && c.str("auth").is_some() {
+        return Some(
+            "Email signed in with Google or Microsoft stays on this computer for now: tab cloud can't refresh that sign-in yet. Use an app password to run it in tab cloud.",
+        );
+    }
     (connection == "github" && !has_token).then_some(
         "To run in tab cloud, GitHub needs a token of its own: tab doesn't send this computer's GitHub CLI sign-in, which reaches every repo you can. Add a fine-grained token with read access to the repos you follow in this connection's settings, then move it.",
     )

@@ -37,6 +37,18 @@ function GoogleMark({ size }: { size: number }) {
   );
 }
 
+/** Microsoft's four squares, as on its sign-in buttons. */
+function MicrosoftMark({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 23 23" aria-label="Microsoft">
+      <path fill="#F25022" d="M1 1h10v10H1z" />
+      <path fill="#7FBA00" d="M12 1h10v10H12z" />
+      <path fill="#00A4EF" d="M1 12h10v10H1z" />
+      <path fill="#FFB900" d="M12 12h10v10H12z" />
+    </svg>
+  );
+}
+
 function SlackMark({ size }: { size: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 124 124" aria-label="Slack">
@@ -80,12 +92,13 @@ export function TabMark({ size = 20 }: { size?: number }) {
 export const brandNames = ["slack", "tab", ...Object.keys(simple)];
 
 export function hasBrand(name: string) {
-  return name === "slack" || name === "tab" || name === "google" || name in simple;
+  return name === "slack" || name === "tab" || name === "google" || name === "microsoft" || name in simple;
 }
 
 export function Brand({ name, size = 16 }: { name: string; size?: number }) {
   if (name === "slack") return <SlackMark size={size} />;
   if (name === "google") return <GoogleMark size={size} />;
+  if (name === "microsoft") return <MicrosoftMark size={size} />;
   if (name === "zoom") return <ZoomMark size={size} />;
   if (name === "tab") return <TabMark size={size} />;
   const icon = simple[name];

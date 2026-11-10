@@ -411,14 +411,23 @@ async fn handle_oauth_callback(
         .get("error_description")
         .or_else(|| q.get("error"))
         .map(String::as_str);
+    let state = q.get("state").map(String::as_str).unwrap_or_default();
+    if crate::mail_oauth::is_pending(state) {
+        let result = finish_mail_sign_in(&s, state, q.get("code").map(String::as_str), error).await;
+        let _ = s.events.send(EngineEvent::ConfigChanged);
+        let html = match result {
+            Ok(address) => page(
+                &format!("Signed in as {}", html_escape(&address)),
+                "tab is reading your mail now. You can close this tab and go back to tab.",
+            ),
+            Err(e) => page("Sign-in didn't finish", &html_escape(&e.to_string())),
+        };
+        return ([("content-type", "text/html; charset=utf-8")], html).into_response();
+    }
     let result = s
         .hub
         .remote_mcp()
-        .finish_sign_in(
-            q.get("state").map(String::as_str).unwrap_or_default(),
-            q.get("code").map(String::as_str),
-            error,
-        )
+        .finish_sign_in(state, q.get("code").map(String::as_str), error)
         .await;
     let _ = s.events.send(EngineEvent::ConfigChanged);
     let html = match result {
@@ -429,6 +438,35 @@ async fn handle_oauth_callback(
         Err(e) => page("Sign-in didn't finish", &html_escape(&e.to_string())),
     };
     ([("content-type", "text/html; charset=utf-8")], html).into_response()
+}
+
+/// Keeps an email sign-in and points the email connection at it: the
+/// provider's IMAP server, the address that signed in, no password.
+async fn finish_mail_sign_in(
+    s: &McpServer,
+    state: &str,
+    code: Option<&str>,
+    error: Option<&str>,
+) -> anyhow::Result<String> {
+    let signed = crate::mail_oauth::finish(state, code, error).await?;
+    let mut cfg = s
+        .engine
+        .connector_config("email")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let set = |cfg: &mut ConnectorConfig, k: &str, v: Value| {
+        cfg.settings.insert(k.into(), v);
+    };
+    set(&mut cfg, "auth", signed.provider.id().into());
+    set(&mut cfg, "host", signed.provider.imap_host().into());
+    set(&mut cfg, "port", 993.into());
+    set(&mut cfg, "username", signed.address.clone().into());
+    cfg.settings.remove("password");
+    cfg.enabled = true;
+    s.engine.save_connector("email", cfg).await?;
+    Ok(signed.address)
 }
 
 fn upstream_client() -> &'static reqwest::Client {
@@ -1067,7 +1105,7 @@ fn missing_required(info: &ConnectorInfo, cfg: &ConnectorConfig) -> Vec<String> 
     info.descriptor
         .settings
         .iter()
-        .filter(|f| f.required)
+        .filter(|f| f.required && !cfg.covered_by_sign_in(&f.key))
         .filter(|f| match cfg.settings.get(&f.key) {
             None | Some(Value::Null) => true,
             Some(Value::String(s)) => s.trim().is_empty(),

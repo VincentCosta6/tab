@@ -1,34 +1,51 @@
-//! Where MCP sign-ins are kept, out of `config.json`.
+//! Where tab keeps secrets, out of `config.json`: MCP sign-ins
+//! ([`crate::remote_mcp`]), every connection's passwords and tokens
+//! ([`crate::secrets`]) and email sign-ins ([`crate::mail_oauth`]).
 //!
 //! - Windows: encrypted with DPAPI (only this Windows account can read it),
-//!   one file per connection. Credential Manager caps entries at 2.5 KB,
-//!   too small for some access tokens.
+//!   one file per entry. Credential Manager caps entries at 2.5 KB, too
+//!   small for some access tokens.
 //! - macOS: the login keychain.
 //! - Elsewhere: a file only this user can read.
 //!
-//! Values are opaque strings (JSON, see [`super::SignIn`]).
+//! Values are opaque strings (JSON).
 
 use std::path::PathBuf;
 
 pub struct Vault {
     dir: PathBuf,
+    /// What the keychain calls the entries (macOS).
+    #[allow(dead_code)]
+    service: &'static str,
 }
 
 impl Vault {
-    /// `dir` is tab's data folder for MCP sign-ins. Each app (dev build,
+    /// `dir` is the folder entries are kept in. Each app (dev build,
     /// installed app) has its own, and on macOS it names the keychain entry.
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self::named(dir, "tab MCP sign-in")
+    }
+
+    /// A vault whose keychain entries (macOS) are called `service`.
+    pub fn named(dir: PathBuf, service: &'static str) -> Self {
+        Self { dir, service }
     }
 
     pub fn get(&self, id: &str) -> Option<String> {
         match imp::get(self, id) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(id, error = %e, "couldn't read an MCP sign-in");
+                tracing::warn!(id, error = %e, "couldn't read a secret from the vault");
                 None
             }
         }
+    }
+
+    /// Like [`Vault::get`], but tells "nothing stored" from "couldn't read
+    /// it" (a locked keychain, a DPAPI file from another account), so a
+    /// caller doesn't overwrite what it couldn't see.
+    pub fn try_get(&self, id: &str) -> anyhow::Result<Option<String>> {
+        imp::get(self, id)
     }
 
     pub fn set(&self, id: &str, value: &str) -> anyhow::Result<()> {
@@ -36,9 +53,13 @@ impl Vault {
     }
 
     pub fn remove(&self, id: &str) {
-        if let Err(e) = imp::remove(self, id) {
-            tracing::warn!(id, error = %e, "couldn't remove an MCP sign-in");
+        if let Err(e) = self.try_remove(id) {
+            tracing::warn!(id, error = %e, "couldn't remove a secret from the vault");
         }
+    }
+
+    pub fn try_remove(&self, id: &str) -> anyhow::Result<()> {
+        imp::remove(self, id)
     }
 
     #[allow(dead_code)]
@@ -127,12 +148,10 @@ mod imp {
 mod imp {
     use super::Vault;
 
-    const SERVICE: &str = "tab MCP sign-in";
-
     fn entry(v: &Vault, id: &str) -> anyhow::Result<keyring::Entry> {
         // The data folder tells the dev build's entries from the app's.
         Ok(keyring::Entry::new(
-            SERVICE,
+            v.service,
             &format!("{}:{id}", v.dir.display()),
         )?)
     }

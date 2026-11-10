@@ -2443,19 +2443,7 @@ async fn api_usage(state: State<'_, AppState>, hours: i64) -> CmdResult<Vec<Usag
         .map_err(err)
 }
 
-/// Keys of settings that hold secrets, per connector, from the descriptors.
-fn secret_keys() -> Vec<(String, String)> {
-    registry()
-        .into_iter()
-        .flat_map(|f| {
-            let d = f.descriptor();
-            d.settings
-                .into_iter()
-                .filter(|s| s.kind == SettingKind::Secret)
-                .map(move |s| (d.id.clone(), s.key))
-        })
-        .collect()
-}
+use tab_core::secrets::secret_keys;
 
 pub(crate) fn masked(cfg: &TabConfig) -> TabConfig {
     let mut cfg = cfg.clone();
@@ -2633,9 +2621,11 @@ async fn connection_set_secrets(
         cfg.settings.insert(k, v);
     }
     cfg.enabled = descriptor.settings.iter().filter(|f| f.required).all(|f| {
-        cfg.settings
-            .get(&f.key)
-            .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty()))
+        cfg.covered_by_sign_in(&f.key)
+            || cfg
+                .settings
+                .get(&f.key)
+                .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty()))
     });
     state.apply(next).await.map(|c| masked(&c)).map_err(err)
 }
@@ -2869,6 +2859,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             lsp::set_tools_dir(data_dir.join("tools"));
             let config_path = app.path().app_config_dir()?.join("config.json");
+            tab_core::secrets::install(&config_path);
             let mut config = TabConfig::load(&config_path)?;
             if let Some(dir) = config_path.parent() {
                 app.manage(account::AccountState::new(dir));
@@ -3178,6 +3169,9 @@ pub fn run() {
             remote_mcp::mcp_add,
             remote_mcp::mcp_sign_in,
             remote_mcp::mcp_sign_out,
+            remote_mcp::email_sign_in_status,
+            remote_mcp::email_sign_in,
+            remote_mcp::email_sign_out,
             remote_mcp::mcp_remove,
             remote_mcp::mcp_set_enabled,
             remote_mcp::mcp_tools,

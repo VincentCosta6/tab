@@ -45,6 +45,10 @@ pub struct Tokens {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// OpenID Connect's ID token, when asked for (`openid` scope). Only read
+    /// once, for who signed in, so never kept.
+    #[serde(skip)]
+    pub id_token: Option<String>,
 }
 
 impl Tokens {
@@ -359,8 +363,11 @@ pub fn authorize_url(
             .append_pair("redirect_uri", &c.redirect_uri)
             .append_pair("code_challenge", challenge)
             .append_pair("code_challenge_method", "S256")
-            .append_pair("state", state)
-            .append_pair("resource", &d.resource);
+            .append_pair("state", state);
+        // RFC 8707. Empty for providers that refuse it (Microsoft).
+        if !d.resource.is_empty() {
+            q.append_pair("resource", &d.resource);
+        }
         if let Some(s) = &d.scope {
             q.append_pair("scope", s);
         }
@@ -376,13 +383,14 @@ fn error_text(v: &Value) -> String {
     }
 }
 
-async fn token_request(
+pub(crate) async fn token_request(
     http: &reqwest::Client,
     endpoint: &str,
     c: &Client,
     mut form: Vec<(&str, String)>,
     now: DateTime<Utc>,
 ) -> anyhow::Result<Tokens> {
+    form.retain(|(k, v)| *k != "resource" || !v.is_empty());
     form.push(("client_id", c.client_id.clone()));
     if let Some(s) = &c.client_secret {
         form.push(("client_secret", s.clone()));
@@ -408,7 +416,20 @@ async fn token_request(
             .or_else(|| v["expires_in"].as_str()?.parse().ok())
             .map(|s| now + Duration::seconds(s)),
         scope: v["scope"].as_str().map(Into::into),
+        id_token: v["id_token"].as_str().map(Into::into),
     })
+}
+
+/// The claims of an ID token, unverified: it came straight from the token
+/// endpoint over TLS (OIDC Core §3.1.3.7 lets a client skip the signature
+/// check then).
+pub fn id_claims(id_token: &str) -> Option<Value> {
+    use base64::Engine;
+    let payload = id_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload.trim_end_matches('='))
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Trades the code from the browser for tokens.
@@ -598,6 +619,7 @@ mod tests {
             refresh_token: None,
             expires_at: Some(now + Duration::seconds(secs)),
             scope: None,
+            id_token: None,
         };
         assert!(t(30).stale(now));
         assert!(!t(600).stale(now));

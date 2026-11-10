@@ -288,6 +288,7 @@ fn policies_protect_tab_and_hide_credentials() {
     for p in [&chat, &review, &iso] {
         for f in [
             config.join("account.json"),
+            config.join(crate::secrets::DIR),
             data.join("hub.db"),
             data.join("hub.db-wal"),
             data.join("hub.db-shm"),

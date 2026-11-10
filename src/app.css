@@ -438,6 +438,9 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .ctx-this-toggle { justify-self: start; }
 
 /* GitHub CLI sign-in */
+.mail-sign-in { display: grid; gap: var(--space-2); }
+.mail-sign-in .toolbar .btn { gap: var(--space-2); }
+.mail-signed-in { display: flex; align-items: center; gap: var(--space-3); }
 .gh-connect { display: grid; gap: var(--space-2); }
 .gh-connect p { margin: 0; }
 .gh-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }

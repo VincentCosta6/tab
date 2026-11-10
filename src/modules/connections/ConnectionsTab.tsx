@@ -14,6 +14,7 @@ import { openSettings } from "../settings/SettingsTab";
 import { startSetupChat } from "../work/Chat";
 import { ApiUsage } from "./ApiUsage";
 import { GhConnect } from "./GhConnect";
+import { EmailSignIn, usesMailSignIn } from "./EmailSignIn";
 import { ImportBanner, ImportDialog } from "./ClaudeImport";
 import { AddByUrl, Caps, McpCatalogCard, McpDetail, McpInstalledRow, useConnect, useMcpCatalog, useMcpServers } from "./RemoteMcp";
 
@@ -236,8 +237,10 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
   useEffect(() => setDraft(saved?.settings ?? {}), [saved]);
 
   // GitHub's token lives in the sign-in card, next to the GitHub CLI login.
-  const settings = c.id === "github" ? c.settings.filter((f) => f.key !== "token") : c.settings;
-  const missingRequired = c.settings.some((f) => f.required && !String(draft[f.key] ?? "").trim());
+  // Email signed in with Google or Microsoft has no password.
+  const hidden = c.id === "github" ? "token" : c.id === "email" && usesMailSignIn(draft) ? "password" : null;
+  const settings = c.settings.filter((f) => f.key !== hidden);
+  const missingRequired = c.settings.some((f) => f.required && f.key !== hidden && !String(draft[f.key] ?? "").trim());
   const write = async (enabled: boolean) => {
     if (!config) return;
     setError(null);
@@ -293,6 +296,8 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
           </Card>
         </Section>
       )}
+
+      {c.id === "email" && c.available && <EmailSignIn auth={saved?.settings?.auth} />}
 
       {c.id === "tab" && <SearchIndexCard />}
 
