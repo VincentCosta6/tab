@@ -7,7 +7,7 @@ import type {
   AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
-  McpCatalogEntry, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy,
+  McpCatalogEntry, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy,
 } from "./types";
 import { mockApi } from "./mock";
 import { HubListSchema, HubStatusSchema, RunnerStatusSchema, decode } from "./protocol/cloud";
@@ -173,6 +173,10 @@ export const api = {
   mcpTools: (id: string, refresh: boolean) => call<McpTool[]>("mcp_tools", { id, refresh }),
   /** Allowed, ask or off for one tool; null goes back to the default. */
   mcpSetTool: (id: string, tool: string, policy: ToolPolicy | null) => call<void>("mcp_set_tool", { id, tool, policy }),
+  /** MCP servers set up in Claude Code, with what tab already has marked. */
+  mcpImportScan: () => call<McpImportCandidate[]>("mcp_import_scan"),
+  /** Copies the chosen Claude Code servers (by key) into tab. */
+  mcpImport: (keys: string[]) => call<McpImportResult[]>("mcp_import", { keys }),
   /** Sets where a connection runs and saves the config. Rejects with a CloudFailure. */
   connectionRunsOn: (connection: string, runsOn: RunsOn) => call<TabConfig>("connection_runs_on", { connection, runsOn }),
   /** The hub's cloud runner. Rejects with a CloudFailure. */

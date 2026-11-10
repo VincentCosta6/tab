@@ -1200,3 +1200,33 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
 .seg button { border: 0; background: transparent; padding: 2px 8px; border-radius: 3px; color: var(--fg-muted); font-size: var(--text-xs); cursor: pointer; }
 .seg button.on { background: var(--bg-raised); color: var(--fg); box-shadow: var(--shadow-sm); }
 .seg button:disabled { cursor: default; }
+
+/* Import from Claude Code: the banner and the dialog. */
+.import-banner { display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-4); padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-raised); }
+.import-banner-icon { display: inline-grid; place-items: center; flex: none; width: 30px; height: 30px; border-radius: var(--radius-md); background: var(--bg-sunken); color: var(--fg-muted); }
+.import-banner-icon.big { width: 34px; height: 34px; }
+.import-banner-text { flex: 1; min-width: 0; display: grid; gap: 2px; font-size: var(--text-sm); }
+.import-banner-text span { color: var(--fg-muted); }
+.mcp-dialog.wide { width: min(640px, calc(100vw - 32px)); }
+.import-list { display: grid; max-height: min(56vh, 520px); overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-md); }
+.import-empty { padding: var(--space-4); text-align: center; font-size: var(--text-sm); }
+.import-row { display: flex; align-items: flex-start; gap: var(--space-3); padding: 10px var(--space-3); border-top: 1px solid var(--border); font-size: var(--text-sm); cursor: default; }
+label.import-row { cursor: pointer; }
+.import-row:first-child { border-top: 0; }
+.import-row > input { margin-top: 7px; flex: none; }
+.import-row.muted { opacity: 0.6; cursor: default; }
+.import-row > .btn, .import-row > button { align-self: center; }
+.import-row-main { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.import-row-head { display: flex; align-items: center; gap: var(--space-2); }
+.import-row-name { font-weight: 600; }
+.import-row-head code { font-family: var(--font-mono); font-size: var(--text-xs); }
+.import-row-source { display: flex; align-items: center; gap: 6px; font-size: var(--text-xs); }
+.import-row-what { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-row-how { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px var(--space-3); color: var(--fg-muted); font-size: var(--text-xs); }
+.import-row-note { font-size: var(--text-xs); color: var(--fg-subtle); }
+.import-row-note.warn { color: var(--tone-warning-fg); }
+.where-runs { display: inline-flex; gap: var(--space-2); flex-wrap: wrap; font-size: var(--text-xs); }
+.where-runs > span { display: inline-flex; align-items: center; gap: 3px; }
+.where-runs .on { color: var(--fg); }
+.where-runs .on svg { color: var(--tone-success-fg); }
+.where-runs .off { color: var(--fg-subtle); }

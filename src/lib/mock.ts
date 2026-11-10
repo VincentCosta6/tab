@@ -8,7 +8,7 @@ import { create, toBinary } from "@bufbuild/protobuf";
 import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
 import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, RunnerState, RunnerStatusSchema, type HubStatus } from "./protocol/cloud";
 import type {
-  McpCatalogEntry, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
+  McpCatalogEntry, McpImportCandidate, McpImportResult, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, ProjectRepo, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
@@ -673,11 +673,44 @@ function mcpServersInfo(): McpServerInfo[] {
   return Object.entries(config.mcp_servers ?? {}).map(([id, c]) => ({
     ...c,
     id,
-    ready: c.enabled && (!c.sign_in || mcpSignedIn.has(id)),
+    ready: c.enabled && (!!c.command || !c.sign_in || mcpSignedIn.has(id)),
     signed_in_at: mcpSignedIn.get(id) ?? null,
     error: null,
     tool_count: !c.sign_in || mcpSignedIn.has(id) ? mockMcpTools.length : null,
+    cloud: mockImport.find((m) => m.key === c.imported_from)?.cloud ?? { portable: true, why_not: null, needs_key: false },
+    keys: !!c.headers?.length || !!c.command?.env?.length,
   }));
+}
+
+/** What Claude Code has, in the mock. */
+const here = { portable: false, why_not: null, needs_key: false };
+const mockImport: (McpImportCandidate & { config: McpServerConfig })[] = [
+  { key: "user:linear", name: "linear", source: "user", path: null, kind: "remote", url: "https://mcp.linear.app/mcp", command: null, header_names: [], env_names: [], cloud: { portable: true, why_not: null, needs_key: false }, catalog: "linear", status: "new", existing: null, id: "linear", note: null,
+    config: { name: "Linear", url: "https://mcp.linear.app/mcp", enabled: true, sign_in: true, catalog: "linear", imported_from: "user:linear" } },
+  { key: "user:github", name: "github", source: "user", path: null, kind: "remote_keys", url: "https://api.githubcopilot.com/mcp/", command: null, header_names: ["Authorization"], env_names: [], cloud: { portable: true, why_not: null, needs_key: true }, catalog: null, status: "new", existing: null, id: "github", note: null,
+    config: { name: "github", url: "https://api.githubcopilot.com/mcp/", enabled: true, sign_in: false, headers: ["Authorization"], imported_from: "user:github" } },
+  { key: "user:playwright", name: "playwright", source: "user", path: null, kind: "local", url: null, command: "npx -y @playwright/mcp@latest", header_names: [], env_names: [], cloud: { portable: true, why_not: null, needs_key: false }, catalog: null, status: "new", existing: null, id: "playwright", note: null,
+    config: { name: "playwright", url: "", enabled: true, sign_in: false, command: { command: "npx", args: ["-y", "@playwright/mcp@latest"] }, imported_from: "user:playwright" } },
+  { key: "project:/users/vincent/code/shop:postgres", name: "postgres", source: "project", path: "/Users/vincent/code/shop", kind: "local", url: null, command: "uvx postgres-mcp --access-mode=restricted", header_names: [], env_names: ["DATABASE_URI"], cloud: { ...here, why_not: "talks to this computer or your network", needs_key: true }, catalog: null, status: "new", existing: null, id: "postgres", note: null,
+    config: { name: "postgres", url: "", enabled: true, sign_in: false, command: { command: "uvx", args: ["postgres-mcp", "--access-mode=restricted"], env: ["DATABASE_URI"], cwd: "/Users/vincent/code/shop" }, imported_from: "project:/users/vincent/code/shop:postgres" } },
+  { key: "repo:/users/vincent/code/shop:docs", name: "docs", source: "repo", path: "/Users/vincent/code/shop", kind: "local", url: null, command: "npx -y @acme/docs-mcp", header_names: [], env_names: ["DOCS_TOKEN"], cloud: { portable: true, why_not: null, needs_key: true }, catalog: null, status: "new", existing: null, id: "docs", note: "DOCS_TOKEN isn't set for tab, so it'll be empty.",
+    config: { name: "docs", url: "", enabled: true, sign_in: false, command: { command: "npx", args: ["-y", "@acme/docs-mcp"], env: ["DOCS_TOKEN"], cwd: "/Users/vincent/code/shop" }, imported_from: "repo:/users/vincent/code/shop:docs" } },
+  { key: "user:obsidian", name: "obsidian", source: "user", path: null, kind: "local", url: null, command: "/Users/vincent/bin/obsidian-mcp ~/Notes", header_names: [], env_names: [], cloud: { ...here, why_not: "runs a program from this computer" }, catalog: null, status: "new", existing: null, id: "obsidian", note: null,
+    config: { name: "obsidian", url: "", enabled: true, sign_in: false, command: { command: "/Users/vincent/bin/obsidian-mcp", args: ["~/Notes"] }, imported_from: "user:obsidian" } },
+  { key: "claude_ai:Notion", name: "Notion", source: "claude_ai", path: null, kind: "claude_ai", url: "https://mcp.notion.com/mcp", command: null, header_names: [], env_names: [], cloud: { portable: true, why_not: null, needs_key: false }, catalog: "notion", status: "new", existing: null, id: "notion", note: null,
+    config: { name: "Notion", url: "https://mcp.notion.com/mcp", enabled: true, sign_in: true, catalog: "notion", imported_from: "claude_ai:Notion" } },
+  { key: "user:old-sse", name: "old-sse", source: "user", path: null, kind: "remote", url: "https://example.com/sse", command: null, header_names: [], env_names: [], cloud: here, catalog: null, status: "unsupported", existing: null, id: "old-sse", note: "It uses the older SSE transport, which tab doesn't speak yet.",
+    config: { name: "", url: "", enabled: false, sign_in: false } },
+  { key: "claude_ai:Health", name: "Health", source: "claude_ai", path: null, kind: "claude_ai", url: null, command: null, header_names: [], env_names: [], cloud: here, catalog: null, status: "unsupported", existing: null, id: "health", note: "tab can't read claude.ai connectors' settings, and doesn't know this one. It keeps working in chats that aren't strict.",
+    config: { name: "", url: "", enabled: false, sign_in: false } },
+];
+function mcpImportScan(): McpImportCandidate[] {
+  const servers = config.mcp_servers ?? {};
+  return mockImport.map(({ config: c, ...m }) => {
+    if (m.status === "unsupported") return m;
+    const existing = Object.entries(servers).find(([, s]) => s.imported_from === m.key || (!!c.url && s.url === c.url) || (!!m.catalog && s.catalog === m.catalog))?.[0] ?? null;
+    return existing ? { ...m, status: "imported", existing, id: existing } : m;
+  });
 }
 function mcpSetServers(next: Record<string, McpServerConfig>) {
   config = { ...config, mcp_servers: next };
@@ -725,6 +758,21 @@ function mcpHandle(cmd: string, args: Record<string, any>): unknown {
     case "mcp_tools": {
       const chosen = servers[args.id]?.tools ?? {};
       return mockMcpTools.map((t) => ({ ...t, policy: chosen[t.name] ?? (t.read_only ? "allow" : "ask"), chosen: t.name in chosen }));
+    }
+    case "mcp_import_scan": return mcpImportScan();
+    case "mcp_import": {
+      const found = mcpImportScan();
+      const next = { ...servers };
+      const results: McpImportResult[] = [];
+      for (const key of args.keys as string[]) {
+        const c = found.find((f) => f.key === key && (f.status === "new" || f.status === "changed"));
+        const cfg = mockImport.find((m) => m.key === key)?.config;
+        if (!c || !cfg) continue;
+        next[c.id] = cfg;
+        results.push({ key, id: c.id, name: cfg.name, sign_in: cfg.sign_in, error: null });
+      }
+      mcpSetServers(next);
+      return results;
     }
     case "mcp_set_tool": {
       const s = servers[args.id];

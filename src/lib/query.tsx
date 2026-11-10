@@ -69,6 +69,7 @@ export const keys = {
   mcpServers: ["mcp-servers"] as const,
   mcpCatalog: ["mcp-catalog"] as const,
   mcpTools: (id: string) => ["mcp-tools", id] as const,
+  mcpImport: ["mcp-import"] as const,
   item: (id: string) => ["item", id] as const,
   preview: (id: string) => ["preview", id] as const,
   context: (id: string) => ["context", id] as const,

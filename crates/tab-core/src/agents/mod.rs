@@ -603,6 +603,24 @@ impl AgentHub {
         }
     }
 
+    /// claude.ai connectors (`claude.ai Linear`) the last chat that could
+    /// see them had.
+    pub fn claude_ai_connectors(&self) -> Vec<String> {
+        std::fs::read(self.dir.join("claude_ai_connectors.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn save_claude_ai_connectors(&self, names: &[String]) {
+        if self.claude_ai_connectors() == names {
+            return;
+        }
+        if let Ok(b) = serde_json::to_vec(names) {
+            let _ = std::fs::write(self.dir.join("claude_ai_connectors.json"), b);
+        }
+    }
+
     /// Each chat's own folder (system prompt, MCP config).
     pub fn sessions_dir(&self) -> PathBuf {
         self.dir.join("sessions")

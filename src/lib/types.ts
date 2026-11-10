@@ -534,12 +534,36 @@ export type ToolPolicy = "allow" | "ask" | "off";
 
 export interface McpServerConfig {
   name: string;
+  /** Empty for a local command. */
   url: string;
   enabled: boolean;
   /** The server wants a sign-in (OAuth). */
   sign_in: boolean;
   catalog?: string;
   tools?: Record<string, ToolPolicy>;
+  /** A local command tab runs as its child. */
+  command?: McpLocalCommand;
+  /** Header names sent with every request; values are in secure storage. */
+  headers?: string[];
+  /** Where it was imported from (Claude Code). */
+  imported_from?: string;
+}
+
+/** Mirrors tab_core::remote_mcp::LocalCommand. Env values are in secure storage. */
+export interface McpLocalCommand {
+  command: string;
+  args?: string[];
+  env?: string[];
+  cwd?: string;
+}
+
+/** Mirrors tab_core::remote_mcp::CloudFit. */
+export interface McpCloudFit {
+  /** Nothing ties it to this computer. */
+  portable: boolean;
+  why_not: string | null;
+  /** It sends a key, which would have to go to the hub. */
+  needs_key: boolean;
 }
 
 /** Mirrors tab_core::remote_mcp::RemoteMcpInfo. */
@@ -550,6 +574,37 @@ export interface McpServerInfo extends McpServerConfig {
   signed_in_at: string | null;
   error: string | null;
   tool_count: number | null;
+  cloud: McpCloudFit;
+  /** It has header or environment values in secure storage. */
+  keys: boolean;
+}
+
+/** A server found in Claude Code. Mirrors tab_core::remote_mcp::import::Candidate. */
+export interface McpImportCandidate {
+  key: string;
+  name: string;
+  source: "user" | "project" | "repo" | "claude_ai";
+  path: string | null;
+  kind: "remote" | "remote_keys" | "local" | "claude_ai";
+  url: string | null;
+  command: string | null;
+  header_names: string[];
+  env_names: string[];
+  cloud: McpCloudFit;
+  catalog: string | null;
+  status: "new" | "changed" | "imported" | "unsupported";
+  existing: string | null;
+  id: string;
+  note: string | null;
+}
+
+export interface McpImportResult {
+  key: string;
+  id: string;
+  name: string;
+  /** It signs in with OAuth: sign in again in tab. */
+  sign_in: boolean;
+  error: string | null;
 }
 
 export interface McpCatalogEntry {

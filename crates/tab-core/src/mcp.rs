@@ -286,6 +286,10 @@ async fn handle_remote(
         }
     }
 
+    if remote.is_local(&server) {
+        return handle_local(&s, &remote, &server, &method, &body).await;
+    }
+
     let forward: Vec<(String, String)> = REMOTE_REQUEST_HEADERS
         .iter()
         .filter_map(|h| {
@@ -341,6 +345,60 @@ async fn handle_remote(
     };
     out.body(body)
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+/// A chat's request to a local server tab runs (an imported `npx …`
+/// server): each message goes to the process over stdio, and the replies
+/// come back as plain JSON. Tool choices were already checked.
+async fn handle_local(
+    s: &McpServer,
+    remote: &crate::remote_mcp::RemoteMcp,
+    server: &str,
+    method: &axum::http::Method,
+    body: &[u8],
+) -> Response {
+    match *method {
+        axum::http::Method::POST => {}
+        // No session to end: the process is shared and stays up.
+        axum::http::Method::DELETE => return StatusCode::OK.into_response(),
+        _ => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
+    }
+    let Ok(req) = serde_json::from_slice::<Value>(body) else {
+        return json_response(rpc_error(Value::Null, -32700, "parse error"));
+    };
+    let (batch, msgs) = match req {
+        Value::Array(a) => (true, a),
+        v => (false, vec![v]),
+    };
+    let mut out = Vec::new();
+    for m in &msgs {
+        match remote.forward_local(server, m).await {
+            Ok(Some(mut r)) => {
+                if m["method"] == "tools/list"
+                    && let Some(t) = r["result"]["tools"].as_array_mut()
+                {
+                    remote.saw_tools(server, t, m["params"]["cursor"].is_null());
+                    t.retain(|t| {
+                        remote.policy(server, t["name"].as_str().unwrap_or_default())
+                            != crate::remote_mcp::ToolPolicy::Off
+                    });
+                }
+                out.push(r);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = s.events.send(EngineEvent::ConfigChanged);
+                if let Some(id) = m.get("id").filter(|v| !v.is_null()) {
+                    out.push(rpc_error(id.clone(), -32603, &e.to_string()));
+                }
+            }
+        }
+    }
+    match (batch, out.len()) {
+        (_, 0) => StatusCode::ACCEPTED.into_response(),
+        (false, _) => json_response(out.remove(0)),
+        (true, _) => json_response(Value::Array(out)),
+    }
 }
 
 /// Where the browser lands after signing in to a remote MCP server.
@@ -3021,6 +3079,117 @@ mod tests {
     /// callback), then forwards a chat's requests with the token, refreshes
     /// it when the server stops taking it, and applies each tool's choice.
     #[tokio::test]
+    async fn fronts_a_local_server_tab_runs() {
+        use crate::remote_mcp::{LocalCommand, RemoteMcpConfig, Secrets, ToolPolicy};
+        let Ok(node) = which::which("node") else {
+            eprintln!("no node; skipping");
+            return;
+        };
+        let script = r#"
+const rl = require('readline').createInterface({ input: process.stdin });
+rl.on('line', (l) => {
+  const m = JSON.parse(l);
+  const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
+  if (m.method === 'initialize') out({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'notes' } } });
+  else if (m.method === 'tools/list') out({ jsonrpc: '2.0', id: m.id, result: { tools: [{ name: 'read_note', annotations: { readOnlyHint: true } }, { name: 'delete_note' }] } });
+  else if (m.method === 'tools/call') out({ jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: 'note:' + process.env.NOTES_KEY } ] } });
+});
+"#;
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let dir = std::env::temp_dir().join(format!("tab-local-mcp-{}", uuid::Uuid::new_v4()));
+        let hub = AgentHub::new(store.clone(), events.clone(), AgentConfig::default(), dir);
+        let server = Arc::new(McpServer {
+            store: store.clone(),
+            hub: hub.clone(),
+            engine: Arc::new(NoEngine(store.clone())),
+            events,
+            token: "secret".into(),
+        });
+        let url = serve(server, 48_400).await.unwrap();
+        let remote = hub.remote_mcp().clone();
+        remote
+            .set_secrets(
+                "notes",
+                &Secrets {
+                    env: [("NOTES_KEY".to_string(), "k".to_string())].into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        remote.set_servers(std::collections::BTreeMap::from([(
+            "notes".to_string(),
+            RemoteMcpConfig {
+                name: "Notes".into(),
+                enabled: true,
+                command: Some(LocalCommand {
+                    command: node.display().to_string(),
+                    args: vec!["-e".into(), script.into()],
+                    env: vec!["NOTES_KEY".into()],
+                    cwd: None,
+                }),
+                tools: [("delete_note".to_string(), ToolPolicy::Off)].into(),
+                ..Default::default()
+            },
+        )]));
+        // Nothing to sign in to: ready right away.
+        assert_eq!(remote.usable(), ["notes"]);
+        let session = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let token = chat_token("secret", &session.id);
+        let client = reqwest::Client::new();
+        let call = |body: Value| {
+            client
+                .post(format!("{url}/notes"))
+                .bearer_auth(&token)
+                .header("x-tab-session", &session.id)
+                .json(&body)
+                .send()
+        };
+        let v: Value =
+            call(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(v["result"]["serverInfo"]["name"], "notes");
+        let r = call(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 202);
+        // Off tools aren't listed.
+        let v: Value = call(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(remote.tool_views("notes").len(), 2);
+        // The key from the vault reaches the process.
+        let v: Value = call(json!({ "jsonrpc": "2.0", "id": "c", "method": "tools/call", "params": { "name": "read_note", "arguments": {} } }))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["id"], "c");
+        assert_eq!(v["result"]["content"][0]["text"], "note:k");
+        // Off: refused before it reaches the process.
+        let v: Value = call(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "delete_note", "arguments": {} } }))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["result"]["isError"], true);
+        remote.forget("notes");
+        assert!(remote.secrets("notes").is_empty());
+    }
+
+    #[tokio::test]
     async fn fronts_a_remote_mcp_server_with_its_sign_in() {
         use crate::remote_mcp::{RemoteMcpConfig, ToolPolicy};
         use std::collections::HashMap;
@@ -3175,6 +3344,7 @@ mod tests {
                     "drop_thing".to_string(),
                     ToolPolicy::Off,
                 )]),
+                ..Default::default()
             },
         )]));
         assert!(remote.usable().is_empty());

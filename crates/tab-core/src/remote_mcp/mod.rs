@@ -9,7 +9,9 @@
 //! Because they come in through tab's `--mcp-config`, these servers work in
 //! strict chats too, where the person's own MCP servers don't load.
 
+pub mod import;
 pub mod oauth;
+pub mod stdio;
 pub mod vault;
 
 use std::collections::{BTreeMap, HashMap};
@@ -27,10 +29,15 @@ use vault::Vault;
 /// The MCP revision tab speaks to servers it lists tools from.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// One remote MCP server, as saved in `config.json` (no secrets).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// One MCP server, as saved in `config.json` (no secrets).
+///
+/// Either remote (`url`) or a local command tab runs as its child
+/// (`command`); agents reach both the same way, through `/mcp/<id>`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RemoteMcpConfig {
     pub name: String,
+    /// The server's address. Empty for a local command.
+    #[serde(default)]
     pub url: String,
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -43,10 +50,149 @@ pub struct RemoteMcpConfig {
     /// The person's choice per tool. Tools not listed get [`default_policy`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, ToolPolicy>,
+    /// A local command tab starts and talks to over stdio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<LocalCommand>,
+    /// Names of headers sent with every request (an API key). The values
+    /// are in the vault ([`Secrets`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<String>,
+    /// Where it was imported from, so importing again finds it
+    /// (see [`import`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<String>,
+}
+
+/// A local MCP server: the program, its arguments, and the names of its
+/// environment variables (their values are in the vault, [`Secrets`]).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct LocalCommand {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    /// The folder it runs in (a project's servers run in the project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// Header and environment values a server needs, kept in the vault next to
+/// sign-ins (they're often API keys).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct Secrets {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+impl Secrets {
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty() && self.env.is_empty()
+    }
 }
 
 fn yes() -> bool {
     true
+}
+
+/// Where a server can run, for the "✓ This computer ✓ Cloud" marks.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CloudFit {
+    /// Nothing ties it to this computer.
+    pub portable: bool,
+    /// Why it can only run here, in a few words.
+    pub why_not: Option<String>,
+    /// It sends a key, which would have to go to the hub (the person decides).
+    pub needs_key: bool,
+}
+
+/// Whether a server could run in tab cloud: no `localhost`, `*.local` or
+/// private addresses; no absolute paths or paths under the home folder; a
+/// local command only when it's a package runner (`npx`, `uvx`, …) the
+/// runner image has.
+pub fn cloud_fit(c: &RemoteMcpConfig, home: Option<&std::path::Path>) -> CloudFit {
+    let needs_key = !c.headers.is_empty() || c.command.as_ref().is_some_and(|l| !l.env.is_empty());
+    let no = |why: &str| CloudFit {
+        portable: false,
+        why_not: Some(why.to_string()),
+        needs_key,
+    };
+    if let Some(l) = &c.command {
+        const RUNNERS: [&str; 6] = ["npx", "uvx", "bunx", "pnpx", "node", "python"];
+        let program = std::path::Path::new(&l.command)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if local_path(&l.command, home) {
+            return no("runs a program from this computer");
+        }
+        if !RUNNERS.contains(&program.as_str()) && !program.starts_with("python3") {
+            return no(&format!("runs {program}, which tab cloud doesn't have"));
+        }
+        if l.args.iter().any(|a| local_path(a, home)) {
+            return no("uses files on this computer");
+        }
+        if l.args.iter().any(|a| private_host_in(a)) {
+            return no("talks to this computer or your network");
+        }
+    } else if private_host_in(&c.url) {
+        return no("talks to this computer or your network");
+    }
+    CloudFit {
+        portable: true,
+        why_not: None,
+        needs_key,
+    }
+}
+
+/// An absolute path, a `~` path, or one under the home folder.
+fn local_path(s: &str, home: Option<&std::path::Path>) -> bool {
+    let s = s.split_once('=').map_or(s, |(_, v)| v);
+    let bytes = s.as_bytes();
+    let windows_abs = bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    s.starts_with('/')
+        || s.starts_with('~')
+        || s.starts_with("\\\\")
+        || windows_abs
+        || home.is_some_and(|h| {
+            let h = h.to_string_lossy();
+            !h.is_empty() && s.contains(h.as_ref())
+        })
+}
+
+/// Whether `s` (a URL, or an argument holding one) names this computer or
+/// a private network.
+fn private_host_in(s: &str) -> bool {
+    let Some(start) = s.find("://") else {
+        return false;
+    };
+    let rest = &s[start + 3..];
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    let host = if let Some(h) = host_port.strip_prefix('[') {
+        h.split(']').next().unwrap_or_default()
+    } else {
+        host_port.split(':').next().unwrap_or_default()
+    }
+    .to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xfe00) == 0xfc00
+        }
+        Err(_) => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -159,6 +305,10 @@ pub struct RemoteMcpInfo {
     pub error: Option<String>,
     /// How many tools it had when tab last looked.
     pub tool_count: Option<usize>,
+    /// Whether it could run in tab cloud.
+    pub cloud: CloudFit,
+    /// It has header or environment values in the vault.
+    pub keys: bool,
 }
 
 /// One tool as the detail page shows it.
@@ -347,6 +497,8 @@ pub struct RemoteMcp {
     errors: Mutex<HashMap<String, String>>,
     refreshing: tokio::sync::Mutex<()>,
     events: broadcast::Sender<SignInEvent>,
+    /// Local servers tab runs.
+    local: stdio::Children,
 }
 
 impl RemoteMcp {
@@ -367,6 +519,7 @@ impl RemoteMcp {
             errors: Default::default(),
             refreshing: Default::default(),
             events: broadcast::channel(16).0,
+            local: Default::default(),
         })
     }
 
@@ -375,7 +528,60 @@ impl RemoteMcp {
     }
 
     pub fn set_servers(&self, servers: BTreeMap<String, RemoteMcpConfig>) {
+        // Local servers that were removed or turned off stop; one whose
+        // command changed restarts on its next request.
+        self.local.retain(|id| {
+            servers
+                .get(id)
+                .is_some_and(|c| c.enabled && c.command.is_some())
+        });
         *self.servers.write().unwrap() = servers;
+    }
+
+    /// Header and environment values for `id`.
+    pub fn secrets(&self, id: &str) -> Secrets {
+        self.vault
+            .get(&secrets_key(id))
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn set_secrets(&self, id: &str, s: &Secrets) -> anyhow::Result<()> {
+        if s.is_empty() {
+            self.vault.remove(&secrets_key(id));
+            return Ok(());
+        }
+        self.vault.set(&secrets_key(id), &serde_json::to_string(s)?)
+    }
+
+    /// Forgets everything kept for `id` (sign-in and keys) and stops it.
+    pub fn forget(&self, id: &str) {
+        self.sign_out(id);
+        self.vault.remove(&secrets_key(id));
+        self.local.stop(id);
+    }
+
+    /// What a local server runs with, if `id` is one.
+    fn local_spec(&self, id: &str) -> Option<stdio::Spec> {
+        let command = self.get(id)?.command?;
+        let mut env = self.secrets(id).env;
+        env.retain(|k, _| command.env.contains(k));
+        Some(stdio::Spec { command, env })
+    }
+
+    /// Whether `id` is a local command rather than a URL.
+    pub fn is_local(&self, id: &str) -> bool {
+        self.get(id).is_some_and(|c| c.command.is_some())
+    }
+
+    /// One message from a chat to a local server (see [`stdio`]).
+    pub async fn forward_local(&self, id: &str, msg: &Value) -> anyhow::Result<Option<Value>> {
+        let spec = self
+            .local_spec(id)
+            .ok_or_else(|| anyhow::anyhow!("{id} isn't a local server"))?;
+        let r = self.local.forward(id, &spec, msg).await;
+        self.set_error(id, r.as_ref().err().map(|e| e.to_string()));
+        r
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SignInEvent> {
@@ -395,7 +601,10 @@ impl RemoteMcp {
     }
 
     fn ready(&self, id: &str, c: &RemoteMcpConfig) -> bool {
-        c.enabled && (!c.sign_in || self.sign_in_record(id).is_some_and(|s| s.tokens.is_some()))
+        c.enabled
+            && (c.command.is_some()
+                || !c.sign_in
+                || self.sign_in_record(id).is_some_and(|s| s.tokens.is_some()))
     }
 
     /// Servers agents get: on, and signed in where that's needed.
@@ -410,11 +619,14 @@ impl RemoteMcp {
 
     pub fn infos(&self) -> Vec<RemoteMcpInfo> {
         let servers = self.servers.read().unwrap().clone();
+        let home = crate::sandbox::home();
         servers
             .into_iter()
             .map(|(id, config)| {
                 let record = self.sign_in_record(&id);
                 RemoteMcpInfo {
+                    cloud: cloud_fit(&config, home.as_deref()),
+                    keys: !self.secrets(&id).is_empty(),
                     ready: self.ready(&id, &config),
                     signed_in_at: record
                         .filter(|r| r.tokens.is_some())
@@ -720,6 +932,13 @@ impl RemoteMcp {
             for (k, v) in headers {
                 req = req.header(k, v);
             }
+            if !cfg.headers.is_empty() {
+                for (k, v) in self.secrets(id).headers {
+                    if cfg.headers.contains(&k) {
+                        req = req.header(k, v);
+                    }
+                }
+            }
             if let Some(t) = &token {
                 req = req.bearer_auth(t);
             }
@@ -767,6 +986,9 @@ impl RemoteMcp {
 
     /// One JSON-RPC request in a fresh MCP session (initialize first).
     async fn rpc(&self, id: &str, method: &str, params: Value) -> anyhow::Result<Value> {
+        if let Some(spec) = self.local_spec(id) {
+            return self.local.rpc(id, &spec, method, params).await;
+        }
         let base = vec![
             ("content-type".to_string(), "application/json".to_string()),
             (
@@ -900,6 +1122,12 @@ impl RemoteMcp {
     }
 }
 
+/// The vault entry for a server's keys (ids can't contain dots, so it can't
+/// clash with a sign-in).
+fn secrets_key(id: &str) -> String {
+    format!("{id}.keys")
+}
+
 /// An `initialize` request from tab.
 fn initialize(id: u64) -> Value {
     json!({
@@ -1016,6 +1244,7 @@ mod tests {
                 sign_in: false,
                 catalog: Some("linear".into()),
                 tools,
+                ..Default::default()
             },
         )]));
         assert_eq!(m.policy("linear", "list_issues"), ToolPolicy::Ask);
@@ -1051,6 +1280,7 @@ mod tests {
                 sign_in: true,
                 catalog: None,
                 tools: Default::default(),
+                ..Default::default()
             },
         )]));
         assert!(m.usable().is_empty());
