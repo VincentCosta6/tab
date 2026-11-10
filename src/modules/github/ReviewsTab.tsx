@@ -37,6 +37,7 @@ function MyPullRow({ p, onOpen }: { p: MyPull; onOpen: () => void }) {
             {status && <Badge tone={status.tone} icon={status.icon}>{status.label}</Badge>}
             <span className="row-byline">{p.repo} #{p.number}</span>
           </span>
+          {s.additions != null && s.deletions != null && <span className="row-time" style={{ fontVariantNumeric: "tabular-nums" }} title="Lines added and removed"><span className="text-success">+{s.additions}</span> <span className="text-danger">−{s.deletions}</span></span>}
           {s.updated_at && <span className="row-time">{timeAgo(s.updated_at)}</span>}
         </div>
       </div>
