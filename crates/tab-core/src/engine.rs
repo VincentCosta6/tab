@@ -125,6 +125,14 @@ impl Engine {
         self
     }
 
+    /// Adds a queue sync for every MCP connection tab has a recipe for
+    /// (see [`crate::remote_mcp::sync`]).
+    pub fn with_mcp(mut self, cfg: &TabConfig, remote: &Arc<crate::remote_mcp::RemoteMcp>) -> Self {
+        self.connectors
+            .extend(crate::remote_mcp::sync::build(cfg, remote, &self.gateway));
+        self
+    }
+
     /// Builds an engine from config: enabled connectors, ranking pipeline, connector infos.
     pub fn from_config(
         cfg: &TabConfig,

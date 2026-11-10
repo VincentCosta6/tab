@@ -3,8 +3,22 @@
 Status: phase 1 built (sign-in, keychain, the `/mcp/<id>` proxy, Add by URL,
 the catalog, per-tool allowed / ask / off for chats). Phase 2 built (import
 from Claude Code, local-command servers run by tab, static header keys in the
-vault, the cloud eligibility check shown per server). Phases 3–5 are still
-designs.
+vault, the cloud eligibility check shown per server). Phase 3 built: sync
+recipes for Linear, Sentry and Notion (`remote_mcp::sync`), and the "Fills
+your queue" chip and section. Phases 4–5 are still designs.
+
+What phase 3 leaves out, on purpose:
+- `act()`: workflows can't call MCP tools yet. MCP connections aren't in the
+  connector registry, so workflows don't list them.
+- Cursors live in memory. Each engine start lists everything open again;
+  dedupe on `external_id` makes that harmless.
+- Recipes are a Rust trait (`sync::Recipe`), not the declarative struct
+  sketched in §3: Sentry has to look up your organizations before it can
+  search, and that needs more than one call per look.
+- Notion has no "assigned to me", so its recipe runs a search the person
+  picks (default "tasks assigned to me").
+- Sync only runs on this computer; cloud polling comes with phase 4.
+- Atlassian, Vercel and Stripe have no recipe: they stay agent tools only.
 
 What phase 2 leaves out, on purpose:
 - The hint in the strict pill when a turn shows blocked servers.
@@ -147,6 +161,21 @@ struct SyncRecipe {
 budgets, emits events using the remote id as `external_id`, saves a
 cursor, and calls `ctx.synced()`. `act()` maps workflow steps to tool calls.
 Without a recipe, the connection is agent tools only.
+
+As built (see "What phase 3 leaves out" above):
+
+| Service | Call | Lands as | Done when |
+|---|---|---|---|
+| Linear | `list_issues {assignee: "me", updatedAt: <last look>}`, paged | `linear.issue` | `statusType` completed/canceled, or completed/canceled/archived set |
+| Sentry | `find_organizations`, then `search_issues {query: "is:unresolved assigned:me"}` per org (up to 5) | `sentry.issue` (`<org>/<SHORT-ID>`) | It drops out of the list and `get_issue_details` says resolved/ignored |
+| Notion | `notion-search {query: <the person's search>, sort: "last_edited"}` | `notion.page` / `notion.database` | Never; mark it done yourself |
+
+Each tool call goes through `Gateway::run`, which uses the gateway's
+budgets and audit log (provider `mcp:<id>`, 120 calls an hour, burst of
+10). Sync calls are background priority. Sync is tab reading as you, so
+the person's per-tool agent choices don't apply to it. Sync has its own
+on/off switch on the connection's page, and turning it off clears the
+connection's items.
 
 ## 4. Import from Claude Code (new)
 

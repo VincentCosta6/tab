@@ -547,6 +547,19 @@ export interface McpServerConfig {
   headers?: string[];
   /** Where it was imported from (Claude Code). */
   imported_from?: string;
+  /** False when the person turned off filling the queue from it. */
+  queue?: boolean;
+  /** What the queue watches, for recipes that ask (Notion: a search). */
+  queue_query?: string;
+}
+
+/** Mirrors tab_core::remote_mcp::QueueState. */
+export interface McpQueueState {
+  on: boolean;
+  last_sync: string | null;
+  error: string | null;
+  /** Open things it found last time. */
+  found: number | null;
 }
 
 /** Mirrors tab_core::remote_mcp::LocalCommand. Env values are in secure storage. */
@@ -577,6 +590,8 @@ export interface McpServerInfo extends McpServerConfig {
   cloud: McpCloudFit;
   /** It has header or environment values in secure storage. */
   keys: boolean;
+  /** Filling the queue from it; null when tab has no recipe for it (agent tools only). */
+  queue_sync: McpQueueState | null;
 }
 
 /** A server found in Claude Code. Mirrors tab_core::remote_mcp::import::Candidate. */
@@ -614,6 +629,11 @@ export interface McpCatalogEntry {
   description: string;
   category: string;
   color: string;
+  /** tab has a sync recipe for it, so its work fills the queue. */
+  fills_queue: boolean;
+  kinds: KindInfo[];
+  /** For recipes that watch a search the person picks: the placeholder. */
+  queue_query?: string;
 }
 
 export interface McpProbe {

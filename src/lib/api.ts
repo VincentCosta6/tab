@@ -169,6 +169,8 @@ export const api = {
   mcpSignOut: (id: string) => call<void>("mcp_sign_out", { id }),
   mcpRemove: (id: string) => call<void>("mcp_remove", { id }),
   mcpSetEnabled: (id: string, enabled: boolean) => call<void>("mcp_set_enabled", { id, enabled }),
+  /** Whether its work fills the queue, and what it watches (for recipes that ask). */
+  mcpSetQueue: (id: string, on: boolean, query: string | null) => call<void>("mcp_set_queue", { id, on, query }),
   /** A server's tools with the person's choices; `refresh` asks the server again. */
   mcpTools: (id: string, refresh: boolean) => call<McpTool[]>("mcp_tools", { id, refresh }),
   /** Allowed, ask or off for one tool; null goes back to the default. */

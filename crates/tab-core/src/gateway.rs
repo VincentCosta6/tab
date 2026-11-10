@@ -482,6 +482,76 @@ impl Gateway {
         }
     }
 
+    /// Runs a call that doesn't go over plain HTTP from here (a tool call
+    /// to an MCP server, which [`crate::remote_mcp`] signs in and sends)
+    /// under the same budgets as [`Self::send`], and logs it. `call` says who
+    /// and why; its `url` is what to log. Nothing is cached.
+    pub async fn run<T>(
+        &self,
+        call: Call,
+        f: impl std::future::Future<Output = anyhow::Result<T>>,
+    ) -> Result<T, GatewayError> {
+        let started = Instant::now();
+        let resource = resource_for(&call.provider, &call.url);
+        let refused = match self.limiter.admit(
+            &call.provider,
+            resource,
+            current_priority(),
+            self.remote(&call.provider, resource),
+        ) {
+            Ok(()) => None,
+            Err(Refusal::Exhausted { until }) => Some(GatewayError::RateLimited {
+                provider: call.provider.clone(),
+                resource: resource.into(),
+                until,
+            }),
+            Err(Refusal::Deferred { reason, until }) => Some(GatewayError::Deferred {
+                provider: call.provider.clone(),
+                resource: resource.into(),
+                reason,
+                until,
+            }),
+        };
+        if let Some(err) = refused {
+            let outcome = match err {
+                GatewayError::RateLimited { .. } => Outcome::RateLimited,
+                _ => Outcome::Deferred,
+            };
+            self.audit(
+                &call,
+                &call.url,
+                outcome,
+                None,
+                started,
+                Some(err.to_string()),
+            );
+            return Err(err);
+        }
+        let slot = self.slot(&call.provider);
+        let _permit = slot
+            .acquire()
+            .await
+            .map_err(|e| GatewayError::Other(e.into()))?;
+        self.limiter.record(&call.provider, resource);
+        match f.await {
+            Ok(v) => {
+                self.audit(&call, &call.url, Outcome::Network, None, started, None);
+                Ok(v)
+            }
+            Err(e) => {
+                self.audit(
+                    &call,
+                    &call.url,
+                    Outcome::Error,
+                    None,
+                    started,
+                    Some(e.to_string()),
+                );
+                Err(GatewayError::Other(e))
+            }
+        }
+    }
+
     pub async fn send(&self, call: Call) -> Result<Response, GatewayError> {
         let started = Instant::now();
         let now = Utc::now();
