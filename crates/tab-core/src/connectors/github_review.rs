@@ -1103,13 +1103,16 @@ pub struct LinkSummary {
     pub merge_state: Option<String>,
     pub review_decision: Option<String>,
     pub open_threads: Option<u32>,
+    /// PRs: lines added and removed across the diff.
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
 }
 
 const LINK_PULL_QUERY: &str = r#"
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      title state isDraft merged updatedAt mergeable mergeStateStatus reviewDecision
+      title state isDraft merged updatedAt mergeable mergeStateStatus reviewDecision additions deletions
       author { login }
       reviewThreads(first: 100) { nodes { isResolved } }
       commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
@@ -1195,6 +1198,8 @@ pub async fn link_summary(
                 merge_state: None,
                 review_decision: None,
                 open_threads: None,
+                additions: None,
+                deletions: None,
             })
         }
         "commit" => {
@@ -1214,6 +1219,8 @@ pub async fn link_summary(
                 merge_state: None,
                 review_decision: None,
                 open_threads: None,
+                additions: None,
+                deletions: None,
             })
         }
         _ => anyhow::bail!("tab doesn't summarise GitHub {what} links"),
@@ -1263,6 +1270,8 @@ fn pull_summary(pr: &Value) -> LinkSummary {
         merge_state,
         review_decision: Some(lower(pr, "reviewDecision")).filter(|s| !s.is_empty()),
         open_threads,
+        additions: pr["additions"].as_u64(),
+        deletions: pr["deletions"].as_u64(),
     }
 }
 
@@ -1280,7 +1289,7 @@ query {
   search(query: "is:pr is:open author:@me archived:false sort:updated-desc", type: ISSUE, first: 50) {
     nodes {
       ... on PullRequest {
-        number url title state isDraft merged updatedAt mergeable mergeStateStatus reviewDecision
+        number url title state isDraft merged updatedAt mergeable mergeStateStatus reviewDecision additions deletions
         author { login }
         repository { nameWithOwner }
         reviewThreads(first: 100) { nodes { isResolved } }
@@ -1394,6 +1403,8 @@ mod link_cache_tests {
             merge_state: None,
             review_decision: None,
             open_threads: None,
+            additions: None,
+            deletions: None,
         };
         LINK_CACHE
             .lock()

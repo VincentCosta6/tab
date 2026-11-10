@@ -1152,6 +1152,8 @@ mod tests {
             merge_state: merge.map(Into::into),
             review_decision: decision.map(Into::into),
             open_threads: Some(threads),
+            additions: None,
+            deletions: None,
         };
         let st = |s: LinkSummary| {
             let c = pull_status("o/r", 7, &s);

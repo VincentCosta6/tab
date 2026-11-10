@@ -72,7 +72,7 @@ export interface QueueItem {
 /** One of your open pull requests, straight from GitHub. */
 export interface MyPull { repo: string; number: number; url: string; summary: LinkSummary }
 
-export interface LinkSummary { title: string; state: "open" | "draft" | "merged" | "closed" | ""; author: string | null; checks: "passing" | "failing" | "pending" | null; updated_at: string | null; merge_state?: string | null; review_decision?: string | null; open_threads?: number | null }
+export interface LinkSummary { title: string; state: "open" | "draft" | "merged" | "closed" | ""; author: string | null; checks: "passing" | "failing" | "pending" | null; updated_at: string | null; merge_state?: string | null; review_decision?: string | null; open_threads?: number | null; additions?: number | null; deletions?: number | null }
 
 /** A reason not to mark an item done yet, raised by a connector or by tab (`agent`). */
 /** Who has the next move on something in an item's Context. */
