@@ -579,8 +579,15 @@ const SECRETS: &[&str] = &[
 ];
 
 /// tab's own secrets in its config folder: every connection's settings,
-/// and the person's tab cloud sign-in (a Supabase refresh token).
-const CONFIG_SECRETS: &[&str] = &["config.json", "account.json"];
+/// the person's tab cloud sign-in (a Supabase refresh token), and the vault
+/// holding every connection's passwords and tokens (DPAPI files any process
+/// of this Windows account could decrypt; a 0600 file on Linux).
+const CONFIG_SECRETS: &[&str] = &[
+    "config.json",
+    "config.json.tmp",
+    "account.json",
+    crate::secrets::DIR,
+];
 
 /// tab's own secrets in its data folder: the database (connection tokens),
 /// the local hub's copy of every synced record, and the hub's TLS key.
@@ -605,7 +612,7 @@ const MADE_BEFORE_HIDING: &[&str] = &[".git-credentials", ".netrc", "account.jso
 
 /// Hidden folders made (empty, this user only) before a process starts, for
 /// the same reason.
-const DIRS_MADE_BEFORE_HIDING: &[&str] = &["hub-tls", "mcp-sign-ins"];
+const DIRS_MADE_BEFORE_HIDING: &[&str] = &["hub-tls", "mcp-sign-ins", crate::secrets::DIR];
 
 /// Credentials a person's own chat may use (to push and open PRs), but code
 /// nobody here wrote may not.

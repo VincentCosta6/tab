@@ -8,6 +8,7 @@ import type {
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
   McpCatalogEntry, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy,
+  EmailSignInStatus, MailProvider,
 } from "./types";
 import { mockApi } from "./mock";
 import { HubListSchema, HubStatusSchema, RunnerStatusSchema, decode } from "./protocol/cloud";
@@ -167,6 +168,11 @@ export const api = {
   /** Starts a sign-in again. Resolves with the page to open; `onMcpSignIn` says when it's done. */
   mcpSignIn: (id: string) => call<string>("mcp_sign_in", { id }),
   mcpSignOut: (id: string) => call<void>("mcp_sign_out", { id }),
+  /** Which mail providers this build can sign in with, and who's signed in. */
+  emailSignInStatus: () => call<EmailSignInStatus>("email_sign_in_status"),
+  /** Starts "Sign in with Google / Microsoft". Resolves with the page to open; tab sets up the email connection when the browser comes back. */
+  emailSignIn: (provider: MailProvider) => call<string>("email_sign_in", { provider }),
+  emailSignOut: () => call<void>("email_sign_out"),
   mcpRemove: (id: string) => call<void>("mcp_remove", { id }),
   mcpSetEnabled: (id: string, enabled: boolean) => call<void>("mcp_set_enabled", { id, enabled }),
   /** Whether its work fills the queue, and what it watches (for recipes that ask). */

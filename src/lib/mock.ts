@@ -9,6 +9,7 @@ import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
 import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, RunnerState, RunnerStatusSchema, type HubStatus } from "./protocol/cloud";
 import type {
   McpCatalogEntry, McpImportCandidate, McpImportResult, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
+  EmailSignInStatus, MailProvider,
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, ProjectRepo, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
@@ -110,6 +111,14 @@ const plainConnectors: ConnectorInfo[] = [
       { kind: "email.direct", label: "Email", icon: "gmail", tone: "neutral" },
       { kind: "email.newsletter", label: "Newsletter", icon: "gmail", tone: "neutral" },
     ], settings: [] },
+  { ...base, id: "email", name: "Email (IMAP)", icon: "mail", category: "communication", description: "Mail from MXroute, Fastmail, iCloud or any IMAP host. Spam and newsletters are sorted with rules, not AI.", available: true, enabled: false, status: { state: "disabled" },
+    kinds: [{ kind: "email.direct", label: "Email", icon: "mail", tone: "info" }],
+    settings: [
+      { key: "host", label: "IMAP server", kind: "text", help: "For MXroute, the server name from your welcome email, e.g. heracles.mxrouting.net.", required: true },
+      { key: "username", label: "Email address", kind: "text", help: null, required: true },
+      { key: "password", label: "Password", kind: "secret", help: "Your mailbox password, or an app password if your host uses them. Not needed when you sign in with Google or Microsoft.", required: true },
+      { key: "port", label: "Port", kind: "number", help: "993 (IMAP over TLS) unless your host says otherwise.", required: false },
+    ] },
   { ...base, id: "zoom", name: "Zoom", icon: "zoom", category: "communication", description: "Action items assigned to you from meeting AI summaries.", available: false, enabled: false, status: { state: "disabled" },
     kinds: [{ kind: "meeting.action_item", label: "Meeting action item", icon: "zoom", tone: "accent" }], settings: [] },
   { ...base, id: "jira", name: "Jira", icon: "jira", category: "work", description: "Issues assigned to you, mentions, and status changes on work you own.", available: false, enabled: false, status: { state: "disabled" },
@@ -661,6 +670,7 @@ const mcpCatalog: McpCatalogEntry[] = [
 ];
 const mcpSignedIn = new Map<string, string>();
 const mcpSignInListeners = new Set<(e: McpSignInEvent) => void>();
+let mailSignedIn: EmailSignInStatus["signed_in"] = null;
 const mockMcpTools: Omit<McpTool, "policy" | "chosen">[] = [
   { name: "list_issues", title: "List issues", description: "Search and filter issues.", read_only: true },
   { name: "get_issue", title: "Get issue", description: "One issue with its comments.", read_only: true },
@@ -750,6 +760,35 @@ function mcpHandle(cmd: string, args: Record<string, any>): unknown {
     }
     case "mcp_sign_in": mcpFinishSoon(args.id); return (servers[args.id]?.url ?? "") + "#authorize";
     case "mcp_sign_out": mcpSignedIn.delete(args.id); emit({ type: "config_changed" }); return null;
+    case "email_sign_in_status": {
+      const status: EmailSignInStatus = {
+        providers: [{ id: "google", name: "Google", available: true }, { id: "microsoft", name: "Microsoft", available: true }],
+        signed_in: mailSignedIn,
+      };
+      return status;
+    }
+    case "email_sign_in": {
+      const provider = args.provider as MailProvider;
+      setTimeout(() => {
+        const address = provider === "google" ? "you@gmail.com" : "you@outlook.com";
+        mailSignedIn = { provider, address, signed_in_at: new Date().toISOString() };
+        const host = provider === "google" ? "imap.gmail.com" : "outlook.office365.com";
+        const prev = config.connectors.email?.settings ?? {};
+        config = { ...config, connectors: { ...config.connectors, email: { enabled: true, settings: { ...prev, auth: provider, host, port: 993, username: address } } } };
+        emit({ type: "config_changed" });
+      }, 1800);
+      return provider === "google" ? "https://accounts.google.com/#authorize" : "https://login.microsoftonline.com/#authorize";
+    }
+    case "email_sign_out": {
+      mailSignedIn = null;
+      const c = config.connectors.email;
+      if (c?.settings.auth) {
+        const { auth: _, ...settings } = c.settings;
+        config = { ...config, connectors: { ...config.connectors, email: { ...c, enabled: false, settings } } };
+      }
+      emit({ type: "config_changed" });
+      return null;
+    }
     case "mcp_remove": {
       const rest = { ...servers };
       delete rest[args.id];

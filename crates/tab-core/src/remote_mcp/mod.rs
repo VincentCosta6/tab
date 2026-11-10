@@ -13,7 +13,7 @@ pub mod import;
 pub mod oauth;
 pub mod stdio;
 pub mod sync;
-pub mod vault;
+pub use crate::vault;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -24,8 +24,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
+use crate::vault::Vault;
 use oauth::{Client, Discovered, Tokens};
-use vault::Vault;
 
 /// The MCP revision tab speaks to servers it lists tools from.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -581,6 +581,11 @@ impl RemoteMcp {
             local: Default::default(),
             synced: Default::default(),
         })
+    }
+
+    /// tab's MCP server (`http://127.0.0.1:port`), where sign-ins come back.
+    pub fn loopback(&self) -> Option<String> {
+        self.loopback.read().unwrap().clone()
     }
 
     pub fn set_loopback(&self, base: &str) {

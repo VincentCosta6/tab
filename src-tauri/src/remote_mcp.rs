@@ -89,6 +89,52 @@ pub async fn mcp_add(
     }
 }
 
+/// "Sign in with Google / Microsoft" for the email connection: which
+/// providers this build offers, and who's signed in.
+#[derive(serde::Serialize)]
+pub struct EmailSignInStatus {
+    providers: Vec<tab_core::mail_oauth::ProviderInfo>,
+    signed_in: Option<tab_core::mail_oauth::SignedIn>,
+}
+
+#[tauri::command]
+pub async fn email_sign_in_status() -> EmailSignInStatus {
+    EmailSignInStatus {
+        providers: tab_core::mail_oauth::providers(),
+        signed_in: tab_core::mail_oauth::signed_in(),
+    }
+}
+
+/// Starts signing in to mail with `provider`. Returns the page to open;
+/// the browser comes back to tab, which sets up the email connection.
+#[tauri::command]
+pub async fn email_sign_in(state: State<'_, AppState>, provider: String) -> CmdResult<String> {
+    let p = tab_core::mail_oauth::Provider::parse(&provider).ok_or("unknown provider")?;
+    let base = state
+        .hub
+        .remote_mcp()
+        .loopback()
+        .ok_or("tab's MCP server isn't running, so the sign-in has nowhere to come back to")?;
+    tab_core::mail_oauth::begin(p, &base).map_err(err)
+}
+
+/// Forgets the email sign-in and turns the connection off until it signs
+/// in again or gets a password.
+#[tauri::command]
+pub async fn email_sign_out(state: State<'_, AppState>) -> CmdResult<()> {
+    tab_core::mail_oauth::sign_out();
+    let mut next = state.config.lock().await.clone();
+    if let Some(c) = next.connectors.get_mut("email")
+        && c.str("auth").is_some()
+    {
+        c.settings.remove("auth");
+        c.enabled = false;
+        state.apply(next).await.map_err(err)?;
+    }
+    let _ = state.events.send(tab_core::EngineEvent::ConfigChanged);
+    Ok(())
+}
+
 /// Starts (or restarts) a sign-in. Returns the page to open.
 #[tauri::command]
 pub async fn mcp_sign_in(state: State<'_, AppState>, id: String) -> CmdResult<String> {

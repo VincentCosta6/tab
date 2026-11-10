@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::model::{AgentKind, UserProfile};
 use crate::ranker::RankingRules;
 
-/// User configuration, persisted as JSON in the app config dir.
-///
-/// Secrets live here for now; moving them to the OS keychain is planned.
+/// User configuration, persisted as JSON in the app config dir. Connection
+/// secrets are carried here in memory but saved in the vault
+/// ([`crate::secrets`]).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TabConfig {
     #[serde(default)]
@@ -431,6 +431,13 @@ impl ConnectorConfig {
     pub fn runs_here(&self) -> bool {
         self.enabled && self.runs_on == tab_domain::runner::RunsOn::ThisComputer
     }
+    /// A required setting this connection does without because it signed
+    /// in another way: email's password, when it signed in with Google or
+    /// Microsoft ([`crate::mail_oauth`]).
+    pub fn covered_by_sign_in(&self, key: &str) -> bool {
+        key == "password" && self.str("auth").is_some()
+    }
+
     pub fn str(&self, key: &str) -> Option<&str> {
         self.settings.get(key)?.as_str().filter(|s| !s.is_empty())
     }
@@ -444,6 +451,22 @@ fn yes() -> bool {
     true
 }
 
+/// Writes through a temporary file, so a crash mid-write doesn't leave a
+/// half-written config, readable only by this user on Unix.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("json.tmp");
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(&tmp)?.write_all(bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
 fn default_connectors() -> BTreeMap<String, ConnectorConfig> {
     // tab's own task connector is always on.
     // Sample data is opt-in from onboarding, never on behind its back.
@@ -451,12 +474,35 @@ fn default_connectors() -> BTreeMap<String, ConnectorConfig> {
 }
 
 impl TabConfig {
+    /// Reads `config.json` and the connection secrets kept in the vault
+    /// ([`crate::secrets`]). Secrets an older version wrote into the file
+    /// move into the vault here.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let mut cfg = match std::fs::read_to_string(path) {
+        let mut cfg: TabConfig = match std::fs::read_to_string(path) {
             Ok(s) => serde_json::from_str(&s)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => TabConfig::default(),
             Err(e) => return Err(e.into()),
         };
+        let plaintext = crate::secrets::has_plaintext(&cfg);
+        match crate::secrets::read(&crate::secrets::vault_for(path)) {
+            Ok(stored) => {
+                crate::secrets::merge(&mut cfg, stored);
+                if plaintext {
+                    match cfg.save(path) {
+                        Ok(()) => tracing::info!("moved connection secrets into the vault"),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "couldn't move secrets into the vault")
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                // Saving now would drop what's in the vault, so this run
+                // keeps secrets in the file, as older versions did.
+                tracing::warn!(error = %e, "couldn't read connection secrets from the vault");
+                crate::secrets::keep_in_file(path);
+            }
+        }
         cfg.apply_env();
         // Older configs kept one model, for the harness in use.
         if let (Some(kind), Some(m)) = (cfg.agent.kind, cfg.agent.model.clone()) {
@@ -475,11 +521,26 @@ impl TabConfig {
         Ok(cfg)
     }
 
+    /// Writes `config.json` without secrets; they go to the vault. If the
+    /// vault can't be written (or read at launch), they stay in the file
+    /// rather than being lost.
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
+        let file = if crate::secrets::kept_in_file(path) {
+            self.clone()
+        } else {
+            let (file, stored) = crate::secrets::split(self);
+            match crate::secrets::write(&crate::secrets::vault_for(path), &stored) {
+                Ok(()) => file,
+                Err(e) => {
+                    tracing::warn!(error = %e, "couldn't write connection secrets to the vault");
+                    self.clone()
+                }
+            }
+        };
+        write_private(path, serde_json::to_string_pretty(&file)?.as_bytes())?;
         Ok(())
     }
 
@@ -578,6 +639,53 @@ mod tests {
         let problem = folder_problem(&file.display().to_string());
         let _ = std::fs::remove_file(&file);
         assert!(problem.unwrap().contains("not a folder"));
+    }
+
+    #[test]
+    fn secrets_in_an_old_config_move_to_the_vault() {
+        // macOS would touch the real keychain.
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tab-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        // What an older version wrote.
+        std::fs::write(
+            &path,
+            r#"{"connectors":{"email":{"enabled":true,"settings":{"host":"imap.example.com","username":"me@example.com","password":"hunter2"}},"github":{"enabled":true,"settings":{"token":"ghp_x"}}},"ranking":{"ai":{"api_key":"sk-ant-x"}}}"#,
+        )
+        .unwrap();
+
+        let cfg = TabConfig::load(&path).unwrap();
+        assert_eq!(cfg.connectors["email"].str("password"), Some("hunter2"));
+        assert_eq!(cfg.connectors["github"].str("token"), Some("ghp_x"));
+        assert_eq!(cfg.ranking.ai.api_key.as_deref(), Some("sk-ant-x"));
+        let file = std::fs::read_to_string(&path).unwrap();
+        for s in ["hunter2", "ghp_x", "sk-ant-x"] {
+            assert!(!file.contains(s), "{s} is still in config.json");
+        }
+        assert!(file.contains("imap.example.com"));
+        assert!(dir.join(crate::secrets::DIR).is_dir());
+
+        // Changing and removing secrets sticks across launches.
+        let mut next = cfg.clone();
+        next.connectors
+            .get_mut("email")
+            .unwrap()
+            .settings
+            .insert("password".into(), "new".into());
+        next.connectors.remove("github");
+        next.save(&path).unwrap();
+        let again = TabConfig::load(&path).unwrap();
+        assert_eq!(again.connectors["email"].str("password"), Some("new"));
+        assert!(!again.connectors.contains_key("github"));
+        next.connectors
+            .insert("github".into(), ConnectorConfig::on());
+        next.save(&path).unwrap();
+        let back = TabConfig::load(&path).unwrap();
+        assert_eq!(back.connectors["github"].str("token"), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

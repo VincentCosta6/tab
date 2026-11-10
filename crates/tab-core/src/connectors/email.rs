@@ -127,7 +127,7 @@ impl ConnectorFactory for EmailFactory {
             settings: vec![
                 setting("host", "IMAP server", SettingKind::Text, "For MXroute, the server name from your welcome email, e.g. heracles.mxrouting.net.", true),
                 setting("username", "Email address", SettingKind::Text, "", true),
-                setting("password", "Password", SettingKind::Secret, "Your mailbox password, or an app password if your host uses them.", true),
+                setting("password", "Password", SettingKind::Secret, "Your mailbox password, or an app password if your host uses them. Not needed when you sign in with Google or Microsoft.", true),
                 setting("port", "Port", SettingKind::Number, "993 (IMAP over TLS) unless your host says otherwise.", false),
                 setting("folders", "Folders", SettingKind::Text, "Comma separated. Defaults to INBOX. Spam folders are never read.", false),
                 setting("bulk", "Newsletters and automated mail", SettingKind::Text, "\"rules\" (default): import, rank with rules only. \"skip\": don't import. \"ai\": let the AI layer read them too.", false),
@@ -169,12 +169,21 @@ pub enum BulkMode {
     Ai,
 }
 
+/// How the connection signs in to IMAP.
+#[derive(Debug, Clone)]
+enum Auth {
+    Password(String),
+    /// "Sign in with Google / Microsoft" ([`crate::mail_oauth`]): XOAUTH2
+    /// with a token from the vault. Set by the sign-in as `auth`.
+    OAuth(crate::mail_oauth::Provider),
+}
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     host: String,
     port: u16,
     username: String,
-    password: String,
+    auth: Auth,
     folders: Vec<String>,
     bulk: BulkMode,
     spam_score: f64,
@@ -203,10 +212,14 @@ impl Settings {
                 .and_then(|p| u16::try_from(p).ok())
                 .unwrap_or(993),
             username: need("username", "email address")?,
-            password: cfg
-                .str("password")
-                .map(str::to_string)
-                .ok_or_else(|| anyhow::anyhow!("Add your password to connect email."))?,
+            auth: match cfg.str("auth").and_then(crate::mail_oauth::Provider::parse) {
+                Some(p) => Auth::OAuth(p),
+                None => Auth::Password(
+                    cfg.str("password")
+                        .map(str::to_string)
+                        .ok_or_else(|| anyhow::anyhow!("Add your password to connect email."))?,
+                ),
+            },
             folders: if folders.is_empty() {
                 vec!["INBOX".into()]
             } else {
@@ -286,11 +299,17 @@ async fn open(
 }
 
 async fn connect(s: &Settings) -> anyhow::Result<Imap> {
-    open(&s.host, s.port, Duration::from_secs(20))
-        .await?
-        .login(&s.username, &s.password)
-        .await
-        .map_err(|(e, _)| anyhow::anyhow!("Signing in to {} failed: {e}", s.host))
+    let client = open(&s.host, s.port, Duration::from_secs(20)).await?;
+    match &s.auth {
+        Auth::Password(password) => client.login(&s.username, password).await,
+        Auth::OAuth(p) => {
+            let (user, token) = crate::mail_oauth::access_token(*p).await?;
+            client
+                .authenticate("XOAUTH2", crate::mail_oauth::XOAuth2 { user, token })
+                .await
+        }
+    }
+    .map_err(|(e, _)| anyhow::anyhow!("Signing in to {} failed: {e}", s.host))
 }
 
 /// Signs in with saved settings and reports what tab will read, for the
@@ -378,7 +397,11 @@ fn known_provider(
         return Some((
             "Google",
             Some("imap.gmail.com".into()),
-            "Gmail needs IMAP turned on and an app password (Google Account → Security → App passwords). Your normal password won't work.",
+            if crate::mail_oauth::Provider::Google.available() {
+                "Gmail: ask the person to press \"Sign in with Google\" in Connections → Email; no password needed. Otherwise it needs IMAP on and an app password (Google Account → Security → App passwords)."
+            } else {
+                "Gmail needs IMAP turned on and an app password (Google Account → Security → App passwords). Your normal password won't work."
+            },
         ));
     }
     if any(".outlook.com")
@@ -389,7 +412,11 @@ fn known_provider(
         return Some((
             "Microsoft",
             Some("outlook.office365.com".into()),
-            "Microsoft turned off password sign-in for IMAP on most accounts, so this may fail. If it does, tab needs OAuth for Outlook, which it doesn't have yet.",
+            if crate::mail_oauth::Provider::Microsoft.available() {
+                "Microsoft turned off password sign-in for IMAP: ask the person to press \"Sign in with Microsoft\" in Connections → Email instead of typing a password."
+            } else {
+                "Microsoft turned off password sign-in for IMAP on most accounts, so this may fail. This build of tab can't sign in with Microsoft yet."
+            },
         ));
     }
     if any(".icloud.com") || domain == "icloud.com" || domain == "me.com" {
@@ -1151,7 +1178,7 @@ mod tests {
             host: "mail.example.com".into(),
             port: 993,
             username: "vince@example.com".into(),
-            password: "x".into(),
+            auth: Auth::Password("x".into()),
             folders: vec!["INBOX".into()],
             bulk,
             spam_score: 5.0,
@@ -1171,6 +1198,27 @@ mod tests {
             Sorted::Keep(e) => format!("{} ai={}", e.kind, e.metadata["ai"]),
             Sorted::Skip(why) => format!("skip: {why}"),
         }
+    }
+
+    #[test]
+    fn signs_in_with_a_password_or_google_microsoft() {
+        let mut cfg = ConnectorConfig::on();
+        cfg.settings.insert("host".into(), "imap.gmail.com".into());
+        cfg.settings
+            .insert("username".into(), "me@gmail.com".into());
+        let e = Settings::from_config(&cfg).unwrap_err().to_string();
+        assert!(e.contains("password"), "{e}");
+        cfg.settings.insert("auth".into(), "google".into());
+        assert!(matches!(
+            Settings::from_config(&cfg).unwrap().auth,
+            Auth::OAuth(crate::mail_oauth::Provider::Google)
+        ));
+        cfg.settings.insert("auth".into(), "".into());
+        cfg.settings.insert("password".into(), "pw".into());
+        assert!(matches!(
+            Settings::from_config(&cfg).unwrap().auth,
+            Auth::Password(_)
+        ));
     }
 
     #[test]

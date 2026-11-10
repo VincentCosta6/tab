@@ -659,6 +659,15 @@ export interface McpSignInEvent {
   error: string | null;
 }
 
+export type MailProvider = "google" | "microsoft";
+
+/** "Sign in with Google / Microsoft" for email. Mirrors src-tauri's EmailSignInStatus. */
+export interface EmailSignInStatus {
+  /** `available` is false when this build has no OAuth client for it. */
+  providers: { id: MailProvider; name: string; available: boolean }[];
+  signed_in: { provider: MailProvider; address: string; signed_in_at: string } | null;
+}
+
 /** The signed-in tab account, without its tokens. Mirrors tab_core::account::AccountView. */
 export interface Account {
   user_id: string;

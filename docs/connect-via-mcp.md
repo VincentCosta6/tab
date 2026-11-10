@@ -5,7 +5,27 @@ the catalog, per-tool allowed / ask / off for chats). Phase 2 built (import
 from Claude Code, local-command servers run by tab, static header keys in the
 vault, the cloud eligibility check shown per server). Phase 3 built: sync
 recipes for Linear, Sentry and Notion (`remote_mcp::sync`), and the "Fills
-your queue" chip and section. Phases 4–5 are still designs.
+your queue" chip and section. Phase 5 built (Sign in with Google / Microsoft
+for email), along with the rest of phase 1's "keychain for every secret".
+Phase 4 is still a design.
+
+What phase 5 leaves out, on purpose:
+- It needs a Google "Desktop app" OAuth client and a Microsoft Entra public
+  client (redirect `http://127.0.0.1/oauth/callback`) registered for tab.
+  Their ids are build variables (`TAB_GOOGLE_CLIENT_ID`,
+  `TAB_GOOGLE_CLIENT_SECRET`, `TAB_MICROSOFT_CLIENT_ID`); a build without
+  one doesn't offer that provider. Google's `https://mail.google.com/` is a
+  restricted scope: until Google verifies the app, only its test users can
+  sign in.
+- Email signed in this way stays on this computer. tab cloud can't refresh
+  it until phase 4 puts sign-ins in the hub.
+- One mail sign-in, for the one email connection.
+
+All connection secrets (IMAP passwords, GitHub tokens, the ranker's API key)
+are now in the vault ([`crate::secrets`]); `config.json` keeps the rest. The
+first launch after the update moves them out of an older `config.json`. The
+MCP bearer token stays in `config.json`: it's written into every agent's MCP
+config anyway.
 
 What phase 3 leaves out, on purpose:
 - `act()`: workflows can't call MCP tools yet. MCP connections aren't in the
@@ -32,7 +52,7 @@ What phase 1 leaves out, on purpose:
   under the review policy) never do, so there's no "In cloud jobs" column yet.
 - Sign-ins stay on each computer; nothing goes to the hub.
 - Only secrets of MCP connections moved out of `config.json`; the other
-  connectors' secrets move in a later change.
+  connectors' secrets moved with phase 5.
 - Discovery uses Dynamic Client Registration. A Client ID Metadata Document
   at tab.dev comes later (every catalog server supports DCR today).
 - GitHub's MCP server isn't in the catalog: it has no self-registration, so
@@ -236,9 +256,9 @@ would drift, and it would be unclear which one wins.
 
 ## What this doesn't solve
 
-- **Email.** IMAP doesn't use MCP. Gmail and Outlook need native OAuth
-  (XOAUTH2). That reuses the client from step 1, but needs registered
-  Google and Microsoft apps, plus Google's verification for restricted scopes.
+- **Email.** IMAP doesn't use MCP. Gmail and Outlook use native OAuth
+  (XOAUTH2, `crate::mail_oauth`), reusing the client from step 1 with
+  registered Google and Microsoft apps instead of self-registration.
 - **GitHub queue.** It stays native. GitHub's MCP server only adds the agent tools.
 
 ## Phases
