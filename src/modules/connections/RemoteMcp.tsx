@@ -13,11 +13,52 @@ import { Icon } from "../../design/icons";
 import { api, onMcpSignIn, openUrl } from "../../lib/api";
 import { timeAgo } from "../../lib/format";
 import { keys } from "../../lib/query";
-import type { McpCatalogEntry, McpProbe, McpQueueState, McpServerInfo, McpTool, Tone, ToolPolicy } from "../../lib/types";
+import type { McpCatalogEntry, McpCloudState, McpProbe, McpQueueState, McpServerInfo, McpTool, Tone, ToolPolicy } from "../../lib/types";
 import { WhereItRuns } from "./ClaudeImport";
 
 export function useMcpServers() {
   return useQuery({ queryKey: keys.mcpServers, queryFn: api.mcpServers, staleTime: 0 });
+}
+
+/** Where each connection stands for tab cloud jobs. */
+export function useMcpCloud() {
+  return useQuery({ queryKey: keys.mcpCloud, queryFn: api.mcpCloudStates, staleTime: 30_000 });
+}
+
+/**
+ * Allowing a connection in tab cloud jobs, and its sign-in for tab cloud.
+ * `allow` resolves once it's allowed; a sign-in goes on in the browser and
+ * `onMcpSignIn` (with `cloud`) says when the hub has it.
+ */
+export function useCloudActions() {
+  const qc = useQueryClient();
+  const refresh = () => Promise.all([
+    qc.invalidateQueries({ queryKey: keys.mcpServers }),
+    qc.invalidateQueries({ queryKey: keys.mcpCloud }),
+  ]);
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    void onMcpSignIn((e) => {
+      if (e.cloud) void refresh();
+    }).then((u) => (off = u));
+    return () => off?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qc]);
+  return {
+    allow: async (id: string, on = true) => {
+      const page = await api.mcpSetCloud(id, on);
+      await refresh();
+      if (page) await openUrl(page);
+    },
+    signIn: async (id: string) => {
+      await openUrl(await api.mcpCloudSignIn(id));
+    },
+    setTool: async (id: string, tool: string, policy: ToolPolicy | null) => {
+      await api.mcpSetCloudTool(id, tool, policy);
+      await qc.invalidateQueries({ queryKey: keys.mcpTools(id) });
+      await refresh();
+    },
+  };
 }
 
 export function useMcpCatalog() {
@@ -265,6 +306,52 @@ const policies: { value: ToolPolicy; label: string }[] = [
   { value: "ask", label: "Ask" },
   { value: "off", label: "Off" },
 ];
+/** Nobody can answer an ask in a cloud job. */
+const cloudPolicies = policies.filter((p) => p.value !== "ask");
+
+/** "In tab cloud jobs" on a connection's page: allow it, its own sign-in, and where it stands. */
+function CloudSection({ s, state, busy, run }: { s: McpServerInfo; state?: McpCloudState; busy: boolean; run: (f: () => Promise<unknown>) => Promise<void> }) {
+  const cloud = useCloudActions();
+  const allowed = !!s.cloud_jobs;
+  const st = state?.state;
+  const status: { tone: Tone; text: string } =
+    st === "no_hub" ? { tone: "neutral", text: "Your hub isn't in tab cloud yet" }
+      : st === "cant_run" ? { tone: "neutral", text: `Only on this computer: it ${state?.why ?? "can't run in tab cloud"}` }
+        : !allowed ? { tone: "neutral", text: "Not in cloud jobs" }
+          : st === "sign_in" ? { tone: "warning", text: "Needs its sign-in for tab cloud" }
+            : st === "unknown" ? { tone: "warning", text: state?.why ?? "tab cloud couldn't be reached" }
+              : { tone: "success", text: "Cloud jobs can use it" };
+  const canAllow = st !== "no_hub" && st !== "cant_run";
+  return (
+    <Section
+      title="In tab cloud jobs"
+      description={`Workflow jobs that run in tab cloud while your computers are off can use ${s.name} too. Tools that only read are allowed there; anything that changes something stays off until you allow it below.`}
+    >
+      <Card>
+        <div className="mcp-queue">
+          <div className="mcp-queue-row">
+            <Toggle checked={allowed} label="Allow in cloud jobs" onChange={(on) => canAllow && void run(() => cloud.allow(s.id, on))} />
+            <span>Allow in cloud jobs</span>
+            <div className="connector-status"><StatusDot tone={status.tone} /> <span>{status.text}</span></div>
+            {allowed && s.sign_in && (st === "sign_in" || st === "ready") && (
+              <Button size="sm" variant={st === "sign_in" ? "primary" : "secondary"} disabled={busy} onClick={() => void run(() => cloud.signIn(s.id))}>
+                {st === "sign_in" ? "Sign in for tab cloud" : "Sign in again"}
+              </Button>
+            )}
+          </div>
+          <p className="subtle mcp-queue-note">
+            {s.sign_in
+              ? `tab cloud signs in to ${s.name} on its own, so this computer's sign-in never leaves it. That sign-in is kept encrypted in your hub, and only its cloud runner can read it.`
+              : s.cloud.needs_key
+                ? `Its keys go to your hub, kept encrypted, and only its cloud runner can read them.`
+                : `It needs no sign-in. Only your hub's cloud runner reaches it.`}{" "}
+            Jobs that need a connection that isn't here tell you, with a way to fix it.
+          </p>
+        </div>
+      </Card>
+    </Section>
+  );
+}
 
 /** One remote MCP connection: status, sign-in, and a choice per tool. */
 export function McpDetail({ id, color, onBack }: { id: string; color?: string; onBack: () => void }) {
@@ -277,6 +364,9 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
   const [showAll, setShowAll] = useState(false);
   const { data: catalog = [] } = useMcpCatalog();
   const catalogEntry = catalog.find((e) => e.id === s?.catalog);
+  const { data: cloudStates } = useMcpCloud();
+  const cloudState = cloudStates?.find((c) => c.id === id);
+  const cloud = useCloudActions();
 
   useEffect(() => {
     let off: (() => void) | undefined;
@@ -318,8 +408,14 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
       await api.mcpSetTool(id, t.name, p === def ? null : p);
       await qc.invalidateQueries({ queryKey: keys.mcpTools(id) });
     });
+  const setCloudTool = (t: McpTool, p: ToolPolicy) =>
+    run(async () => {
+      const def: ToolPolicy = t.read_only ? "allow" : "off";
+      await cloud.setTool(id, t.name, p === def ? null : p);
+    });
   const list = tools.data ?? [];
   const shown = showAll ? list : list.slice(0, 12);
+  const cloudColumn = !!s.cloud_jobs;
 
   return (
     <div className="page page-narrow">
@@ -353,7 +449,7 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
         {s.command
           ? `Agents in your chats can use ${s.name}'s tools. tab runs it on this computer and passes each request on, so agents never start it or see its keys.`
           : `Agents in your chats can use ${s.name}'s tools as you. tab signs each request in, so the agents never hold your sign-in.`}{" "}
-        Chats on someone else's code (pull request reviews, jobs) don't get them.
+        Chats on someone else's code (pull request reviews, jobs on your computers) don't get them; tab cloud jobs do only if you allow it below.
       </p>
       {error && <p className="chat-error">{error}</p>}
 
@@ -384,6 +480,8 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
         </Card>
       </Section>
 
+      <CloudSection s={s} state={cloudState} busy={busy} run={run} />
+
       {s.queue_sync && (
         <QueueSection
           s={s}
@@ -396,13 +494,22 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
 
       <Section
         title="Agent tools"
-        description="Tools that only read run without asking. Anything that changes something asks you in the chat first, unless you allow it here. Off tools are hidden from agents."
+        description={cloudColumn
+          ? "In chats, tools that only read run without asking, and anything that changes something asks you first. In cloud jobs nobody is there to ask, so those are off until you allow them. Off tools are hidden from agents."
+          : "Tools that only read run without asking. Anything that changes something asks you in the chat first, unless you allow it here. Off tools are hidden from agents."}
         actions={s.ready ? <Button size="sm" variant="ghost" icon="undo" disabled={tools.isFetching} onClick={() => void api.mcpTools(id, true).then(() => qc.invalidateQueries({ queryKey: keys.mcpTools(id) }))}>Refresh</Button> : undefined}
       >
         <Card padded={false}>
           {!s.ready && <div className="mcp-tools-empty subtle">{s.enabled ? "Sign in to see its tools." : "Turn it on to see its tools."}</div>}
           {s.ready && tools.isLoading && <div className="mcp-tools-empty subtle">Asking {s.name} for its tools…</div>}
           {s.ready && tools.error && <div className="mcp-tools-empty chat-error">{String(tools.error)}</div>}
+          {cloudColumn && shown.length > 0 && (
+            <div className="mcp-tool mcp-tool-head subtle">
+              <div className="mcp-tool-main">Tool</div>
+              <span className="mcp-col">In chats</span>
+              <span className="mcp-col">In cloud jobs</span>
+            </div>
+          )}
           {shown.map((t) => (
             <div key={t.name} className="mcp-tool">
               <div className="mcp-tool-main">
@@ -410,13 +517,22 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
                 {t.description && <span className="subtle mcp-tool-desc" title={t.description}>{t.description}</span>}
               </div>
               <Badge tone={t.read_only ? "neutral" : "warning"}>{t.read_only ? "reads" : "changes"}</Badge>
-              <div className="seg" role="radiogroup" aria-label={`${t.name}: allowed, ask or off`}>
+              <div className={cx("seg", cloudColumn && "mcp-col")} role="radiogroup" aria-label={`${t.name} in chats: allowed, ask or off`}>
                 {policies.map((p) => (
                   <button key={p.value} role="radio" aria-checked={t.policy === p.value} className={cx(t.policy === p.value && "on")} disabled={busy} onClick={() => void setTool(t, p.value)}>
                     {p.label}
                   </button>
                 ))}
               </div>
+              {cloudColumn && (
+                <div className="seg mcp-col" role="radiogroup" aria-label={`${t.name} in cloud jobs: allowed or off`}>
+                  {cloudPolicies.map((p) => (
+                    <button key={p.value} role="radio" aria-checked={t.cloud_policy === p.value} className={cx(t.cloud_policy === p.value && "on")} disabled={busy} onClick={() => void setCloudTool(t, p.value)}>
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
           {list.length > shown.length && (

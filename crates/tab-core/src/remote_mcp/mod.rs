@@ -69,6 +69,35 @@ pub struct RemoteMcpConfig {
     /// What the queue watches, for recipes that ask (Notion: a search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_query: Option<String>,
+    /// The person allowed it in tab cloud jobs ("Allow in cloud"). It runs
+    /// there only when it can ([`cloud_fit`]) and the hub is in tab cloud.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cloud_jobs: bool,
+    /// The person's choice per tool in cloud jobs, where nobody is watching.
+    /// Tools not listed get [`cloud_default_policy`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub cloud_tools: BTreeMap<String, ToolPolicy>,
+}
+
+impl RemoteMcpConfig {
+    /// What the hub keeps for its cloud runner: the server without this
+    /// computer's choices for chats or where it was imported from. A tool
+    /// turned off for chats stays off there, unless the cloud column says
+    /// otherwise.
+    pub fn for_cloud(&self) -> RemoteMcpConfig {
+        let mut c = self.clone();
+        for (tool, p) in &self.tools {
+            if *p == ToolPolicy::Off {
+                c.cloud_tools.entry(tool.clone()).or_insert(ToolPolicy::Off);
+            }
+        }
+        c.tools.clear();
+        c.imported_from = None;
+        if let Some(l) = &mut c.command {
+            l.cwd = None;
+        }
+        c
+    }
 }
 
 /// A local MCP server: the program, its arguments, and the names of its
@@ -156,6 +185,50 @@ pub fn cloud_fit(c: &RemoteMcpConfig, home: Option<&std::path::Path>) -> CloudFi
     }
 }
 
+/// Where each of the person's connections stands for tab cloud jobs.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CloudPlan {
+    /// Allowed in the cloud and able to run there: what the hub keeps.
+    pub servers: BTreeMap<String, RemoteMcpConfig>,
+    /// The rest that are on, so a cloud job can say it needed one.
+    pub elsewhere: Vec<Elsewhere>,
+}
+
+/// Splits the person's connections into what goes to tab cloud and what
+/// stays on their computers. `home` is for [`cloud_fit`].
+pub fn cloud_plan(
+    servers: &BTreeMap<String, RemoteMcpConfig>,
+    home: Option<&std::path::Path>,
+) -> CloudPlan {
+    use tab_domain::runner::GapKind;
+    let mut plan = CloudPlan::default();
+    for (id, c) in servers {
+        if !c.enabled {
+            continue;
+        }
+        let portable = cloud_fit(c, home).portable;
+        if c.cloud_jobs && portable {
+            plan.servers.insert(id.clone(), c.for_cloud());
+        } else {
+            plan.elsewhere.push(Elsewhere {
+                id: id.clone(),
+                name: c.name.clone(),
+                why: if portable {
+                    GapKind::NotInCloud
+                } else {
+                    GapKind::OnlyOnComputer
+                },
+            });
+        }
+    }
+    plan
+}
+
+/// [`cloud_plan`] with this computer's home folder.
+pub fn cloud_plan_here(servers: &BTreeMap<String, RemoteMcpConfig>) -> CloudPlan {
+    cloud_plan(servers, crate::sandbox::home().as_deref())
+}
+
 /// An absolute path, a `~` path, or one under the home folder.
 fn local_path(s: &str, home: Option<&std::path::Path>) -> bool {
     let s = s.split_once('=').map_or(s, |(_, v)| v);
@@ -212,6 +285,34 @@ pub enum ToolPolicy {
     Ask,
     /// Agents don't see it.
     Off,
+}
+
+/// The person's choice for a tool in cloud jobs: the cloud column's, or
+/// off where they turned it off for chats (off in chats means off).
+fn cloud_choice(c: &RemoteMcpConfig, tool: &str) -> Option<ToolPolicy> {
+    c.cloud_tools
+        .get(tool)
+        .copied()
+        .or_else(|| (c.tools.get(tool) == Some(&ToolPolicy::Off)).then_some(ToolPolicy::Off))
+}
+
+/// In cloud jobs nobody is at the keyboard: read-only tools run, and
+/// anything that changes something is off until the person allows it.
+pub fn cloud_default_policy(tool: &Value) -> ToolPolicy {
+    if tool["annotations"]["readOnlyHint"] == true {
+        ToolPolicy::Allow
+    } else {
+        ToolPolicy::Off
+    }
+}
+
+/// A connection the person has on a computer that isn't in tab cloud, so
+/// a cloud job that needs it can say so (see [`RemoteMcp::set_elsewhere`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Elsewhere {
+    pub id: String,
+    pub name: String,
+    pub why: tab_domain::runner::GapKind,
 }
 
 /// Read-only tools run; anything else asks first.
@@ -378,6 +479,9 @@ pub struct ToolView {
     pub policy: ToolPolicy,
     /// Whether `policy` is the person's choice rather than the default.
     pub chosen: bool,
+    /// The same, in tab cloud jobs.
+    pub cloud_policy: ToolPolicy,
+    pub cloud_chosen: bool,
 }
 
 /// What tab found at a URL before adding it.
@@ -396,10 +500,14 @@ pub struct SignInEvent {
     pub id: String,
     pub ok: bool,
     pub error: Option<String>,
+    /// It was the sign-in for tab cloud ([`RemoteMcp::begin_sign_in_for`]).
+    #[serde(default)]
+    pub cloud: bool,
 }
 
 struct Pending {
     id: String,
+    cloud: bool,
     verifier: String,
     discovered: Discovered,
     client: Client,
@@ -558,7 +666,19 @@ pub struct RemoteMcp {
     local: stdio::Children,
     /// How each connection's queue sync went last ([`sync`]).
     synced: Mutex<HashMap<String, QueueState>>,
+    /// This is a cloud runner's: tools follow the cloud column, and what
+    /// jobs miss is noted for them.
+    in_cloud: std::sync::atomic::AtomicBool,
+    /// Called with a sign-in after a refresh saves it.
+    on_saved: RwLock<Option<SavedHook>>,
+    /// Connections the person has elsewhere (cloud runner only).
+    elsewhere: RwLock<Vec<Elsewhere>>,
+    /// What each chat needed and didn't have, until its job takes them.
+    gaps: Mutex<HashMap<String, Vec<tab_domain::runner::CloudGap>>>,
 }
+
+/// See [`RemoteMcp::set_on_saved`].
+pub type SavedHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 impl RemoteMcp {
     /// `dir` holds the sign-ins on platforms that keep them in files.
@@ -580,7 +700,107 @@ impl RemoteMcp {
             events: broadcast::channel(16).0,
             local: Default::default(),
             synced: Default::default(),
+            in_cloud: Default::default(),
+            on_saved: Default::default(),
+            elsewhere: Default::default(),
+            gaps: Default::default(),
         })
+    }
+
+    /// Makes this a cloud runner's: tools follow each connection's cloud
+    /// column, and what jobs miss is noted for them.
+    pub fn set_in_cloud(&self, on: bool) {
+        self.in_cloud
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn in_cloud(&self) -> bool {
+        self.in_cloud.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Called with `(id, sign-in JSON)` each time a refresh saves a
+    /// sign-in, so a cloud runner can keep the hub's copy current (servers
+    /// rotate refresh tokens).
+    pub fn set_on_saved(&self, f: SavedHook) {
+        *self.on_saved.write().unwrap() = Some(f);
+    }
+
+    /// Puts a sign-in the hub kept (JSON [`SignIn`]) in place for `id`.
+    pub fn seed_sign_in(&self, id: &str, json: &str) -> anyhow::Result<()> {
+        let s: SignIn = serde_json::from_str(json)?;
+        self.save_sign_in(id, &s)?;
+        self.set_error(id, None);
+        Ok(())
+    }
+
+    /// The sign-in made for tab cloud and not sent there yet (JSON).
+    pub fn cloud_sign_in(&self, id: &str) -> Option<String> {
+        self.vault.get(&cloud_key(id))
+    }
+
+    /// Forgets the sign-in made for tab cloud, once the hub has it.
+    pub fn clear_cloud_sign_in(&self, id: &str) {
+        self.vault.remove(&cloud_key(id));
+    }
+
+    /// Connections the person has on a computer but not here.
+    pub fn set_elsewhere(&self, all: Vec<Elsewhere>) {
+        *self.elsewhere.write().unwrap() = all;
+    }
+
+    /// On a cloud runner, what stands in for `id` when jobs can't use it:
+    /// a connection that's only on the person's computers, or one allowed
+    /// here whose cloud sign-in is missing or stopped working.
+    pub fn stand_in(&self, id: &str) -> Option<Elsewhere> {
+        if !self.in_cloud() {
+            return None;
+        }
+        if let Some(c) = self.get(id) {
+            return (!self.ready(id, &c)).then(|| Elsewhere {
+                id: id.to_string(),
+                name: c.name,
+                why: tab_domain::runner::GapKind::SignIn,
+            });
+        }
+        self.elsewhere
+            .read()
+            .unwrap()
+            .iter()
+            .find(|e| e.id == id)
+            .cloned()
+    }
+
+    /// Every connection [`RemoteMcp::stand_in`] answers for.
+    pub fn stand_in_ids(&self) -> Vec<String> {
+        if !self.in_cloud() {
+            return Vec::new();
+        }
+        let usable = self.usable();
+        let mut ids: Vec<String> = self
+            .servers
+            .read()
+            .unwrap()
+            .keys()
+            .filter(|id| !usable.contains(id))
+            .cloned()
+            .collect();
+        ids.extend(self.elsewhere.read().unwrap().iter().map(|e| e.id.clone()));
+        ids
+    }
+
+    /// Notes that a chat needed something it didn't have.
+    pub fn note_gap(&self, session: &str, gap: tab_domain::runner::CloudGap) {
+        let mut all = self.gaps.lock().unwrap();
+        tab_domain::runner::CloudGap::add(all.entry(session.to_string()).or_default(), gap);
+    }
+
+    /// What a chat needed and didn't have. Taken once.
+    pub fn take_gaps(&self, session: &str) -> Vec<tab_domain::runner::CloudGap> {
+        self.gaps
+            .lock()
+            .unwrap()
+            .remove(session)
+            .unwrap_or_default()
     }
 
     /// tab's MCP server (`http://127.0.0.1:port`), where sign-ins come back.
@@ -623,6 +843,7 @@ impl RemoteMcp {
     pub fn forget(&self, id: &str) {
         self.sign_out(id);
         self.vault.remove(&secrets_key(id));
+        self.vault.remove(&cloud_key(id));
         self.local.stop(id);
     }
 
@@ -859,6 +1080,14 @@ impl RemoteMcp {
     /// Starts signing in to `id`. Returns the page to open in the browser;
     /// the browser comes back to `/oauth/callback` on tab's MCP server.
     pub async fn begin_sign_in(&self, id: &str) -> anyhow::Result<String> {
+        self.begin_sign_in_for(id, false).await
+    }
+
+    /// Starts a sign-in for this computer, or (`cloud`) for tab cloud. The
+    /// one for tab cloud is a grant of its own, kept apart until it's sent
+    /// to the hub: the cloud runner refreshes it there, and with a server
+    /// that rotates refresh tokens, sharing one would sign the other out.
+    pub async fn begin_sign_in_for(&self, id: &str, cloud: bool) -> anyhow::Result<String> {
         let cfg = self
             .get(id)
             .ok_or_else(|| anyhow::anyhow!("no connection {id}"))?;
@@ -896,11 +1125,13 @@ impl RemoteMcp {
         let state = uuid::Uuid::new_v4().simple().to_string();
         let url = oauth::authorize_url(&discovered, &client, &state, &challenge)?;
         let mut pending = self.pending.lock().unwrap();
-        pending.retain(|_, p| p.started.elapsed() < PENDING_FOR && p.id != id);
+        pending
+            .retain(|_, p| p.started.elapsed() < PENDING_FOR && (p.id != id || p.cloud != cloud));
         pending.insert(
             state,
             Pending {
                 id: id.to_string(),
+                cloud,
                 verifier,
                 discovered,
                 client,
@@ -945,24 +1176,30 @@ impl RemoteMcp {
             )
             .await
             .map_err(|e| anyhow::anyhow!("{name} didn't accept the sign-in: {e}"))?;
-            self.save_sign_in(
-                &p.id,
-                &SignIn {
-                    discovered: p.discovered.clone(),
-                    client: p.client.clone(),
-                    tokens: Some(tokens),
-                    signed_in_at: Utc::now(),
-                },
-            )?;
+            let record = SignIn {
+                discovered: p.discovered.clone(),
+                client: p.client.clone(),
+                tokens: Some(tokens),
+                signed_in_at: Utc::now(),
+            };
+            if p.cloud {
+                self.vault
+                    .set(&cloud_key(&p.id), &serde_json::to_string(&record)?)?;
+            } else {
+                self.save_sign_in(&p.id, &record)?;
+            }
             Ok(())
         }
         .await;
-        self.tools.lock().unwrap().remove(&p.id);
-        self.set_error(&p.id, result.as_ref().err().map(|e| e.to_string()));
+        if !p.cloud {
+            self.tools.lock().unwrap().remove(&p.id);
+            self.set_error(&p.id, result.as_ref().err().map(|e| e.to_string()));
+        }
         let _ = self.events.send(SignInEvent {
             id: p.id.clone(),
             ok: result.is_ok(),
             error: result.as_ref().err().map(|e| e.to_string()),
+            cloud: p.cloud,
         });
         result.map(|_| name)
     }
@@ -1022,6 +1259,12 @@ impl RemoteMcp {
                 record.tokens = Some(t);
                 self.save_sign_in(id, &record)?;
                 self.set_error(id, None);
+                let hook = self.on_saved.read().unwrap().clone();
+                if let Some(f) = hook
+                    && let Ok(json) = serde_json::to_string(&record)
+                {
+                    f(id, &json);
+                }
                 Ok(Some(access))
             }
             Err(e) => {
@@ -1078,18 +1321,50 @@ impl RemoteMcp {
     }
 
     /// The person's choice for a tool, or the default for its kind.
+    /// On a cloud runner, the cloud column's.
     pub fn policy(&self, id: &str, tool: &str) -> ToolPolicy {
-        if let Some(p) = self.get(id).and_then(|c| c.tools.get(tool).copied()) {
+        let cloud = self.in_cloud();
+        if let Some(p) = self.chosen(id, tool, cloud) {
             return p;
         }
+        let default = if cloud {
+            cloud_default_policy
+        } else {
+            default_policy
+        };
         self.tools
             .lock()
             .unwrap()
             .get(id)
             .and_then(|t| t.iter().find(|t| t["name"] == tool))
-            .map(default_policy)
-            // Not seen yet: ask, rather than guess it only reads.
-            .unwrap_or(ToolPolicy::Ask)
+            .map(default)
+            // Not seen yet: ask (in the cloud, off) rather than guess it
+            // only reads.
+            .unwrap_or(if cloud {
+                ToolPolicy::Off
+            } else {
+                ToolPolicy::Ask
+            })
+    }
+
+    fn chosen(&self, id: &str, tool: &str, cloud: bool) -> Option<ToolPolicy> {
+        let c = self.get(id)?;
+        if cloud {
+            cloud_choice(&c, tool)
+        } else {
+            c.tools.get(tool).copied()
+        }
+    }
+
+    /// Whether agents don't see a tool at all. One the person turned off
+    /// is hidden; in the cloud, a write that's off only by default is still
+    /// listed, so a job that tries it can say what it needed.
+    pub fn hidden(&self, id: &str, tool: &str) -> bool {
+        if self.in_cloud() {
+            self.chosen(id, tool, true) == Some(ToolPolicy::Off)
+        } else {
+            self.policy(id, tool) == ToolPolicy::Off
+        }
     }
 
     /// Remembers a server's tools from a `tools/list` result that passed
@@ -1216,7 +1491,8 @@ impl RemoteMcp {
 
     /// The tools tab last saw, with the person's choices.
     pub fn tool_views(&self, id: &str) -> Vec<ToolView> {
-        let chosen = self.get(id).map(|c| c.tools).unwrap_or_default();
+        let cfg = self.get(id).unwrap_or_default();
+        let (chosen, cloud) = (cfg.tools.clone(), cfg.cloud_tools.clone());
         let tools = self
             .tools
             .lock()
@@ -1229,7 +1505,10 @@ impl RemoteMcp {
             .map(|t| {
                 let name = t["name"].as_str().unwrap_or_default().to_string();
                 let choice = chosen.get(&name).copied();
+                let in_cloud = cloud_choice(&cfg, &name);
                 ToolView {
+                    cloud_policy: in_cloud.unwrap_or_else(|| cloud_default_policy(t)),
+                    cloud_chosen: cloud.contains_key(&name),
                     title: t["title"]
                         .as_str()
                         .or_else(|| t["annotations"]["title"].as_str())
@@ -1249,6 +1528,11 @@ impl RemoteMcp {
 /// clash with a sign-in).
 fn secrets_key(id: &str) -> String {
     format!("{id}.keys")
+}
+
+/// The vault entry for a sign-in made for tab cloud, until it's sent.
+fn cloud_key(id: &str) -> String {
+    format!("{id}.cloud")
 }
 
 /// An `initialize` request from tab.
@@ -1275,6 +1559,81 @@ pub fn content_type(h: &reqwest::header::HeaderMap) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_jobs_get_reads_and_only_the_writes_allowed_there() {
+        let read = json!({ "name": "list", "annotations": { "readOnlyHint": true } });
+        let write = json!({ "name": "make" });
+        assert_eq!(cloud_default_policy(&read), ToolPolicy::Allow);
+        assert_eq!(cloud_default_policy(&write), ToolPolicy::Off);
+        // Off for chats is off in the cloud too, unless the cloud column
+        // says otherwise; what goes to the hub carries that, without the
+        // chat column or this computer's folder.
+        let c = RemoteMcpConfig {
+            name: "Things".into(),
+            url: "https://mcp.things.dev/mcp".into(),
+            enabled: true,
+            cloud_jobs: true,
+            tools: BTreeMap::from([
+                ("drop".to_string(), ToolPolicy::Off),
+                ("make".to_string(), ToolPolicy::Allow),
+                ("swap".to_string(), ToolPolicy::Off),
+            ]),
+            cloud_tools: BTreeMap::from([("swap".to_string(), ToolPolicy::Allow)]),
+            imported_from: Some("user:things".into()),
+            ..Default::default()
+        };
+        assert_eq!(cloud_choice(&c, "drop"), Some(ToolPolicy::Off));
+        assert_eq!(
+            cloud_choice(&c, "make"),
+            None,
+            "allowed in chats isn't allowed in the cloud"
+        );
+        assert_eq!(cloud_choice(&c, "swap"), Some(ToolPolicy::Allow));
+        let up = c.for_cloud();
+        assert!(up.tools.is_empty() && up.imported_from.is_none());
+        assert_eq!(up.cloud_tools["drop"], ToolPolicy::Off);
+        assert_eq!(up.cloud_tools["swap"], ToolPolicy::Allow);
+    }
+
+    #[test]
+    fn the_cloud_plan_splits_whats_allowed_from_the_rest() {
+        use tab_domain::runner::GapKind;
+        let remote = |cloud_jobs: bool, url: &str| RemoteMcpConfig {
+            name: url.into(),
+            url: url.into(),
+            enabled: true,
+            cloud_jobs,
+            ..Default::default()
+        };
+        let mut servers = BTreeMap::from([
+            (
+                "linear".to_string(),
+                remote(true, "https://mcp.linear.app/mcp"),
+            ),
+            (
+                "sentry".to_string(),
+                remote(false, "https://mcp.sentry.dev/mcp"),
+            ),
+            // Allowed, but it can't run there.
+            ("dev".to_string(), remote(true, "http://localhost:3000/mcp")),
+        ]);
+        let mut off = remote(true, "https://mcp.notion.com/mcp");
+        off.enabled = false;
+        servers.insert("notion".into(), off);
+        let plan = cloud_plan(&servers, None);
+        assert_eq!(plan.servers.keys().collect::<Vec<_>>(), ["linear"]);
+        assert_eq!(
+            plan.elsewhere
+                .iter()
+                .map(|e| (e.id.as_str(), e.why))
+                .collect::<Vec<_>>(),
+            [
+                ("dev", GapKind::OnlyOnComputer),
+                ("sentry", GapKind::NotInCloud)
+            ]
+        );
+    }
 
     #[test]
     fn ids_are_server_names_agents_can_use() {

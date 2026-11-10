@@ -254,6 +254,37 @@ would drift, and it would be unclear which one wins.
 - Sync dedupes on `external_id`, so a computer and the runner both polling
   is harmless. Let the hub's leases pick one.
 
+**As built (phase 4):**
+
+- "Allow in cloud jobs" per connection (`cloud_jobs` in `config.json`).
+  Only connections that pass `cloud_fit` can be allowed; the rest show
+  "Only on this computer" with the reason.
+- Hub secrets fit tab-infra's existing names: `connection/mcp.<id>/server`
+  (the config without the chat column), `…/keys`, `…/oauth`, and
+  `connection/mcp/elsewhere` (the person's other connections). MCP ids
+  can't contain a dot, so these never clash with a built-in connection.
+- **The cloud gets its own sign-in**, not a copy of the desktop's: a
+  separate OAuth grant, made in the browser when the person allows the
+  connection, kept on this computer only until it's sent to the hub. With
+  servers that rotate refresh tokens, sharing one grant would sign one side
+  out. The runner refreshes it and writes it back
+  (`PUT /v1/runner/secrets`, which only replaces an `…/oauth` the hub
+  already keeps).
+- The cloud column is **Allowed / Off**, not Allowed / Ask / Off: approvals
+  are in-memory on the runner, so nobody could answer an ask. Reads default
+  to allowed and writes to off; a tool turned off for chats is off in the
+  cloud too unless the cloud column says otherwise. So the card offers
+  "Allow <tool> in cloud", not "Ask me each time".
+- On the runner, agents get only the connection servers (no `tab` server,
+  no approval prompt tool, no gh/git broker), so cloud jobs keep the
+  review policy. A connection that isn't there (not allowed, only on a
+  computer, or its cloud sign-in needs redoing) gets a stand-in server with
+  one `request_access` tool. Calling it, or a write that's off, is noted on
+  the job (`Job.missing`) and on the run step's output.
+- The card shows on the item and on the run in Workflows: "Allow in cloud",
+  "Allow <tool> in cloud", "Sign in for tab cloud", or "Run this step on my
+  computers" (sets the agent step's placement).
+
 ## What this doesn't solve
 
 - **Email.** IMAP doesn't use MCP. Gmail and Outlook use native OAuth
@@ -268,7 +299,7 @@ would drift, and it would be unclear which one wins.
 2. Import from Claude Code: the banner and the import dialog.
 3. Catalog with capability chips. Sync recipes for Linear, Notion and Sentry.
 4. Cloud: OAuth refresh tokens in the hub, the cloud eligibility check, the
-   "missing in cloud" card.
+   "missing in cloud" card. (Done; see "As built" in §5.)
 5. Native OAuth for Gmail and Outlook IMAP.
 
 ## Open questions

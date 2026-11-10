@@ -8,7 +8,7 @@ import { create, toBinary } from "@bufbuild/protobuf";
 import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
 import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, RunnerState, RunnerStatusSchema, type HubStatus } from "./protocol/cloud";
 import type {
-  McpCatalogEntry, McpImportCandidate, McpImportResult, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
+  McpCatalogEntry, McpCloudState, JobGaps, McpImportCandidate, McpImportResult, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
   EmailSignInStatus, MailProvider,
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
@@ -669,9 +669,11 @@ const mcpCatalog: McpCatalogEntry[] = [
   { id: "stripe", name: "Stripe", url: "https://mcp.stripe.com", description: "Agents can look up customers, payments, invoices and disputes.", category: "work", color: "#635bff", fills_queue: false, kinds: [] },
 ];
 const mcpSignedIn = new Map<string, string>();
+/** Connections whose sign-in for tab cloud the hub keeps. */
+const mcpCloudSignedIn = new Set<string>();
 const mcpSignInListeners = new Set<(e: McpSignInEvent) => void>();
 let mailSignedIn: EmailSignInStatus["signed_in"] = null;
-const mockMcpTools: Omit<McpTool, "policy" | "chosen">[] = [
+const mockMcpTools: Omit<McpTool, "policy" | "chosen" | "cloud_policy" | "cloud_chosen">[] = [
   { name: "list_issues", title: "List issues", description: "Search and filter issues.", read_only: true },
   { name: "get_issue", title: "Get issue", description: "One issue with its comments.", read_only: true },
   { name: "list_projects", title: "List projects", description: "Projects in the workspace.", read_only: true },
@@ -729,10 +731,11 @@ function mcpSetServers(next: Record<string, McpServerConfig>) {
   config = { ...config, mcp_servers: next };
   emit({ type: "config_changed" });
 }
-function mcpFinishSoon(id: string) {
+function mcpFinishSoon(id: string, cloud = false) {
   setTimeout(() => {
-    mcpSignedIn.set(id, new Date().toISOString());
-    mcpSignInListeners.forEach((l) => l({ id, ok: true, error: null }));
+    if (cloud) mcpCloudSignedIn.add(id);
+    else mcpSignedIn.set(id, new Date().toISOString());
+    mcpSignInListeners.forEach((l) => l({ id, ok: true, error: null, cloud }));
     emit({ type: "config_changed" });
   }, 1800);
 }
@@ -800,7 +803,56 @@ function mcpHandle(cmd: string, args: Record<string, any>): unknown {
     case "mcp_set_queue": mcpSetServers({ ...servers, [args.id]: { ...servers[args.id], queue: args.on ? undefined : false, queue_query: args.query?.trim() || undefined } }); return null;
     case "mcp_tools": {
       const chosen = servers[args.id]?.tools ?? {};
-      return mockMcpTools.map((t) => ({ ...t, policy: chosen[t.name] ?? (t.read_only ? "allow" : "ask"), chosen: t.name in chosen }));
+      const cloud = servers[args.id]?.cloud_tools ?? {};
+      return mockMcpTools.map((t) => ({
+        ...t,
+        policy: chosen[t.name] ?? (t.read_only ? "allow" : "ask"), chosen: t.name in chosen,
+        cloud_policy: cloud[t.name] ?? (t.read_only ? "allow" : "off"), cloud_chosen: t.name in cloud,
+      }));
+    }
+    case "mcp_cloud_states": {
+      const fits = new Map(mcpServersInfo().map((s) => [s.id, s.cloud]));
+      const states: McpCloudState[] = Object.entries(servers).map(([id, c]) => {
+        const fit = fits.get(id);
+        const allowed = !!c.cloud_jobs;
+        if (!mockMoved) return { id, allowed, state: "no_hub", why: "Move your hub to tab cloud first (Settings → Hub)." };
+        if (fit && !fit.portable) return { id, allowed, state: "cant_run", why: fit.why_not };
+        if (!allowed) return { id, allowed, state: "off", why: null };
+        return { id, allowed, state: !c.sign_in || mcpCloudSignedIn.has(id) ? "ready" : "sign_in", why: null };
+      });
+      return states;
+    }
+    case "mcp_set_cloud": {
+      if (args.on && !mockMoved) throw "Move your hub to tab cloud first (Settings → Hub), then connections can be used in cloud jobs.";
+      const s = servers[args.id];
+      mcpSetServers({ ...servers, [args.id]: { ...s, cloud_jobs: args.on || undefined } });
+      if (!args.on || !s.sign_in || mcpCloudSignedIn.has(args.id)) return null;
+      mcpFinishSoon(args.id, true);
+      return s.url + "#authorize-tab-cloud";
+    }
+    case "mcp_cloud_sign_in": mcpFinishSoon(args.id, true); return (servers[args.id]?.url ?? "") + "#authorize-tab-cloud";
+    case "mcp_set_cloud_tool": {
+      if (args.policy === "ask") throw "Cloud jobs can't ask: nobody is there to answer. Pick Allowed or Off.";
+      const s = servers[args.id];
+      const cloud_tools = { ...(s.cloud_tools ?? {}) };
+      if (args.policy) cloud_tools[args.tool] = args.policy;
+      else delete cloud_tools[args.tool];
+      mcpSetServers({ ...servers, [args.id]: { ...s, cloud_tools } });
+      return null;
+    }
+    case "cloud_job_gaps": {
+      // One finished cloud job on the first item that needed Linear (and a write it doesn't have), and Notion.
+      const gaps: JobGaps[] = [{
+        job_id: "job-mock-1", run_id: "run-mock-1", workflow_id: "wf-triage", workflow_name: "Triage new Sentry issues", step_id: "fix",
+        item_id: items[0]?.id ?? null, failed: false, finished_at: ago(25),
+        missing: [
+          servers.linear?.cloud_jobs
+            ? { connection: "linear", name: "Linear", tool: "create_issue", why: "tool_off" }
+            : { connection: "linear", name: "Linear", why: "not_in_cloud" },
+          { connection: "obsidian", name: "obsidian", why: "only_on_computer" },
+        ],
+      }];
+      return gaps;
     }
     case "mcp_import_scan": return mcpImportScan();
     case "mcp_import": {

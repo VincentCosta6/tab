@@ -13,6 +13,7 @@ import { isPinned, useThreadFiles } from "../../lib/threadFiles";
 import { offerDone } from "../../lib/nav";
 import { keys } from "../../lib/query";
 import type { QueueItem } from "../../lib/types";
+import { CloudGaps } from "../connections/CloudGaps";
 import { parsePullUrl } from "../github/pulls";
 import { ChatView, DevicePill, SandboxPill, StrictPill } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
@@ -132,6 +133,7 @@ export function ItemPane({ id, arrived, onAct, onSelect }: {
           )}
         </div>
       </header>
+      <div className="item-cloud-gaps"><CloudGaps itemId={item.id} /></div>
       <ContextDrawer
         item={item}
         onSelect={onSelect}

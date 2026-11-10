@@ -205,6 +205,7 @@ mod tests {
             max_attempts: 2,
             created_at: at,
             deadline: at + chrono::Duration::hours(1),
+            missing: Vec::new(),
         }
     }
 

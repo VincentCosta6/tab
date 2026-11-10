@@ -14,6 +14,11 @@
 //! - It takes agent jobs whose placement allows the cloud, with the
 //!   person's own harness setup and keys, cloning the repo it's asked to
 //!   work on.
+//! - It fronts the MCP connections (Linear, Sentry, ...) the person allowed
+//!   in tab cloud jobs, with the cloud column's choice for each tool and a
+//!   sign-in of the cloud's own, which it refreshes and writes back to the
+//!   hub. Connections that aren't here get a stand-in, so a job that needs
+//!   one can say so and the person gets a one-click fix.
 //!
 //! Configured by environment (set by the hub when it starts the container):
 //! `TAB_CLOUD_URL`, `TAB_HUB_ID`, `TAB_RUNNER_TOKEN`, and `TAB_DATA` (a
@@ -47,6 +52,8 @@ use tab_core::engine::{Engine, EngineEvent, EngineHandle};
 use tab_core::gateway::Gateway;
 use tab_core::jobs::{CancellationToken, JobRunner};
 use tab_core::local_hub::LocalHub;
+use tab_core::mcp::{EngineAccess, McpServer};
+use tab_core::remote_mcp::{Elsewhere, RemoteMcp, RemoteMcpConfig, Secrets};
 use tab_core::runner::RunnerKind;
 use tab_core::sandbox::{self, Sandbox, SandboxConfig};
 use tab_core::store::Store;
@@ -89,6 +96,10 @@ struct Setup {
     /// Environment the harnesses need (`ANTHROPIC_API_KEY`, ...).
     env: BTreeMap<String, String>,
     git_token: Option<String>,
+    /// Keys of the MCP connections allowed here (in `config.mcp_servers`).
+    mcp_keys: BTreeMap<String, Secrets>,
+    /// The person's connections that aren't here.
+    elsewhere: Vec<Elsewhere>,
 }
 
 fn setup(store: &Store, secrets: &[(String, String)], work: &Path) -> Setup {
@@ -97,7 +108,38 @@ fn setup(store: &Store, secrets: &[(String, String)], work: &Path) -> Setup {
     let mut git_token = None;
     let mut agent: Option<AgentConfig> = None;
     let mut fields: BTreeMap<String, serde_json::Map<String, serde_json::Value>> = BTreeMap::new();
+    let mut mcp: BTreeMap<String, RemoteMcpConfig> = BTreeMap::new();
+    let mut mcp_keys = BTreeMap::new();
+    let mut elsewhere: Vec<Elsewhere> = Vec::new();
     for (name, value) in secrets {
+        if name == cloud::mcp_secret::ELSEWHERE {
+            match serde_json::from_str(value) {
+                Ok(e) => elsewhere = e,
+                Err(e) => {
+                    tracing::warn!(error = %e, "the list of connections elsewhere didn't parse")
+                }
+            }
+            continue;
+        }
+        if let Some((id, field)) = cloud::mcp_secret::parse(name) {
+            match field {
+                cloud::mcp_secret::SERVER => match serde_json::from_str::<RemoteMcpConfig>(value) {
+                    Ok(c) => {
+                        mcp.insert(id.to_string(), c);
+                    }
+                    Err(e) => tracing::warn!(id, error = %e, "an MCP connection didn't parse"),
+                },
+                cloud::mcp_secret::KEYS => {
+                    if let Ok(k) = serde_json::from_str::<Secrets>(value) {
+                        mcp_keys.insert(id.to_string(), k);
+                    }
+                }
+                // Sign-ins are seeded apart (`sign_ins`): the runner
+                // rewrites them, which isn't a change of setup.
+                _ => {}
+            }
+            continue;
+        }
         let parts: Vec<&str> = name.splitn(3, '/').collect();
         match parts.as_slice() {
             ["connection", id, field] => {
@@ -145,10 +187,87 @@ fn setup(store: &Store, secrets: &[(String, String)], work: &Path) -> Setup {
             },
         );
     }
+    // Only connections that are on and can run here; the rest are known
+    // only as elsewhere.
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    for (id, mut c) in mcp {
+        if !c.enabled
+            || !c.cloud_jobs
+            || !tab_core::remote_mcp::cloud_fit(&c, home.as_deref()).portable
+        {
+            continue;
+        }
+        c.tools.clear();
+        config.mcp_servers.insert(id, c);
+    }
+    mcp_keys.retain(|id, _| config.mcp_servers.contains_key(id));
+    elsewhere.retain(|e| !config.mcp_servers.contains_key(&e.id));
     Setup {
         config,
         env,
         git_token,
+        mcp_keys,
+        elsewhere,
+    }
+}
+
+/// The cloud sign-ins of MCP connections, by id (JSON `SignIn`).
+fn sign_ins(secrets: &[(String, String)]) -> BTreeMap<String, String> {
+    secrets
+        .iter()
+        .filter_map(|(name, value)| {
+            let (id, field) = cloud::mcp_secret::parse(name)?;
+            (field == cloud::mcp_secret::OAUTH).then(|| (id.to_string(), value.clone()))
+        })
+        .collect()
+}
+
+/// Puts the MCP connections allowed here in place.
+fn apply_mcp(remote: &RemoteMcp, s: &Setup) {
+    remote.set_servers(s.config.mcp_servers.clone());
+    for id in s.config.mcp_servers.keys() {
+        let keys = s.mcp_keys.get(id).cloned().unwrap_or_default();
+        if let Err(e) = remote.set_secrets(id, &keys) {
+            tracing::warn!(id, error = %e, "couldn't keep an MCP connection's keys");
+        }
+    }
+    remote.set_elsewhere(s.elsewhere.clone());
+}
+
+/// The sign-ins this runner last saw or wrote, so one the hub still has
+/// from before a refresh here isn't put back over the newer one.
+type Seen = Arc<std::sync::Mutex<BTreeMap<String, String>>>;
+
+/// Seeds sign-ins that are new, or that the person redid on a computer.
+fn seed(remote: &RemoteMcp, seen: &Seen, all: &BTreeMap<String, String>) {
+    let mut seen = seen.lock().unwrap();
+    for (id, json) in all {
+        if seen.get(id) == Some(json) {
+            continue;
+        }
+        match remote.seed_sign_in(id, json) {
+            Ok(()) => {
+                seen.insert(id.clone(), json.clone());
+            }
+            Err(e) => tracing::warn!(id, error = %e, "an MCP sign-in didn't parse"),
+        }
+    }
+}
+
+/// What tab's MCP server needs from the engine. A cloud runner's fronts
+/// only connections, so it needs nothing.
+struct NoEngine;
+
+#[async_trait::async_trait]
+impl EngineAccess for NoEngine {
+    async fn create_task(
+        &self,
+        _: tab_core::model::NewTask,
+    ) -> anyhow::Result<tab_core::QueueItem> {
+        anyhow::bail!("tasks can't be made from tab cloud")
+    }
+    async fn preview(&self, _: &str) -> anyhow::Result<tab_core::model::Preview> {
+        anyhow::bail!("previews aren't available in tab cloud")
     }
 }
 
@@ -270,7 +389,8 @@ async fn run(env: Env) -> anyhow::Result<()> {
     let api = CloudConfig {
         api: env.api.clone(),
     };
-    let mut current = setup(&store, &secrets(&api, &env.token).await, &work);
+    let first = secrets(&api, &env.token).await;
+    let mut current = setup(&store, &first, &work);
     sb.set_spawn_env(current.env.clone());
 
     let agents = AgentHub::new(
@@ -281,6 +401,46 @@ async fn run(env: Env) -> anyhow::Result<()> {
     );
     // Every job here works on a clone of someone's repo.
     agents.review_under(&work);
+
+    // The MCP connections the person allowed here, through tab's MCP
+    // server on this container's loopback. Their sign-ins live in the data
+    // folder, which agents can't read.
+    let remote = agents.remote_mcp().clone();
+    remote.set_in_cloud(true);
+    let seen: Seen = Default::default();
+    {
+        let (api, token, seen) = (api.clone(), env.token.clone(), seen.clone());
+        remote.set_on_saved(Arc::new(move |id: &str, json: &str| {
+            seen.lock().unwrap().insert(id.to_string(), json.to_string());
+            let name = cloud::mcp_secret::name(id, cloud::mcp_secret::OAUTH);
+            let (api, token) = (api.clone(), token.clone());
+            let (json, id) = (json.to_string(), id.to_string());
+            tokio::spawn(async move {
+                if let Err(e) = cloud::runner_put_secrets(&api, &token, vec![(name, json)]).await {
+                    tracing::warn!(id, error = %e, "couldn't keep a refreshed MCP sign-in in the hub; this runner keeps using it until it stops");
+                }
+            });
+        }));
+    }
+    apply_mcp(&remote, &current);
+    seed(&remote, &seen, &sign_ins(&first));
+    let mcp_token = uuid::Uuid::new_v4().simple().to_string();
+    let server = Arc::new(McpServer {
+        store: store.clone(),
+        hub: agents.clone(),
+        engine: Arc::new(NoEngine),
+        events: events.clone(),
+        token: mcp_token.clone(),
+    });
+    match tab_core::mcp::serve(server, 47_800).await {
+        Ok(url) => agents.set_mcp(tab_core::agents::McpEndpoint {
+            url,
+            token: mcp_token,
+        }),
+        Err(e) => {
+            tracing::error!(error = %e, "couldn't start the connections proxy; jobs get no connections")
+        }
+    }
     let jobs = JobRunner::new(
         store.clone(),
         Arc::new(agents.clone()),
@@ -294,6 +454,7 @@ async fn run(env: Env) -> anyhow::Result<()> {
     let gateway = Arc::new(Gateway::new(store.clone()));
     let start = |cfg: &TabConfig| -> EngineHandle {
         Engine::from_config(cfg, store.clone(), gateway.clone(), events.clone())
+            .with_mcp(cfg, &remote)
             .with_leases(hub.clone())
             .start()
     };
@@ -310,7 +471,9 @@ async fn run(env: Env) -> anyhow::Result<()> {
             _ = refresh.tick() => {}
             _ = tokio::signal::ctrl_c() => break,
         }
-        let next = setup(&store, &secrets(&api, &env.token).await, &work);
+        let all = secrets(&api, &env.token).await;
+        let next = setup(&store, &all, &work);
+        seed(&remote, &seen, &sign_ins(&all));
         if next != current {
             tracing::info!(
                 connections = next.config.connectors.len(),
@@ -319,6 +482,7 @@ async fn run(env: Env) -> anyhow::Result<()> {
             sb.set_spawn_env(next.env.clone());
             jobs.set_git_token(next.git_token.clone());
             agents.set_config(next.config.agent.clone()).await;
+            apply_mcp(&remote, &next);
             engine.shutdown();
             engine = start(&next.config);
             current = next;
@@ -368,6 +532,70 @@ mod tests {
         assert_eq!(s.config.agent.kind, Some(tab_core::model::AgentKind::Codex));
         assert_eq!(s.config.agent.workdir.as_deref(), Some("/data/work"));
         assert_eq!(s.config.agent.command, None);
+    }
+
+    #[test]
+    fn mcp_connections_come_from_the_hubs_secrets() {
+        use tab_core::remote_mcp::ToolPolicy;
+        use tab_core::runner::GapKind;
+        let store = Store::in_memory().unwrap();
+        let server = |cloud_jobs: bool, url: &str| {
+            json!({ "name": "Linear", "url": url, "enabled": true, "sign_in": true,
+                    "cloud_jobs": cloud_jobs, "cloud_tools": { "create_issue": "allow" },
+                    "tools": { "x": "allow" } })
+            .to_string()
+        };
+        let secrets = vec![
+            (
+                "connection/mcp.linear/server".to_string(),
+                server(true, "https://mcp.linear.app/mcp"),
+            ),
+            (
+                "connection/mcp.linear/oauth".to_string(),
+                "{\"signed\":1}".to_string(),
+            ),
+            (
+                "connection/mcp.linear/keys".to_string(),
+                json!({ "headers": { "X-Key": "k" } }).to_string(),
+            ),
+            // Sent before the person took it back out of the cloud.
+            (
+                "connection/mcp.old/server".to_string(),
+                server(false, "https://mcp.old.dev/mcp"),
+            ),
+            // Allowed, but on a private address.
+            (
+                "connection/mcp.dev/server".to_string(),
+                server(true, "http://10.0.0.5/mcp"),
+            ),
+            (
+                "connection/mcp/elsewhere".to_string(),
+                json!([{ "id": "notion", "name": "Notion", "why": "not_in_cloud" },
+                       { "id": "linear", "name": "Linear", "why": "not_in_cloud" }])
+                .to_string(),
+            ),
+        ];
+        let s = setup(&store, &secrets, Path::new("/data/work"));
+        assert_eq!(s.config.mcp_servers.keys().collect::<Vec<_>>(), ["linear"]);
+        let l = &s.config.mcp_servers["linear"];
+        assert!(l.tools.is_empty(), "the chat column stays on the computer");
+        assert_eq!(l.cloud_tools["create_issue"], ToolPolicy::Allow);
+        assert_eq!(s.mcp_keys["linear"].headers["X-Key"], "k");
+        // What's here isn't also a stand-in.
+        assert_eq!(
+            s.elsewhere
+                .iter()
+                .map(|e| (e.id.as_str(), e.why))
+                .collect::<Vec<_>>(),
+            [("notion", GapKind::NotInCloud)]
+        );
+        // Sign-ins are seeded apart, so the runner writing one back isn't a
+        // change of setup.
+        assert_eq!(sign_ins(&secrets)["linear"], "{\"signed\":1}");
+        let mut later = secrets.clone();
+        later[1].1 = "{\"signed\":2}".into();
+        assert_eq!(setup(&store, &later, Path::new("/data/work")), s);
+        assert!(!s.config.connectors.contains_key("mcp.linear"));
     }
 
     #[test]

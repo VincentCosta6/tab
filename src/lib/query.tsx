@@ -70,6 +70,8 @@ export const keys = {
   mcpCatalog: ["mcp-catalog"] as const,
   mcpTools: (id: string) => ["mcp-tools", id] as const,
   mcpImport: ["mcp-import"] as const,
+  mcpCloud: ["mcp-cloud"] as const,
+  cloudJobGaps: ["cloud-job-gaps"] as const,
   item: (id: string) => ["item", id] as const,
   preview: (id: string) => ["preview", id] as const,
   context: (id: string) => ["context", id] as const,

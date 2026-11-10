@@ -262,15 +262,18 @@ async fn server(hub: &Arc<AgentHub>, session: Option<&Session>) -> anyhow::Resul
                         servers.insert(name, json!({ "enabled": false }));
                     }
                 }
-                servers.insert(
-                    "tab".into(),
-                    json!({
-                        "type": "remote",
-                        "url": mcp.url,
-                        "enabled": true,
-                        "headers": headers
-                    }),
-                );
+                // A cloud runner fronts only the connections allowed there.
+                if !hub.remote_mcp().in_cloud() {
+                    servers.insert(
+                        "tab".into(),
+                        json!({
+                            "type": "remote",
+                            "url": mcp.url,
+                            "enabled": true,
+                            "headers": headers
+                        }),
+                    );
+                }
                 // Connected remote servers, through tab, for the chat's own
                 // server only (not the one for suggestions).
                 if session.is_some() {

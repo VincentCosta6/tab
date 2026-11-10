@@ -174,17 +174,22 @@ pub(super) async fn run_turn(
         cmd.arg("--add-dir").arg(&attachments);
     }
     let remote = hub.remote_servers(policy.trust);
-    if let Some(mcp) = hub.mcp() {
+    // A cloud runner fronts only the connections the person allowed there:
+    // no tab tools, and no approvals (nobody is at its keyboard).
+    let own = !hub.remote_mcp().in_cloud();
+    if let Some(mcp) = hub.mcp().filter(|_| own || !remote.is_empty()) {
         let mcp_file = dir.join("mcp.json");
         let headers = json!({
             "Authorization": format!("Bearer {}", crate::mcp::chat_token(&mcp.token, &session.id)),
             "X-Tab-Session": session.id,
         });
         let mut servers = serde_json::Map::new();
-        servers.insert(
-            "tab".into(),
-            json!({ "type": "http", "url": mcp.url, "headers": headers }),
-        );
+        if own {
+            servers.insert(
+                "tab".into(),
+                json!({ "type": "http", "url": mcp.url, "headers": headers }),
+            );
+        }
         // Connected remote servers, through tab, which signs them in.
         for (name, url) in &remote {
             servers.insert(
@@ -197,8 +202,13 @@ pub(super) async fn run_turn(
         cmd.arg("--mcp-config").arg(&mcp_file);
         // Approvals come to tab; tab's own tools need none, and tab asks
         // about remote tools itself, by the person's choice for each.
-        cmd.args(["--permission-prompt-tool", "mcp__tab__approve"]);
-        cmd.arg("--allowedTools").arg("mcp__tab");
+        if own {
+            cmd.args(["--permission-prompt-tool", "mcp__tab__approve"]);
+        }
+        cmd.arg("--allowedTools");
+        if own {
+            cmd.arg("mcp__tab");
+        }
         for (name, _) in &remote {
             cmd.arg(format!("mcp__{name}"));
         }

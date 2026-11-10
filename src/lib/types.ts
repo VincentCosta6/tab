@@ -244,6 +244,8 @@ export interface Job {
   id: string; run_id: string; step_id: string; workflow_id: string;
   spec: { prompt: string; repo: string; harness: string; model: string; placement: Placement };
   state: JobState; attempts: number; max_attempts: number; created_at: string; deadline: string;
+  /** What it needed in tab cloud and didn't have. */
+  missing?: CloudGap[];
 }
 
 export interface Activity { id: number; item_id: string; at: string; kind: string; title: string; by: string | null; detail: Record<string, unknown>; via: string | null }
@@ -551,6 +553,33 @@ export interface McpServerConfig {
   queue?: boolean;
   /** What the queue watches, for recipes that ask (Notion: a search). */
   queue_query?: string;
+  /** The person allowed it in tab cloud jobs ("Allow in cloud"). */
+  cloud_jobs?: boolean;
+  /** The person's choice per tool in cloud jobs: allow or off (nobody can answer an ask there). */
+  cloud_tools?: Record<string, ToolPolicy>;
+}
+
+/** Where a connection stands for tab cloud jobs. Mirrors src-tauri's McpCloudState. */
+export interface McpCloudState {
+  id: string;
+  allowed: boolean;
+  /** off · ready · sign_in (needs its tab cloud sign-in) · cant_run (only works on a computer) · no_hub · unknown */
+  state: "off" | "ready" | "sign_in" | "cant_run" | "no_hub" | "unknown";
+  why: string | null;
+}
+
+/** Something a tab cloud job needed and didn't have. Mirrors tab_domain::runner::CloudGap. */
+export interface CloudGap {
+  connection: string;
+  name: string;
+  tool?: string | null;
+  why: "not_in_cloud" | "only_on_computer" | "tool_off" | "sign_in";
+}
+
+/** A cloud job that needed something. Mirrors src-tauri's JobGaps. */
+export interface JobGaps {
+  job_id: string; run_id: string; workflow_id: string; workflow_name: string; step_id: string;
+  item_id: string | null; missing: CloudGap[]; failed: boolean; finished_at: string | null;
 }
 
 /** Mirrors tab_core::remote_mcp::QueueState. */
@@ -651,12 +680,17 @@ export interface McpTool {
   policy: ToolPolicy;
   /** The person picked `policy` (rather than the default). */
   chosen: boolean;
+  /** The same in tab cloud jobs: reads allowed, writes off by default. */
+  cloud_policy: ToolPolicy;
+  cloud_chosen: boolean;
 }
 
 export interface McpSignInEvent {
   id: string;
   ok: boolean;
   error: string | null;
+  /** It was the sign-in for tab cloud. */
+  cloud?: boolean;
 }
 
 export type MailProvider = "google" | "microsoft";

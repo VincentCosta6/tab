@@ -5198,6 +5198,7 @@ name = "tab-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "serde_json",
  "tab-core",
@@ -5206,6 +5207,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
