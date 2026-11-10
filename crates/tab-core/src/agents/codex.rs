@@ -44,6 +44,9 @@ pub(super) struct Options<'a> {
     pub mcp: Option<(&'a str, &'a str)>,
     /// Remote MCP servers through tab, as `(name, url)`; same token.
     pub remote: &'a [(String, String)],
+    /// tab's own server goes in too (not on a cloud runner, which fronts
+    /// only the connections the person allowed there).
+    pub own: bool,
     pub resume: Option<&'a str>,
 }
 
@@ -72,12 +75,14 @@ pub(super) fn args(o: &Options) -> Vec<String> {
         config.push(format!("developer_instructions={}", toml_str(o.system)));
     }
     if let Some((url, session)) = o.mcp {
-        config.push(format!("mcp_servers.tab.url={}", toml_str(url)));
-        config.push("mcp_servers.tab.bearer_token_env_var=\"TAB_MCP_TOKEN\"".into());
-        config.push(format!(
-            "mcp_servers.tab.http_headers={{ \"X-Tab-Session\" = {} }}",
-            toml_str(session)
-        ));
+        if o.own {
+            config.push(format!("mcp_servers.tab.url={}", toml_str(url)));
+            config.push("mcp_servers.tab.bearer_token_env_var=\"TAB_MCP_TOKEN\"".into());
+            config.push(format!(
+                "mcp_servers.tab.http_headers={{ \"X-Tab-Session\" = {} }}",
+                toml_str(session)
+            ));
+        }
         for (name, url) in o.remote {
             config.push(format!("mcp_servers.{name}.url={}", toml_str(url)));
             config.push(format!(
@@ -136,6 +141,7 @@ pub(super) async fn run_turn(
         system,
         mcp: mcp.as_ref().map(|m| (m.url.as_str(), session.id.as_str())),
         remote: &remote,
+        own: !hub.remote_mcp().in_cloud(),
         resume: session.agent_session_id.as_deref(),
     });
     let mut events = Parser::new(hub.clone(), session.id.clone(), model);
@@ -453,6 +459,7 @@ mod tests {
             system: "Be brief.",
             mcp: None,
             remote: &[],
+            own: true,
             resume: None,
         }
     }

@@ -189,6 +189,9 @@ fn authed_chat(s: &McpServer, headers: &HeaderMap, session: &str) -> bool {
 /// `tab __tab_cli`: a chat's `gh` or `git` command, run by tab with the
 /// connection's token (see [`crate::sandbox::broker`]).
 async fn handle_cli(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: String) -> Response {
+    if s.hub.remote_mcp().in_cloud() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let id = headers
         .get("x-tab-session")
         .and_then(|v| v.to_str().ok())
@@ -243,14 +246,21 @@ async fn handle_remote(
     let Some(session) = s.store.session_get(&id).ok().flatten() else {
         return (StatusCode::FORBIDDEN, "only tab's chats can use this").into_response();
     };
-    if s.hub.policy(&session).trust != crate::sandbox::Trust::Person {
+    let remote = s.hub.remote_mcp().clone();
+    // On a computer, only chats the person drives. A cloud runner only runs
+    // jobs, and gets only what the person allowed in the cloud column.
+    if !remote.in_cloud() && s.hub.policy(&session).trust != crate::sandbox::Trust::Person {
         return (
             StatusCode::FORBIDDEN,
             "connected MCP servers are only for chats you drive",
         )
             .into_response();
     }
-    let remote = s.hub.remote_mcp().clone();
+    if remote.in_cloud()
+        && let Some(e) = remote.stand_in(&server)
+    {
+        return handle_elsewhere(&remote, &session.id, &e, &method, &body);
+    }
     if !remote.usable().contains(&server) {
         return (StatusCode::NOT_FOUND, "that MCP server isn't connected").into_response();
     }
@@ -311,7 +321,19 @@ async fn handle_remote(
     {
         Ok(r) => r,
         Err(e) => {
-            // A sign-in that stopped working shows in Connections.
+            // A sign-in that stopped working shows in Connections, and in
+            // the cloud, on the job.
+            if remote.in_cloud() && remote.get(&server).is_some_and(|c| c.sign_in) {
+                remote.note_gap(
+                    &session.id,
+                    tab_domain::runner::CloudGap {
+                        connection: server.clone(),
+                        name: remote.get(&server).map(|c| c.name).unwrap_or_default(),
+                        tool: None,
+                        why: tab_domain::runner::GapKind::SignIn,
+                    },
+                );
+            }
             let _ = s.events.send(EngineEvent::ConfigChanged);
             return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
         }
@@ -334,10 +356,7 @@ async fn handle_remote(
             }
             axum::body::Body::from(crate::remote_mcp::rewrite(&ct, &text, |v| {
                 if let Some(t) = v["result"]["tools"].as_array_mut() {
-                    t.retain(|t| {
-                        remote.policy(&server, t["name"].as_str().unwrap_or_default())
-                            != crate::remote_mcp::ToolPolicy::Off
-                    });
+                    t.retain(|t| !remote.hidden(&server, t["name"].as_str().unwrap_or_default()));
                 }
             }))
         }
@@ -378,10 +397,7 @@ async fn handle_local(
                     && let Some(t) = r["result"]["tools"].as_array_mut()
                 {
                     remote.saw_tools(server, t, m["params"]["cursor"].is_null());
-                    t.retain(|t| {
-                        remote.policy(server, t["name"].as_str().unwrap_or_default())
-                            != crate::remote_mcp::ToolPolicy::Off
-                    });
+                    t.retain(|t| !remote.hidden(server, t["name"].as_str().unwrap_or_default()));
                 }
                 out.push(r);
             }
@@ -394,11 +410,112 @@ async fn handle_local(
             }
         }
     }
+    replies(batch, out)
+}
+
+fn replies(batch: bool, mut out: Vec<Value>) -> Response {
     match (batch, out.len()) {
         (_, 0) => StatusCode::ACCEPTED.into_response(),
         (false, _) => json_response(out.remove(0)),
         (true, _) => json_response(Value::Array(out)),
     }
+}
+
+/// The one tool a cloud job sees for a connection the person has on a
+/// computer but not in tab cloud.
+pub const REQUEST_ACCESS: &str = "request_access";
+
+/// On a cloud runner, a connection the person has on a computer but not
+/// here: tab answers for it with one tool, so a job that needs it can say
+/// so, and the person gets a one-click fix ("Allow in cloud").
+fn handle_elsewhere(
+    remote: &crate::remote_mcp::RemoteMcp,
+    session: &str,
+    e: &crate::remote_mcp::Elsewhere,
+    method: &axum::http::Method,
+    body: &[u8],
+) -> Response {
+    use tab_domain::runner::{CloudGap, GapKind};
+    match *method {
+        axum::http::Method::POST => {}
+        axum::http::Method::DELETE => return StatusCode::OK.into_response(),
+        _ => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
+    }
+    let Ok(req) = serde_json::from_slice::<Value>(body) else {
+        return json_response(rpc_error(Value::Null, -32700, "parse error"));
+    };
+    let (batch, msgs) = match req {
+        Value::Array(a) => (true, a),
+        v => (false, vec![v]),
+    };
+    let why = match e.why {
+        GapKind::OnlyOnComputer => format!(
+            "{} only works on the person's computer, so tab cloud jobs can't use it.",
+            e.name
+        ),
+        GapKind::SignIn => format!(
+            "{} is allowed in tab cloud jobs, but its sign-in for tab cloud needs redoing.",
+            e.name
+        ),
+        _ => format!(
+            "{} is connected on the person's computer but isn't allowed in tab cloud jobs yet.",
+            e.name
+        ),
+    };
+    let mut out = Vec::new();
+    for m in &msgs {
+        let id = m.get("id").filter(|v| !v.is_null()).cloned();
+        let Some(id) = id else {
+            continue; // a notification
+        };
+        let result = match m["method"].as_str().unwrap_or_default() {
+            "initialize" => json!({
+                "protocolVersion": m["params"]["protocolVersion"]
+                    .as_str()
+                    .unwrap_or(crate::remote_mcp::PROTOCOL_VERSION),
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": e.id, "version": "tab" },
+            }),
+            "ping" => json!({}),
+            "tools/list" => json!({ "tools": [{
+                "name": REQUEST_ACCESS,
+                "description": format!(
+                    "{why} Its tools aren't here. Call this if the task needs {}: tab will ask the person to allow it. Then finish what you can without it.",
+                    e.name
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "need": { "type": "string", "description": "What you needed it for, in a few words." } },
+                },
+                "annotations": { "readOnlyHint": true },
+            }] }),
+            "tools/call" if m["params"]["name"] == REQUEST_ACCESS => {
+                remote.note_gap(
+                    session,
+                    CloudGap {
+                        connection: e.id.clone(),
+                        name: e.name.clone(),
+                        tool: None,
+                        why: e.why,
+                    },
+                );
+                json!({ "content": [{ "type": "text", "text": format!(
+                    "Noted. tab will show the person a way to fix it ({why}) Finish what you can without {}, and end by saying what's left that needs it.",
+                    e.name
+                ) }] })
+            }
+            "tools/call" => {
+                out.push(rpc_error(id, -32602, "unknown tool"));
+                continue;
+            }
+            _ => {
+                out.push(rpc_error(id, -32601, "method not found"));
+                continue;
+            }
+        };
+        out.push(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+    }
+    replies(batch, out)
 }
 
 /// Where the browser lands after signing in to a remote MCP server.
@@ -491,6 +608,9 @@ async fn handle_git(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Response {
+    if s.hub.remote_mcp().in_cloud() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !authed_chat(&s, &headers, &session) {
         return (StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
     }
@@ -783,6 +903,10 @@ async fn fast_forward(cwd: &str, old: &str, new: &str) -> bool {
 }
 
 async fn handle(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: String) -> Response {
+    // A cloud runner fronts only the connections the person allowed there.
+    if s.hub.remote_mcp().in_cloud() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let session = headers
         .get("x-tab-session")
         .and_then(|v| v.to_str().ok())
@@ -1133,6 +1257,21 @@ impl McpServer {
             .unwrap_or_else(|| server.to_string());
         match remote.policy(server, tool) {
             ToolPolicy::Allow => None,
+            // Nobody can answer in the cloud (approvals stay on the runner).
+            ToolPolicy::Off | ToolPolicy::Ask if remote.in_cloud() => {
+                remote.note_gap(
+                    &session.id,
+                    tab_domain::runner::CloudGap {
+                        connection: server.to_string(),
+                        name: name.clone(),
+                        tool: Some(tool.to_string()),
+                        why: tab_domain::runner::GapKind::ToolOff,
+                    },
+                );
+                Some(format!(
+                    "{tool} isn't allowed in tab cloud jobs yet, so it didn't run. tab will show the person a one-click way to allow it. Don't try it another way: finish what you can, and end by saying what you'd have done with {tool}."
+                ))
+            }
             ToolPolicy::Off => Some(format!(
                 "{tool} is turned off for agents in tab (Connections → {name}). Don't try it another way; tell the person what you wanted to do."
             )),
@@ -3612,8 +3751,167 @@ rl.on('line', (l) => {
         assert_eq!(v["result"]["isError"], true);
         assert_eq!(v["result"]["content"][0]["text"], "not now");
 
-        // Signed out: chats lose it.
+        // On a cloud runner: jobs get it, with the cloud column, and a
+        // stand-in for a connection that's only on a computer.
+        use tab_domain::runner::{CloudGap, GapKind};
+        remote.set_in_cloud(true);
+        remote.set_elsewhere(vec![crate::remote_mcp::Elsewhere {
+            id: "linear".into(),
+            name: "Linear".into(),
+            why: GapKind::NotInCloud,
+        }]);
+        let job = store
+            .session_create_keyed("job:j1", AgentKind::ClaudeCode, "job", ".", Utc::now())
+            .unwrap();
+        assert_eq!(hub.policy(&job).trust, crate::sandbox::Trust::Agent);
+        assert_eq!(
+            hub.remote_servers(crate::sandbox::Trust::Agent),
+            [
+                ("things".to_string(), format!("{url}/things")),
+                ("linear".to_string(), format!("{url}/linear")),
+            ]
+        );
+        let job_token = chat_token("secret", &job.id);
+        let job_call = |server: &str, body: Value| {
+            client
+                .post(format!("{url}/{server}"))
+                .bearer_auth(&job_token)
+                .header("x-tab-session", &job.id)
+                .header("mcp-session-id", "up-1")
+                .header("accept", "application/json, text/event-stream")
+                .json(&body)
+                .send()
+        };
+        // A write that's off only by default stays listed, so a job can say
+        // it needed it; the one the person turned off is hidden.
+        let r = job_call(
+            "things",
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        )
+        .await
+        .unwrap();
+        let msgs = crate::remote_mcp::messages("text/event-stream", &r.text().await.unwrap());
+        let names: Vec<&str> = msgs[0]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["list_things", "make_thing"]);
+        // Off in the cloud: refused without asking (nobody would answer),
+        // and noted for the job.
+        let v: Value = job_call("things", tool("make_thing"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["result"]["isError"], true);
+        assert!(
+            v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("isn't allowed in tab cloud jobs"),
+            "{v}"
+        );
+        // Reads run.
+        let r = job_call("things", tool("list_things"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(r.contains("did list_things"), "{r}");
+        // The stand-in: one tool, which notes what the job needed.
+        let v: Value = job_call(
+            "linear",
+            json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/list" }),
+        )
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(v["result"]["tools"][0]["name"], REQUEST_ACCESS);
+        let v: Value = job_call(
+            "linear",
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": REQUEST_ACCESS, "arguments": { "need": "file an issue" } } }),
+        )
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert!(
+            v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Noted.")
+        );
+        assert_eq!(
+            hub.take_gaps(&job.id),
+            [
+                CloudGap {
+                    connection: "things".into(),
+                    name: "Things".into(),
+                    tool: Some("make_thing".into()),
+                    why: GapKind::ToolOff,
+                },
+                CloudGap {
+                    connection: "linear".into(),
+                    name: "Linear".into(),
+                    tool: None,
+                    why: GapKind::NotInCloud,
+                },
+            ]
+        );
+        assert!(hub.take_gaps(&job.id).is_empty(), "taken once");
+        // Allowed in the cloud column: it runs.
+        let mut allowed = remote.get("things").unwrap();
+        allowed
+            .cloud_tools
+            .insert("make_thing".into(), ToolPolicy::Allow);
+        remote.set_servers(std::collections::BTreeMap::from([(
+            "things".to_string(),
+            allowed.clone(),
+        )]));
+        let r = job_call("things", tool("make_thing"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(r.contains("did make_thing"), "{r}");
+        // A refresh here goes back to the hub (servers rotate tokens).
+        let saved = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let s2 = saved.clone();
+        remote.set_on_saved(Arc::new(move |id: &str, json: &str| {
+            s2.lock().unwrap().push((id.to_string(), json.to_string()));
+        }));
+        remote.token("things", true).await.unwrap();
+        let saved = saved.lock().unwrap().clone();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0, "things");
+        assert!(saved[0].1.contains("tok-2"));
+        // tab's own tools aren't on a cloud runner.
+        let r = client
+            .post(&url)
+            .bearer_auth("secret")
+            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        // Signed out here: a stand-in that says to sign in again.
         remote.sign_out("things");
+        assert_eq!(
+            remote.stand_in("things").map(|e| e.why),
+            Some(GapKind::SignIn)
+        );
+        remote.set_in_cloud(false);
+        assert!(remote.stand_in("things").is_none());
+
+        // Signed out: chats lose it.
         assert!(remote.usable().is_empty());
         let r = call(tool("list_things"), token).await.unwrap();
         assert_eq!(r.status(), 404);

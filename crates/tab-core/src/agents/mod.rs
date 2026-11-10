@@ -551,25 +551,43 @@ impl AgentHub {
         self.mcp.read().unwrap().clone()
     }
 
+    /// Whether chats' `gh` and `git` go through tab's server. Not on a cloud
+    /// runner: it gives agents no git host token at all, and pushes jobs'
+    /// branches itself.
+    fn brokers(&self) -> bool {
+        self.mcp().is_some() && !self.remote.in_cloud()
+    }
+
     /// The remote MCP servers the person connected.
     pub fn remote_mcp(&self) -> &Arc<crate::remote_mcp::RemoteMcp> {
         &self.remote
     }
 
+    /// What a job's chat needed in tab cloud and didn't have.
+    pub fn take_gaps(&self, session: &str) -> Vec<tab_domain::runner::CloudGap> {
+        self.remote.take_gaps(session)
+    }
+
     /// Remote MCP servers a chat gets, as `(name, url)` on tab's MCP
-    /// server, which signs each request in. Only chats the person drives:
-    /// an agent reading someone else's code or mail could be talked into
-    /// acting as them.
+    /// server, which signs each request in. On a computer, only chats the
+    /// person drives: an agent reading someone else's code or mail could be
+    /// talked into acting as them. On a cloud runner, jobs get what the
+    /// person allowed in tab cloud (writes only when they said so), and a
+    /// stand-in for each connection that isn't there, so a job can say it
+    /// needed one.
     pub(crate) fn remote_servers(&self, trust: crate::sandbox::Trust) -> Vec<(String, String)> {
         let Some(mcp) = self.mcp() else {
             return Vec::new();
         };
-        if trust != crate::sandbox::Trust::Person {
+        let cloud = self.remote.in_cloud();
+        if trust != crate::sandbox::Trust::Person && !cloud {
             return Vec::new();
         }
-        self.remote
-            .usable()
-            .into_iter()
+        let mut ids = self.remote.usable();
+        if cloud {
+            ids.extend(self.remote.stand_in_ids());
+        }
+        ids.into_iter()
             .map(|id| {
                 let url = format!("{}/{id}", mcp.url.trim_end_matches('/'));
                 (id, url)
@@ -698,11 +716,7 @@ impl AgentHub {
             .push(crate::sandbox::real(&self.sessions_dir().join(&session.id)));
         // gh and git's network commands go through tab, which needs its
         // server to be up.
-        if self.mcp().is_some() {
-            sb.brokered(p)
-        } else {
-            p
-        }
+        if self.brokers() { sb.brokered(p) } else { p }
     }
 
     /// Where the chat's project's repos are checked out, with each one's
@@ -744,7 +758,7 @@ impl AgentHub {
     /// the sandbox is on. Returns whether it did.
     pub(crate) fn add_shims(&self, session: &Session, cmd: &mut tokio::process::Command) -> bool {
         let sb = crate::sandbox::current();
-        let (Some(mcp), true) = (self.mcp(), sb.config().enabled) else {
+        let (Some(mcp), true) = (self.mcp(), sb.config().enabled && self.brokers()) else {
             return false;
         };
         let Ok(exe) = std::env::current_exe() else {
@@ -1577,7 +1591,7 @@ impl AgentHub {
                 "\ntab's own files and stored credentials are off limits to your file tools. If an edit is refused \
                  for that reason, tell the person what you needed instead of working around it.\n"
             });
-            if sb.config().enabled && self.mcp().is_some() {
+            if sb.config().enabled && self.brokers() {
                 out.push_str(
                     "Use `gh` and `git` as usual: tab runs `gh` for you, and git reaches GitHub through tab, \
                      both signed in with the person's GitHub connection. There's no GitHub token in your \

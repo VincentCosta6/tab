@@ -194,6 +194,51 @@ pub struct Job {
     pub created_at: DateTime<Utc>,
     /// After this it fails instead of waiting longer.
     pub deadline: DateTime<Utc>,
+    /// What a cloud runner's agent needed and didn't have: a connection
+    /// that isn't allowed in tab cloud, a tool that's off there, a sign-in
+    /// to redo. The person's computers show these with one-click fixes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<CloudGap>,
+}
+
+/// Something a job in tab cloud needed and didn't have.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudGap {
+    /// The connection's id (`linear`).
+    pub connection: String,
+    /// Its name, as the person sees it (`Linear`).
+    #[serde(default)]
+    pub name: String,
+    /// The tool it tried, where it was one tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    pub why: GapKind,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GapKind {
+    /// Connected on a computer, not allowed in tab cloud jobs.
+    NotInCloud,
+    /// Connected on a computer, and it can only run there (a local
+    /// program, a private address).
+    OnlyOnComputer,
+    /// Allowed in cloud jobs, but this tool isn't.
+    ToolOff,
+    /// Its cloud sign-in stopped working.
+    SignIn,
+}
+
+impl CloudGap {
+    /// Adds `gap` to `all` unless it's there already.
+    pub fn add(all: &mut Vec<CloudGap>, gap: CloudGap) {
+        if !all
+            .iter()
+            .any(|g| g.connection == gap.connection && g.tool == gap.tool && g.why == gap.why)
+        {
+            all.push(gap);
+        }
+    }
 }
 
 /// Why a runner may not take a job, for the job's status line.
@@ -344,6 +389,7 @@ mod tests {
             max_attempts: 2,
             created_at: t(0),
             deadline: t(60),
+            missing: Vec::new(),
         }
     }
 

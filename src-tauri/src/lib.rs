@@ -1248,7 +1248,9 @@ async fn hub_move_to_cloud(
     let _ = state.events.send(EngineEvent::ConfigChanged);
     // The cloud runner gets the agent setup (and any connections already
     // set to run there) now, not at the next save.
-    if let Err(e) = cloud_runner::sync_connections(&account, &state.store, &next).await {
+    if let Err(e) =
+        cloud_runner::sync_connections(&account, &state.store, state.hub.remote_mcp(), &next).await
+    {
         tracing::warn!(error = %e.message(), "couldn't send the cloud runner its setup");
     }
     Ok(outcome)
@@ -1268,7 +1270,9 @@ async fn hub_move_to_local(
         .clone()
         .ok_or_else(|| err("this computer's hub isn't running"))?;
     let cfg = state.config.lock().await.clone();
-    if let Err(e) = cloud_runner::forget_cloud(&account, &state.store, &cfg).await {
+    if let Err(e) =
+        cloud_runner::forget_cloud(&account, &state.store, state.hub.remote_mcp(), &cfg).await
+    {
         // Moving back still works offline; the runner's secrets then stay
         // until removed in Settings → Hub.
         tracing::warn!(error = %e.message(), "couldn't remove the cloud runner's secrets");
@@ -2527,7 +2531,9 @@ async fn save_config(
     drop(current);
     let saved = state.apply(next).await.map_err(err)?;
     // Connections in tab cloud get their changed settings there too.
-    if let Err(e) = cloud_runner::sync_connections(&account, &state.store, &saved).await {
+    if let Err(e) =
+        cloud_runner::sync_connections(&account, &state.store, state.hub.remote_mcp(), &saved).await
+    {
         tracing::warn!(error = ?e.message(), "couldn't update connections in tab cloud");
     }
     Ok(masked(&saved))
@@ -3179,6 +3185,11 @@ pub fn run() {
             remote_mcp::mcp_set_queue,
             remote_mcp::mcp_tools,
             remote_mcp::mcp_set_tool,
+            remote_mcp::mcp_cloud_states,
+            remote_mcp::mcp_set_cloud,
+            remote_mcp::mcp_cloud_sign_in,
+            remote_mcp::mcp_set_cloud_tool,
+            remote_mcp::cloud_job_gaps,
             remote_mcp::mcp_import_scan,
             remote_mcp::mcp_import,
             gh_install,

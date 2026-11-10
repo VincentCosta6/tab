@@ -9,6 +9,8 @@ use tab_core::remote_mcp::{
 };
 use tauri::{Emitter, State};
 
+use crate::account::AccountState;
+use crate::cloud_runner;
 use crate::{AppState, CmdResult, err};
 
 /// Services tab knows the MCP server of.
@@ -351,13 +353,187 @@ pub(crate) async fn set_tool(
     Ok(())
 }
 
-/// Forwards finished sign-ins to the UI as `tab://mcp-sign-in`.
+/// Sends the hub what changed for tab cloud jobs. The error is for the UI.
+async fn sync_cloud(state: &AppState, account: &AccountState) -> CmdResult<()> {
+    let cfg = state.config.lock().await.clone();
+    cloud_runner::sync_connections(account, &state.store, state.hub.remote_mcp(), &cfg)
+        .await
+        .map_err(|e| e.message().to_string())
+}
+
+/// Where each connection stands for tab cloud jobs.
+#[tauri::command]
+pub async fn mcp_cloud_states(
+    state: State<'_, AppState>,
+    account: State<'_, AccountState>,
+) -> CmdResult<Vec<cloud_runner::McpCloudState>> {
+    let cfg = state.config.lock().await.clone();
+    Ok(cloud_runner::mcp_cloud_states(&account, state.hub.remote_mcp(), &cfg).await)
+}
+
+/// "Allow in cloud" (or not) for one connection. Allowing one that signs
+/// in returns the page for its tab cloud sign-in, when the hub has none.
+#[tauri::command]
+pub async fn mcp_set_cloud(
+    state: State<'_, AppState>,
+    account: State<'_, AccountState>,
+    id: String,
+    on: bool,
+) -> CmdResult<Option<String>> {
+    let mut next = state.config.lock().await.clone();
+    if on && next.hub.cloud_hub.is_none() {
+        return Err("Move your hub to tab cloud first (Settings → Hub), then connections can be used in cloud jobs.".into());
+    }
+    let remote = state.hub.remote_mcp().clone();
+    let fit = remote
+        .infos()
+        .into_iter()
+        .find(|i| i.id == id)
+        .map(|i| i.cloud)
+        .ok_or("no such connection")?;
+    if on && !fit.portable {
+        return Err(format!(
+            "This connection can't run in tab cloud: it {}.",
+            fit.why_not
+                .unwrap_or_else(|| "only works on this computer".into())
+        ));
+    }
+    let s = next.mcp_servers.get_mut(&id).ok_or("no such connection")?;
+    if s.cloud_jobs == on {
+        return Ok(None);
+    }
+    s.cloud_jobs = on;
+    let sign_in = on && s.sign_in;
+    state.apply(next.clone()).await.map_err(err)?;
+    if let Err(e) = sync_cloud(&state, &account).await {
+        // Put it back: the hub has to match what Connections shows.
+        if let Some(s) = next.mcp_servers.get_mut(&id) {
+            s.cloud_jobs = !on;
+        }
+        let _ = state.apply(next).await;
+        return Err(e);
+    }
+    if !sign_in {
+        return Ok(None);
+    }
+    let have =
+        cloud_runner::mcp_cloud_states(&account, &remote, &state.config.lock().await.clone())
+            .await
+            .into_iter()
+            .any(|c| c.id == id && c.state == "ready");
+    if have {
+        return Ok(None);
+    }
+    remote
+        .begin_sign_in_for(&id, true)
+        .await
+        .map(Some)
+        .map_err(err)
+}
+
+/// Starts (or redoes) a connection's sign-in for tab cloud. Returns the
+/// page to open; the hub gets it when the browser comes back.
+#[tauri::command]
+pub async fn mcp_cloud_sign_in(state: State<'_, AppState>, id: String) -> CmdResult<String> {
+    state
+        .hub
+        .remote_mcp()
+        .begin_sign_in_for(&id, true)
+        .await
+        .map_err(err)
+}
+
+/// Sets a tool to allowed or off in tab cloud jobs; `None` goes back to
+/// the default (reads allowed, writes off). There's no "ask": nobody is at
+/// a cloud job's keyboard.
+#[tauri::command]
+pub async fn mcp_set_cloud_tool(
+    state: State<'_, AppState>,
+    account: State<'_, AccountState>,
+    id: String,
+    tool: String,
+    policy: Option<ToolPolicy>,
+) -> CmdResult<()> {
+    if policy == Some(ToolPolicy::Ask) {
+        return Err("Cloud jobs can't ask: nobody is there to answer. Pick Allowed or Off.".into());
+    }
+    let mut next = state.config.lock().await.clone();
+    let s = next.mcp_servers.get_mut(&id).ok_or("no such connection")?;
+    match policy {
+        Some(p) => s.cloud_tools.insert(tool, p),
+        None => s.cloud_tools.remove(&tool),
+    };
+    state.apply(next).await.map_err(err)?;
+    sync_cloud(&state, &account).await
+}
+
+/// A finished cloud job that needed something it didn't have.
+#[derive(serde::Serialize)]
+pub struct JobGaps {
+    pub job_id: String,
+    pub run_id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub step_id: String,
+    pub item_id: Option<String>,
+    pub missing: Vec<tab_core::runner::CloudGap>,
+    pub failed: bool,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Recent cloud jobs that needed a connection or tool they didn't have,
+/// newest first, for the "missing in cloud" card.
+#[tauri::command]
+pub async fn cloud_job_gaps(state: State<'_, AppState>) -> CmdResult<Vec<JobGaps>> {
+    use tab_core::runner::JobState;
+    let mut out = Vec::new();
+    for j in state.store.jobs_recent(100).map_err(err)? {
+        if j.missing.is_empty() {
+            continue;
+        }
+        let run = state.store.workflow_run_get(&j.run_id).ok().flatten();
+        let (failed, finished_at) = match &j.state {
+            JobState::Done { finished_at, .. } => (false, Some(*finished_at)),
+            JobState::Failed { finished_at, .. } => (true, Some(*finished_at)),
+            _ => (false, None),
+        };
+        out.push(JobGaps {
+            job_id: j.id,
+            run_id: j.run_id,
+            workflow_id: j.workflow_id,
+            workflow_name: run
+                .as_ref()
+                .map(|r| r.workflow_name.clone())
+                .unwrap_or_default(),
+            step_id: j.step_id,
+            item_id: run.and_then(|r| r.item_id),
+            missing: j.missing,
+            failed,
+            finished_at,
+        });
+    }
+    Ok(out)
+}
+
+/// Forwards finished sign-ins to the UI as `tab://mcp-sign-in`. One made
+/// for tab cloud goes to the hub first.
 pub fn forward_sign_ins(app: tauri::AppHandle, remote: std::sync::Arc<remote_mcp::RemoteMcp>) {
+    use tauri::Manager;
     let mut rx = remote.subscribe();
     tauri::async_runtime::spawn(async move {
         loop {
             match rx.recv().await {
-                Ok(e) => {
+                Ok(mut e) => {
+                    if e.cloud && e.ok {
+                        let state = app.state::<AppState>();
+                        let account = app.state::<AccountState>();
+                        if let Err(why) = sync_cloud(&state, &account).await {
+                            e.ok = false;
+                            e.error = Some(format!(
+                                "Signed in, but tab cloud couldn't be reached to keep it: {why}"
+                            ));
+                        }
+                    }
                     let _ = app.emit("tab://mcp-sign-in", &e);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,

@@ -7,7 +7,7 @@ import type {
   AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
-  McpCatalogEntry, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy,
+  McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
   EmailSignInStatus, MailProvider,
 } from "./types";
 import { mockApi } from "./mock";
@@ -181,6 +181,16 @@ export const api = {
   mcpTools: (id: string, refresh: boolean) => call<McpTool[]>("mcp_tools", { id, refresh }),
   /** Allowed, ask or off for one tool; null goes back to the default. */
   mcpSetTool: (id: string, tool: string, policy: ToolPolicy | null) => call<void>("mcp_set_tool", { id, tool, policy }),
+  /** Where each connection stands for tab cloud jobs (asks the hub which cloud sign-ins it keeps). */
+  mcpCloudStates: () => call<McpCloudState[]>("mcp_cloud_states"),
+  /** "Allow in cloud" for a connection. Resolves with the tab cloud sign-in page to open, when it needs one. */
+  mcpSetCloud: (id: string, on: boolean) => call<string | null>("mcp_set_cloud", { id, on }),
+  /** Starts a connection's sign-in for tab cloud (a grant of its own). Resolves with the page to open. */
+  mcpCloudSignIn: (id: string) => call<string>("mcp_cloud_sign_in", { id }),
+  /** Allowed or off for one tool in cloud jobs; null goes back to the default. */
+  mcpSetCloudTool: (id: string, tool: string, policy: ToolPolicy | null) => call<void>("mcp_set_cloud_tool", { id, tool, policy }),
+  /** Recent cloud jobs that needed a connection or tool they didn't have. */
+  cloudJobGaps: () => call<JobGaps[]>("cloud_job_gaps"),
   /** MCP servers set up in Claude Code, with what tab already has marked. */
   mcpImportScan: () => call<McpImportCandidate[]>("mcp_import_scan"),
   /** Copies the chosen Claude Code servers (by key) into tab. */

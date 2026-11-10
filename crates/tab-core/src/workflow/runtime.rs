@@ -422,9 +422,19 @@ impl Runtime {
             JobState::Done { result, runner, .. } => {
                 let mut out = serde_json::to_value(result)?;
                 out["runner"] = runner.clone().into();
+                if !job.missing.is_empty() {
+                    out["missing"] = serde_json::to_value(&job.missing)?;
+                }
                 (StepStatus::Ok, out, None)
             }
-            JobState::Failed { error, .. } => (StepStatus::Failed, json!({}), Some(error.clone())),
+            JobState::Failed { error, .. } => {
+                let out = if job.missing.is_empty() {
+                    json!({})
+                } else {
+                    json!({ "missing": job.missing })
+                };
+                (StepStatus::Failed, out, Some(error.clone()))
+            }
             _ => return Ok(()),
         };
         if let Some(sr) = run.steps.iter_mut().rev().find(|s| s.id == job.step_id) {
@@ -860,6 +870,7 @@ impl Runtime {
                             max_attempts: DEFAULT_JOB_ATTEMPTS,
                             created_at: now,
                             deadline: now + chrono::Duration::minutes(i64::from(minutes)),
+                            missing: Vec::new(),
                         };
                         match self.host.store().job_put(&job, now) {
                             Ok(()) => {

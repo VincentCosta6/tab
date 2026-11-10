@@ -28,7 +28,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 pub use tab_domain::runner::RunnerKind as Kind;
 use tab_domain::runner::{
-    JOB_LEASE, JOB_RENEW, Job, JobResult, JobState, RunnerCaps, RunnerKind, job_lease,
+    CloudGap, JOB_LEASE, JOB_RENEW, Job, JobResult, JobState, RunnerCaps, RunnerKind, job_lease,
 };
 pub use tokio_util::sync::CancellationToken;
 
@@ -64,6 +64,10 @@ pub trait Agents: Send + Sync + 'static {
     ) -> anyhow::Result<String>;
     /// Stops a chat's agent.
     fn stop(&self, session: &str);
+    /// What a chat needed in tab cloud and didn't have (taken once).
+    fn gaps(&self, _session: &str) -> Vec<CloudGap> {
+        Vec::new()
+    }
 }
 
 impl Agents for Arc<AgentHub> {
@@ -110,6 +114,9 @@ impl Agents for Arc<AgentHub> {
     }
     fn stop(&self, session: &str) {
         AgentHub::stop(self, session)
+    }
+    fn gaps(&self, session: &str) -> Vec<CloudGap> {
+        self.take_gaps(session)
     }
 }
 
@@ -283,11 +290,26 @@ impl JobRunner {
 
     /// Writes `state` to the job if this runner still holds it.
     fn finish(&self, id: &str, me: &str, token: u64, state: JobState) -> anyhow::Result<bool> {
+        self.finish_with(id, me, token, state, Vec::new())
+    }
+
+    /// [`JobRunner::finish`], noting what the job needed and didn't have.
+    fn finish_with(
+        &self,
+        id: &str,
+        me: &str,
+        token: u64,
+        state: JobState,
+        gaps: Vec<CloudGap>,
+    ) -> anyhow::Result<bool> {
         let Some(mut job) = self.store.job_get(id)? else {
             return Ok(false);
         };
         if !job.accepts_result_from(me, token) {
             return Ok(false);
+        }
+        for g in gaps {
+            CloudGap::add(&mut job.missing, g);
         }
         job.state = state;
         self.store.job_put(&job, Utc::now())?;
@@ -384,7 +406,7 @@ impl JobRunner {
         loop {
             if Utc::now() >= job.deadline {
                 self.agents.stop(&session);
-                self.finish(
+                self.finish_with(
                     &job.id,
                     &me,
                     token,
@@ -392,6 +414,7 @@ impl JobRunner {
                         error: "The agent didn't finish before the job's deadline.".into(),
                         finished_at: Utc::now(),
                     },
+                    self.agents.gaps(&session),
                 )?;
                 break;
             }
@@ -418,7 +441,7 @@ impl JobRunner {
                             }
                         }
                     }
-                    self.finish(
+                    self.finish_with(
                         &job.id,
                         &me,
                         token,
@@ -427,6 +450,7 @@ impl JobRunner {
                             result,
                             finished_at: Utc::now(),
                         },
+                        self.agents.gaps(&session),
                     )?;
                     break;
                 }
@@ -439,7 +463,7 @@ impl JobRunner {
                         .find(|m| m.kind == "error")
                         .map(|m| m.content)
                         .unwrap_or_else(|| "The agent stopped with an error.".into());
-                    self.finish(
+                    self.finish_with(
                         &job.id,
                         &me,
                         token,
@@ -447,6 +471,7 @@ impl JobRunner {
                             error: why,
                             finished_at: Utc::now(),
                         },
+                        self.agents.gaps(&session),
                     )?;
                     break;
                 }
@@ -528,7 +553,10 @@ fn first_line(s: &str) -> String {
 /// What a cloud job's agent is told about where it works.
 const CLOUD_NOTE: &str = "\n\n---\nYou're running in tab cloud, in a sandbox without git or GitHub credentials. \
 When you're done, commit your work on a new branch (not the default branch); tab pushes that branch \
-for you. Don't try to push or open a pull request yourself.";
+for you. Don't try to push or open a pull request yourself.\n\
+Connections (Linear, Sentry, ...) the person allowed in tab cloud are your MCP tools; ones that \
+change something may be off here. If one you need is off, or a connection only offers \
+`request_access`, call that once, finish what you can, and say what's left.";
 
 /// `owner/name` from what a job names: `owner/name` or a
 /// `https://github.com/owner/name` URL. Anything else is refused, so a
@@ -766,6 +794,18 @@ mod tests {
             Ok(s.id)
         }
         fn stop(&self, _session: &str) {}
+        fn gaps(&self, _session: &str) -> Vec<CloudGap> {
+            vec![linear_gap()]
+        }
+    }
+
+    fn linear_gap() -> CloudGap {
+        CloudGap {
+            connection: "linear".into(),
+            name: "Linear".into(),
+            tool: None,
+            why: tab_domain::runner::GapKind::NotInCloud,
+        }
     }
 
     fn job(placement: Placement) -> Job {
@@ -785,6 +825,7 @@ mod tests {
             max_attempts: 2,
             created_at: now,
             deadline: now + chrono::Duration::hours(1),
+            missing: Vec::new(),
         }
     }
 
@@ -830,6 +871,8 @@ mod tests {
         );
         assert_eq!(j.attempts, 1);
         assert_eq!(*agents.1.lock().unwrap(), ["Fix the flaky test"]);
+        // What the chat needed and didn't have is on the job.
+        assert_eq!(j.missing, [linear_gap()]);
     }
 
     #[tokio::test]

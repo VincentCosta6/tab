@@ -19,6 +19,7 @@ import harnessData from "../../../crates/tab-core/src/agents/harnesses.json";
 
 /** Every harness a runner may have, by id and name (what an agent step can ask for). */
 const harnesses = (harnessData as { id: string; name: string }[]).map(({ id, name }) => ({ id, name }));
+import { CloudGaps } from "../connections/CloudGaps";
 import { AgentStatus, Composer, Transcript, openItem } from "../work/Chat";
 import "./workflows.css";
 
@@ -1116,6 +1117,7 @@ function RunsPanel({ workflow }: { workflow: Workflow }) {
 function RunDetail({ run: r }: { run: WorkflowRun }) {
   return (
             <div className="wf-run-body">
+              <CloudGaps runId={r.id} />
               {r.error && <IssueLine issue={{ at: null, error: r.status === "failed", message: r.error }} />}
               {r.chain.length > 0 && <p className="subtle">Started by changes from {r.chain.length} earlier workflow{r.chain.length === 1 ? "" : "s"}.</p>}
               {r.steps.map((s) => (

@@ -240,9 +240,62 @@ pub async fn runner_secrets(
     Ok(s.secrets.into_iter().map(|s| (s.name, s.value)).collect())
 }
 
+/// For the cloud runner itself: replaces secrets it keeps current, which
+/// for now is only an MCP connection's cloud sign-in after a refresh
+/// (servers rotate refresh tokens). The hub refuses any other name.
+pub async fn runner_put_secrets(
+    cfg: &CloudConfig,
+    runner_token: &str,
+    secrets: Vec<(String, String)>,
+) -> Result<Vec<String>, CloudError> {
+    let body = pb::PutSecrets {
+        secrets: secrets
+            .into_iter()
+            .map(|(name, value)| pb::Secret { name, value })
+            .collect(),
+        remove: Vec::new(),
+    };
+    let names: pb::SecretNames = send(
+        cfg,
+        &format!("Runner {runner_token}"),
+        reqwest::Method::PUT,
+        "/v1/runner/secrets",
+        Some(body.encode_to_vec()),
+    )
+    .await?;
+    Ok(names.names)
+}
+
 /// The secret name a connection's field is kept under.
 pub fn connection_secret(connection: &str, field: &str) -> String {
     format!("connection/{connection}/{field}")
+}
+
+/// What the hub keeps for an MCP connection allowed in tab cloud jobs,
+/// under `connection/mcp.<id>/…` (ids can't hold a dot, so these never
+/// meet a built-in connection's):
+pub mod mcp_secret {
+    /// The server, as [`crate::remote_mcp::RemoteMcpConfig::for_cloud`].
+    pub const SERVER: &str = "server";
+    /// Its sign-in for tab cloud (a [`crate::remote_mcp::SignIn`]), a grant
+    /// of its own that the runner refreshes and writes back.
+    pub const OAUTH: &str = "oauth";
+    /// Its header and environment values ([`crate::remote_mcp::Secrets`]).
+    pub const KEYS: &str = "keys";
+    /// The connections the person has on a computer but not in tab cloud
+    /// ([`crate::remote_mcp::Elsewhere`]), so a job can say it needed one.
+    pub const ELSEWHERE: &str = "connection/mcp/elsewhere";
+
+    pub fn name(id: &str, field: &str) -> String {
+        format!("connection/mcp.{id}/{field}")
+    }
+
+    /// `(id, field)` from a name made by [`name`].
+    pub fn parse(name: &str) -> Option<(&str, &str)> {
+        let rest = name.strip_prefix("connection/mcp.")?;
+        let (id, field) = rest.split_once('/')?;
+        (!id.is_empty() && !field.is_empty() && !field.contains('/')).then_some((id, field))
+    }
 }
 
 /// The secret holding the person's agent setup (JSON `AgentConfig`, with
@@ -333,6 +386,18 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, pb::ErrorCode::Internal);
+    }
+
+    #[test]
+    fn mcp_secrets_have_names_of_their_own() {
+        let n = mcp_secret::name("linear", mcp_secret::OAUTH);
+        assert_eq!(n, "connection/mcp.linear/oauth");
+        assert_eq!(mcp_secret::parse(&n), Some(("linear", "oauth")));
+        // The list of the rest, and built-in connections, aren't one.
+        assert_eq!(mcp_secret::parse(mcp_secret::ELSEWHERE), None);
+        assert_eq!(mcp_secret::parse("connection/github/token"), None);
+        assert_eq!(mcp_secret::parse("connection/mcp./oauth"), None);
+        assert_eq!(mcp_secret::parse("connection/mcp.x/a/b"), None);
     }
 
     #[test]
