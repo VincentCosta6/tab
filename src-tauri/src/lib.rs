@@ -1195,6 +1195,10 @@ struct McpInfo {
 #[tauri::command]
 async fn hub_status(state: State<'_, AppState>) -> CmdResult<Option<HubStatusView>> {
     let Some(hub) = state.work_hub.clone() else {
+        // Not "this computer": the work is still in tab cloud.
+        if state.config.lock().await.hub.cloud_hub.is_some() {
+            return Err("Your work is in tab cloud, but this computer's hub didn't open, so nothing syncs right now. Quit and reopen tab.".into());
+        }
         return Ok(None);
     };
     tauri::async_runtime::spawn_blocking(move || hub.status())
@@ -2776,11 +2780,72 @@ fn browser_close(app: tauri::AppHandle, id: String) -> Result<(), String> {
     }
 }
 
+/// Opens this computer's hub, trying again for a few seconds: right after
+/// an update restarts tab, the old app can still be closing `hub.db`.
+fn open_hub(path: &std::path::Path) -> anyhow::Result<Arc<LocalHub>> {
+    let mut tries = 0;
+    loop {
+        match LocalHub::open(path) {
+            Ok(h) => return Ok(h),
+            Err(e) if tries < 5 => {
+                tries += 1;
+                tracing::warn!(error = %e, tries, "hub didn't open; trying again");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// `tab.log` in the app's log folder, once setup knows where that is.
+static LOG_FILE: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> = std::sync::OnceLock::new();
+
+/// Writes log lines to `tab.log` once it's open (and nowhere before).
+struct LogFile;
+
+impl std::io::Write for LogFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match LOG_FILE.get() {
+            Some(f) => f.lock().unwrap().write(buf),
+            None => Ok(buf.len()),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match LOG_FILE.get() {
+            Some(f) => f.lock().unwrap().flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Keeps a log on disk, so what happened at a launch (say, the one after
+/// an update) can be read afterwards. The last launch's goes to
+/// `tab.old.log`.
+fn open_log_file(dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let path = dir.join("tab.log");
+    let _ = std::fs::rename(&path, dir.join("tab.old.log"));
+    match std::fs::File::create(&path) {
+        Ok(f) => {
+            let _ = LOG_FILE.set(std::sync::Mutex::new(f));
+            tracing::info!(version = env!("CARGO_PKG_VERSION"), "tab starting");
+        }
+        Err(e) => tracing::warn!(error = %e, "couldn't open the log file"),
+    }
+}
+
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,tab_core=debug".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(|| LogFile),
         )
         .init();
     // Opened from Finder, tab gets a soft limit of 256 open files, and every
@@ -2797,6 +2862,9 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_decorations(false);
+            }
+            if let Ok(dir) = app.path().app_log_dir() {
+                open_log_file(&dir);
             }
             let data_dir = app.path().app_data_dir()?;
             lsp::set_tools_dir(data_dir.join("tools"));
@@ -2874,7 +2942,9 @@ pub fn run() {
             });
             // The hub: this device's copy (tab.db) syncs through its change
             // log, and other devices connect to it on localhost.
-            let work_hub = match LocalHub::open(&data_dir.join("hub.db")) {
+            // Tried a few times: without it, work that moved to tab cloud
+            // looks like it's back on this computer until the next launch.
+            let work_hub = match open_hub(&data_dir.join("hub.db")) {
                 Ok(h) => {
                     // Other devices steer the sessions this one runs.
                     h.attach_agents(hub.clone());
@@ -2933,6 +3003,12 @@ pub fn run() {
                 (tab_core::config::HubMode::Cloud, Some(id)) => Some(id.clone()),
                 _ => None,
             };
+            tracing::info!(
+                mode = ?config.hub.mode,
+                cloud_hub = ?config.hub.cloud_hub,
+                hub_open = work_hub.is_some(),
+                "hub: where work is kept"
+            );
             if let (Some(h), Some(id)) = (&work_hub, &cloud_hub) {
                 h.expect_cloud(id);
                 let (h, store, app, id) = (h.clone(), store.clone(), app.handle().clone(), id.clone());

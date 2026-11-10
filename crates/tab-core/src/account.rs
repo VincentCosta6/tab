@@ -396,6 +396,16 @@ async fn exchange(
 /// A token this close to expiring is refreshed before use, in seconds.
 const REFRESH_AHEAD: i64 = 60;
 
+/// One refresh at a time. Each refresh token works once (Supabase rotates
+/// it, and can end the whole session when a spent one comes back), and at
+/// launch the cloud socket, the cloud runner and the UI all want a token at
+/// once, often an expired one after the app was closed for a while.
+static REFRESHING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn usable(s: &Session) -> bool {
+    s.expires_at - chrono::Utc::now().timestamp() > REFRESH_AHEAD
+}
+
 /// Trades the refresh token for a new session. Supabase rotates the refresh
 /// token, so the result must be saved.
 pub async fn refresh(cfg: &SupabaseConfig, session: &Session) -> Result<Session, SignInError> {
@@ -415,6 +425,13 @@ pub async fn refresh(cfg: &SupabaseConfig, session: &Session) -> Result<Session,
         .text()
         .await
         .map_err(|e| SignInError::Network(e.to_string()))?;
+    // Only a refused refresh token means signing in again. A busy or
+    // failing server (429, 5xx) is tried again on the next call.
+    if status.as_u16() == 429 || status.is_server_error() {
+        return Err(SignInError::Network(format!(
+            "the sign-in server said {status}"
+        )));
+    }
     if !status.is_success() {
         return Err(SignInError::Provider(
             "your sign-in has expired. Sign in again.".into(),
@@ -429,13 +446,33 @@ pub async fn access_token(
     cfg: &SupabaseConfig,
     path: &Path,
 ) -> Result<Option<String>, SignInError> {
+    match load(path) {
+        None => return Ok(None),
+        Some(s) if usable(&s) => return Ok(Some(s.access_token)),
+        Some(_) => {}
+    }
+    let _turn = REFRESHING.lock().await;
+    // Whoever refreshed while this waited saved the new session.
     let Some(session) = load(path) else {
         return Ok(None);
     };
-    if session.expires_at - chrono::Utc::now().timestamp() > REFRESH_AHEAD {
+    if usable(&session) {
         return Ok(Some(session.access_token));
     }
-    let fresh = refresh(cfg, &session).await?;
+    let fresh = match refresh(cfg, &session).await {
+        Ok(fresh) => fresh,
+        Err(e) => match load(path) {
+            // Another tab (the one an update just restarted) spent the
+            // token first and saved what it got: carry on from that.
+            Some(now) if now.refresh_token != session.refresh_token => {
+                if usable(&now) {
+                    return Ok(Some(now.access_token));
+                }
+                refresh(cfg, &now).await?
+            }
+            _ => return Err(e),
+        },
+    };
     save(path, &fresh)?;
     Ok(Some(fresh.access_token))
 }
@@ -466,7 +503,11 @@ pub fn save(path: &Path, session: &Session) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    // A temporary file of its own, so two saves at once can't write into
+    // each other's and leave a broken session behind.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}-{n}.tmp", std::process::id()));
     let bytes = serde_json::to_vec_pretty(session).map_err(std::io::Error::other)?;
     #[cfg(unix)]
     {
@@ -612,6 +653,133 @@ mod tests {
         remove(&path).unwrap();
         assert!(load(&path).is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn session(refresh: &str, expires_at: i64) -> Session {
+        Session {
+            access_token: format!("access-{refresh}"),
+            refresh_token: refresh.into(),
+            expires_at,
+            account: session_from(
+                r#"{"access_token":"a","refresh_token":"r","user":{"id":"u"}}"#,
+                0,
+            )
+            .unwrap()
+            .account,
+        }
+    }
+
+    /// A stand-in for Supabase's token endpoint: each refresh token works
+    /// once, and `on_spent` decides what a spent one gets.
+    async fn token_server(
+        on_spent: impl Fn(&str) -> u16 + Clone + Send + Sync + 'static,
+    ) -> (
+        SupabaseConfig,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use axum::{Json, Router, http::StatusCode, routing::post};
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let app = Router::new().route(
+            "/auth/v1/token",
+            post({
+                let seen = seen.clone();
+                move |Json(body): Json<serde_json::Value>| async move {
+                    let token = body["refresh_token"].as_str().unwrap().to_string();
+                    let mut seen = seen.lock().unwrap();
+                    seen.push(format!("asked {token}"));
+                    if seen.contains(&token) {
+                        let status = StatusCode::from_u16(on_spent(&token)).unwrap();
+                        return (status, r#"{"error":"invalid_grant"}"#.to_string());
+                    }
+                    seen.push(token.clone());
+                    let next = format!("{token}+");
+                    (
+                        StatusCode::OK,
+                        format!(
+                            r#"{{"access_token":"access-{next}","refresh_token":"{next}","expires_in":3600,"user":{{"id":"u"}}}}"#
+                        ),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cfg = SupabaseConfig {
+            url: format!("http://{addr}"),
+            anon_key: "anon".into(),
+        };
+        (cfg, seen)
+    }
+
+    fn temp_session(s: &Session) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tab-account-{}", uuid::Uuid::new_v4()));
+        let path = session_path(&dir);
+        save(&path, s).unwrap();
+        path
+    }
+
+    /// At launch everything wants a token at once; only one refresh goes
+    /// out, so the session survives.
+    #[tokio::test]
+    async fn callers_at_once_share_one_refresh() {
+        let (cfg, seen) = token_server(|_| 400).await;
+        let path = temp_session(&session("r1", 0));
+        let calls: Vec<_> = (0..8)
+            .map(|_| {
+                let (cfg, path) = (cfg.clone(), path.clone());
+                tokio::spawn(async move { access_token(&cfg, &path).await })
+            })
+            .collect();
+        for c in calls {
+            assert_eq!(c.await.unwrap().unwrap().as_deref(), Some("access-r1+"));
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["asked r1".to_string(), "r1".to_string()]
+        );
+        assert_eq!(load(&path).unwrap().refresh_token, "r1+");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The tab an update replaced refreshed and saved just before this one
+    /// tried the same token: this one carries on with what it saved.
+    #[tokio::test]
+    async fn a_token_another_tab_spent_is_picked_up() {
+        let path = temp_session(&session("r1", 0));
+        let (cfg, seen) = token_server({
+            let path = path.clone();
+            move |_| {
+                save(
+                    &path,
+                    &session("r1+", chrono::Utc::now().timestamp() + 3600),
+                )
+                .unwrap();
+                400
+            }
+        })
+        .await;
+        seen.lock().unwrap().push("r1".into());
+        let got = access_token(&cfg, &path).await.unwrap();
+        assert_eq!(got.as_deref(), Some("access-r1+"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A busy sign-in server isn't an expired sign-in.
+    #[tokio::test]
+    async fn a_failing_server_is_not_an_expired_sign_in() {
+        let (cfg, seen) = token_server(|_| 503).await;
+        seen.lock().unwrap().push("r1".into());
+        let path = temp_session(&session("r1", 0));
+        let e = access_token(&cfg, &path).await.unwrap_err();
+        assert!(matches!(e, SignInError::Network(_)), "{e:?}");
+        // Refused outright, it is.
+        let (cfg, seen) = token_server(|_| 400).await;
+        seen.lock().unwrap().push("r1".into());
+        let e = access_token(&cfg, &path).await.unwrap_err();
+        assert!(matches!(e, SignInError::Provider(_)), "{e:?}");
+        assert_eq!(load(&path).unwrap().refresh_token, "r1");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[tokio::test]
