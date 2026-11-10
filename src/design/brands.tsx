@@ -3,7 +3,7 @@
 // Very dark marks (GitHub, OpenCode, Notion) follow the text color so they
 // stay visible in dark mode.
 
-import { siApple, siClaude, siFigma, siGithub, siGmail, siGooglecalendar, siJira, siLinear, siNotion, siOpencode, siZoom } from "simple-icons";
+import { siApple, siClaude, siFigma, siGithub, siGmail, siGooglecalendar, siJira, siLinear, siNotion, siSentry, siOpencode, siZoom } from "simple-icons";
 import type { Tone } from "../lib/types";
 import { Icon } from "./icons";
 
@@ -18,12 +18,13 @@ const simple: Record<string, SimpleIcon> = {
   opencode: siOpencode,
   linear: siLinear,
   notion: siNotion,
+  sentry: siSentry,
   figma: siFigma,
   calendar: siGooglecalendar,
   apple: siApple,
 };
 
-const dark = new Set(["github", "opencode", "notion", "apple"]);
+const dark = new Set(["github", "opencode", "notion", "apple", "sentry"]);
 
 /** Google's four-colour "G", as on its sign-in buttons (Simple Icons only has it in one colour). */
 function GoogleMark({ size }: { size: number }) {
@@ -100,7 +101,7 @@ export function Brand({ name, size = 16 }: { name: string; size?: number }) {
 /** Which product an item comes from, by its kind prefix or source. */
 export function brandFor(kind: string, source?: string): string | null {
   const app = kind.split(".")[0];
-  const byApp: Record<string, string> = { slack: "slack", github: "github", email: "gmail", meeting: "zoom", jira: "jira", tab: "tab", linear: "linear" };
+  const byApp: Record<string, string> = { slack: "slack", github: "github", email: "gmail", meeting: "zoom", jira: "jira", tab: "tab", linear: "linear", notion: "notion", sentry: "sentry" };
   return byApp[app] ?? (source && hasBrand(source) ? source : null);
 }
 

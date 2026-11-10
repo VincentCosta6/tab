@@ -12,6 +12,7 @@
 pub mod import;
 pub mod oauth;
 pub mod stdio;
+pub mod sync;
 pub mod vault;
 
 use std::collections::{BTreeMap, HashMap};
@@ -61,6 +62,13 @@ pub struct RemoteMcpConfig {
     /// (see [`import`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_from: Option<String>,
+    /// Whether work from it comes into the queue, where tab has a sync
+    /// recipe for it ([`sync`]). `None` means yes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<bool>,
+    /// What the queue watches, for recipes that ask (Notion: a search).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_query: Option<String>,
 }
 
 /// A local MCP server: the program, its arguments, and the names of its
@@ -226,11 +234,19 @@ pub struct CatalogEntry {
     pub category: &'static str,
     /// Brand-ish color for the letter mark.
     pub color: &'static str,
+    /// tab has a sync recipe for it, so work from it fills the queue.
+    pub fills_queue: bool,
+    /// The kinds of work it brings, for the queue's labels and icons.
+    pub kinds: Vec<crate::model::KindInfo>,
+    /// What the queue watches, for recipes that ask (see
+    /// [`RemoteMcpConfig::queue_query`]): the placeholder to show.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_query: Option<&'static str>,
 }
 
 /// Services whose servers let tab register itself (no app to set up).
 pub fn catalog() -> Vec<CatalogEntry> {
-    vec![
+    let mut all = vec![
         CatalogEntry {
             id: "linear",
             name: "Linear",
@@ -238,6 +254,9 @@ pub fn catalog() -> Vec<CatalogEntry> {
             description: "Agents can find, create and update issues, projects and comments.",
             category: "work",
             color: "#5e6ad2",
+            fills_queue: false,
+            kinds: Vec::new(),
+            queue_query: None,
         },
         CatalogEntry {
             id: "notion",
@@ -246,6 +265,9 @@ pub fn catalog() -> Vec<CatalogEntry> {
             description: "Agents can search, read and edit pages and databases.",
             category: "work",
             color: "#191919",
+            fills_queue: false,
+            kinds: Vec::new(),
+            queue_query: None,
         },
         CatalogEntry {
             id: "atlassian",
@@ -254,6 +276,9 @@ pub fn catalog() -> Vec<CatalogEntry> {
             description: "Agents can search, comment on and move tickets, and read pages.",
             category: "work",
             color: "#1868db",
+            fills_queue: false,
+            kinds: Vec::new(),
+            queue_query: None,
         },
         CatalogEntry {
             id: "sentry",
@@ -262,6 +287,9 @@ pub fn catalog() -> Vec<CatalogEntry> {
             description: "Agents can look up issues, stack traces and events.",
             category: "code",
             color: "#362d59",
+            fills_queue: false,
+            kinds: Vec::new(),
+            queue_query: None,
         },
         CatalogEntry {
             id: "vercel",
@@ -270,6 +298,9 @@ pub fn catalog() -> Vec<CatalogEntry> {
             description: "Agents can read deployments, build logs and project settings.",
             category: "code",
             color: "#000000",
+            fills_queue: false,
+            kinds: Vec::new(),
+            queue_query: None,
         },
         CatalogEntry {
             id: "stripe",
@@ -278,8 +309,19 @@ pub fn catalog() -> Vec<CatalogEntry> {
             description: "Agents can look up customers, payments, invoices and disputes.",
             category: "work",
             color: "#635bff",
+            fills_queue: false,
+            kinds: Vec::new(),
+            queue_query: None,
         },
-    ]
+    ];
+    for e in &mut all {
+        if let Some(r) = sync::recipe(e.id) {
+            e.fills_queue = true;
+            e.kinds = r.kinds();
+            e.queue_query = r.query_hint();
+        }
+    }
+    all
 }
 
 /// What tab keeps in the [`Vault`] for a server that wants a sign-in.
@@ -309,6 +351,21 @@ pub struct RemoteMcpInfo {
     pub cloud: CloudFit,
     /// It has header or environment values in the vault.
     pub keys: bool,
+    /// Where filling the queue from it stands. `None` when tab has no
+    /// recipe for it (agent tools only).
+    pub queue_sync: Option<QueueState>,
+}
+
+/// How filling the queue from one connection is going.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct QueueState {
+    /// The person wants its work in the queue.
+    pub on: bool,
+    pub last_sync: Option<chrono::DateTime<Utc>>,
+    /// What went wrong on the last look, if it did.
+    pub error: Option<String>,
+    /// How many open things it found last time.
+    pub found: Option<usize>,
 }
 
 /// One tool as the detail page shows it.
@@ -499,6 +556,8 @@ pub struct RemoteMcp {
     events: broadcast::Sender<SignInEvent>,
     /// Local servers tab runs.
     local: stdio::Children,
+    /// How each connection's queue sync went last ([`sync`]).
+    synced: Mutex<HashMap<String, QueueState>>,
 }
 
 impl RemoteMcp {
@@ -520,6 +579,7 @@ impl RemoteMcp {
             refreshing: Default::default(),
             events: broadcast::channel(16).0,
             local: Default::default(),
+            synced: Default::default(),
         })
     }
 
@@ -607,6 +667,53 @@ impl RemoteMcp {
                 || self.sign_in_record(id).is_some_and(|s| s.tokens.is_some()))
     }
 
+    /// Whether `id` is on and signed in where that's needed.
+    pub fn is_ready(&self, id: &str) -> bool {
+        self.get(id).is_some_and(|c| self.ready(id, &c))
+    }
+
+    /// Records how a queue sync went (see [`sync`]).
+    pub(crate) fn set_synced(&self, id: &str, f: impl FnOnce(&mut QueueState)) {
+        let mut all = self.synced.lock().unwrap();
+        f(all.entry(id.to_string()).or_default());
+    }
+
+    /// Calls one tool as tab itself (not for an agent), and returns its
+    /// result. A result the server marks as an error comes back as `Err`.
+    pub async fn call_tool(&self, id: &str, tool: &str, args: Value) -> anyhow::Result<Value> {
+        let result = self
+            .rpc(id, "tools/call", json!({ "name": tool, "arguments": args }))
+            .await?;
+        if result["isError"] == true {
+            let text = sync::text_of(&result);
+            anyhow::bail!(
+                "{tool}: {}",
+                if text.is_empty() {
+                    "the server returned an error"
+                } else {
+                    text.trim()
+                }
+            );
+        }
+        Ok(result)
+    }
+
+    /// The tools `id` has, asking it when tab hasn't looked yet.
+    pub(crate) async fn tool_names(&self, id: &str) -> anyhow::Result<Vec<String>> {
+        let names = |all: &HashMap<String, Vec<Value>>| {
+            all.get(id).map(|t| {
+                t.iter()
+                    .filter_map(|t| t["name"].as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+        };
+        if let Some(n) = names(&self.tools.lock().unwrap()).filter(|n| !n.is_empty()) {
+            return Ok(n);
+        }
+        self.list_tools(id).await?;
+        Ok(names(&self.tools.lock().unwrap()).unwrap_or_default())
+    }
+
     /// Servers agents get: on, and signed in where that's needed.
     pub fn usable(&self) -> Vec<String> {
         let servers = self.servers.read().unwrap().clone();
@@ -633,6 +740,17 @@ impl RemoteMcp {
                         .map(|r| r.signed_in_at),
                     error: self.errors.lock().unwrap().get(&id).cloned(),
                     tool_count: self.tools.lock().unwrap().get(&id).map(Vec::len),
+                    queue_sync: sync::recipe_for(&id, &config).map(|_| {
+                        let mut q = self
+                            .synced
+                            .lock()
+                            .unwrap()
+                            .get(&id)
+                            .cloned()
+                            .unwrap_or_default();
+                        q.on = config.queue != Some(false);
+                        q
+                    }),
                     id,
                     config,
                 }

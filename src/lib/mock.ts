@@ -652,12 +652,12 @@ const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
 
 // Remote MCP connections. Sign-ins finish on their own after a moment.
 const mcpCatalog: McpCatalogEntry[] = [
-  { id: "linear", name: "Linear", url: "https://mcp.linear.app/mcp", description: "Agents can find, create and update issues, projects and comments.", category: "work", color: "#5e6ad2" },
-  { id: "notion", name: "Notion", url: "https://mcp.notion.com/mcp", description: "Agents can search, read and edit pages and databases.", category: "work", color: "#191919" },
-  { id: "atlassian", name: "Jira & Confluence", url: "https://mcp.atlassian.com/v1/mcp", description: "Agents can search, comment on and move tickets, and read pages.", category: "work", color: "#1868db" },
-  { id: "sentry", name: "Sentry", url: "https://mcp.sentry.dev/mcp", description: "Agents can look up issues, stack traces and events.", category: "code", color: "#362d59" },
-  { id: "vercel", name: "Vercel", url: "https://mcp.vercel.com", description: "Agents can read deployments, build logs and project settings.", category: "code", color: "#000000" },
-  { id: "stripe", name: "Stripe", url: "https://mcp.stripe.com", description: "Agents can look up customers, payments, invoices and disputes.", category: "work", color: "#635bff" },
+  { id: "linear", name: "Linear", url: "https://mcp.linear.app/mcp", description: "Agents can find, create and update issues, projects and comments.", category: "work", color: "#5e6ad2", fills_queue: true, kinds: [{ kind: "linear.issue", label: "Linear issue", icon: "linear", tone: "accent" }] },
+  { id: "notion", name: "Notion", url: "https://mcp.notion.com/mcp", description: "Agents can search, read and edit pages and databases.", category: "work", color: "#191919", fills_queue: true, queue_query: "tasks assigned to me", kinds: [{ kind: "notion.page", label: "Notion page", icon: "notion", tone: "neutral" }, { kind: "notion.database", label: "Notion database", icon: "notion", tone: "neutral" }] },
+  { id: "atlassian", name: "Jira & Confluence", url: "https://mcp.atlassian.com/v1/mcp", description: "Agents can search, comment on and move tickets, and read pages.", category: "work", color: "#1868db", fills_queue: false, kinds: [] },
+  { id: "sentry", name: "Sentry", url: "https://mcp.sentry.dev/mcp", description: "Agents can look up issues, stack traces and events.", category: "code", color: "#362d59", fills_queue: true, kinds: [{ kind: "sentry.issue", label: "Sentry issue", icon: "alert", tone: "danger" }] },
+  { id: "vercel", name: "Vercel", url: "https://mcp.vercel.com", description: "Agents can read deployments, build logs and project settings.", category: "code", color: "#000000", fills_queue: false, kinds: [] },
+  { id: "stripe", name: "Stripe", url: "https://mcp.stripe.com", description: "Agents can look up customers, payments, invoices and disputes.", category: "work", color: "#635bff", fills_queue: false, kinds: [] },
 ];
 const mcpSignedIn = new Map<string, string>();
 const mcpSignInListeners = new Set<(e: McpSignInEvent) => void>();
@@ -679,6 +679,9 @@ function mcpServersInfo(): McpServerInfo[] {
     tool_count: !c.sign_in || mcpSignedIn.has(id) ? mockMcpTools.length : null,
     cloud: mockImport.find((m) => m.key === c.imported_from)?.cloud ?? { portable: true, why_not: null, needs_key: false },
     keys: !!c.headers?.length || !!c.command?.env?.length,
+    queue_sync: mcpCatalog.find((e) => e.id === c.catalog)?.fills_queue
+      ? { on: c.queue !== false, last_sync: c.queue !== false && mcpSignedIn.has(id) ? mcpSignedIn.get(id)! : null, error: null, found: c.queue !== false && mcpSignedIn.has(id) ? 3 : null }
+      : null,
   }));
 }
 
@@ -755,6 +758,7 @@ function mcpHandle(cmd: string, args: Record<string, any>): unknown {
       return null;
     }
     case "mcp_set_enabled": mcpSetServers({ ...servers, [args.id]: { ...servers[args.id], enabled: args.enabled } }); return null;
+    case "mcp_set_queue": mcpSetServers({ ...servers, [args.id]: { ...servers[args.id], queue: args.on ? undefined : false, queue_query: args.query?.trim() || undefined } }); return null;
     case "mcp_tools": {
       const chosen = servers[args.id]?.tools ?? {};
       return mockMcpTools.map((t) => ({ ...t, policy: chosen[t.name] ?? (t.read_only ? "allow" : "ask"), chosen: t.name in chosen }));

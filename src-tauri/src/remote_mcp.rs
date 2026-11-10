@@ -237,6 +237,25 @@ pub async fn mcp_set_enabled(
     Ok(())
 }
 
+/// Whether work from a connection fills the queue, and what it watches
+/// (for recipes that ask). Turning it off clears its items.
+#[tauri::command]
+pub async fn mcp_set_queue(
+    state: State<'_, AppState>,
+    id: String,
+    on: bool,
+    query: Option<String>,
+) -> CmdResult<()> {
+    let mut next = state.config.lock().await.clone();
+    let s = next.mcp_servers.get_mut(&id).ok_or("no such connection")?;
+    s.queue = (!on).then_some(false);
+    s.queue_query = query
+        .map(|q| q.trim().to_string())
+        .filter(|q| !q.is_empty());
+    state.apply(next).await.map_err(err)?;
+    Ok(())
+}
+
 /// The server's tools with the person's choices. `refresh` asks the
 /// server again; otherwise it's what tab saw last (asking when it has
 /// never looked).

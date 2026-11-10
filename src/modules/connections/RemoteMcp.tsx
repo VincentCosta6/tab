@@ -7,13 +7,13 @@
 
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, Section, StatusDot, cx } from "../../design/components";
+import { Badge, Button, Card, Section, StatusDot, TextInput, Toggle, cx } from "../../design/components";
 import { Brand, hasBrand } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { api, onMcpSignIn, openUrl } from "../../lib/api";
 import { timeAgo } from "../../lib/format";
 import { keys } from "../../lib/query";
-import type { McpCatalogEntry, McpProbe, McpServerInfo, McpTool, Tone, ToolPolicy } from "../../lib/types";
+import type { McpCatalogEntry, McpProbe, McpQueueState, McpServerInfo, McpTool, Tone, ToolPolicy } from "../../lib/types";
 import { WhereItRuns } from "./ClaudeImport";
 
 export function useMcpServers() {
@@ -38,7 +38,7 @@ export function Caps({ queue, tools }: { queue: boolean | "soon"; tools: boolean
   );
 }
 
-const brandFor: Record<string, string> = { linear: "linear", notion: "notion", atlassian: "jira" };
+const brandFor: Record<string, string> = { linear: "linear", notion: "notion", atlassian: "jira", sentry: "sentry" };
 /** Whose sign-in page it is, where that isn't the card's name. */
 const signInWith: Record<string, string> = { atlassian: "Atlassian" };
 
@@ -76,6 +76,7 @@ export function McpInstalledRow({ s, color, onOpen }: { s: McpServerInfo; color?
         <div className="connector-status"><StatusDot tone={st.tone} /> <span>{st.text}</span></div>
       </div>
       <div className="connector-row-kinds">
+        {s.queue_sync?.on && <Badge tone={s.queue_sync.error ? "danger" : "neutral"}>{s.queue_sync.error ? "Queue sync failed" : "Fills your queue"}</Badge>}
         <Badge>{s.tool_count != null ? `${s.tool_count} agent tools` : "Agent tools"}</Badge>
       </div>
       <Icon name="chevron-right" size={16} />
@@ -95,7 +96,7 @@ export function McpCatalogCard({ entry, onConnect }: { entry: McpCatalogEntry; o
         <Button size="sm" variant="primary" onClick={onConnect}>Connect</Button>
       </div>
       <p className="connector-desc">{entry.description}</p>
-      <Caps queue={false} tools />
+      <Caps queue={entry.fills_queue} tools />
     </Card>
   );
 }
@@ -274,6 +275,8 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
+  const { data: catalog = [] } = useMcpCatalog();
+  const catalogEntry = catalog.find((e) => e.id === s?.catalog);
 
   useEffect(() => {
     let off: (() => void) | undefined;
@@ -345,7 +348,7 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
           Disconnect
         </Button>
       </header>
-      <div style={{ marginBottom: "var(--space-4)" }}><Caps queue={false} tools /></div>
+      <div style={{ marginBottom: "var(--space-4)" }}><Caps queue={!!s.queue_sync?.on} tools /></div>
       <p className="connector-desc large">
         {s.command
           ? `Agents in your chats can use ${s.name}'s tools. tab runs it on this computer and passes each request on, so agents never start it or see its keys.`
@@ -381,6 +384,16 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
         </Card>
       </Section>
 
+      {s.queue_sync && (
+        <QueueSection
+          s={s}
+          q={s.queue_sync}
+          hint={catalogEntry?.queue_query}
+          busy={busy}
+          onChange={(on, query) => void run(() => api.mcpSetQueue(id, on, query))}
+        />
+      )}
+
       <Section
         title="Agent tools"
         description="Tools that only read run without asking. Anything that changes something asks you in the chat first, unless you allow it here. Off tools are hidden from agents."
@@ -412,5 +425,52 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
         </Card>
       </Section>
     </div>
+  );
+}
+
+/** "Fills your queue" on a connection's page: on or off, how the last look went, and what it watches. */
+function QueueSection({ s, q, hint, busy, onChange }: { s: McpServerInfo; q: McpQueueState; hint?: string; busy: boolean; onChange: (on: boolean, query: string | null) => void }) {
+  const [query, setQuery] = useState(s.queue_query ?? "");
+  useEffect(() => setQuery(s.queue_query ?? ""), [s.queue_query]);
+  const what: Record<string, string> = {
+    linear: "Issues assigned to you come into your queue. Issues that are done or cancelled in Linear are marked done here.",
+    sentry: "Unresolved issues assigned to you come into your queue, from every organization you're in. Resolved or ignored issues are marked done here.",
+    notion: "Pages matching a search come into your queue. Notion has no list of what's assigned to you, so tab runs a search you pick.",
+  };
+  const status = !q.on
+    ? "Off"
+    : q.error
+      ? q.error
+      : !s.ready
+        ? "Starts once you're signed in"
+        : q.last_sync
+          ? `Looked ${timeAgo(q.last_sync)} · ${q.found ?? 0} open`
+          : "Looking…";
+  const tone: Tone = !q.on ? "neutral" : q.error ? "danger" : q.last_sync ? "success" : "warning";
+  return (
+    <Section title="Fills your queue" description={(s.catalog && what[s.catalog]) ?? "Work from it comes into your queue."}>
+      <Card>
+        <div className="mcp-queue">
+          <div className="mcp-queue-row">
+            <Toggle checked={q.on} label="Bring its work into your queue" onChange={(on) => onChange(on, query || null)} />
+            <span>Bring its work into your queue</span>
+            <div className="connector-status"><StatusDot tone={tone} /> <span>{status}</span></div>
+          </div>
+          {hint && q.on && (
+            <form
+              className="mcp-queue-query"
+              onSubmit={(e) => {
+                e.preventDefault();
+                onChange(true, query.trim() || null);
+              }}
+            >
+              <TextInput value={query} placeholder={hint} onChange={(e) => setQuery(e.target.value)} aria-label="What to watch" />
+              <Button size="sm" type="submit" disabled={busy || query.trim() === (s.queue_query ?? "")}>Save</Button>
+            </form>
+          )}
+          <p className="subtle mcp-queue-note">tab only reads to fill your queue, and checks every few minutes. Turning this off clears its items from your queue.</p>
+        </div>
+      </Card>
+    </Section>
   );
 }
