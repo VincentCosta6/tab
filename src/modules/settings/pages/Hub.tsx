@@ -54,6 +54,24 @@ function HubsSection() {
   };
   const look = hubLook(h ?? null, [], signedIn);
 
+  // The work is in tab cloud but this computer's hub didn't open: say so,
+  // rather than offer to move it there again.
+  if (local.error) {
+    return (
+      <Section title="Where your work is kept" description="Your queue, chats, projects and workflows live in one place, called a hub.">
+        <Card>
+          <div className="hub-row">
+            <Icon name="cloud" size={20} />
+            <div className="hub-row-main">
+              <strong>Your work is kept in tab cloud.</strong> <Badge tone="warning">Not syncing</Badge>
+              <div className="subtle mono hub-error">{String(local.error)}</div>
+            </div>
+          </div>
+        </Card>
+      </Section>
+    );
+  }
+
   const headline = moved
     ? "Your work is kept in tab cloud."
     : mode === "cloud"
