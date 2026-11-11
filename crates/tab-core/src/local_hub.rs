@@ -367,9 +367,11 @@ impl LocalHub {
         if self.cloud_link().is_none() {
             return self.head();
         }
-        // Nothing is newer than this, so the reply is just the head.
+        // Nothing is newer than this, so the reply is just the head. The
+        // largest integer JavaScript holds exactly: the cloud hub's storage
+        // refuses anything bigger, and no hub gets near it.
         let Res::Changes(page) = self.up(Req::GetChanges(pb::GetChanges {
-            since: i64::MAX as u64,
+            since: (1 << 53) - 1,
             limit: 1,
         }))?
         else {
