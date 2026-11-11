@@ -1235,14 +1235,20 @@ async fn hub_move_to_cloud(
     })
     .await
     .map_err(account::CloudFailure::internal)?
-    .map_err(account::CloudFailure::internal)?;
+    .map_err(|e| {
+        tracing::error!(error = %e, "hub: couldn't move to tab cloud");
+        account::CloudFailure::internal(e)
+    })?;
     // Remembered, so the next launch syncs with the cloud too.
     let mut current = state.config.lock().await;
     let mut next = current.clone();
     next.hub.mode = tab_core::config::HubMode::Cloud;
-    next.hub.cloud_hub = Some(hub_id);
-    next.save(&state.config_path)
-        .map_err(account::CloudFailure::internal)?;
+    next.hub.cloud_hub = Some(hub_id.clone());
+    next.save(&state.config_path).map_err(|e| {
+        tracing::error!(error = %e, "hub: moved to tab cloud, but couldn't save that");
+        account::CloudFailure::internal(e)
+    })?;
+    tracing::info!(cloud_hub = %hub_id, "hub: moved to tab cloud");
     *current = next.clone();
     drop(current);
     let _ = state.events.send(EngineEvent::ConfigChanged);
