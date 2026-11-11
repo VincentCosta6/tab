@@ -720,7 +720,14 @@ impl LocalHub {
                     if m.awaiting_cloud.load(Ordering::Relaxed) {
                         return Ok(());
                     }
-                    let r = m.sync(&st);
+                    // A move whose first sync failed finishes joining
+                    // the cloud hub here.
+                    let introduced = if m.cloud_link().is_some() && !st.hub_backfilled()? {
+                        m.introduce(&st)
+                    } else {
+                        Ok(())
+                    };
+                    let r = introduced.and_then(|()| m.sync(&st));
                     if m.cloud_link().is_some() {
                         *m.cloud_error.lock().unwrap() = r.as_ref().err().map(|e| format!("{e:#}"));
                     }
@@ -838,8 +845,14 @@ impl LocalHub {
         };
         self.link_cloud(link);
         self.upload_all_soon();
-        self.introduce(store)?;
-        self.sync(store)?;
+        // Linked: the work is in tab cloud now, and the caller has to save
+        // that, or the next launch opens on this computer's hub again. A
+        // first sync that fails (offline, a slow join) is retried by the
+        // sync loop, which also finishes the introduction.
+        if let Err(e) = self.introduce(store).and_then(|()| self.sync(store)) {
+            tracing::warn!(error = %e, "hub: moved to tab cloud; the first sync failed, will retry");
+            *self.cloud_error.lock().unwrap() = Some(format!("{e:#}"));
+        }
         Ok(outcome)
     }
 
