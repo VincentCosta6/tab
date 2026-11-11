@@ -31,14 +31,31 @@ pub mod do_like {
         Ok(())
     }
 
+    /// `ctx.storage.sql` refuses integers a JavaScript number can't hold
+    /// exactly, bound or stored.
+    fn js_safe(args: &[SqlValue]) -> Result<()> {
+        const MAX: i64 = (1 << 53) - 1;
+        if args
+            .iter()
+            .any(|v| matches!(v, SqlValue::Int(n) if !(-MAX..=MAX).contains(n)))
+        {
+            return Err(StoreError::Backend(
+                "Value outside JavaScript safe integer range".into(),
+            ));
+        }
+        Ok(())
+    }
+
     impl SqliteConn for DoLike {
         fn execute(&self, sql: &str, args: &[SqlValue]) -> Result<()> {
             no_tx(sql)?;
+            js_safe(args)?;
             SqliteConn::execute(&self.0, sql, args)
         }
 
         fn query(&self, sql: &str, args: &[SqlValue]) -> Result<Vec<Vec<SqlValue>>> {
             no_tx(sql)?;
+            js_safe(args)?;
             Ok(SqliteConn::query(&self.0, sql, args)?
                 .into_iter()
                 .map(|row| {

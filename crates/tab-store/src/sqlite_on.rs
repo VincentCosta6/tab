@@ -71,6 +71,16 @@ fn db(e: impl std::fmt::Display) -> StoreError {
     StoreError::Backend(e.to_string())
 }
 
+/// The largest integer a JavaScript number holds exactly. A Durable Object
+/// refuses to bind anything bigger.
+const JS_MAX_SAFE: u64 = (1 << 53) - 1;
+
+/// `n`, capped where a Durable Object can bind it. Only for bounds (LIMITs,
+/// a `since` past every sequence number), where the cap reads the same.
+fn js_safe(n: u64) -> i64 {
+    n.min(JS_MAX_SAFE) as i64
+}
+
 /// sea-query's bound values as [`SqlValue`]s.
 fn bind(values: Values) -> Vec<SqlValue> {
     use sea_query::Value as Q;
@@ -80,7 +90,7 @@ fn bind(values: Values) -> Vec<SqlValue> {
             Q::String(Some(s)) => SqlValue::Text(s),
             Q::BigInt(Some(n)) => SqlValue::Int(n),
             // LIMITs.
-            Q::BigUnsigned(Some(n)) => SqlValue::Int(i64::try_from(n).unwrap_or(i64::MAX)),
+            Q::BigUnsigned(Some(n)) => SqlValue::Int(js_safe(n)),
             // crate::sql only binds text and integers; anything else is a bug there.
             other => panic!("tab_store::sql bound an unsupported value: {other:?}"),
         })
@@ -285,7 +295,7 @@ impl<C: SqliteConn> HubStore for SqliteOn<C> {
     fn changes_since(&self, since: Seq, limit: usize) -> Result<Vec<Applied>> {
         all(
             &self.conn,
-            &sql::changes_since(since as i64, limit as u64),
+            &sql::changes_since(js_safe(since), limit as u64),
             |r| {
                 Ok(Applied {
                     seq: r.int(0)? as Seq,
