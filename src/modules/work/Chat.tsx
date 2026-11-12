@@ -348,14 +348,23 @@ function describeTool(m: SessionMessage): string {
 }
 
 /**
+ * Where the running (or last) turn starts: just after the person's last
+ * message that started one. A message sent mid-turn (a steer) joins the
+ * turn already running, so the plan from before it still counts.
+ */
+function turnStart(messages: SessionMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user" && !messages[i].meta?.steer) return i + 1;
+  return 0;
+}
+
+/**
  * The agent's step list, from whichever todo tool it uses: TodoWrite
  * (Claude Code, and opencode's todowrite) sends the whole list each time;
  * TaskCreate/TaskUpdate (newer Claude Code) builds it up one step at a time.
  * Only shown when this turn touched it, so an old list doesn't linger.
  */
 function agentSteps(messages: SessionMessage[], results: Map<number, SessionMessage>): Todo[] {
-  let turn = 0;
-  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { turn = i + 1; break; }
+  const turn = turnStart(messages);
   for (let i = messages.length - 1; i >= turn; i--) {
     const m = messages[i];
     if (m.kind === "tool" && isStepsTool(m.meta?.tool)) {
@@ -405,8 +414,7 @@ function ProgressBar({ messages, results, running, folded, writing }: { messages
   // the last few tool calls with done/doing marks, so there's always something to follow.
   const activity: Todo[] = [];
   if (!plan.length && running) {
-    let turn = 0;
-    for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { turn = i + 1; break; }
+    const turn = turnStart(messages);
     for (const m of messages.slice(turn)) {
       if (m.kind !== "tool" || isStepTool(m.meta?.tool) || m.meta?.tool === "AskUserQuestion") continue;
       activity.push({ content: describeTool(m), status: results.has(m.id) ? "completed" : "in_progress" });
@@ -419,7 +427,7 @@ function ProgressBar({ messages, results, running, folded, writing }: { messages
   let note = "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m.role === "user") break; // only this turn's work
+    if (m.role === "user" && !m.meta?.steer) break; // only this turn's work
     if (!note && folded.has(m.id)) note = m.content.trim().split("\n")[0].replace(/[`*]/g, "");
     if (step || m.kind !== "tool") continue;
     const tool = m.meta?.tool;
