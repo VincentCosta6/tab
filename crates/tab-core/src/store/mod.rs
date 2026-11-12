@@ -35,7 +35,7 @@ use rusqlite::Connection;
 
 pub use http::{AuditEntry, AuditQuery, CachedResponse, UsageRow};
 pub use items::{Scope, Upsert};
-pub use usage::{NewUsage, PlanWindow, UsageSummary};
+pub use usage::{NewUsage, PlanWindow, TurnUsage, UsageSummary};
 pub use vault::{VAULT_TITLE, VaultAuditRow, VaultDevice, VaultGeneration};
 pub use vectors::Doc;
 

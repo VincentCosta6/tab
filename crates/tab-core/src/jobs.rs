@@ -29,9 +29,10 @@ use chrono::{DateTime, Utc};
 use tab_domain::families::model_trouble;
 pub use tab_domain::runner::RunnerKind as Kind;
 use tab_domain::runner::{
-    Candidate, CloudGap, JOB_LEASE, JOB_RENEW, Job, JobResult, JobState, RunnerCaps, RunnerKind,
-    job_lease,
+    Candidate, CloudGap, JOB_LEASE, JOB_RENEW, Job, JobResult, JobState, JobUsage, RunnerCaps,
+    RunnerKind, job_lease,
 };
+use tab_domain::workflow::Intervention;
 pub use tokio_util::sync::CancellationToken;
 
 use crate::agents::AgentHub;
@@ -39,6 +40,8 @@ use crate::engine::EngineEvent;
 use crate::leases::{self, Leases};
 use crate::model::{AgentKind, SessionStatus};
 use crate::store::Store;
+
+mod watch;
 
 /// How often the runner looks for jobs.
 const LOOK: Duration = Duration::from_secs(15);
@@ -295,10 +298,11 @@ impl JobRunner {
 
     /// Writes `state` to the job if this runner still holds it.
     fn finish(&self, id: &str, me: &str, token: u64, state: JobState) -> anyhow::Result<bool> {
-        self.finish_with(id, me, token, state, Vec::new())
+        self.finish_with(id, me, token, state, Vec::new(), Vec::new())
     }
 
-    /// [`JobRunner::finish`], noting what the job needed and didn't have.
+    /// [`JobRunner::finish`], noting what the job needed and didn't have,
+    /// and each time the person stepped in.
     fn finish_with(
         &self,
         id: &str,
@@ -306,6 +310,7 @@ impl JobRunner {
         token: u64,
         state: JobState,
         gaps: Vec<CloudGap>,
+        stepped_in: Vec<Intervention>,
     ) -> anyhow::Result<bool> {
         let Some(mut job) = self.store.job_get(id)? else {
             return Ok(false);
@@ -316,6 +321,7 @@ impl JobRunner {
         for g in gaps {
             CloudGap::add(&mut job.missing, g);
         }
+        job.interventions.extend(stepped_in);
         job.state = state;
         self.store.job_put(&job, Utc::now())?;
         Ok(true)
@@ -356,6 +362,7 @@ impl JobRunner {
                                 JobState::Failed {
                                     error: format!("{e:#}"),
                                     finished_at: Utc::now(),
+                                    usage: None,
                                 },
                             )?;
                             let _ = leases::release(&self.leases, &key).await;
@@ -374,6 +381,8 @@ impl JobRunner {
             RunnerKind::Computer => job.spec.prompt.clone(),
             RunnerKind::Cloud => format!("{}{CLOUD_NOTE}", job.spec.prompt),
         };
+        let windows = self.store.plan_windows().unwrap_or_default();
+        let began = Utc::now();
         let started = match plan.first() {
             Some(c) => self.start_on(&job, c, 0, &title, &cwd, &prompt),
             None => Err(anyhow::anyhow!(
@@ -391,6 +400,7 @@ impl JobRunner {
                     JobState::Failed {
                         error: format!("couldn't start the agent: {e:#}"),
                         finished_at: Utc::now(),
+                        usage: None,
                     },
                 )?;
                 let _ = leases::release(&self.leases, &key).await;
@@ -402,13 +412,19 @@ impl JobRunner {
         let mut earlier_gaps = Vec::new();
         let mut tried = Vec::new();
 
+        let mut watch = watch::Watch::new(&self.store, &session, windows, began);
+        // What earlier candidates' chats spent, when the family moved on.
+        let mut earlier: Vec<(JobUsage, Vec<Intervention>)> = Vec::new();
+
         // Give the turn a moment to start before reading its status.
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        let poll = Duration::from_secs(3);
+        tokio::time::sleep(watch::POLL).await;
+        let poll = watch::POLL;
         let mut since_renew = Duration::ZERO;
         loop {
             if Utc::now() >= job.deadline {
                 self.agents.stop(&session);
+                let (usage, stepped_in) =
+                    with_earlier(watch.report(&self.store, Utc::now(), true), &earlier, at);
                 self.finish_with(
                     &job.id,
                     &me,
@@ -416,21 +432,30 @@ impl JobRunner {
                     JobState::Failed {
                         error: "The agent didn't finish before the job's deadline.".into(),
                         finished_at: Utc::now(),
+                        usage: Some(usage),
                     },
                     [earlier_gaps.clone(), self.agents.gaps(&session)].concat(),
+                    stepped_in,
                 )?;
                 break;
             }
             let s = self.store.session_get(&session)?;
+            watch.saw(s.as_ref().map(|s| s.status), Utc::now());
             match s.as_ref().map(|s| s.status) {
                 Some(SessionStatus::Idle) => {
                     let mut result = self.result_of(&session)?;
-                    // What ran, which the family or the runner's default decided.
+                    // What ran, which the family or the runner's default decided,
+                    // and what it and any model tried before it spent.
+                    let (mut usage, stepped_in) =
+                        with_earlier(watch.report(&self.store, Utc::now(), false), &earlier, at);
                     let (harness, model) = self.ran_on(&session, &plan[at]);
-                    let usage = result.usage.get_or_insert_with(Default::default);
-                    usage.harness = harness;
-                    usage.model = model;
-                    usage.fallbacks = at as u32;
+                    if usage.harness.is_empty() {
+                        usage.harness = harness;
+                    }
+                    if usage.model.is_empty() {
+                        usage.model = model;
+                    }
+                    result.usage = Some(usage);
                     if self.kind == RunnerKind::Cloud && !job.spec.repo.is_empty() {
                         match push_branch(
                             Path::new(&cwd),
@@ -460,6 +485,7 @@ impl JobRunner {
                             finished_at: Utc::now(),
                         },
                         [earlier_gaps.clone(), self.agents.gaps(&session)].concat(),
+                        stepped_in,
                     )?;
                     break;
                 }
@@ -479,9 +505,17 @@ impl JobRunner {
                         earlier_gaps.extend(self.agents.gaps(&session));
                         at += 1;
                         tracing::info!(job = %job.id, next = %label(&plan[at]), "moving on to the family's next model");
+                        let spent = watch.report(&self.store, Utc::now(), false);
                         match self.start_on(&job, &plan[at], at, &title, &cwd, &prompt) {
                             Ok(s) => {
+                                earlier.push(spent);
                                 session = s;
+                                watch = watch::Watch::new(
+                                    &self.store,
+                                    &session,
+                                    self.store.plan_windows().unwrap_or_default(),
+                                    Utc::now(),
+                                );
                                 self.note_session(&job.id, &me, token, &session)?;
                                 tokio::time::sleep(poll).await;
                                 continue;
@@ -496,6 +530,8 @@ impl JobRunner {
                     } else {
                         format!("{why}\n\nTried before: {}", tried.join("; "))
                     };
+                    let (usage, stepped_in) =
+                        with_earlier(watch.report(&self.store, Utc::now(), false), &earlier, at);
                     self.finish_with(
                         &job.id,
                         &me,
@@ -503,8 +539,10 @@ impl JobRunner {
                         JobState::Failed {
                             error: why,
                             finished_at: Utc::now(),
+                            usage: Some(usage),
                         },
                         [earlier_gaps.clone(), self.agents.gaps(&session)].concat(),
+                        stepped_in,
                     )?;
                     break;
                 }
@@ -621,6 +659,27 @@ impl JobRunner {
             usage: None,
         })
     }
+}
+
+/// Adds what a family's earlier models spent, and when the person stepped
+/// in on them, to the report of the one that finished the job.
+fn with_earlier(
+    last: (JobUsage, Vec<Intervention>),
+    earlier: &[(JobUsage, Vec<Intervention>)],
+    fallbacks: usize,
+) -> (JobUsage, Vec<Intervention>) {
+    let (mut usage, mut stepped_in) = last;
+    for (u, i) in earlier {
+        usage.cost_usd += u.cost_usd;
+        usage.input_tokens += u.input_tokens;
+        usage.output_tokens += u.output_tokens;
+        usage.plan_share += u.plan_share;
+        usage.human_wait_ms += u.human_wait_ms;
+        stepped_in.extend(i.iter().cloned());
+    }
+    stepped_in.sort_by_key(|i| i.at);
+    usage.fallbacks = fallbacks as u32;
+    (usage, stepped_in)
 }
 
 /// A candidate as the person reads it in an error.
@@ -894,6 +953,19 @@ mod tests {
                 &serde_json::json!({}),
                 Utc::now(),
             )?;
+            self.0.usage_add(
+                &crate::store::NewUsage {
+                    purpose: "agent",
+                    session_id: Some(s.id.clone()),
+                    agent: "claude_code".into(),
+                    model: Some("claude-opus-5-5".into()),
+                    billing: "api",
+                    cost_usd: 0.3,
+                    input_tokens: 1200,
+                    output_tokens: 80,
+                },
+                Utc::now(),
+            )?;
             self.0
                 .session_update(&s.id, Some(SessionStatus::Idle), None, Utc::now())?;
             Ok(s.id)
@@ -931,6 +1003,8 @@ mod tests {
             created_at: now,
             deadline: now + chrono::Duration::hours(1),
             missing: Vec::new(),
+            claimed_at: None,
+            interventions: Vec::new(),
         }
     }
 
@@ -978,6 +1052,144 @@ mod tests {
         assert_eq!(*agents.1.lock().unwrap(), ["Fix the flaky test"]);
         // What the chat needed and didn't have is on the job.
         assert_eq!(j.missing, [linear_gap()]);
+        // And what it spent, which never leaves this computer otherwise.
+        let u = result.usage.clone().unwrap();
+        assert_eq!(u.billing, tab_domain::workflow::Billing::Api);
+        assert!((u.cost_usd - 0.3).abs() < 1e-9);
+        assert_eq!((u.input_tokens, u.output_tokens), (1200, 80));
+        assert_eq!(
+            (u.harness.as_str(), u.model.as_str()),
+            ("claude_code", "claude-opus-5-5")
+        );
+        assert!(j.claimed_at.is_some());
+        assert!(j.interventions.is_empty(), "{:?}", j.interventions);
+    }
+
+    /// Agents whose chat asks the person something, gets an answer, is
+    /// then told something unasked, and finishes; on a Claude plan.
+    struct Asks(Arc<Store>);
+
+    impl Agents for Asks {
+        fn harnesses(&self) -> BoxFuture<'_, Vec<AgentKind>> {
+            Box::pin(async { vec![AgentKind::ClaudeCode] })
+        }
+        fn default_folder(&self) -> String {
+            std::env::temp_dir().to_string_lossy().into_owned()
+        }
+        fn start(
+            &self,
+            key: &str,
+            kind: Option<AgentKind>,
+            _model: &str,
+            title: &str,
+            cwd: &str,
+            prompt: &str,
+        ) -> anyhow::Result<String> {
+            let store = self.0.clone();
+            let s = store.session_create_keyed(
+                key,
+                kind.unwrap_or(AgentKind::ClaudeCode),
+                title,
+                cwd,
+                Utc::now(),
+            )?;
+            store.message_add(
+                &s.id,
+                "user",
+                "text",
+                prompt,
+                &serde_json::json!({}),
+                Utc::now(),
+            )?;
+            store.session_update(&s.id, Some(SessionStatus::Working), None, Utc::now())?;
+            let id = s.id.clone();
+            // The runner looks every 3s: at 3 (working), 6 (waiting), 9
+            // (working again) and 12 (done).
+            tokio::spawn(async move {
+                let at = |secs: u64| tokio::time::sleep(Duration::from_secs(secs));
+                let say = |role: &str, text: &str| {
+                    store
+                        .message_add(&id, role, "text", text, &serde_json::json!({}), Utc::now())
+                        .unwrap();
+                };
+                let set = |st| {
+                    store
+                        .session_update(&id, Some(st), None, Utc::now())
+                        .unwrap();
+                };
+                at(4).await;
+                say("assistant", "Which test?");
+                set(SessionStatus::NeedsInput);
+                at(3).await;
+                say("user", "The clock one");
+                set(SessionStatus::Working);
+                at(3).await;
+                say("user", "Also, leave CI alone");
+                at(1).await;
+                store
+                    .usage_add(
+                        &crate::store::NewUsage {
+                            purpose: "agent",
+                            session_id: Some(id.clone()),
+                            agent: "claude_code".into(),
+                            model: Some("claude-sonnet-5".into()),
+                            billing: "subscription",
+                            cost_usd: 0.8,
+                            input_tokens: 900,
+                            output_tokens: 60,
+                        },
+                        Utc::now(),
+                    )
+                    .unwrap();
+                say("assistant", "Pinned the clock.");
+                set(SessionStatus::Idle);
+            });
+            Ok(s.id)
+        }
+        fn stop(&self, _session: &str) {}
+    }
+
+    #[tokio::test]
+    async fn a_job_notes_each_time_the_person_stepped_in_and_how_long_it_waited() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        store
+            .job_put(&job(Placement::Computers), Utc::now())
+            .unwrap();
+        let runner = JobRunner::new(
+            store.clone(),
+            Arc::new(Asks(store.clone())),
+            InMemory::new("laptop"),
+            RunnerKind::Computer,
+            "Laptop",
+        );
+        runner.take(Utc::now()).await;
+        for _ in 0..400 {
+            if store.job_get("j1").unwrap().unwrap().finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let j = store.job_get("j1").unwrap().unwrap();
+        let JobState::Done { result, .. } = &j.state else {
+            panic!("{:?}", j.state)
+        };
+        let kinds: Vec<_> = j.interventions.iter().map(|i| i.kind).collect();
+        use tab_domain::workflow::InterventionKind as K;
+        assert_eq!(kinds, [K::Question, K::Message]);
+        let u = result.usage.clone().unwrap();
+        // About one look apart: seen waiting at 6s, answered by 9s.
+        assert!(
+            (1_000..=6_000).contains(&u.human_wait_ms),
+            "{}",
+            u.human_wait_ms
+        );
+        // On the plan: tokens, not dollars.
+        assert_eq!(u.billing, tab_domain::workflow::Billing::Subscription);
+        assert_eq!(u.cost_usd, 0.0);
+        assert_eq!(u.input_tokens, 900);
+        assert_eq!(u.model, "claude-sonnet-5");
+        // No plan window was reported, so no share is claimed.
+        assert_eq!(u.plan_share, 0.0);
     }
 
     /// Agents that end each chat as scripted: an error, or done.

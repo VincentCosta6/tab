@@ -38,6 +38,7 @@ const PROVENANCE_TTL: Duration = Duration::from_secs(10 * 60);
 /// Runs at once.
 const CONCURRENT_RUNS: usize = 2;
 
+use tab_domain::workflow::run::{Intervention, InterventionKind};
 pub use tab_domain::workflow::run::{Resume, Run, RunStatus, StepRun, StepStatus};
 
 /// What the runtime needs from the engine.
@@ -70,6 +71,8 @@ struct Start {
     chain: Vec<String>,
     ctx: Value,
     dry_run: bool,
+    /// The failed run a person is running again.
+    rerun_of: Option<String>,
 }
 
 pub struct Runtime {
@@ -262,6 +265,7 @@ impl Runtime {
                     chain: chain.clone(),
                     ctx,
                     dry_run: false,
+                    rerun_of: None,
                 },
             );
         }
@@ -299,6 +303,7 @@ impl Runtime {
                     chain: chain.clone(),
                     ctx,
                     dry_run: false,
+                    rerun_of: None,
                 },
             );
         }
@@ -331,6 +336,7 @@ impl Runtime {
                     chain: Vec::new(),
                     ctx,
                     dry_run: false,
+                    rerun_of: None,
                 },
             );
         }
@@ -377,6 +383,7 @@ impl Runtime {
                         j.state = JobState::Failed {
                             error: why,
                             finished_at: now,
+                            usage: None,
                         };
                         if let Err(e) = store.job_put(&j, now) {
                             tracing::warn!(error = %e, "failing a job failed");
@@ -441,6 +448,8 @@ impl Runtime {
             sr.status = status;
             sr.output = output.clone();
             sr.error = error.clone();
+            sr.metrics = job.metrics();
+            sr.interventions.extend(job.interventions.iter().cloned());
         }
         let mut ctx = resume.ctx;
         ctx["steps"][&job.step_id] = output;
@@ -497,9 +506,47 @@ impl Runtime {
             chain: Vec::new(),
             ctx,
             dry_run,
+            rerun_of: None,
         };
         let run = self.clone().begin(&w, start).await?;
         Ok(run)
+    }
+
+    /// Runs a failed run's workflow again because a person asked, on the
+    /// same item, as the workflow is saved now. The new run notes the one
+    /// it re-runs.
+    pub async fn rerun(self: &Arc<Self>, run_id: &str) -> anyhow::Result<Run> {
+        let store = self.host.store();
+        let old = store
+            .workflow_run_get(run_id)?
+            .ok_or_else(|| anyhow::anyhow!("no run {run_id}"))?;
+        anyhow::ensure!(
+            old.status == RunStatus::Failed && !old.dry_run,
+            "only a failed run can be run again"
+        );
+        let w = store
+            .workflow_get(&old.workflow_id)?
+            .ok_or_else(|| anyhow::anyhow!("its workflow was deleted"))?;
+        let item = match &old.item_id {
+            Some(id) => store.get(id)?,
+            None => None,
+        };
+        let ctx = base_ctx(
+            &w,
+            json!({ "type": "manual", "change": item.as_ref().map(|_| "manual"), "rerun_of": old.id }),
+            item.as_ref(),
+            Value::Null,
+        );
+        let start = Start {
+            trigger: format!("by hand, again after: {}", old.trigger),
+            key: None,
+            item_id: item.map(|i| i.id),
+            chain: Vec::new(),
+            ctx,
+            dry_run: false,
+            rerun_of: Some(old.id),
+        };
+        self.clone().begin(&w, start).await
     }
 
     fn spawn(self: Arc<Self>, w: Workflow, start: Start) {
@@ -514,7 +561,7 @@ impl Runtime {
         Run {
             runner: self.host.leases().holder(),
             resume: None,
-            rerun_of: None,
+            rerun_of: s.rerun_of.clone(),
             id: uuid::Uuid::new_v4().to_string(),
             workflow_id: w.id.clone(),
             workflow_name: w.name.clone(),
@@ -896,6 +943,8 @@ impl Runtime {
                             created_at: now,
                             deadline: now + chrono::Duration::minutes(i64::from(minutes)),
                             missing: Vec::new(),
+                            claimed_at: None,
+                            interventions: Vec::new(),
                         };
                         match self.host.store().job_put(&job, now) {
                             Ok(()) => {
@@ -1042,6 +1091,13 @@ impl Runtime {
                 }
             }
             sr.ms = started.elapsed().as_millis() as u64;
+            if sr.status == StepStatus::Blocked {
+                // It waits for the person to allow it.
+                sr.interventions.push(Intervention {
+                    kind: InterventionKind::Approval,
+                    at: Utc::now(),
+                });
+            }
             if sr.status == StepStatus::Failed && !step.continue_on_error && stop.is_none() {
                 stop = Some(RunStatus::Failed);
                 run.error = sr.error.clone();
@@ -1366,6 +1422,7 @@ mod tests {
             chain: vec![],
             ctx: base_ctx(&w, json!({ "type": "schedule" }), None, Value::Null),
             dry_run: false,
+            rerun_of: None,
         };
         let run = rt.clone().begin(&w, start()).await.unwrap();
         assert_eq!(run.status, RunStatus::Stopped);
@@ -1400,6 +1457,7 @@ mod tests {
                 chain: vec![],
                 ctx: Value::Null,
                 dry_run: false,
+                rerun_of: None,
             },
             RunStatus::Running,
         );
@@ -1424,5 +1482,140 @@ mod tests {
                 .status,
             RunStatus::Running
         );
+    }
+
+    #[tokio::test]
+    async fn an_agent_step_keeps_what_its_job_took_spent_and_who_stepped_in() {
+        use tab_domain::runner::JobUsage;
+        use tab_domain::workflow::Billing;
+        let (rt, host) = runtime(Store::in_memory().unwrap(), "laptop");
+        let w = agent_workflow(&host.store);
+        let run = rt.run_now(w, None, false).await.unwrap();
+        let job = host
+            .store
+            .job_get(&run.resume.unwrap().job)
+            .unwrap()
+            .unwrap();
+        let t0 = job.created_at;
+        let mut done = job.claimed("cloud", 1, t0 + chrono::Duration::minutes(2));
+        done.interventions = vec![Intervention {
+            kind: InterventionKind::Question,
+            at: t0 + chrono::Duration::minutes(5),
+        }];
+        done.state = JobState::Done {
+            runner: "cloud".into(),
+            result: JobResult {
+                summary: "Done".into(),
+                usage: Some(JobUsage {
+                    billing: Billing::Subscription,
+                    input_tokens: 5000,
+                    output_tokens: 700,
+                    plan_share: 0.04,
+                    harness: "codex".into(),
+                    model: "gpt-6".into(),
+                    human_wait_ms: 90_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            finished_at: t0 + chrono::Duration::minutes(12),
+        };
+        host.store.job_put(&done, Utc::now()).unwrap();
+        rt.follow_jobs(Utc::now()).await;
+        let after = host.store.workflow_run_get(&run.id).unwrap().unwrap();
+        assert_eq!(after.status, RunStatus::Succeeded);
+        let m = after.steps[0].metrics.clone().unwrap();
+        assert_eq!((m.queue_ms, m.work_ms), (2 * 60_000, 10 * 60_000));
+        assert_eq!((m.human_wait_ms, m.attempts), (90_000, 1));
+        assert_eq!(m.billing, Billing::Subscription);
+        assert_eq!((m.input_tokens, m.output_tokens), (5000, 700));
+        assert_eq!((m.harness.as_str(), m.model.as_str()), ("codex", "gpt-6"));
+        assert_eq!(
+            after.steps[0].interventions,
+            [Intervention {
+                kind: InterventionKind::Question,
+                at: t0 + chrono::Duration::minutes(5),
+            }]
+        );
+        // Steps that aren't agent steps say nothing of the kind.
+        assert!(after.steps[1].metrics.is_none());
+        assert!(after.steps[1].interventions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_job_nobody_took_counts_its_whole_wait_as_queue() {
+        let (rt, host) = runtime(Store::in_memory().unwrap(), "laptop");
+        let w = agent_workflow(&host.store);
+        let run = rt.run_now(w, None, false).await.unwrap();
+        let job_id = run.resume.unwrap().job;
+        let job = host.store.job_get(&job_id).unwrap().unwrap();
+        let late = job.deadline + chrono::Duration::minutes(1);
+        rt.follow_jobs(late).await;
+        rt.follow_jobs(late).await;
+        let after = host.store.workflow_run_get(&run.id).unwrap().unwrap();
+        assert_eq!(after.status, RunStatus::Failed);
+        let m = after.steps[0].metrics.clone().unwrap();
+        assert_eq!(m.attempts, 0);
+        assert_eq!(m.work_ms, 0);
+        assert_eq!(
+            m.queue_ms,
+            (late - job.created_at).num_milliseconds() as u64
+        );
+        assert_eq!(m.harness, "codex");
+    }
+
+    #[tokio::test]
+    async fn a_step_blocked_on_the_persons_ok_records_an_approval() {
+        let (rt, _host) = runtime(Store::in_memory().unwrap(), "laptop");
+        let w = Workflow {
+            name: "Lint".into(),
+            trigger: Trigger::Manual,
+            steps: vec![step(
+                "lint",
+                StepKind::Command {
+                    program: "cargo".into(),
+                    args: vec!["clippy".into()],
+                    folder: String::new(),
+                    network: Vec::new(),
+                    env: serde_json::Map::new(),
+                    image: String::new(),
+                    timeout_secs: 0,
+                },
+            )],
+            ..Default::default()
+        };
+        let run = rt.run_now(w, None, false).await.unwrap();
+        assert_eq!(run.status, RunStatus::Blocked);
+        let kinds: Vec<_> = run.steps[0].interventions.iter().map(|i| i.kind).collect();
+        assert_eq!(kinds, [InterventionKind::Approval]);
+    }
+
+    #[tokio::test]
+    async fn a_person_can_run_a_failed_run_again_and_the_new_run_says_so() {
+        let (rt, host) = runtime(Store::in_memory().unwrap(), "laptop");
+        let mut w = agent_workflow(&host.store);
+        if let StepKind::Agent { repo, .. } = &mut w.steps[0].kind {
+            *repo = "{{item.body}}".into();
+        }
+        let w = host.store.workflow_save(&w, "user", Utc::now()).unwrap();
+        let failed = rt.run_now(w.clone(), None, false).await.unwrap();
+        assert_eq!(failed.status, RunStatus::Failed);
+        assert_eq!(failed.rerun_of, None);
+
+        let again = rt.rerun(&failed.id).await.unwrap();
+        assert_eq!(again.rerun_of.as_deref(), Some(failed.id.as_str()));
+        assert_ne!(again.id, failed.id);
+        let stored = host.store.workflow_run_get(&again.id).unwrap().unwrap();
+        assert_eq!(stored.rerun_of.as_deref(), Some(failed.id.as_str()));
+
+        // Only failed runs are run again.
+        let mut values = serde_json::Map::new();
+        values.insert("x".into(), json!(1));
+        let mut ok = w.clone();
+        ok.steps = vec![step("only", StepKind::Set { values })];
+        let ok = host.store.workflow_save(&ok, "user", Utc::now()).unwrap();
+        let fine = rt.run_now(ok, None, false).await.unwrap();
+        assert_eq!(fine.status, RunStatus::Succeeded);
+        assert!(rt.rerun(&fine.id).await.is_err());
     }
 }
