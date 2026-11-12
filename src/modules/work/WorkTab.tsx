@@ -34,6 +34,9 @@ const OPEN_FOLLOWUPS_KEY = "tab.openFollowups";
 const DEFAULT_LIST_WIDTH = 420;
 const clampWidth = (w: number) => Math.round(Math.min(Math.max(w, 300), Math.max(320, window.innerWidth - 560)));
 
+/** Queue rows drawn at a time. */
+const PAGE = 150;
+
 export function WorkTab() {
   const { apps } = useApp();
   const qc = useQueryClient();
@@ -149,6 +152,28 @@ export function WorkTab() {
     return out.filter((i) => !leaving.has(i.id));
   }, [grouped, children, unfolded, leaving]);
   useEffect(() => setHere({ itemId: selected === NEW ? null : selected }), [selected]);
+
+  // Draw the queue a page at a time: every row costs DOM, and a queue of
+  // thousands kept the webview at over a gigabyte. More rows draw as the list
+  // nears its end, and always enough to include the open item.
+  const [limit, setLimit] = useState(PAGE);
+  const tops = useMemo(() => grouped.flatMap((g) => g.items), [grouped]);
+  const drawnTops = useMemo(() => {
+    const byId = new Map(drawn.map((i) => [i.id, i]));
+    let root = byId.get(selected ?? "");
+    while (root?.parent_id && byId.has(root.parent_id)) root = byId.get(root.parent_id);
+    const at = root ? tops.indexOf(root) : -1;
+    return new Set(tops.slice(0, Math.max(limit, at + 1)).map((i) => i.id));
+  }, [tops, drawn, selected, limit]);
+  const more = tops.length - drawnTops.size;
+  const moreRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = moreRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver((es) => es.some((e) => e.isIntersecting) && setLimit((l) => l + PAGE), { root: el.parentElement, rootMargin: "600px 0px" });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [more > 0, drawnTops]);
 
   // A new filter or search keeps the open item while it's still in the list,
   // so typing doesn't rebuild the right pane; once the results leave it out,
@@ -351,12 +376,20 @@ export function WorkTab() {
               {query ? "Search covers titles, bodies, people and places." : view === "open" ? "New work from your connections lands here, ranked." : undefined}
             </EmptyState>
           )}
-          {grouped.map((g) => (
-            <div key={g.urgency ?? "all"}>
-              {g.urgency && <div className={cx("urgency-group", `urgency-${g.urgency}`)}>{urgencyHeading[g.urgency]}</div>}
-              {g.items.map((i) => row(i))}
+          {grouped.map((g) => {
+            const rows = g.items.filter((i) => drawnTops.has(i.id));
+            return rows.length > 0 && (
+              <div key={g.urgency ?? "all"}>
+                {g.urgency && <div className={cx("urgency-group", `urgency-${g.urgency}`)}>{urgencyHeading[g.urgency]}</div>}
+                {rows.map((i) => row(i))}
+              </div>
+            );
+          })}
+          {more > 0 && (
+            <div ref={moreRef} className="queue-more">
+              <Button variant="ghost" size="sm" onClick={() => setLimit((l) => l + PAGE)}>Show {Math.min(more, PAGE)} more of {more}</Button>
             </div>
-          ))}
+          )}
         </div>
       </section>
       <section className="pane work-pane">
