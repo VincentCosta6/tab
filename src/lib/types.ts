@@ -534,6 +534,13 @@ export type HubMode = "cloud" | "local";
 /** Allowed runs without asking, ask waits for the person in the chat, off hides the tool. */
 export type ToolPolicy = "allow" | "ask" | "off";
 
+/** An MCP server as the chat's agent saw it. Mirrors tab_core::agents::AgentMcpServer. */
+export interface AgentMcpServer {
+  name: string;
+  /** `connected`, `failed`, `needs-auth`, `pending`; absent from older agents. */
+  status: string | null;
+}
+
 export interface McpServerConfig {
   name: string;
   /** Empty for a local command. */

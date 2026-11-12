@@ -7,7 +7,7 @@ import type {
   AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
-  McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
+  AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
   EmailSignInStatus, MailProvider,
 } from "./types";
 import { mockApi } from "./mock";
@@ -66,6 +66,8 @@ export const api = {
   agentActivity: () => call<AgentActivity[]>("agent_activity"),
   contextStatus: (ids: string[]) => call<Record<string, ContextStatus[]>>("context_status", { ids }),
   slashCommands: () => call<string[]>("agent_slash_commands"),
+  /** The MCP servers a chat's agent reported at its last turn. */
+  agentMcpServers: (sessionId: string) => call<AgentMcpServer[]>("agent_mcp_servers", { sessionId }),
   graphView: (projectId: string | null, days: number | null, limit?: number) => call<GraphView>("graph_view", { projectId, days, limit: limit ?? null }),
   graphNode: (id: number) => call<GraphNode>("graph_node", { id }),
   graphDelete: (id: number, withExclusive: boolean) => call<number>("graph_delete", { id, withExclusive }),

@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -55,6 +55,14 @@ pub enum Decision {
 }
 
 /// Where agents reach tab's MCP server.
+/// One MCP server as the agent saw it at the start of a turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMcpServer {
+    pub name: String,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct McpEndpoint {
     pub url: String,
@@ -620,6 +628,36 @@ impl AgentHub {
         if let Ok(b) = serde_json::to_vec(names) {
             let _ = std::fs::write(self.dir.join("slash_commands.json"), b);
         }
+    }
+
+    /// The MCP servers a chat's agent reported when its last turn started,
+    /// with their status (`connected`, `failed`, `needs-auth`, `pending`),
+    /// for the composer's `/mcp` card.
+    pub fn agent_mcp(&self, session: &str) -> Vec<AgentMcpServer> {
+        std::fs::read(self.agent_mcp_path(session))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn save_agent_mcp(&self, session: &str, servers: &[AgentMcpServer]) {
+        if self.agent_mcp(session) == servers {
+            return;
+        }
+        let path = self.agent_mcp_path(session);
+        if let (Some(dir), Ok(b)) = (path.parent(), serde_json::to_vec(servers)) {
+            let _ = std::fs::create_dir_all(dir);
+            let _ = std::fs::write(path, b);
+        }
+    }
+
+    fn agent_mcp_path(&self, session: &str) -> PathBuf {
+        // Session ids are uuids; keep anything else out of the path.
+        let name: String = session
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        self.dir.join("agent_mcp").join(format!("{name}.json"))
     }
 
     /// claude.ai connectors (`claude.ai Linear`) the last chat that could

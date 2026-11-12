@@ -9,6 +9,7 @@ import type { ConnectorInfo, ConnectorStatus, RunsOn, Tone } from "../../lib/typ
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../lib/api";
 import { keys } from "../../lib/query";
+import { showTab } from "../../lib/nav";
 import { asFailure } from "../../lib/protocol/cloud";
 import { openSettings } from "../settings/SettingsTab";
 import { startSetupChat } from "../work/Chat";
@@ -51,11 +52,26 @@ const shelves: { id: string; label: string }[] = [
   { id: "built_in", label: "Built in" },
 ];
 
+let requested: string | null = null;
+
+/** Opens Connections from anywhere, at a connection (`mcp:<id>` for a remote MCP one) or the list. */
+export function openConnection(open: string | null = null) {
+  requested = open;
+  window.dispatchEvent(new CustomEvent("tab:open-connection", { detail: open }));
+  showTab("connections");
+}
+
 export function ConnectionsTab() {
   const { connectors } = useApp();
   const [view, setView] = useState<View>("installed");
   // A connector id, or `mcp:<id>` for a remote MCP connection.
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(() => requested);
+  useEffect(() => {
+    requested = null;
+    const go = (e: Event) => { setOpen((e as CustomEvent<string | null>).detail); requested = null; };
+    window.addEventListener("tab:open-connection", go);
+    return () => window.removeEventListener("tab:open-connection", go);
+  }, []);
   const installed = connectors.filter((c) => c.enabled);
   const current = connectors.find((c) => c.id === open);
   const { data: servers = [] } = useMcpServers();

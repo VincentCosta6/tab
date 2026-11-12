@@ -10,6 +10,8 @@ import { filesInText, isShowable } from "../../lib/threadFiles";
 import { useStage } from "../../lib/stage";
 import { sessionLook } from "../shell/AppHeader";
 import { AgentNotice } from "./AgentNotice";
+import { ContextMeter } from "./ContextMeter";
+import { SlashPanel, tabCommand, tabCommands, type Panel } from "./SlashPanels";
 import { Dictation } from "./Dictation";
 import { useDropTarget } from "./DropZone";
 import { api } from "../../lib/api";
@@ -150,124 +152,6 @@ export function StrictPill({ kind }: { kind?: AgentKind | null }) {
       <Icon name="plug" size={11} /> {remote ? "Not strict" : "Strict"}
     </span>
   );
-}
-
-const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
-
-/**
- * How full the agent's context window is, from the last turn's usage, with
- * a breakdown: the agent's own setup (system prompt, tools, MCP), what tab
- * adds (this item and its attached context), and the conversation so far.
- */
-function ContextMeter({ messages }: { messages: SessionMessage[] }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  const now = useNow(30_000);
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
-    window.addEventListener("mousedown", close);
-    return () => window.removeEventListener("mousedown", close);
-  }, [open]);
-
-  const turns = messages.filter((m) => m.kind === "result" && m.meta?.context?.used);
-  const lastTurn = turns[turns.length - 1];
-  const last = lastTurn?.meta.context;
-  if (!last) return null;
-  const used = Number(last.used);
-  // Claude Code reports the model's largest window, which can be 1M even
-  // when the plan only gets 200k. Trust 1M only for a "[1m]" model or once
-  // the chat is actually past 200k.
-  const reported = Number(last.window) || 200_000;
-  const long = /\[1m\]/i.test(String(last.model ?? "")) || used > 200_000;
-  const size = reported > 200_000 && !long ? 200_000 : reported;
-  // The session's very first model call: setup plus the first message.
-  const base = Number(turns[0].meta.context.first_call ?? used);
-  const tab = Math.min(Number(last.tab_context) || 0, base);
-  const parts = [
-    { label: "Agent setup", hint: "System prompt, tools and MCP servers", n: Math.max(0, base - tab), cls: "cw-setup" },
-    { label: "tab context", hint: "This item and the context attached to it", n: tab, cls: "cw-tab" },
-    { label: "Conversation", hint: "Your messages, replies and tool output", n: Math.max(0, used - base), cls: "cw-chat" },
-  ];
-  const pct = Math.min(100, (used / size) * 100);
-  const tone = pct >= 90 ? "danger" : pct >= 75 ? "warning" : "accent";
-
-  // Prompt cache: Claude keeps the conversation's prefix cached for about
-  // five minutes after each call. A message sent while it's warm re-reads it
-  // at a tenth of the price; after that the whole context is written again.
-  const n = (k: string) => Number(last[k]) || 0;
-  const read = n("cache_read"), write = n("cache_write"), fresh = n("fresh_input");
-  const hit = read + write + fresh ? read / (read + write + fresh) : 0;
-  const cached = read + write > 0;
-  const left = cached ? Math.max(0, CACHE_TTL - (now - new Date(lastTurn.created_at).getTime())) : 0;
-  const cache = !cached ? "none" : left <= 0 ? "cold" : left < 60_000 ? "cooling" : "warm";
-  const total = turns.reduce((t, m) => {
-    const c = m.meta.context;
-    return { read: t.read + (Number(c.cache_read) || 0), all: t.all + (Number(c.cache_read) || 0) + (Number(c.cache_write) || 0) + (Number(c.fresh_input) || 0) };
-  }, { read: 0, all: 0 });
-
-  return (
-    <div className="cw" ref={ref}>
-      <button className="cw-chip" onClick={() => setOpen(!open)} title={`Context: ${k(used)} of ${k(size)} · cache ${cacheText(cache, left)}`}>
-        <span className="cw-ring" style={{ ["--p" as string]: `${pct}%` }} data-tone={tone} />
-        <span className="cw-used">{k(used)}</span>
-        {cache !== "none" && <span className={cx("cw-cache", `cache-${cache}`)}>{cache === "cold" ? "cold" : clock(left)}</span>}
-      </button>
-      {open && (
-        <div className="cw-pop">
-          <div className="cw-pop-head">
-            <strong>Context window</strong>
-            <span className={`text-${tone}`}>{k(used)} / {k(size)} · {Math.round(pct)}%</span>
-          </div>
-          <div className="cw-bar">
-            {parts.map((p) => <span key={p.label} className={p.cls} style={{ width: `${(p.n / size) * 100}%` }} title={`${p.label}: ${k(p.n)}`} />)}
-          </div>
-          <ul className="cw-list">
-            {parts.map((p) => (
-              <li key={p.label}><i className={p.cls} /><span><strong>{p.label}</strong><small>{p.hint}</small></span><span>{k(p.n)}</span></li>
-            ))}
-            <li><i className="cw-free" /><span><strong>Free</strong></span><span>{k(Math.max(0, size - used))}</span></li>
-          </ul>
-          <div className="cw-pop-head">
-            <strong>Prompt cache</strong>
-            <span className={cx("cw-cache", `cache-${cache}`)}>{cacheText(cache, left)}</span>
-          </div>
-          <div className="cw-bar">
-            <span className="cw-read" style={{ width: `${hit * 100}%` }} title={`Read from cache: ${k(read)}`} />
-            <span className="cw-write" style={{ width: `${(read + write + fresh ? write / (read + write + fresh) : 0) * 100}%` }} title={`Written to cache: ${k(write)}`} />
-            <span className="cw-fresh" style={{ width: `${(read + write + fresh ? fresh / (read + write + fresh) : 0) * 100}%` }} title={`Uncached: ${k(fresh)}`} />
-          </div>
-          <ul className="cw-list">
-            <li><i className="cw-read" /><span><strong>Read from cache</strong><small>About a tenth of the input price</small></span><span>{k(read)}</span></li>
-            <li><i className="cw-write" /><span><strong>Written to cache</strong><small>A little over the input price, once</small></span><span>{k(write)}</span></li>
-            <li><i className="cw-fresh" /><span><strong>Uncached input</strong></span><span>{k(fresh)}</span></li>
-          </ul>
-          <p className="subtle">
-            Last call {Math.round(hit * 100)}% cached{total.all ? `, ${Math.round((total.read / total.all) * 100)}% across this chat` : ""}.{" "}
-            {cache === "cold"
-              ? `The cache has expired, so the next message writes all ${k(used)} again.`
-              : "Claude keeps it about 5 minutes after each reply. Changing model or mode starts a fresh cache."}
-            {last.model ? ` · ${String(last.model).replace(/^claude-/, "")}` : ""}
-            {pct >= 75 && " The agent compacts older history when it gets close to full."}
-          </p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Claude's default prompt-cache lifetime, refreshed on every call. */
-const CACHE_TTL = 5 * 60_000;
-const clock = (ms: number) => (ms < 60_000 ? "<1m" : `${Math.ceil(ms / 60_000)}m`);
-const cacheText = (c: string, left: number) => (c === "none" ? "not used" : c === "cold" ? "expired" : `warm for ${clock(left)}`);
-
-function useNow(every: number) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = window.setInterval(() => setNow(Date.now()), every);
-    return () => window.clearInterval(t);
-  }, [every]);
-  return now;
 }
 
 export function AgentStatus({ chat }: { chat: Chat | undefined }) {
@@ -963,9 +847,10 @@ function ToolApproval({ approval }: { approval: Approval }) {
 }
 
 /** A compact picker for the composer bar: as wide as its label, menu above. */
-function BarPicker({ value, options, onChange, title, className }: { value: string; options: { value: string; label: string; help?: string }[]; onChange: (v: string) => void; title: string; className?: string }) {
+function BarPicker({ value, options, onChange, title, className, openSignal }: { value: string; options: { value: string; label: string; help?: string }[]; onChange: (v: string) => void; title: string; className?: string; openSignal?: number }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => void (openSignal && setOpen(true)), [openSignal]);
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
@@ -1002,7 +887,7 @@ function BarPicker({ value, options, onChange, title, className }: { value: stri
  * start on. After, the chat keeps its own model on its harness: changing it
  * applies from the next message to this chat only.
  */
-function ChatModelPicker({ chat }: { chat: Chat | undefined }) {
+function ChatModelPicker({ chat, openSignal }: { chat: Chat | undefined; openSignal?: number }) {
   const { data: config } = useConfig();
   const { data: models = [] } = useModels();
   const qc = useQueryClient();
@@ -1031,6 +916,7 @@ function ChatModelPicker({ chat }: { chat: Chat | undefined }) {
       <ModelMenu
         value={{ agent, model }}
         lock={session ? agent : undefined}
+        openSignal={openSignal}
         title={session ? "Model for this chat, from the next message" : "Model for this chat and new ones"}
         onChange={async (p) => {
           if (session) setPending(p.model);
@@ -1063,7 +949,7 @@ function ChatModelPicker({ chat }: { chat: Chat | undefined }) {
 }
 
 /** The harness's permission mode (from its metadata), saved at once. Applies from the next message. */
-function ModePicker({ chat }: { chat: Chat | undefined }) {
+function ModePicker({ chat, openSignal }: { chat: Chat | undefined; openSignal?: number }) {
   const { data: config } = useConfig();
   const { data: harnesses } = useHarnesses();
   const qc = useQueryClient();
@@ -1072,7 +958,7 @@ function ModePicker({ chat }: { chat: Chat | undefined }) {
   if (!config || !modes.length) return null;
   const current = config.agent.permission_mode || "default";
   const options = modes.some((m) => m.value === current) ? modes : [...modes, { value: current, label: current }];
-  return <BarPicker value={current} options={options} title="Permission mode" className={cx(current === "auto" && "mode-auto")} onChange={async (v) => qc.setQueryData(keys.config, await api.setAgentMode(v))} />;
+  return <BarPicker value={current} options={options} title="Permission mode" className={cx(current === "auto" && "mode-auto")} openSignal={openSignal} onChange={async (v) => qc.setQueryData(keys.config, await api.setAgentMode(v))} />;
 }
 
 /** What Claude Code's built-in commands do; custom commands and skills show just their name. */
@@ -1093,14 +979,15 @@ const slashDescriptions: Record<string, string> = {
   "release-notes": "Show Claude Code's release notes",
   todos: "List the current todo items",
 };
-// Terminal-only commands that do nothing useful in a headless turn.
-const interactiveOnly = new Set(["config", "permissions", "login", "logout", "vim", "exit", "quit", "theme", "terminal-setup", "ide", "resume", "statusline", "upgrade", "bug", "feedback", "privacy-settings", "output-style", "install-github-app", "migrate-installer", "rewind", "add-dir", "export", "clear"]);
-const fallbackSlash = ["compact", "context", "cost", "mcp", "status", "init", "review", "pr-comments", "security-review"];
+// Terminal-only commands that do nothing useful in a headless turn and that
+// tab has no answer for. The ones it does answer are in `tabCommands`.
+const interactiveOnly = new Set(["vim", "exit", "quit", "theme", "terminal-setup", "ide", "statusline", "bug", "feedback", "privacy-settings", "output-style", "install-github-app", "migrate-installer", "add-dir", "export"]);
+const fallbackSlash = ["compact", "context", "cost", "mcp", "model", "status", "init", "review", "pr-comments", "security-review"];
 
 /**
  * The `/` menu: Claude Code's commands, custom commands and skills, as it
- * reported them when it last started. The command is sent as typed and
- * Claude Code runs it.
+ * reported them when it last started. Most are sent as typed and Claude Code
+ * runs them; the interactive ones tab answers itself, marked "tab".
  */
 function useSlashMenu(text: string) {
   const { data } = useQuery({ queryKey: ["slash-commands"], queryFn: api.slashCommands, staleTime: 60_000 });
@@ -1108,13 +995,13 @@ function useSlashMenu(text: string) {
   const [dismissed, setDismissed] = useState<string | null>(null);
   const m = /^\/([\w:.-]*)$/.exec(text);
   const q = m?.[1].toLowerCase() ?? "";
-  const names = data?.length ? data : fallbackSlash;
+  const names = [...new Set([...(data?.length ? data : fallbackSlash), ...Object.keys(tabCommands)])];
   const matches = m
     ? names
         .filter((n) => !interactiveOnly.has(n) && n.toLowerCase().includes(q))
         .sort((a, b) => Number(!a.toLowerCase().startsWith(q)) - Number(!b.toLowerCase().startsWith(q)))
         .slice(0, 8)
-        .map((name) => ({ name, description: slashDescriptions[name] }))
+        .map((name) => ({ name, description: tabCommands[name]?.description ?? slashDescriptions[name], tab: name in tabCommands }))
     : [];
   const open = matches.length > 0 && dismissed !== text;
   useEffect(() => setIndex(0), [q]);
@@ -1155,7 +1042,26 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   const last = chat?.messages[chat.messages.length - 1];
   const suggestion = !running && last?.kind === "suggestion" && config?.agent.suggest_replies !== false ? last.content : "";
   const slash = useSlashMenu(text);
-  const pickSlash = (name: string) => (setText(`/${name} `), slash.close(), ref.current?.focus());
+  const [panel, setPanel] = useState<Panel | null>(null);
+  const [picker, setPicker] = useState<{ which: "model" | "mode"; n: number }>({ which: "model", n: 0 });
+  // A tab command runs at once; the agent's own get a space for arguments.
+  const pickSlash = (name: string) => {
+    slash.close();
+    if (tabCommands[name]) return runCommand(`/${name}`);
+    setText(`/${name} `);
+    ref.current?.focus();
+  };
+  /** Answers an interactive command in tab. False when it's for the agent. */
+  const runCommand = (t: string) => {
+    const c = tabCommand(t);
+    if (!c) return false;
+    setText("");
+    const a = c.action;
+    if ("panel" in a) setPanel(a.panel);
+    else if ("picker" in a) (setPanel(null), setPicker((p) => ({ which: a.picker, n: p.n + 1 })));
+    else (setPanel(null), a.go());
+    return true;
+  };
 
   useEffect(() => {
     const t = ref.current;
@@ -1190,6 +1096,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   const submit = () => {
     const t = text.trim();
     if ((!t && !images.length) || uploading) return;
+    if (!images.length && runCommand(t)) return;
     setText("");
     setImages([]);
     setError(null);
@@ -1208,6 +1115,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   return (
     <div ref={drop.ref} className={cx("composer", drop.armed && "drop-armed", drop.targeted && "dragging")}>
       <AgentNotice messages={chat?.messages} starting={!chat?.session && !chat?.running} />
+      {panel && <SlashPanel panel={panel} chat={chat} onClose={() => (setPanel(null), ref.current?.focus())} onSend={(t) => onSend(t, [])} />}
       {(images.length > 0 || uploading > 0) && (
         <div className="composer-images">
           <Attachments paths={images} size={56} onRemove={(p) => setImages((xs) => xs.filter((x) => x !== p))} />
@@ -1239,6 +1147,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
             <button key={c.name} role="option" aria-selected={i === slash.index} className={cx(i === slash.index && "active")} onMouseDown={(e) => (e.preventDefault(), pickSlash(c.name))} onMouseEnter={() => slash.setIndex(i)}>
               <span className="slash-name">/{c.name}</span>
               {c.description && <span className="slash-desc">{c.description}</span>}
+              {c.tab && <span className="slash-tab" title="tab answers this itself">tab</span>}
             </button>
           ))}
         </div>
@@ -1250,7 +1159,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
           <button className="bar-icon" onClick={() => file.current?.click()} title="Attach files or images (or paste or drop them)" aria-label="Attach files"><Icon name="plus" size={14} /></button>
           <input ref={file} type="file" multiple hidden onChange={(e) => (void add([...(e.target.files ?? [])]), (e.target.value = ""))} />
           <Dictation onText={(t) => setText((cur) => (cur && !/\s$/.test(cur) ? `${cur} ${t}` : cur + t))} target={ref} />
-          {config?.agent.kind && <><ChatModelPicker chat={chat} /><ModePicker chat={chat} /></>}
+          {config?.agent.kind && <><ChatModelPicker chat={chat} openSignal={picker.which === "model" ? picker.n : 0} /><ModePicker chat={chat} openSignal={picker.which === "mode" ? picker.n : 0} /></>}
           {extra}
           {chat?.messages && <ContextMeter messages={chat.messages} />}
         </span>
