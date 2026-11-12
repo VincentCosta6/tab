@@ -20,10 +20,10 @@ export const accessLook: Record<ResourceAccess, { label: string; help: string; t
 };
 
 export const statusLook: Record<ProjectResource["status"], { label: string; tone: Tone; help: string }> = {
-  pending: { label: "Not indexed yet", tone: "neutral", help: "Agents can open the link now; searching its contents comes with indexing." },
+  pending: { label: "Not indexed yet", tone: "neutral", help: "Waiting to be read. Agents can open the link meanwhile." },
   indexed: { label: "Indexed", tone: "success", help: "Its contents are searchable." },
   live: { label: "Live", tone: "success", help: "Agents read it live through its connection." },
-  failed: { label: "Failed", tone: "danger", help: "The last sync failed." },
+  failed: { label: "Failed", tone: "danger", help: "The last read failed; what was indexed before is still searchable." },
   needs_sign_in: { label: "Needs sign-in", tone: "warning", help: "Connect the service so agents can read it." },
 };
 

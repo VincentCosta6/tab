@@ -281,6 +281,17 @@ export const mockApi = {
           resources.push(fresh);
           return fresh;
         }
+        case "project_file_add": {
+          const now = new Date().toISOString();
+          const name = String(args.name);
+          if (!/\.(pdf|docx|xlsx|md|mdx|markdown|txt|text|csv|tsv|json|html?|rst|org|ya?ml|toml|xml|log)$/i.test(name)) throw new Error(`tab can't read ${name} yet: add PDF, Word (.docx), Excel (.xlsx), markdown or text files`);
+          const fresh: ProjectResource = { id: `res-${Date.now()}`, project_id: args.projectId, kind: "file", title: name, url: `sha256:${Date.now().toString(16).padStart(64, "0")}`, note: "", access: args.access ?? "all", options: { name, size: (args.bytes as Uint8Array).length }, status: "pending", chunks: 0, pinned: false, added_by: "user", created_at: now, updated_at: now };
+          resources.push(fresh);
+          // Indexing happens in the background; pretend it finished.
+          setTimeout(() => Object.assign(fresh, { status: "indexed", chunks: Math.max(1, Math.round(fresh.options.size as number / 1200)), indexed_at: new Date().toISOString() }), 1500);
+          return fresh;
+        }
+        case "project_resource_reindex": return null;
         case "project_resource_delete": {
           const n = resources.length;
           resources = resources.filter((r) => !(r.project_id === args.projectId && r.id === args.id));
@@ -937,11 +948,13 @@ let repos: ProjectRepo[] = [
   { id: "r2", project_id: "p-pay", repo: "acme/web", path: null, note: "Checkout UI", added_by: "user", created_at: ago(900), updated_at: ago(900) },
 ];
 let resources: ProjectResource[] = [
-  { id: "res1", project_id: "p-pay", kind: "website", title: "acme.com/pricing", url: "https://acme.com/pricing", note: "Public pricing and plans", access: "all", options: { depth: 1, schedule: "daily" }, status: "indexed", chunks: 42, pinned: false, added_by: "user", created_at: ago(2000), updated_at: ago(60) },
+  { id: "res1", project_id: "p-pay", kind: "website", title: "acme.com/pricing", url: "https://acme.com/pricing", note: "Public pricing and plans", access: "all", options: { depth: 1, schedule: "daily" }, status: "indexed", chunks: 42, pinned: false, added_by: "user", created_at: ago(2000), updated_at: ago(60), indexed_at: ago(45), last_used_at: ago(12) },
   { id: "res2", project_id: "p-pay", kind: "service", title: "Stripe dashboard", url: "https://dashboard.stripe.com", note: "Charges, refunds, disputes", access: "coordinator", options: {}, status: "live", chunks: 0, pinned: false, added_by: "user", created_at: ago(2000), updated_at: ago(2000) },
   { id: "res3", project_id: "p-pay", kind: "service", title: "Cloudflare · checkout-edge", url: "https://dash.cloudflare.com/acme/workers/services/view/checkout-edge", note: "Edge worker in front of checkout", access: "all", options: { watch_deploys: true }, status: "live", chunks: 0, pinned: false, added_by: "user", created_at: ago(1500), updated_at: ago(1500) },
-  { id: "res4", project_id: "p-pay", kind: "email", title: "Billing inbox", url: "label:billing", note: "Customer billing questions", access: "coordinator", options: {}, status: "indexed", chunks: 118, pinned: false, added_by: "user", created_at: ago(1500), updated_at: ago(30) },
-  { id: "res5", project_id: "p-pay", kind: "note", title: "Refund policy", url: null, note: "Full refunds within 30 days of a charge. Over $500 needs Priya.", access: "all", options: {}, status: "indexed", chunks: 1, pinned: true, added_by: "user", created_at: ago(900), updated_at: ago(900) },
+  { id: "res4", project_id: "p-pay", kind: "email", title: "Billing inbox", url: "label:billing", note: "Customer billing questions", access: "coordinator", options: {}, status: "indexed", chunks: 118, pinned: false, added_by: "user", created_at: ago(1500), updated_at: ago(30), indexed_at: ago(20), last_used_at: ago(240) },
+  { id: "res7", project_id: "p-pay", kind: "file", title: "Merchant agreement 2026.pdf", url: `sha256:${"ab".repeat(32)}`, note: "Signed terms with our processor", access: "coordinator", options: { name: "Merchant agreement 2026.pdf", size: 184_220 }, status: "indexed", chunks: 37, pinned: false, added_by: "user", created_at: ago(800), updated_at: ago(800), indexed_at: ago(799) },
+  { id: "res8", project_id: "p-pay", kind: "website", title: "status.acme.com", url: "https://status.acme.com", note: "", access: "all", options: { depth: 0, schedule: "hourly" }, status: "failed", chunks: 0, pinned: false, added_by: "agent", created_at: ago(300), updated_at: ago(300), index_error: "status.acme.com didn't answer (timed out)" },
+  { id: "res5", project_id: "p-pay", kind: "note", title: "Refund policy", url: null, note: "Full refunds within 30 days of a charge. Over $500 needs Priya.", access: "all", options: {}, status: "indexed", chunks: 1, pinned: true, added_by: "user", created_at: ago(900), updated_at: ago(900), indexed_at: ago(900), last_used_at: ago(3) },
   { id: "res6", project_id: "p-pay", kind: "link", title: "Runbook: checkout incidents", url: "https://docs.google.com/document/d/1abc", note: "", access: "all", options: {}, status: "needs_sign_in", chunks: 0, pinned: false, added_by: "agent", created_at: ago(400), updated_at: ago(400) },
 ];
 let notes: ProjectNote[] = [

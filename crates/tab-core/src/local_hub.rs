@@ -1200,6 +1200,19 @@ impl LocalHub {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    /// A hub file's bytes, copied from the cloud hub first when this one
+    /// doesn't have it. Blocks on the download.
+    pub fn file_bytes(&self, hash: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        if let Some(b) = self.file_get(hash)? {
+            return Ok(Some(b));
+        }
+        if self.cloud_link().is_none() {
+            return Ok(None);
+        }
+        self.fetch_from_cloud(hash)?;
+        self.file_get(hash)
+    }
+
     /// Puts a hub file in the attachments folder `dir` as
     /// `<dir>/<hash hex>/<name>` and returns its path. Already there: just the path.
     pub fn file_materialize(&self, dir: &Path, hash: &str, name: &str) -> anyhow::Result<PathBuf> {

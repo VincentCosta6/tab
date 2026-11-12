@@ -369,6 +369,15 @@ pub struct ProjectResource {
     pub added_by: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// When this device last read it into the index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_at: Option<DateTime<Utc>>,
+    /// Why the last read failed, on this device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_error: Option<String>,
+    /// When an agent's search last returned a piece of it, on this device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 /// Who may read a project resource, lowest first.

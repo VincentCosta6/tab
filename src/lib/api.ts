@@ -4,7 +4,7 @@
 
 import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
+  AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceAccess, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
   AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
@@ -92,6 +92,14 @@ export const api = {
   projectResources: (projectId: string) => call<ProjectResource[]>("project_resources", { projectId }),
   projectResourceSave: (projectId: string, resource: ResourceInput) => call<ProjectResource>("project_resource_save", { projectId, resource }),
   projectResourceDelete: (projectId: string, id: string) => call<boolean>("project_resource_delete", { projectId, id }),
+  projectResourceReindex: (id: string) => call<void>("project_resource_reindex", { id }),
+  /** Puts a file in the hub and adds it to the project's Files. */
+  projectFileAdd: async (projectId: string, name: string, bytes: Uint8Array, access: ResourceAccess): Promise<ProjectResource> => {
+    if (!inTauri) return mockApi.invoke<ProjectResource>("project_file_add", { projectId, name, bytes, access });
+    const { invoke } = await import("@tauri-apps/api/core");
+    const headers = { "x-project": encodeURIComponent(projectId), "x-name": encodeURIComponent(name), "x-access": access };
+    return invoke<ProjectResource>("project_file_add", bytes, { headers });
+  },
   projectItems: (projectId: string) => call<QueueItem[]>("project_items", { projectId }),
   reviewChatOpen: (repo: string, number: number) => call<Chat>("review_chat_open", { repo, number }),
   reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string, attachments: string[] = []) =>

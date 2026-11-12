@@ -1049,7 +1049,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_search",
-            "description": "Search the person's work (Slack, GitHub, email, meetings, Jira, tab tasks) by keyword and by meaning, so both exact names and paraphrases match. Narrow it to a time window and/or a project for more relevant results; if a window finds too little it widens automatically (say so if you rely on older results). Also returns project notes that match. Returns items with ids you can attach or read.",
+            "description": "Search the person's work (Slack, GitHub, email, meetings, Jira, tab tasks) by keyword and by meaning, so both exact names and paraphrases match. Narrow it to a time window and/or a project for more relevant results; if a window finds too little it widens automatically (say so if you rely on older results). Also returns project notes that match, and passages from what projects know (their websites, files, email labels, notes and repo docs) under `resources`, each with its source: cite the source when you use one. Returns items with ids you can attach or read.",
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string", "description": "Words or a short description of what you're looking for." },
                 "within_days": { "type": "integer", "minimum": 1, "description": "Only things from the last N days. Start small (7 or 30) for recent work." },
@@ -1716,6 +1716,14 @@ impl McpServer {
                     Some(v) => self.store.notes_near(v, 3)?,
                     None => Vec::new(),
                 };
+                // What projects know, as far as this session may read: a
+                // project's coordinator reads its coordinator-only resources
+                // too (from the session's own key, never an argument).
+                let reader = crate::store::Reader {
+                    coordinator_of: self.coordinator_of(session),
+                    project: scope.project_id.clone(),
+                };
+                let passages = self.store.chunks_search(&q, qv.as_deref(), &reader, 5)?;
                 let mut out = json!({
                     "items": items.iter().map(brief).collect::<Vec<_>>(),
                     "search": self.store.index_status().summary(),
@@ -1726,13 +1734,40 @@ impl McpServer {
                         None => "all time".into(),
                     });
                 }
+                let names: std::collections::HashMap<String, String> =
+                    if notes.is_empty() && passages.is_empty() {
+                        Default::default()
+                    } else {
+                        self.store
+                            .projects()?
+                            .into_iter()
+                            .map(|p| (p.id, p.name))
+                            .collect()
+                    };
+                if !passages.is_empty() {
+                    let used: Vec<&str> = passages.iter().map(|h| h.resource_id.as_str()).collect();
+                    self.store.knowledge_mark_used(&used, now)?;
+                    out["resources"] = json!(
+                        passages
+                            .iter()
+                            .map(|h| {
+                                let mut v = json!({
+                                    "resource": h.resource,
+                                    "kind": h.kind,
+                                    "project": names.get(&h.project_id),
+                                    "title": h.title,
+                                    "source": h.source,
+                                    "text": h.text,
+                                });
+                                if h.access != "all" {
+                                    v["access"] = json!(h.access);
+                                }
+                                v
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                }
                 if !notes.is_empty() {
-                    let names: std::collections::HashMap<String, String> = self
-                        .store
-                        .projects()?
-                        .into_iter()
-                        .map(|p| (p.id, p.name))
-                        .collect();
                     out["project_notes"] = json!(
                         notes
                             .iter()
@@ -2883,6 +2918,27 @@ mod tests {
                 )
                 .unwrap();
         }
+        // Their contents, as indexing leaves them.
+        for r in store.project_resources(&p.id, "coordinator").unwrap() {
+            let t = crate::store::IndexTarget {
+                id: r.id.clone(),
+                project_id: p.id.clone(),
+                kind: r.kind.clone(),
+                title: r.title.clone(),
+                url: r.url.clone(),
+                note: String::new(),
+                access: r.access.clone(),
+                options: json!({}),
+                version: crate::store::ts(r.updated_at),
+                path: None,
+            };
+            let piece = crate::knowledge::chunk::Piece {
+                title: format!("{} page", r.title),
+                source: r.url.clone(),
+                text: format!("Refund handling, as the {} says", r.title),
+            };
+            store.knowledge_put(&t, "f", &[piece], None, now).unwrap();
+        }
         let dir = std::env::temp_dir().to_string_lossy().to_string();
         let coordinator = store
             .session_create_keyed(
@@ -2949,6 +3005,37 @@ mod tests {
             seen(call(other.id.clone(), json!({"project":"Shop"})).await),
             (true, false)
         );
+
+        // Search returns their passages by the same rule, with sources.
+        let search = |id: String| {
+            let server = &server;
+            async move {
+                let out = server
+                    .call(Some(&id), "tab_search", json!({"query": "refund handling"}))
+                    .await
+                    .unwrap();
+                let v: Value =
+                    serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+                v["resources"].clone()
+            }
+        };
+        let mine = search(coordinator.id.clone()).await;
+        assert_eq!(mine.as_array().unwrap().len(), 2);
+        assert!(
+            mine.as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["access"] == "coordinator"
+                    && r["source"] == "https://x/coordinator"
+                    && r["project"] == "Shop")
+        );
+        for id in [worker.id.clone(), other.id.clone()] {
+            let theirs = search(id).await;
+            assert_eq!(theirs.as_array().unwrap().len(), 1);
+            assert_eq!(theirs[0]["resource"], "Public site");
+        }
+        let used = store.project_resources(&p.id, "coordinator").unwrap();
+        assert!(used.iter().all(|r| r.last_used_at.is_some()));
     }
 
     #[tokio::test]

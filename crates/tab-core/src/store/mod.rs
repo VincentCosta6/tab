@@ -11,6 +11,7 @@ mod http;
 pub mod hub_sync;
 mod items;
 mod jobs;
+mod knowledge;
 mod links;
 mod previews;
 mod projects;
@@ -19,6 +20,7 @@ mod usage;
 mod vectors;
 mod workflows;
 pub use jobs::CloudConnection;
+pub use knowledge::{ChunkHit, IndexTarget, Reader};
 pub use projects::ResourceInput;
 
 use std::path::Path;
@@ -41,6 +43,9 @@ pub struct Store {
     workflows_rev: std::sync::atomic::AtomicU64,
     /// Woken after every commit, so the hub sync sends changes right away.
     commits: std::sync::Arc<tokio::sync::Notify>,
+    /// Woken when a resource or repo is added or changed, so it's indexed
+    /// right away rather than on the next pass.
+    knowledge_wake: std::sync::Arc<tokio::sync::Notify>,
 }
 
 /// Ordered migrations; `PRAGMA user_version` records how many have run.
@@ -64,7 +69,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/017_session_model.sql"),
     include_str!("migrations/018_item_state_at.sql"),
     include_str!("migrations/019_project_resources.sql"),
-    include_str!("migrations/020_item_links.sql"),
+    include_str!("migrations/020_resource_chunks.sql"),
+    include_str!("migrations/021_item_links.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {
@@ -119,6 +125,7 @@ impl Store {
         }));
         Ok(Self {
             commits,
+            knowledge_wake: Default::default(),
             conn: Mutex::new(conn),
             embedder: std::sync::RwLock::new(None),
             index_status: Mutex::new(Default::default()),

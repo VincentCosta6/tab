@@ -47,6 +47,11 @@ webpki-roots = "1"
 mail-parser = "0.11"
 sqlite-vec = "0.1.6"
 model2vec-rs = { version = "0.4", default-features = false, features = ["fancy-regex", "local-only"] }
+# Project resources' text (crate::knowledge): docx/xlsx are zipped XML.
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+quick-xml = "0.42"
+pdf-extract = "0.12"
+url = "2"
 
 # The cloud hub's sync socket.
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }

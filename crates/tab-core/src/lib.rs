@@ -34,6 +34,7 @@ pub mod gateway;
 pub mod gh;
 pub mod hub_tls;
 pub mod jobs;
+pub mod knowledge;
 pub mod leases;
 pub mod limits;
 pub mod live;

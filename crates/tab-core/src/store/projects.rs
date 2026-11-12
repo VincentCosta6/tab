@@ -46,7 +46,27 @@ fn resource_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectResource> {
         added_by: r.get("added_by")?,
         created_at: parse_ts(&r.get::<_, String>("created_at")?)?,
         updated_at: parse_ts(&r.get::<_, String>("updated_at")?)?,
+        // From this device's index, when the query joins it.
+        indexed_at: opt_ts(r, "indexed_at"),
+        index_error: r.get("index_error").ok().flatten(),
+        last_used_at: opt_ts(r, "last_used_at"),
     })
+}
+
+/// Wakes the indexer once dropped, which is after the write it guards.
+struct WakeAfter<'a>(&'a tokio::sync::Notify);
+
+impl Drop for WakeAfter<'_> {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+fn opt_ts(r: &rusqlite::Row<'_>, col: &str) -> Option<DateTime<Utc>> {
+    r.get::<_, Option<String>>(col)
+        .ok()
+        .flatten()
+        .and_then(|t| parse_ts(&t).ok())
 }
 
 /// What a resource is saved from: the person's dialog or an agent.
@@ -209,6 +229,7 @@ impl Store {
         let repo = normalize_repo(repo);
         anyhow::ensure!(!repo.is_empty(), "a repo needs a name or URL");
         let path = path.map(str::trim).filter(|p| !p.is_empty());
+        let _wake = WakeAfter(&self.knowledge_wake);
         let conn = self.conn();
         Ok(conn.query_row(
             &format!(
@@ -262,8 +283,9 @@ impl Store {
         let conn = self.conn();
         let out = conn
             .prepare(&format!(
-                "SELECT {RESOURCE_COLS} FROM project_resources WHERE project_id = ?1
-                 ORDER BY pinned DESC, kind, title COLLATE NOCASE"
+                "SELECT {RESOURCE_COLS}, i.indexed_at, i.error AS index_error, i.last_used_at
+                 FROM project_resources LEFT JOIN resource_index i ON i.resource_id = id
+                 WHERE project_id = ?1 ORDER BY pinned DESC, kind, title COLLATE NOCASE"
             ))?
             .query_map([project_id], resource_row)?
             .filter(|r| {
@@ -307,6 +329,7 @@ impl Store {
             .filter(|u| !u.is_empty());
         anyhow::ensure!(url.is_some() || kind == "note", "a {kind} needs a link");
         let options = input.options.as_ref().map(|o| o.to_string());
+        let _wake = WakeAfter(&self.knowledge_wake);
         let conn = self.conn();
         if let Some(id) = &input.id {
             return conn
