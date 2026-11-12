@@ -61,7 +61,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/015_session_branches.sql"),
     include_str!("migrations/016_runners_jobs.sql"),
     include_str!("migrations/017_session_model.sql"),
-    include_str!("migrations/018_project_resources.sql"),
+    include_str!("migrations/018_item_state_at.sql"),
+    include_str!("migrations/019_project_resources.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {
