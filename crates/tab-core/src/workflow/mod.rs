@@ -5,6 +5,7 @@
 pub use tab_domain::workflow::*;
 
 pub mod command;
+pub mod insights_store;
 pub mod runtime;
 
 /// The builder assistant's chat key for one workflow: each workflow gets its

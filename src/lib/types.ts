@@ -327,6 +327,41 @@ export interface WorkflowRun {
   error: string | null; started_at: string; finished_at: string | null;
 }
 
+// --- Workflow insights (mirror tab_domain::workflow::{stats, insights}) ---
+
+/** The middle and the slow end of a set of times, in ms. `n` 0 means the rest say nothing. */
+export interface Quantiles { n: number; p50: number; p95: number }
+/** What was spent. API-key sessions cost dollars; subscription sessions use plan tokens and allowance and never get a dollar figure. */
+export interface Spend {
+  cost_usd: number; input_tokens: number; output_tokens: number;
+  plan_input_tokens: number; plan_output_tokens: number;
+  /** Plan allowance used, as a sum of shares (0.5 is half a window). */
+  plan_share: number;
+}
+/** Run counts every breakdown shares. `runs` (runs that did work) is the denominator of every rate. */
+export interface RunCounts { runs: number; succeeded: number; unattended: number; failed: number; attended: number; unplanned: number }
+export interface StepStats {
+  id: string; label: string; runs: number; ok: number; failed: number; blocked: number; throttled: number; skipped: number;
+  ms: Quantiles; queue_ms: Quantiles; work_ms: Quantiles; human_wait_ms: Quantiles; spend: Spend;
+  interventions: number; unplanned_interventions: number; fallbacks: number;
+}
+export interface ModelStats {
+  step_id: string; harness: string; model: string; family: string;
+  runs: number; ok: number; failed: number; unattended: number; work_ms: Quantiles; spend: Spend;
+}
+export interface VersionStats extends RunCounts { version: number; duration_ms: Quantiles; spend: Spend; first_run: string | null }
+export interface FailureGroup { step_id: string; label: string; error: string; count: number; first_seen: string; last_seen: string; sample_run: string }
+export interface DayStats extends RunCounts { day: string; duration_ms: Quantiles; spend: Spend }
+export interface WorkflowStats extends RunCounts {
+  in_progress: number; held_back: number; loop_stopped: number; duration_ms: Quantiles; spend: Spend;
+  steps: StepStats[]; models: ModelStats[]; versions: VersionStats[]; failures: FailureGroup[]; days: DayStats[];
+}
+export type WorkflowHealth = "unknown" | "healthy" | "degraded" | "failing";
+export interface WorkflowInsights { workflow_id: string; days: number; from: string; to: string; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats }
+export interface FactoryWorkflow { id: string; name: string; enabled: boolean; version: number; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats }
+/** `totals` are run-level only: their steps, models, versions and failures are empty. */
+export interface WorkflowFactory { days: number; from: string; to: string; totals: WorkflowStats; previous_totals: WorkflowStats; workflows: FactoryWorkflow[] }
+
 // --- Runners and jobs (mirror tab_domain::runner) ---
 
 /** Where a connection runs: on this computer, or in tab cloud on the hub's cloud runner. */
