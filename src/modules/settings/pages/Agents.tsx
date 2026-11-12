@@ -58,18 +58,13 @@ export function AgentsPage() {
               </select>
             </FormRow>
           )}
-          {harness?.acp && draft.agent.kind && (
+          {harness?.acp?.preview && draft.agent.kind && (
             <FormRow label="Agent Client Protocol" help={`Preview: run ${harness.name} chats over ACP, the open protocol Zed and other editors use, instead of tab's own adapter. Turn it off if a chat behaves differently.`}>
               <Toggle
                 label="Use ACP"
                 checked={!!draft.agent.acp?.includes(draft.agent.kind)}
                 onChange={(v) => set((c) => void (c.agent.acp = [...(c.agent.acp ?? []).filter((k) => k !== c.agent.kind), ...(v && c.agent.kind ? [c.agent.kind] : [])]))}
               />
-            </FormRow>
-          )}
-          {harness?.capabilities.external_server && !(draft.agent.kind && draft.agent.acp?.includes(draft.agent.kind)) && (
-            <FormRow label="Server URL" help="Leave empty and tab starts its own server.">
-              <TextInput placeholder="http://127.0.0.1:4096" value={draft.agent.opencode_url ?? ""} onChange={(e) => set((c) => void (c.agent.opencode_url = e.target.value || null))} />
             </FormRow>
           )}
         </Card>

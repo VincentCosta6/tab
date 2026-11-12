@@ -468,8 +468,6 @@ pub struct AgentHub {
     /// writes in it. Their tools are held tighter (see `crate::mcp`).
     woken: Mutex<std::collections::HashSet<String>>,
     approvals: Mutex<HashMap<String, (Approval, oneshot::Sender<Decision>)>>,
-    /// OpenCode servers by chat id (see `opencode::server`).
-    opencode: tokio::sync::Mutex<HashMap<String, Arc<opencode::Server>>>,
     /// Puts a file in the hub and returns its hash, once the hub is up, so
     /// files a reply names reach other devices ([`crate::named_files`]).
     file_sink: std::sync::OnceLock<FileSink>,
@@ -534,7 +532,6 @@ impl AgentHub {
             followups: Mutex::new(HashMap::new()),
             woken: Mutex::new(Default::default()),
             approvals: Mutex::new(HashMap::new()),
-            opencode: tokio::sync::Mutex::new(HashMap::new()),
             file_sink: std::sync::OnceLock::new(),
             vault: std::sync::OnceLock::new(),
             review_root: RwLock::new(None),
@@ -553,21 +550,7 @@ impl AgentHub {
     }
 
     pub async fn set_config(&self, cfg: AgentConfig) {
-        let changed = *self.cfg.read().unwrap() != cfg;
         *self.cfg.write().unwrap() = cfg;
-        if changed {
-            for (_, old) in self.opencode.lock().await.drain() {
-                old.shutdown();
-            }
-        }
-    }
-
-    /// Stops every OpenCode server; the next turn starts a fresh one with
-    /// the current sandbox settings.
-    pub async fn stop_opencode(&self) {
-        for (_, s) in self.opencode.lock().await.drain() {
-            s.shutdown();
-        }
     }
 
     pub fn config(&self) -> AgentConfig {
@@ -1450,7 +1433,7 @@ impl AgentHub {
                     .await
                 }
                 AgentKind::OpenCode => {
-                    opencode::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
+                    acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
                 }
                 AgentKind::Codex => {
                     codex::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
@@ -2114,11 +2097,6 @@ impl AgentHub {
     pub fn shutdown(&self) {
         for c in self.running.lock().unwrap().values() {
             c.cancel();
-        }
-        if let Ok(mut oc) = self.opencode.try_lock() {
-            for (_, s) in oc.drain() {
-                s.shutdown();
-            }
         }
     }
 

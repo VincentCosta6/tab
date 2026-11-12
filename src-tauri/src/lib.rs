@@ -287,8 +287,6 @@ impl Core {
         let sandbox = tab_core::sandbox::current();
         if sandbox.config() != next.sandbox {
             sandbox.set_config(next.sandbox.clone());
-            // OpenCode servers keep the policy they started with.
-            self.hub.stop_opencode().await;
         }
         self.hub.set_config(next.agent.clone()).await;
         self.hub.remote_mcp().set_servers(next.mcp_servers.clone());

@@ -78,7 +78,6 @@ fn split(
 fn agent_setup(cfg: &TabConfig) -> String {
     let mut a = cfg.agent.clone();
     a.command = None;
-    a.opencode_url = None;
     a.workdir = None;
     serde_json::to_string(&a).unwrap_or_default()
 }
