@@ -1,15 +1,17 @@
 // Data layer: React Query with caching turned all the way up.
 //
-// Nothing goes stale on a timer (staleTime: Infinity) and nothing is evicted
-// (gcTime: Infinity). The cache is persisted to localStorage, so a restart
-// renders the last known queue, previews and chats instantly. Freshness comes
+// Nothing goes stale on a timer (staleTime: Infinity). What no screen has
+// shown for ten minutes is dropped (gcTime) and read again when it's next
+// needed; these are local reads. The queue, items and previews are persisted
+// to localStorage, so a restart renders the last known queue instantly; chats,
+// PR files and search results are not (see PERSIST_SKIP). Freshness comes
 // from the engine instead of polling: every engine event patches or
 // invalidates exactly the queries it affects (see useLiveEvents). Remote APIs
 // are never hit from here directly; previews come from the backend's own
 // preview cache, which a rate-limit-aware refresher keeps current.
 
 import { QueryClient, useQueryClient } from "@tanstack/react-query";
-import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
+import { PersistQueryClientProvider, removeOldestQuery } from "@tanstack/react-query-persist-client";
 import { createSyncStoragePersister } from "@tanstack/query-sync-storage-persister";
 import { useEffect, type ReactNode } from "react";
 import { onEngineEvent } from "./api";
@@ -35,7 +37,9 @@ export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: Infinity,
-      gcTime: Infinity,
+      // Unbounded, this kept every chat, PR file and search a session ever
+      // opened: hundreds of MB after a long day.
+      gcTime: 10 * 60_000,
       refetchOnWindowFocus: false,
       refetchOnReconnect: false,
       retry: 1,
@@ -47,7 +51,19 @@ const persister = createSyncStoragePersister({
   storage: typeof window === "undefined" ? undefined : safeStorage(),
   key: "tab.query-cache",
   throttleTime: 1000,
+  // localStorage holds about 5 MB. Past that every write failed and the saved
+  // cache silently stopped updating; drop the oldest queries until it fits.
+  retry: removeOldestQuery,
 });
+
+/**
+ * Queries not saved across restarts: streaming buffers and live telemetry,
+ * the app's version and update check (a restart may change them), and what is
+ * big and cheap to read again (chats, PR files and pulls, search results).
+ */
+const PERSIST_SKIP = new Set(["stream", "pressure", "search-index", "workflow-issues", "app-version", "app-update", "chat", "chats", "file", "pull"]);
+const persisted = (key: readonly unknown[]) =>
+  !PERSIST_SKIP.has(String(key[0])) && !(key[0] === "items" && key[2]);
 
 function safeStorage(): Storage | undefined {
   try {
@@ -61,7 +77,7 @@ function safeStorage(): Storage | undefined {
 }
 
 /** Bump when cached shapes change so old caches are dropped. */
-const CACHE_VERSION = "2";
+const CACHE_VERSION = "3";
 
 export const keys = {
   items: (state: string, query: string) => ["items", state, query] as const,
@@ -104,9 +120,7 @@ export function QueryProvider({ children }: { children: ReactNode }) {
         persister,
         maxAge: Infinity,
         buster: CACHE_VERSION,
-        // Streaming buffers and live telemetry are not worth restoring. Nor is
-        // the app's version or update check, which a restart may have changed.
-        dehydrateOptions: { shouldDehydrateQuery: (q) => !["stream", "pressure", "search-index", "workflow-issues", "app-version", "app-update"].includes(String(q.queryKey[0])) && q.state.status === "success" },
+        dehydrateOptions: { shouldDehydrateQuery: (q) => persisted(q.queryKey) && q.state.status === "success" },
       }}
       // The queue is a cheap local read, so re-read it once after restoring:
       // items can change while the app is closed (or a connection was turned off).
