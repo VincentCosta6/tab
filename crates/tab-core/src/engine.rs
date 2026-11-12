@@ -22,7 +22,7 @@ use crate::gateway::Gateway;
 use crate::gateway::GatewayError;
 use crate::model::{
     Approval, ConnectorInfo, ConnectorStatus, ContextStatus, DoneGuard, GuardLevel, IncomingEvent,
-    ItemState, NewTask, Preview, QueueItem, Session, SessionMessage, SessionStatus,
+    ItemState, NewTask, Preview, QueueItem, Ranking, Session, SessionMessage, SessionStatus,
 };
 use crate::ranker::{Pipeline, Ranker};
 use crate::ratelimit;
@@ -478,7 +478,10 @@ impl Core {
             return;
         };
         match self.ranker.rank(&item).await {
-            Ok(ranking) => match self.store.set_ranking(&item.id, &ranking) {
+            Ok(mut ranking) => match self
+                .under_parent(&item.id, &mut ranking)
+                .and_then(|()| self.store.set_ranking(&item.id, &ranking))
+            {
                 Ok(Some(item)) => self.publish(Change::Ranked, item),
                 Ok(None) => {}
                 Err(e) => tracing::error!(error = %e, "saving ranking failed"),
@@ -487,6 +490,31 @@ impl Core {
                 tracing::warn!(item = %item.id, error = %e, "ranking failed; item stays unranked")
             }
         }
+    }
+
+    /// A follow-up never ranks above the open task it came from: ranked on
+    /// its own, a later phase can look more urgent than the work it builds on.
+    fn under_parent(&self, id: &str, ranking: &mut Ranking) -> anyhow::Result<()> {
+        // Read again: links are added just after a task is created.
+        let Some(parent) = self.store.get(id)?.and_then(|i| i.parent_id) else {
+            return Ok(());
+        };
+        let Some(parent) = self
+            .store
+            .get(&parent)?
+            .filter(|p| p.state != ItemState::Done)
+        else {
+            return Ok(());
+        };
+        if let Some(cap) = parent.ranking.filter(|p| p.score < ranking.score) {
+            ranking.score = cap.score;
+            ranking.urgency = cap.urgency;
+            ranking.reason = format!(
+                "Follow-up of \"{}\". {}",
+                parent.event.title, ranking.reason
+            );
+        }
+        Ok(())
     }
 
     /// Stores an event and ranks it. Shared by connectors and tab's own tasks.

@@ -12,6 +12,7 @@ pub mod hub_sync;
 mod items;
 mod jobs;
 mod knowledge;
+mod links;
 mod previews;
 mod projects;
 mod sessions;
@@ -69,6 +70,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/018_item_state_at.sql"),
     include_str!("migrations/019_project_resources.sql"),
     include_str!("migrations/020_resource_chunks.sql"),
+    include_str!("migrations/021_item_links.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {

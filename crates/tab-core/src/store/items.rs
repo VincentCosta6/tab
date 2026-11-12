@@ -117,17 +117,21 @@ fn row_to_item(r: &Row<'_>) -> rusqlite::Result<QueueItem> {
         project_id: r.get("project_id")?,
         created_at: parse_ts(&r.get::<_, String>("created_at")?)?,
         updated_at: parse_ts(&r.get::<_, String>("updated_at")?)?,
+        parent_id: None,
+        blocked_by: vec![],
     })
 }
 
 pub(crate) fn get_item(conn: &Connection, id: &str) -> anyhow::Result<Option<QueueItem>> {
-    Ok(conn
+    let mut item = conn
         .query_row(
             &format!("SELECT {COLUMNS} FROM items WHERE id = ?1"),
             [id],
             row_to_item,
         )
-        .optional()?)
+        .optional()?;
+    super::links::fill(conn, item.as_mut_slice())?;
+    Ok(item)
 }
 
 /// See [`Store::item_by_url`]. Query and fragment are ignored.
@@ -374,10 +378,11 @@ impl Store {
             "SELECT {COLUMNS} FROM items WHERE state IN ({}) {ORDER} LIMIT 1000",
             state_list(states)
         );
-        let items = conn
+        let mut items: Vec<QueueItem> = conn
             .prepare(&sql)?
             .query_map([], row_to_item)?
             .collect::<Result<_, _>>()?;
+        super::links::fill(&conn, &mut items)?;
         Ok(items)
     }
 

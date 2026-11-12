@@ -1562,9 +1562,13 @@ impl AgentHub {
              - A plan, design or architecture write-up longer than a few lines goes in a markdown file \
              (in your working folder), named by its path in backticks: tab shows it as a card the person \
              opens to read, and it travels with the chat. Keep the reply itself short.\n\
-             - If the work splits into follow-ups, create them with tab_create_task; each is linked with \
-             this task both ways, so don't attach it again. Give each a body the next agent can start from. \
-             When the person asks for agents on them, pass start_agent with the first message.\n\
+             - Follow-ups: list possible next steps in your reply rather than filing them. Create tasks \
+             with tab_create_task only when the person asks, or for one concrete thing that must happen and \
+             can't be done now. Each becomes a follow-up of this task (it shows under it in the queue and \
+             is in its Context), so don't attach it again. Give each a body the next agent can start from. \
+             For work in phases or steps, pass `after` with the earlier task's id so it waits its turn; \
+             tab_link_tasks orders tasks that already exist. When the person asks for agents on them, pass \
+             start_agent with the first message.\n\
              - Waiting on CI, a deploy or anything else slow: don't block on it with sleep or a --watch \
              command in the foreground. If you can, start the wait in the background (e.g. \
              run_in_background), say what you're waiting for and end your turn; tab shows the chat as \

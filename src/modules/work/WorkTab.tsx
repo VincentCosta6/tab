@@ -21,6 +21,7 @@ import { SnoozeMenu, snoozeOptions } from "./SnoozeMenu";
 import { ScoreBreakdown } from "./ScoreBreakdown";
 import { api } from "../../lib/api";
 import { actOnItem, type ItemAction } from "./optimistic";
+import { afterBlockers, nest } from "./followups";
 
 const urgencyOrder: Urgency[] = ["now", "today", "this_week", "whenever"];
 const urgencyHeading: Record<Urgency, string> = { now: "Now", today: "Today", this_week: "This week", whenever: "Whenever" };
@@ -29,6 +30,7 @@ type Leaving = "done" | "away";
 /** A row animating out, kept drawn after the optimistic update drops it from the list. */
 type Ghost = { kind: Leaving; item: QueueItem; after: string | null };
 const WIDTH_KEY = "tab.queueWidth";
+const OPEN_FOLLOWUPS_KEY = "tab.openFollowups";
 const DEFAULT_LIST_WIDTH = 420;
 const clampWidth = (w: number) => Math.round(Math.min(Math.max(w, 300), Math.max(320, window.innerWidth - 560)));
 
@@ -101,6 +103,51 @@ export function WorkTab() {
     }
     return out;
   }, [visible, leaving]);
+  // Follow-ups fold under the task they came from; search and the other
+  // views stay flat.
+  const nested = view === "open" && !query;
+  const { top, children } = useMemo(() => (nested ? nest(drawn) : { top: drawn, children: new Map<string, QueueItem[]>() }), [drawn, nested]);
+  const grouped = useMemo(() => {
+    if (!nested) return [{ urgency: null as Urgency | null, items: top }];
+    return urgencyOrder
+      .map((u) => ({ urgency: u as Urgency | null, items: afterBlockers(top.filter((i) => (i.ranking?.urgency ?? "today") === u)) }))
+      .filter((g) => g.items.length);
+  }, [top, nested]);
+  const titles = useMemo(() => new Map(all.map((i) => [i.id, i.title])), [all]);
+  const [openFollowups, setOpenFollowups] = useState<ReadonlySet<string>>(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(OPEN_FOLLOWUPS_KEY) ?? "[]"));
+    } catch {
+      return new Set();
+    }
+  });
+  const toggleFollowups = (id: string) => setOpenFollowups((s) => {
+    const n = new Set(s);
+    if (!n.delete(id)) n.add(id);
+    try {
+      localStorage.setItem(OPEN_FOLLOWUPS_KEY, JSON.stringify([...n]));
+    } catch {
+      /* private mode: it just isn't remembered */
+    }
+    return n;
+  });
+  // The open item's parents unfold, so it's never hidden.
+  const unfolded = useMemo(() => {
+    const out = new Set(openFollowups);
+    const byId = new Map(drawn.map((i) => [i.id, i]));
+    for (let p = byId.get(selected ?? "")?.parent_id; p && !out.has(p); p = byId.get(p)?.parent_id) out.add(p);
+    return out;
+  }, [openFollowups, drawn, selected]);
+  // Rows in the order they're drawn, for the arrow keys.
+  const shown = useMemo(() => {
+    const out: QueueItem[] = [];
+    const add = (i: QueueItem) => {
+      out.push(i);
+      if (unfolded.has(i.id)) children.get(i.id)?.forEach(add);
+    };
+    grouped.forEach((g) => g.items.forEach(add));
+    return out.filter((i) => !leaving.has(i.id));
+  }, [grouped, children, unfolded, leaving]);
   useEffect(() => setHere({ itemId: selected === NEW ? null : selected }), [selected]);
 
   // A new filter or search keeps the open item while it's still in the list,
@@ -142,14 +189,14 @@ export function WorkTab() {
 
   const move = useCallback(
     (delta: number) => {
-      const idx = live.findIndex((i) => i.id === selected);
-      const next = live[Math.max(0, Math.min(live.length - 1, idx + delta))];
+      const idx = shown.findIndex((i) => i.id === selected);
+      const next = shown[Math.max(0, Math.min(shown.length - 1, idx + delta))];
       if (next) {
         setSelected(next.id);
         document.getElementById(`row-${next.id}`)?.scrollIntoView({ block: "nearest" });
       }
     },
-    [live, selected],
+    [shown, selected],
   );
 
   /**
@@ -242,12 +289,24 @@ export function WorkTab() {
   useMarkSeen(openId, openId ? activity.get(openId) : undefined);
   // Only items with a chat get a task status; that keeps the lookups few.
   const contextStatus = useContextStatus(drawn.filter((i) => activity.has(i.id)).map((i) => i.id));
-  const grouped = useMemo(() => {
-    if (view !== "open" || query) return [{ urgency: null as Urgency | null, items: drawn }];
-    return urgencyOrder
-      .map((u) => ({ urgency: u as Urgency | null, items: drawn.filter((i) => (i.ranking?.urgency ?? "today") === u) }))
-      .filter((g) => g.items.length);
-  }, [drawn, view, query]);
+  const row = (i: QueueItem, depth = 0): React.ReactNode => {
+    const kids = children.get(i.id);
+    const open = unfolded.has(i.id);
+    const waiting = (i.blocked_by ?? []).map((b) => titles.get(b) ?? "another task");
+    return (
+      <div key={i.id} className={cx(depth > 0 && "followup")}>
+        <QueueRow item={i} agent={activity.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} waiting={waiting} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
+        {kids && (
+          <button className={cx("followups-toggle", open && "open")} aria-expanded={open} onClick={() => toggleFollowups(i.id)}>
+            <Icon name="chevron-right" size={12} />
+            {kids.length} follow-up{kids.length === 1 ? "" : "s"}
+            {!open && kids.some((k) => k.blocked_by?.length) && <span className="followups-ready">· {kids.filter((k) => !k.blocked_by?.length).length} ready</span>}
+          </button>
+        )}
+        {kids && open && kids.map((k) => row(k, depth + 1))}
+      </div>
+    );
+  };
 
   return (
     <div className="work" style={{ gridTemplateColumns: `${listWidth}px 1fr` }}>
@@ -294,9 +353,7 @@ export function WorkTab() {
           {grouped.map((g) => (
             <div key={g.urgency ?? "all"}>
               {g.urgency && <div className={cx("urgency-group", `urgency-${g.urgency}`)}>{urgencyHeading[g.urgency]}</div>}
-              {g.items.map((i) => (
-                <QueueRow key={i.id} item={i} agent={activity.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
-              ))}
+              {g.items.map((i) => row(i))}
             </div>
           ))}
         </div>
@@ -336,8 +393,10 @@ function byline(item: QueueItem): string {
   return [actor, same(item.context) ? null : item.context].filter(Boolean).join(" · ");
 }
 
-export function QueueRow({ item, agent, status, selected, leaving, onSelect, onAct, compact }: {
+export function QueueRow({ item, agent, status, waiting, selected, leaving, onSelect, onAct, compact }: {
   item: QueueItem;
+  /** Titles of the tasks this one waits on. */
+  waiting?: string[];
   agent?: AgentActivity;
   /** The task's one status; without it the row shows the agent's. */
   status?: TaskStatus | null;
@@ -369,6 +428,11 @@ export function QueueRow({ item, agent, status, selected, leaving, onSelect, onA
             <ProjectChip id={item.project_id} />
             <span className="row-byline">{byline(item)}</span>
           </span>
+          {!!waiting?.length && item.state !== "done" && (
+            <span className="row-waiting" title={`Waiting on: ${waiting.join(", ")}`}>
+              <Icon name="clock" size={11} /> Waiting{waiting.length > 1 ? ` on ${waiting.length}` : ""}
+            </span>
+          )}
           {item.state === "snoozed" && item.snoozed_until && <Badge icon="clock">{timeUntil(item.snoozed_until)}</Badge>}
           <span className="row-time">{timeAgo(item.occurred_at)}</span>
         </div>
