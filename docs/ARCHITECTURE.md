@@ -270,6 +270,12 @@ Rule of thumb: a new screen should be composable from these; if it isn't, add th
 
 **Dry runs** execute reads for real and show what each write would do with its rendered inputs.
 
+**On queue items.** Each item's runs add up to one workflow status beside the agent's on its queue row and header: waiting for you (a step needs your OK, or the agent a run waits on asked you something), running, waiting on an agent, failed, held back, done (`tab_domain::workflow::item_status`, pure; `workflow_activity` reads it for the whole queue in one query). Only the newest run of each workflow on an item counts once it ends; done shows for an hour, failed and held back for a day, a blocked run for a week. The item lists its runs with links to the run, its agent's chat, and the chat or run that started it.
+
+**Approve and carry on.** A run blocked on a destructive or command step keeps its values (`resume` with no job). The person can approve that one step for that one run, with the exact inputs shown, from the item or the Runs panel (`workflow_run_answer`, a Tauri command only: no MCP tool can); the run carries on from that step. Declining ends it. The workflow's `allow_destructive` and `allow_commands` don't change.
+
+**Agents start workflows.** `tab_run_workflow` runs a workflow the person turned on (never one that's off), through every guardrail; `tab_get_workflow_run` reads a run. The run records the agent chat that started it (`started_by`). An agent a workflow's job started passes that run's chain on, so a workflow can't loop through an agent.
+
 **Building with AI.** The builder has an assistant chat (session key `workflows`) whose agent uses MCP tools `tab_list_actions`, `tab_list_workflows`, `tab_save_workflow` and `tab_test_workflow`; the open workflow is sent with each message, and what the agent saves appears on the canvas right away.
 
 ## Item timelines (built)

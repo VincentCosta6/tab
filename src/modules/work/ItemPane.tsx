@@ -8,7 +8,7 @@ import { SourceGlyph } from "../../design/brands";
 import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
-import { useChat, useItem } from "../../lib/hooks";
+import { useChat, useItem, useWorkflowActivity } from "../../lib/hooks";
 import { isPinned, useThreadFiles } from "../../lib/threadFiles";
 import { offerDone } from "../../lib/nav";
 import { keys } from "../../lib/query";
@@ -23,6 +23,7 @@ import { ReadModeSwitch, Reader, useHasRich, useReadMode } from "./Reader";
 import { ProjectPicker, useProjectTint } from "./Projects";
 import { SnoozeMenu } from "./SnoozeMenu";
 import { Timeline } from "./Timeline";
+import { ItemWorkflows, WorkflowPill } from "./WorkflowStatus";
 
 const ReviewView = lazy(() => import("../github/review/Workspace"));
 
@@ -41,6 +42,7 @@ export function ItemPane({ id, arrived, onAct, onSelect }: {
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const { data: chat } = useChat(id);
+  const workflow = useWorkflowActivity().get(id);
   const all = useThreadFiles(chat);
   const files = useMemo(() => all.filter(isPinned), [all]);
   const [readMode, setReadMode] = useReadMode();
@@ -116,6 +118,11 @@ export function ItemPane({ id, arrived, onAct, onSelect }: {
               <span className="item-when">· {timeAgo(item.occurred_at)}</span>
               {item.state === "snoozed" && item.snoozed_until && <Badge icon="clock">back in {timeUntil(item.snoozed_until)}</Badge>}
               {item.state === "done" && <Badge tone="success" icon="check">Done</Badge>}
+              {workflow && (
+                <button className="item-wf-pill" title="See the item's workflow runs" onClick={() => document.getElementById(`wf-runs-${item.id}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" })}>
+                  <WorkflowPill status={workflow} />
+                </button>
+              )}
             </div>
         <div className="item-actions">
           {pull && <Button size="sm" icon="code" shortcut="R" title="Review (R)" onClick={() => setReviewing(true)}>Review</Button>}
@@ -134,6 +141,7 @@ export function ItemPane({ id, arrived, onAct, onSelect }: {
         </div>
       </header>
       <div className="item-cloud-gaps"><CloudGaps itemId={item.id} /></div>
+      <div id={`wf-runs-${item.id}`}><ItemWorkflows itemId={item.id} /></div>
       <ContextDrawer
         item={item}
         onSelect={onSelect}

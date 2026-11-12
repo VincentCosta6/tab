@@ -26,6 +26,7 @@
 //!   turns them on, and destructive actions (merge, close, move mail) stay
 //!   blocked until the person allows them on that workflow.
 
+pub mod item_status;
 pub mod run;
 pub mod stats;
 pub mod template;
@@ -40,8 +41,8 @@ use crate::model::Change;
 use crate::model::{ActionInfo, ConnectorInfo, Effect};
 
 pub use run::{
-    Billing, Intervention, InterventionKind, Resume, Run, RunStatus, StepMetrics, StepRun,
-    StepStatus,
+    Billing, Intervention, InterventionKind, Resume, Run, RunStatus, StepApproval, StepMetrics,
+    StepRun, StepStatus,
 };
 
 /// A run that was caused by another run stops after this many links.

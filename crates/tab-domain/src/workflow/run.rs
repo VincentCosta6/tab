@@ -69,14 +69,28 @@ pub enum StepStatus {
     Waiting,
 }
 
-/// Where a paused run picks up: the step after the agent step, with the
-/// run's values as they were, once job `job` finishes.
+/// Where a paused run picks up, with the run's values as they were.
+///
+/// A run waiting on an agent carries on at the step after the agent step
+/// once job `job` finishes. A run blocked on a destructive or command step
+/// has no job (`job` is empty): if the person approves that step for this
+/// run, it runs that step and carries on.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Resume {
     pub job: String,
-    /// Index of the agent step in the workflow version that ran.
+    /// Index of the paused step in the workflow version that ran.
     pub step: usize,
     pub ctx: Value,
+}
+
+/// A step the person let run once, on one run, after it was blocked.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StepApproval {
+    pub step: String,
+    /// The inputs they saw. The step runs only if it renders the same.
+    #[serde(default)]
+    pub input: Value,
+    pub at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -206,4 +220,70 @@ pub struct Run {
     /// The failed run a person ran again to get this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rerun_of: Option<String>,
+    /// The agent chat (session id) that started it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<String>,
+    /// The run that led to this one, when it's known: the run whose agent
+    /// started it, or whose signal it answered. Runs started by an item
+    /// change another run made only have `chain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caused_by: Option<String>,
+    /// Steps the person let run on this run only (never the workflow's
+    /// `allow_destructive`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approved: Vec<StepApproval>,
+}
+
+impl Run {
+    /// Where a blocked run would carry on if the person approved its
+    /// blocked step. `None` for every other run, and for runs blocked
+    /// before approvals existed, which can't carry on.
+    pub fn awaiting_approval(&self) -> Option<&Resume> {
+        self.resume
+            .as_ref()
+            .filter(|r| self.status == RunStatus::Blocked && !self.dry_run && r.job.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_run_stored_before_approvals_and_agent_starts_still_parses() {
+        let old = r#"{"id":"r","workflow_id":"w","workflow_name":"W","version":1,"status":"blocked",
+            "dry_run":false,"trigger":"t","trigger_key":null,"item_id":"i","chain":[],"steps":[],
+            "error":"Merge is destructive.","started_at":"2026-01-02T03:04:05Z",
+            "finished_at":"2026-01-02T03:04:06Z"}"#;
+        let run: Run = serde_json::from_str(old).unwrap();
+        assert_eq!(run.started_by, None);
+        assert_eq!(run.caused_by, None);
+        assert!(run.approved.is_empty());
+        assert!(
+            run.awaiting_approval().is_none(),
+            "nothing to carry on from"
+        );
+        let again = serde_json::to_value(&run).unwrap();
+        assert!(again.get("approved").is_none() && again.get("started_by").is_none());
+    }
+
+    #[test]
+    fn only_a_blocked_run_with_its_values_kept_awaits_approval() {
+        let mut run: Run = serde_json::from_value(serde_json::json!({
+            "id": "r", "workflow_id": "w", "workflow_name": "W", "version": 1, "status": "blocked",
+            "dry_run": false, "trigger": "t", "trigger_key": null, "item_id": null, "chain": [],
+            "steps": [], "error": null, "started_at": "2026-01-02T03:04:05Z", "finished_at": null,
+            "resume": { "job": "", "step": 2, "ctx": {} },
+        }))
+        .unwrap();
+        assert_eq!(run.awaiting_approval().map(|r| r.step), Some(2));
+        run.status = RunStatus::Waiting;
+        assert!(run.awaiting_approval().is_none());
+        run.status = RunStatus::Blocked;
+        run.resume.as_mut().unwrap().job = "job-1".into();
+        assert!(
+            run.awaiting_approval().is_none(),
+            "a job's resume isn't an approval"
+        );
+    }
 }

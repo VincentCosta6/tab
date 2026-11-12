@@ -27,6 +27,9 @@
 //! * `tab_list_actions`, `tab_list_workflows`, `tab_save_workflow`,
 //!   `tab_test_workflow`: build workflows. Agents draft and dry-run them;
 //!   only the person turns one on.
+//! * `tab_run_workflow`, `tab_get_workflow_run`: start a workflow the
+//!   person turned on, and follow the run. Every guardrail applies; a
+//!   blocked step waits for the person, never for an agent.
 //! * `tab_vault_search`, `tab_vault_get` (a project's coordinator) and
 //!   `tab_vault_request` (its other threads): the end-to-end encrypted
 //!   vault ([`crate::e2e`]), listed only to chats the person drives on the
@@ -119,6 +122,15 @@ pub trait EngineAccess: Send + Sync + 'static {
         _item_id: Option<String>,
     ) -> anyhow::Result<Run> {
         anyhow::bail!("workflows can't be tested from here")
+    }
+    /// Starts an enabled workflow for real, for the agent chat `session`.
+    async fn run_workflow_for_agent(
+        &self,
+        _workflow_id: String,
+        _item_id: Option<String>,
+        _session: Option<String>,
+    ) -> anyhow::Result<workflow::runtime::AgentRun> {
+        anyhow::bail!("workflows can't be run from here")
     }
 }
 
@@ -960,6 +972,40 @@ fn text(t: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": t.into() }] })
 }
 
+/// A run as an agent sees it: where it stands, each step's result, and
+/// what happens next in words.
+fn agent_run_json(run: &Run, repeat: bool) -> Value {
+    use workflow::RunStatus;
+    let next = match run.status {
+        RunStatus::Blocked => {
+            "A step needs the person's OK. Tell them; they approve or decline it on the item or in the Workflows tab. You can't approve it."
+        }
+        RunStatus::Waiting => {
+            "Waiting on an agent step; check again later with tab_get_workflow_run."
+        }
+        RunStatus::Running => "Still running; check again with tab_get_workflow_run.",
+        RunStatus::Throttled => "Held back by a rate limit; it didn't run.",
+        RunStatus::LoopStopped => {
+            "Refused: it would have looped, or the chain of workflows got too long."
+        }
+        _ => "",
+    };
+    json!({
+        "run_id": run.id,
+        "workflow": run.workflow_name,
+        "status": run.status,
+        "already_started": repeat.then_some(true),
+        "item_id": run.item_id,
+        "error": run.error,
+        "next": (!next.is_empty()).then_some(next),
+        "steps": run.steps.iter().map(|s| json!({
+            "id": s.id, "status": s.status, "error": s.error, "output": s.output,
+        })).collect::<Vec<_>>(),
+        "started": run.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        "finished": run.finished_at.map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+    })
+}
+
 /// A list of ids, from a JSON array or a single string.
 fn ids(v: &Value) -> Vec<String> {
     match v {
@@ -1252,6 +1298,21 @@ pub fn tools() -> Value {
                 "workflow": { "type": "object", "description": "A draft definition, instead of workflow_id." },
                 "item_id": { "type": "string", "description": "The item to run it on, from tab_search. Optional for schedule and signal triggers." }
             } }
+        },
+        {
+            "name": "tab_run_workflow",
+            "description": "Run one of the person's workflows for real, now, on a queue item if given, and wait for it. Only workflows the person turned on can run (tab_list_workflows says which). Every guardrail applies: hourly limits, loops (a workflow can't start itself again through you), and destructive or command steps stay blocked unless the person allowed them on that workflow. A blocked step waits for the person's OK in tab; you can't give it. Asking again for the same workflow and item within 10 minutes returns the run already started. Use tab_test_workflow first if you only want to see what it would do.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow_id": { "type": "string" },
+                "item_id": { "type": "string", "description": "The item to run it on, from tab_search. Optional." }
+            }, "required": ["workflow_id"] }
+        },
+        {
+            "name": "tab_get_workflow_run",
+            "description": "A workflow run's status and each step's result, by run id (from tab_run_workflow or tab_list_workflows). Statuses: running, waiting (on an agent step), succeeded, stopped (a filter ended it, or the person declined a step), failed, blocked (a step waits for the person's OK), throttled, loop_stopped.",
+            "inputSchema": { "type": "object", "properties": {
+                "run_id": { "type": "string" }
+            }, "required": ["run_id"] }
         },
         {
             "name": "approve",
@@ -2933,6 +2994,31 @@ impl McpServer {
                     "steps": run.steps,
                 }))?))
             }
+            "tab_run_workflow" => {
+                let id = s("workflow_id").ok_or_else(|| anyhow::anyhow!("pass workflow_id"))?;
+                let started = self
+                    .engine
+                    .run_workflow_for_agent(
+                        id,
+                        s("item_id"),
+                        session.filter(|s| !s.is_empty()).map(str::to_string),
+                    )
+                    .await?;
+                Ok(text(serde_json::to_string_pretty(&agent_run_json(
+                    &started.run,
+                    started.repeat,
+                ))?))
+            }
+            "tab_get_workflow_run" => {
+                let id = s("run_id").ok_or_else(|| anyhow::anyhow!("pass run_id"))?;
+                let run = self
+                    .store
+                    .workflow_run_get(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("no run {id}"))?;
+                Ok(text(serde_json::to_string_pretty(&agent_run_json(
+                    &run, false,
+                ))?))
+            }
             _ => anyhow::bail!("unknown tool {name}"),
         }
     }
@@ -3027,7 +3113,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 24);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 26);
         let always: Vec<&str> = list["result"]["tools"]
             .as_array()
             .unwrap()
@@ -4921,5 +5007,124 @@ rl.on('line', (l) => {
         for a in ["search", "request", "approve", "reveal"] {
             assert!(log.iter().any(|x| x.action == a), "no {a}");
         }
+    }
+
+    /// What `tab_run_workflow` asked for: workflow, item, chat.
+    type Asked = (String, Option<String>, Option<String>);
+
+    /// Records what `tab_run_workflow` asked for; starts nothing.
+    struct Starts(Arc<Store>, std::sync::Mutex<Vec<Asked>>);
+
+    #[async_trait]
+    impl EngineAccess for Starts {
+        async fn create_task(&self, _t: NewTask) -> anyhow::Result<QueueItem> {
+            anyhow::bail!("not in this test")
+        }
+        async fn preview(&self, _id: &str) -> anyhow::Result<Preview> {
+            anyhow::bail!("not in this test")
+        }
+        async fn run_workflow_for_agent(
+            &self,
+            workflow_id: String,
+            item_id: Option<String>,
+            session: Option<String>,
+        ) -> anyhow::Result<workflow::runtime::AgentRun> {
+            self.1
+                .lock()
+                .unwrap()
+                .push((workflow_id.clone(), item_id.clone(), session.clone()));
+            let run: Run = serde_json::from_value(json!({
+                "id": "run-1", "workflow_id": workflow_id, "workflow_name": "Merge when green",
+                "version": 1, "status": "blocked", "dry_run": false, "trigger": "by an agent",
+                "trigger_key": null, "item_id": item_id, "chain": [], "steps": [],
+                "error": "Merge a pull request is destructive.", "started_at": Utc::now(),
+                "finished_at": Utc::now(), "started_by": session,
+                "resume": { "job": "", "step": 0, "ctx": {} },
+            }))?;
+            self.0.workflow_run_insert(&run)?;
+            Ok(workflow::runtime::AgentRun { run, repeat: false })
+        }
+    }
+
+    #[tokio::test]
+    async fn agents_start_workflows_as_their_chat_but_cant_approve_a_blocked_step() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let engine = Arc::new(Starts(store.clone(), Default::default()));
+        let server = McpServer {
+            store: store.clone(),
+            hub,
+            engine: engine.clone(),
+            events,
+            token: "t".into(),
+        };
+        let out = server
+            .call(
+                Some("chat-1"),
+                "tab_run_workflow",
+                json!({ "workflow_id": "w1", "item_id": "i1" }),
+            )
+            .await
+            .unwrap();
+        let said = out["content"][0]["text"].as_str().unwrap();
+        assert!(said.contains("\"status\": \"blocked\""), "{said}");
+        assert!(said.contains("You can't approve it"), "{said}");
+        assert_eq!(
+            engine.1.lock().unwrap().clone(),
+            [(
+                "w1".to_string(),
+                Some("i1".to_string()),
+                Some("chat-1".to_string())
+            )]
+        );
+        let got = server
+            .call(None, "tab_get_workflow_run", json!({ "run_id": "run-1" }))
+            .await
+            .unwrap();
+        assert!(
+            got["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("blocked")
+        );
+
+        // No tool answers a blocked run: that's a button in the app.
+        let names: Vec<String> = tools()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(names.contains(&"tab_run_workflow".to_string()));
+        assert!(names.contains(&"tab_get_workflow_run".to_string()));
+        for n in &names {
+            assert!(
+                !(n.contains("workflow")
+                    && (n.contains("approve") || n.contains("answer") || n.contains("allow"))),
+                "{n} could give a workflow the person's OK"
+            );
+        }
+        // Saving the workflow as an agent can't allow it either.
+        let _ = server
+            .call(
+                Some("chat-1"),
+                "tab_save_workflow",
+                json!({ "workflow": { "id": "w1", "allow_destructive": true } }),
+            )
+            .await;
+        let run = store.workflow_run_get("run-1").unwrap().unwrap();
+        assert!(run.awaiting_approval().is_some() && run.approved.is_empty());
+        assert!(
+            server
+                .call(None, "tab_get_workflow_run", json!({}))
+                .await
+                .is_err()
+        );
     }
 }
