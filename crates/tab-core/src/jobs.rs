@@ -524,6 +524,7 @@ impl JobRunner {
             summary,
             branch,
             pr_url,
+            usage: None,
         })
     }
 }

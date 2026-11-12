@@ -27,6 +27,7 @@
 //!   blocked until the person allows them on that workflow.
 
 pub mod run;
+pub mod stats;
 pub mod template;
 
 use std::collections::{HashMap, HashSet};
@@ -38,7 +39,10 @@ use serde_json::{Map, Value};
 use crate::model::Change;
 use crate::model::{ActionInfo, ConnectorInfo, Effect};
 
-pub use run::{Resume, Run, RunStatus, StepRun, StepStatus};
+pub use run::{
+    Billing, Intervention, InterventionKind, Resume, Run, RunStatus, StepMetrics, StepRun,
+    StepStatus,
+};
 
 /// A run that was caused by another run stops after this many links.
 pub const MAX_CHAIN: usize = 3;

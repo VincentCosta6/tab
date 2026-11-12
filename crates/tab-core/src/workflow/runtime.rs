@@ -514,6 +514,7 @@ impl Runtime {
         Run {
             runner: self.host.leases().holder(),
             resume: None,
+            rerun_of: None,
             id: uuid::Uuid::new_v4().to_string(),
             workflow_id: w.id.clone(),
             workflow_name: w.name.clone(),
@@ -698,6 +699,8 @@ impl Runtime {
                 output: Value::Null,
                 error: None,
                 ms: 0,
+                metrics: None,
+                interventions: Vec::new(),
             };
             if !all_hold(&step.when, &ctx) {
                 sr.status = StepStatus::Skipped;
@@ -1201,6 +1204,7 @@ mod tests {
                 summary: "Pinned the clock in the test".into(),
                 branch: Some("fix-flaky".into()),
                 pr_url: None,
+                usage: None,
             },
             finished_at: Utc::now(),
         };

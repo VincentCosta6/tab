@@ -321,6 +321,7 @@ mod tests {
             finished_at: Some(now),
             runner: String::new(),
             resume: None,
+            rerun_of: None,
         };
         assert!(s.workflow_run_insert(&run).unwrap());
         let mut dup = run.clone();

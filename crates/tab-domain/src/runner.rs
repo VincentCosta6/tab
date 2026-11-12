@@ -175,6 +175,31 @@ pub struct JobResult {
     /// A pull request it opened.
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// What the agent's session spent, when the runner knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<JobUsage>,
+}
+
+/// What a job's agent session spent, reported by the runner that ran it
+/// (usage counters themselves never leave that device).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct JobUsage {
+    pub billing: crate::workflow::Billing,
+    /// What was billed; zero on a subscription.
+    pub cost_usd: f64,
+    /// On a subscription: the part of the plan's allowance it used, 0.0
+    /// to 1.0, when the harness reports its plan windows.
+    pub plan_share: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// The harness and model that ran, which a family or a default decided.
+    pub harness: String,
+    pub model: String,
+    /// Time the session spent waiting on the person.
+    pub human_wait_ms: u64,
+    /// Times the runner moved on to the family's next model.
+    pub fallbacks: u32,
 }
 
 /// One job, as stored and synced.

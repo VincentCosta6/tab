@@ -90,6 +90,91 @@ pub struct StepRun {
     pub output: Value,
     pub error: Option<String>,
     pub ms: u64,
+    /// What an agent step took and spent. Absent on other steps, and on
+    /// runs from before this was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<StepMetrics>,
+    /// Each time a person had to step in on this step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interventions: Vec<Intervention>,
+}
+
+/// What an agent step took and spent, filled in when its job finishes.
+/// Everything defaults to zero or empty, so a runner that reports less
+/// (an older one, or a harness that doesn't say what it cost) still fits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct StepMetrics {
+    /// From the job being created to a runner claiming it.
+    pub queue_ms: u64,
+    /// From the claim to the result.
+    pub work_ms: u64,
+    /// Time inside `work_ms` spent waiting on the person.
+    pub human_wait_ms: u64,
+    /// How the session was paid for, which decides what its cost reads
+    /// as: dollars through an API key, usage on a subscription.
+    pub billing: Billing,
+    /// What it was billed. Zero on a subscription, where nothing is
+    /// billed per run.
+    pub cost_usd: f64,
+    /// On a subscription: how much of the plan's allowance the step used,
+    /// 0.0 to 1.0, when the harness reports its plan windows.
+    pub plan_share: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// The model family the step asked for; empty when it pinned a model
+    /// or took the runner's default.
+    pub family: String,
+    /// The harness and model that ran it.
+    pub harness: String,
+    pub model: String,
+    /// Claims made on the job.
+    pub attempts: u32,
+    /// Times the runner moved on to the family's next model.
+    pub fallbacks: u32,
+}
+
+/// How an agent session is paid for.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Billing {
+    /// Per token, through an API key: the cost is dollars.
+    Api,
+    /// A plan with usage windows: the cost is tokens and plan share.
+    Subscription,
+    /// The harness didn't say (or said something newer than this build).
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum InterventionKind {
+    /// An OK the workflow asks for by design (a destructive step).
+    Approval,
+    /// The agent stopped to ask the person something.
+    Question,
+    /// The person wrote into the job's chat unasked.
+    Message,
+    /// The person stopped the job.
+    Stopped,
+    /// The person ran it again after it failed.
+    Rerun,
+}
+
+impl InterventionKind {
+    /// Planned interventions are part of the workflow's design; the rest
+    /// mean it couldn't finish on its own.
+    pub fn planned(self) -> bool {
+        matches!(self, InterventionKind::Approval)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Intervention {
+    pub kind: InterventionKind,
+    pub at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -118,4 +203,7 @@ pub struct Run {
     /// Set while the run waits on an agent step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<Resume>,
+    /// The failed run a person ran again to get this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerun_of: Option<String>,
 }
