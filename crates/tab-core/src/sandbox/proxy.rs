@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// A running proxy; it stops when dropped.
@@ -187,7 +187,8 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
             sock.write_all(refuse(&host).as_bytes()).await?;
             return Ok(());
         }
-        let mut up = TcpStream::connect((host.as_str(), port)).await?;
+        // Upstream through the company proxy when one is set (crate::net).
+        let mut up = crate::net::connect(&host, port, true).await?;
         sock.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
         if buf.len() > head_end {
@@ -212,7 +213,7 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         sock.write_all(refuse(&host).as_bytes()).await?;
         return Ok(());
     }
-    let mut up = TcpStream::connect((host.as_str(), port)).await?;
+    let mut up = crate::net::connect(&host, port, false).await?;
     let rest_of_head = &head[first.len()..];
     up.write_all(format!("{method} {path} {version}{rest_of_head}").as_bytes())
         .await?;

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Badge, Button, Card, FormRow, Meter, Section } from "../../../design/components";
 import { Markdown } from "../../../design/markdown";
 import { timeAgo } from "../../../lib/format";
@@ -23,6 +24,7 @@ export function UpdatesPage() {
         <FormRow label="This version">
           <span className="mono">{v ? v.version : "…"}</span>
         </FormRow>
+        <ThirdPartyLicenses />
         <FormRow label="Status" help={v?.updates && ago ? `Last checked ${/^\d/.test(ago) ? `${ago} ago` : ago}` : undefined}>
           <div className="settings-version">
             <div className="settings-version-line">
@@ -59,6 +61,32 @@ export function UpdatesPage() {
         </Card>
       )}
     </Section>
+  );
+}
+
+/**
+ * The open source software tab ships and each license text, from
+ * THIRD_PARTY_LICENSES.txt (written by scripts/licenses/notices.sh for each
+ * release; dev builds don't have it).
+ */
+function ThirdPartyLicenses() {
+  const [text, setText] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const load = () =>
+    fetch("/THIRD_PARTY_LICENSES.txt")
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(String(r.status)))))
+      .then((t) => (t.startsWith("THIRD-PARTY") ? setText(t) : Promise.reject(new Error("missing"))))
+      .catch(() => setFailed(true));
+  return (
+    <FormRow label="Third-party licenses" help="The open source software in tab, with each license and notice.">
+      {text ? (
+        <pre className="settings-notes mono" style={{ maxHeight: 320, overflow: "auto", whiteSpace: "pre-wrap" }}>{text}</pre>
+      ) : failed ? (
+        <span className="subtle">Only release builds include them.</span>
+      ) : (
+        <Button size="sm" onClick={() => void load()}>Show</Button>
+      )}
+    </FormRow>
   );
 }
 

@@ -480,6 +480,8 @@ export interface Harness {
   /** What background helpers use when no model is set; null is the harness's own default. */
   small_model: string | null;
   install: { npm: string | null; unix: string | null; windows: string | null };
+  /** How to run it over the Agent Client Protocol, when its chats can go through it. */
+  acp?: { command: string | null; adapter: { npm: string | null; repo: string; license: string } | null } | null;
 }
 
 /** One model a harness can run. */
@@ -881,6 +883,8 @@ export interface AgentConfig {
   /** Only tab's connections load in chats, never the person's own agent setup. On unless turned off. */
   strict?: boolean;
   opencode_url: string | null;
+  /** Harnesses whose chats run through the Agent Client Protocol (a preview). */
+  acp?: string[];
   budget: BudgetConfig;
 }
 

@@ -44,6 +44,60 @@ pub struct Harness {
     /// PATH doesn't include them yet.
     #[serde(default)]
     pub bin_dirs: Vec<String>,
+    /// How to run it over the Agent Client Protocol (see `agents::acp`),
+    /// for harnesses whose chats can go through it.
+    #[serde(default)]
+    pub acp: Option<AcpSpec>,
+}
+
+/// An ACP agent as data: the program, its arguments and environment, and
+/// what strict mode adds. A new ACP agent is a new entry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AcpSpec {
+    /// The program; `None` runs the harness's own command (it speaks ACP).
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Added in strict mode, to keep the person's own setup out.
+    #[serde(default)]
+    pub strict_args: Vec<String>,
+    #[serde(default)]
+    pub strict_env: std::collections::BTreeMap<String, String>,
+    /// How it names MCP tools (`mcp__{server}__{tool}` or
+    /// `{server}_{tool}`), so strict mode can spot a server tab didn't add.
+    #[serde(default)]
+    pub mcp_tool_name: Option<String>,
+    /// The adapter, when it's a program of its own. Its license is checked
+    /// before tab offers it (see `every_acp_adapter_has_an_allowed_license`).
+    #[serde(default)]
+    pub adapter: Option<AcpAdapter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AcpAdapter {
+    pub npm: Option<String>,
+    pub repo: String,
+    /// SPDX id, as read from the repository.
+    pub license: String,
+}
+
+impl AcpSpec {
+    pub fn args_for(&self, strict: bool) -> Vec<std::ffi::OsString> {
+        let extra = if strict { &self.strict_args[..] } else { &[] };
+        self.args.iter().chain(extra).map(Into::into).collect()
+    }
+
+    pub fn env_for(&self, strict: bool) -> Vec<(&str, &str)> {
+        let extra = strict.then_some(&self.strict_env).into_iter().flatten();
+        self.env
+            .iter()
+            .chain(extra)
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
 }
 
 /// How the app draws it.
@@ -326,6 +380,34 @@ mod tests {
                 super::super::find(kind, None).ok()
             );
         }
+    }
+
+    #[test]
+    fn every_acp_adapter_has_an_allowed_license() {
+        // Same list as deny.toml: tab only offers adapters it could ship.
+        const ALLOWED: &[&str] = &["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC"];
+        for h in harnesses() {
+            if let Some(a) = h.acp.as_ref().and_then(|a| a.adapter.as_ref()) {
+                assert!(
+                    ALLOWED.contains(&a.license.as_str()),
+                    "{}: {}",
+                    h.id,
+                    a.license
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strict_adds_its_arguments_and_environment() {
+        let h = harness(AgentKind::OpenCode);
+        let acp = h.acp.as_ref().expect("OpenCode speaks ACP");
+        assert_eq!(acp.args_for(false), ["acp"]);
+        assert!(
+            acp.env_for(true)
+                .contains(&("OPENCODE_DISABLE_CLAUDE_CODE", "1"))
+        );
+        assert!(acp.env_for(false).is_empty());
     }
 
     #[test]

@@ -359,9 +359,81 @@ const BLOCK: &[&str] = &[
     "details",
 ];
 
+/// A web page's title, links, and its text as Markdown: headings, lists,
+/// tables, emphasis and code kept, scripts, styles, navigation and footers
+/// dropped. The Markdown comes from Zed's `html_to_markdown` (a real HTML
+/// parser); the hand-written pass below is the fallback.
+pub fn html(src: &str) -> Page {
+    let mut page = html_scan(src);
+    if let Some(md) = html_to_markdown(src) {
+        page.text = cut(md);
+    }
+    page
+}
+
+/// HTML as Markdown, without the page's chrome. `None` if it couldn't be
+/// read or holds no text.
+pub fn html_to_markdown(src: &str) -> Option<String> {
+    use html_to_markdown::markdown::{
+        CodeHandler, HeadingHandler, ListHandler, ParagraphHandler, StyledTextHandler, TableHandler,
+    };
+    use html_to_markdown::{HandleTag, HtmlElement, MarkdownWriter, StartTagOutcome, TagHandler};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Skips what isn't the page's content (as `SKIP`).
+    struct Chrome;
+    impl HandleTag for Chrome {
+        fn should_handle(&self, tag: &str) -> bool {
+            tag == "head" || SKIP.contains(&tag)
+        }
+        fn handle_tag_start(&mut self, _: &HtmlElement, _: &mut MarkdownWriter) -> StartTagOutcome {
+            StartTagOutcome::Skip
+        }
+    }
+
+    let mut handlers: Vec<TagHandler> = vec![
+        Rc::new(RefCell::new(Chrome)),
+        Rc::new(RefCell::new(ParagraphHandler)),
+        Rc::new(RefCell::new(HeadingHandler)),
+        Rc::new(RefCell::new(ListHandler)),
+        Rc::new(RefCell::new(TableHandler::new())),
+        Rc::new(RefCell::new(StyledTextHandler)),
+        Rc::new(RefCell::new(CodeHandler)),
+    ];
+    let md = html_to_markdown::convert_html_to_markdown(src.as_bytes(), &mut handlers).ok()?;
+    // At most one blank line in a row.
+    let md = md.replace('\u{a0}', " ");
+    let mut out = String::with_capacity(md.len());
+    let mut blank = 0;
+    let mut code = false;
+    for line in md.lines() {
+        let mut line = line.trim_end();
+        if line.trim_start().starts_with("```") {
+            code = !code;
+        }
+        // Indentation from the HTML source; nested lists keep theirs.
+        let t = line.trim_start();
+        if !code && !t.starts_with(['-', '*', '|']) && !t.starts_with(|c: char| c.is_ascii_digit())
+        {
+            line = t;
+        }
+        if !code && line.trim().is_empty() {
+            blank += 1;
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str(if blank > 0 { "\n\n" } else { "\n" });
+        }
+        blank = 0;
+        out.push_str(line);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// A forgiving HTML-to-text pass: drops scripts, styles, navigation and
 /// footers, keeps headings as markdown headings, and lists the links.
-pub fn html(src: &str) -> Page {
+fn html_scan(src: &str) -> Page {
     let mut page = Page::default();
     let mut out = String::new();
     let mut rest = src;
@@ -459,6 +531,21 @@ pub fn html(src: &str) -> Page {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn html_becomes_markdown() {
+        let md = html_to_markdown(
+            "<div><p>Hi <strong>Sam</strong>,</p><p>The <code>deploy</code> failed:</p>\
+             <table><tr><th>Step</th><th>Result</th></tr><tr><td>build</td><td>ok</td></tr></table>\
+             <ol><li>Retry</li><li>Page me</li></ol></div>",
+        )
+        .unwrap();
+        assert!(md.contains("Hi **Sam**,"), "{md}");
+        assert!(md.contains("`deploy`"), "{md}");
+        assert!(md.contains("| Step | Result |"), "{md}");
+        assert!(md.contains("- Retry\n- Page me"), "{md}");
+        assert_eq!(html_to_markdown("<script>x()</script>"), None);
+    }
 
     #[test]
     fn html_keeps_text_headings_and_links() {

@@ -727,16 +727,15 @@ impl LspHub {
                 if let Some(req_id) = msg.get("id").cloned() {
                     // workspace/configuration wants one item per request; others take null.
                     let result = if method == "workspace/configuration" {
-                        let items = msg["params"]["items"]
-                            .as_array()
-                            .cloned()
-                            .unwrap_or_default();
+                        let items = serde_json::from_value::<lsp_types::ConfigurationParams>(
+                            msg["params"].clone(),
+                        )
+                        .map(|p| p.items)
+                        .unwrap_or_default();
                         Value::Array(
                             items
                                 .iter()
-                                .map(|i| {
-                                    section(&settings, i.get("section").and_then(Value::as_str))
-                                })
+                                .map(|i| section(&settings, i.section.as_deref()))
                                 .collect(),
                         )
                     } else {
@@ -772,38 +771,7 @@ impl LspHub {
         let init = session
             .request(
                 "initialize",
-                json!({
-                    "processId": std::process::id(),
-                    "clientInfo": { "name": "tab" },
-                    "rootUri": root_uri,
-                    "initializationOptions": init_options,
-                    "workspaceFolders": [{ "uri": root_uri, "name": root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() }],
-                    "capabilities": {
-                        "general": { "positionEncodings": ["utf-16"] },
-                        "textDocument": {
-                            "synchronization": { "didSave": false, "dynamicRegistration": false },
-                            "hover": { "contentFormat": ["markdown", "plaintext"] },
-                            "definition": { "linkSupport": true },
-                            "typeDefinition": { "linkSupport": true },
-                            "implementation": { "linkSupport": true },
-                            "references": {},
-                            "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
-                            "documentHighlight": {},
-                            "publishDiagnostics": { "relatedInformation": false },
-                            "semanticTokens": {
-                                "dynamicRegistration": false,
-                                "requests": { "full": true, "range": false },
-                                "tokenTypes": SEMANTIC_TYPES,
-                                "tokenModifiers": SEMANTIC_MODIFIERS,
-                                "formats": ["relative"],
-                                "overlappingTokenSupport": false,
-                                "multilineTokenSupport": false,
-                            },
-                        },
-                        "workspace": { "workspaceFolders": true, "configuration": true, "semanticTokens": { "refreshSupport": false } },
-                        "window": { "workDoneProgress": false },
-                    },
-                }),
+                serde_json::to_value(initialize_params(root, &root_uri, init_options)?)?,
             )
             .await;
         let caps = match init {
@@ -813,7 +781,12 @@ impl LspHub {
                 return Err(e.context(format!("{} didn't start", s.name)));
             }
         };
-        session.notify("initialized", json!({})).await?;
+        session
+            .notify(
+                "initialized",
+                serde_json::to_value(lsp_types::InitializedParams {})?,
+            )
+            .await?;
         let _ = session.capabilities.set(caps);
         self.sessions.lock().await.insert(id, session.clone());
         Ok(session)
@@ -836,6 +809,108 @@ impl LspHub {
             s.stop().await;
         }
     }
+}
+
+/// What tab tells a server it can do: the editor's read-only features
+/// (hover, go to, references, symbols, highlights, diagnostics and semantic
+/// tokens), in UTF-16 positions as Monaco counts them.
+fn initialize_params(
+    root: &Path,
+    root_uri: &str,
+    init_options: Value,
+) -> anyhow::Result<lsp_types::InitializeParams> {
+    use lsp_types::*;
+    let uri: Uri = root_uri
+        .parse()
+        .map_err(|e| anyhow::anyhow!("{root_uri} isn't a URI: {e:?}"))?;
+    let links = || {
+        Some(GotoCapability {
+            dynamic_registration: None,
+            link_support: Some(true),
+        })
+    };
+    let text_document = TextDocumentClientCapabilities {
+        synchronization: Some(TextDocumentSyncClientCapabilities {
+            dynamic_registration: Some(false),
+            did_save: Some(false),
+            ..Default::default()
+        }),
+        hover: Some(HoverClientCapabilities {
+            content_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
+            ..Default::default()
+        }),
+        definition: links(),
+        type_definition: links(),
+        implementation: links(),
+        references: Some(ReferenceClientCapabilities::default()),
+        document_symbol: Some(DocumentSymbolClientCapabilities {
+            hierarchical_document_symbol_support: Some(true),
+            ..Default::default()
+        }),
+        document_highlight: Some(DocumentHighlightClientCapabilities::default()),
+        publish_diagnostics: Some(PublishDiagnosticsClientCapabilities {
+            related_information: Some(false),
+            ..Default::default()
+        }),
+        semantic_tokens: Some(SemanticTokensClientCapabilities {
+            dynamic_registration: Some(false),
+            requests: SemanticTokensClientCapabilitiesRequests {
+                range: Some(false),
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+            },
+            token_types: SEMANTIC_TYPES
+                .iter()
+                .map(|t| SemanticTokenType::new(t))
+                .collect(),
+            token_modifiers: SEMANTIC_MODIFIERS
+                .iter()
+                .map(|m| SemanticTokenModifier::new(m))
+                .collect(),
+            formats: vec![TokenFormat::RELATIVE],
+            overlapping_token_support: Some(false),
+            multiline_token_support: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    #[allow(deprecated)] // root_uri: older servers still read it.
+    Ok(InitializeParams {
+        process_id: Some(std::process::id()),
+        client_info: Some(ClientInfo {
+            name: "tab".into(),
+            version: None,
+        }),
+        root_uri: Some(uri.clone()),
+        initialization_options: Some(init_options),
+        workspace_folders: Some(vec![WorkspaceFolder {
+            uri,
+            name: root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        }]),
+        capabilities: ClientCapabilities {
+            general: Some(GeneralClientCapabilities {
+                position_encodings: Some(vec![PositionEncodingKind::UTF16]),
+                ..Default::default()
+            }),
+            text_document: Some(text_document),
+            workspace: Some(WorkspaceClientCapabilities {
+                workspace_folders: Some(true),
+                configuration: Some(true),
+                semantic_tokens: Some(SemanticTokensWorkspaceClientCapabilities {
+                    refresh_support: Some(false),
+                }),
+                ..Default::default()
+            }),
+            window: Some(WindowClientCapabilities {
+                work_done_progress: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
 }
 
 const SEMANTIC_TYPES: &[&str] = &[
@@ -934,6 +1009,29 @@ mod tests {
         );
         assert_eq!(read_msg(&mut r).await.unwrap(), Some(json!({})));
         assert_eq!(read_msg(&mut r).await.unwrap(), None);
+    }
+
+    #[test]
+    fn initialize_says_what_the_editor_does() {
+        let root = Path::new("/w/repo");
+        let p = initialize_params(root, &file_uri(root), json!({ "a": 1 })).unwrap();
+        let v = serde_json::to_value(p).unwrap();
+        assert_eq!(v["rootUri"], file_uri(root));
+        assert_eq!(v["workspaceFolders"][0]["name"], "repo");
+        assert_eq!(v["initializationOptions"]["a"], 1);
+        assert_eq!(
+            v["capabilities"]["general"]["positionEncodings"],
+            json!(["utf-16"])
+        );
+        let td = &v["capabilities"]["textDocument"];
+        assert_eq!(
+            td["hover"]["contentFormat"],
+            json!(["markdown", "plaintext"])
+        );
+        assert_eq!(td["definition"]["linkSupport"], true);
+        assert_eq!(td["semanticTokens"]["requests"]["full"], true);
+        assert_eq!(td["semanticTokens"]["tokenTypes"][0], SEMANTIC_TYPES[0]);
+        assert_eq!(v["capabilities"]["workspace"]["configuration"], true);
     }
 
     #[test]

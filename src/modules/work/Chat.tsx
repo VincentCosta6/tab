@@ -156,7 +156,7 @@ export function StrictPill({ kind }: { kind?: AgentKind | null }) {
   const harness = harnesses?.find((h) => h.id === (kind ?? agent?.kind));
   if (!agent || !harness || agent.strict === false) return null;
   // Its adapter can't keep your setup out, or it's attached to a server you run.
-  const remote = !harness.capabilities.strict || (harness.capabilities.external_server && !!agent.opencode_url?.trim());
+  const remote = !harness.capabilities.strict || (harness.capabilities.external_server && !!agent.opencode_url?.trim() && !agent.acp?.includes(harness.id));
   const title = remote
     ? `Strict mode is on, but tab can't control what ${harness.name} loads here${harness.capabilities.external_server ? " (it's attached to a server you started)" : ""}.`
     : "Strict mode: this chat loads only tab's connections. Your personal MCP servers, connectors, plugins, hooks and user settings stay out; the repo's own config still loads. If anything else loads, tab stops the turn.";
