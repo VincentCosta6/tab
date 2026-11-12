@@ -439,6 +439,10 @@ impl Store {
                     continue;
                 }
                 let sp = tx.savepoint()?;
+                let ours = match (table.as_str(), row) {
+                    ("items", Some(row)) => item_states_here(&sp, key, row)?,
+                    _ => vec![],
+                };
                 let mut wrote = write_row(&sp, table, pk, key, row.as_ref());
                 if wrote.as_ref().is_err_and(is_unique_conflict) {
                     // Another row here has the same natural key (the same
@@ -448,6 +452,9 @@ impl Store {
                     // the same one.
                     wrote = drop_twins(&sp, table, pk, key, row.as_ref())
                         .and_then(|_| write_row(&sp, table, pk, key, row.as_ref()));
+                }
+                if let (Ok(()), Some(row)) = (&wrote, row.as_ref().filter(|_| table == "items")) {
+                    wrote = merge_item_state(&sp, key, row, ours);
                 }
                 match wrote {
                     Ok(()) => {
@@ -585,6 +592,110 @@ fn drop_twins(
                 cols.len() + 1
             ),
             params_from_iter(args),
+        )?;
+    }
+    Ok(())
+}
+
+/// When an item's state changed, what to, and until when if snoozed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ItemStateAt {
+    at: String,
+    state: String,
+    snoozed_until: Option<String>,
+}
+
+impl ItemStateAt {
+    /// `state_at` is missing on rows from before it existed (or from older
+    /// apps): an item open since it arrived counts as opened when its
+    /// activity happened, anything else as of its last update.
+    fn new(
+        state: String,
+        snoozed_until: Option<String>,
+        state_at: Option<String>,
+        [occurred_at, created_at, updated_at]: [String; 3],
+    ) -> Self {
+        let at = state_at.unwrap_or(if state == "open" && updated_at == created_at {
+            occurred_at
+        } else {
+            updated_at
+        });
+        Self {
+            at,
+            state,
+            snoozed_until,
+        }
+    }
+
+    fn of_row(row: &Value) -> Self {
+        let text = |c: &str| row.get(c).and_then(Value::as_str).map(str::to_string);
+        Self::new(
+            text("state").unwrap_or_else(|| "open".into()),
+            text("snoozed_until"),
+            text("state_at"),
+            ["occurred_at", "created_at", "updated_at"].map(|c| text(c).unwrap_or_default()),
+        )
+    }
+}
+
+/// The states this copy has for the item in `row`: its own row, and a twin
+/// with the same source and external id (from before ids were shared).
+fn item_states_here(
+    conn: &rusqlite::Connection,
+    key: &str,
+    row: &Value,
+) -> anyhow::Result<Vec<ItemStateAt>> {
+    let id = serde_json::from_str::<Vec<Value>>(key)?
+        .first()
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_default();
+    let text = |c: &str| row.get(c).and_then(Value::as_str).unwrap_or_default();
+    Ok(conn
+        .prepare_cached(
+            "SELECT state, snoozed_until, state_at, occurred_at, created_at, updated_at FROM items
+             WHERE id = ?1 OR (source = ?2 AND external_id = ?3)",
+        )?
+        .query_map(
+            rusqlite::params![id, text("source"), text("external_id")],
+            |r| {
+                Ok(ItemStateAt::new(
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    [r.get(3)?, r.get(4)?, r.get(5)?],
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Keeps the newest state of an item the hub just sent over, rather than
+/// whatever the newest row says: a device that brought the item in before
+/// it synced would otherwise reopen something marked done elsewhere. When
+/// this copy's state wins, it goes back to the hub so the others get it.
+/// A tie goes to the hub's row, as rows do, so every device keeps the same.
+fn merge_item_state(
+    conn: &rusqlite::Connection,
+    key: &str,
+    row: &Value,
+    ours: Vec<ItemStateAt>,
+) -> anyhow::Result<()> {
+    let theirs = ItemStateAt::of_row(row);
+    // Timestamps are all RFC 3339 in UTC with milliseconds, so they sort as text.
+    let best = ours.into_iter().fold(
+        theirs.clone(),
+        |best, s| if s.at > best.at { s } else { best },
+    );
+    let id: Vec<Value> = serde_json::from_str(key)?;
+    conn.execute(
+        "UPDATE items SET state = ?2, snoozed_until = ?3, state_at = ?4 WHERE id = ?1",
+        rusqlite::params![to_sql(&id[0]), best.state, best.snoozed_until, best.at],
+    )?;
+    if best != theirs {
+        conn.execute(
+            "INSERT INTO hub_outbox (tbl, pk) VALUES ('items', ?1)",
+            [key],
         )?;
     }
     Ok(())
