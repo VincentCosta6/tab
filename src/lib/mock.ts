@@ -222,6 +222,19 @@ const setState = (id: string, state: ItemState, snoozed_until: string | null = n
 
 const connectors: ConnectorInfo[] = withActions(plainConnectors);
 
+const mockSlashCommands = [
+  { name: "code-review", description: "Review the current diff, or a PR number/branch/path target, for correctness bugs", argument_hint: "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>]", aliases: ["review"], kind: "builtin" },
+  { name: "compact", description: "Free up context by summarizing the conversation so far", argument_hint: "<optional custom summarization instructions>", aliases: [], kind: "builtin" },
+  { name: "context", description: "Show current context usage", argument_hint: "", aliases: [], kind: "builtin" },
+  { name: "init", description: "Initialize a new CLAUDE.md file with codebase documentation", argument_hint: "", aliases: [], kind: "builtin" },
+  { name: "effort", description: "Set effort level for model usage", argument_hint: "<low|medium|high|xhigh|max|auto>", aliases: [], kind: "builtin" },
+  { name: "security-review", description: "Complete a security review of the pending changes on the current branch", argument_hint: "", aliases: [], kind: "builtin" },
+  { name: "deploy", description: "Deploy a branch to staging", argument_hint: "<branch> [staging|production]", aliases: [], kind: "command" },
+  { name: "frontend-design", description: "Build distinctive, production-grade frontend interfaces", argument_hint: "", aliases: [], kind: "skill" },
+  { name: "pdf", description: "Read, fill and merge PDF files", argument_hint: "[<path>]", aliases: [], kind: "skill" },
+  { name: "mcp__docs__search", description: "Search the team docs (MCP)", argument_hint: "<query>", aliases: [], kind: "mcp" },
+];
+
 export const mockApi = {
   async invoke<T>(cmd: string, args: Record<string, any> = {}): Promise<T> {
     const r = await (async () => {
@@ -231,7 +244,9 @@ export const mockApi = {
       if (mcp !== NOT_HANDLED) return mcp;
       switch (cmd) {
         case "agent_mcp_servers": return [{ name: "tab", status: "connected" }, ...mcpServersInfo().map((m) => ({ name: m.id, status: m.ready ? "connected" : "needs-auth" })), { name: "playwright", status: "failed" }];
-        case "agent_slash_commands": return ["compact", "context", "cost", "init", "review", "pr-comments", "security-review", "release-notes", "frontend-design", "deploy"];
+        case "agent_slash_commands": return mockSlashCommands;
+        case "agent_subagents": return [{ name: "Explore", description: "Read-only search agent" }, { name: "Plan", description: "Designs implementation plans" }];
+        case "slash_arg_values": return args.kind === "branch" ? ["main", "slash-menu-rich", "fix-hub-sync"] : ["src/", "crates/", "docs/", "README.md", "package.json"].map((p) => `${args.typed}${p}`);
         case "agent_activity": return sessions.filter((s) => s.item_id && items.find((i) => i.id === s.item_id)?.state !== "done").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));
         case "graph_view": return mockGraph(args.projectId ?? null, args.days ?? null);
         case "graph_delete": {

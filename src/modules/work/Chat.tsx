@@ -13,13 +13,14 @@ import { AgentNotice } from "./AgentNotice";
 import { ContextMeter } from "./ContextMeter";
 import { CompactedDivider } from "../projects/Compaction";
 import { SlashPanel, tabCommand, tabCommands, type Panel } from "./SlashPanels";
+import { openSlots, parseHint, splitArgs, type ArgSource } from "./slashArgs";
 import { Dictation } from "./Dictation";
 import { useDropTarget } from "./DropZone";
 import { api } from "../../lib/api";
 import { useChat, useConfig, useHarnesses, useModels, useStream } from "../../lib/hooks";
 import { HarnessIcon, ModelMenu, modelFor } from "./ModelMenu";
 import { keys } from "../../lib/query";
-import type { AgentKind, Approval, Chat, QueueItem, Session, SessionMessage, SessionStatus } from "../../lib/types";
+import type { AgentKind, Approval, Chat, QueueItem, Session, SessionMessage, SessionStatus, SlashCommand, SlashKind } from "../../lib/types";
 
 
 export function openOnboarding() {
@@ -964,7 +965,7 @@ function ModePicker({ chat, openSignal }: { chat: Chat | undefined; openSignal?:
   return <BarPicker value={current} options={options} title="Permission mode" className={cx(current === "auto" && "mode-auto")} openSignal={openSignal} onChange={async (v) => qc.setQueryData(keys.config, await api.setAgentMode(v))} />;
 }
 
-/** What Claude Code's built-in commands do; custom commands and skills show just their name. */
+/** What Claude Code's built-in commands do, for an agent that reported only their names. */
 const slashDescriptions: Record<string, string> = {
   compact: "Summarise the conversation so far to free up context",
   context: "Show what's using the context window",
@@ -984,43 +985,141 @@ const slashDescriptions: Record<string, string> = {
 };
 // Terminal-only commands that do nothing useful in a headless turn and that
 // tab has no answer for. The ones it does answer are in `tabCommands`.
-const interactiveOnly = new Set(["vim", "exit", "quit", "theme", "terminal-setup", "ide", "statusline", "bug", "feedback", "privacy-settings", "output-style", "install-github-app", "migrate-installer", "add-dir", "export"]);
+const interactiveOnly = new Set(["vim", "exit", "quit", "theme", "terminal-setup", "ide", "statusline", "bug", "feedback", "privacy-settings", "output-style", "install-github-app", "migrate-installer", "add-dir", "export", "color", "focus", "heapdump", "import"]);
 const fallbackSlash = ["compact", "context", "cost", "mcp", "model", "status", "init", "review", "pr-comments", "security-review"];
 
+/** The `/` menu's groups, in order. */
+const slashGroups: Record<SlashKind | "tab", string> = { builtin: "Claude Code", tab: "Answered by tab", command: "Your commands", skill: "Skills", mcp: "MCP prompts" };
+const groupOrder = Object.keys(slashGroups) as (SlashKind | "tab")[];
+/** Headings for argument values, by where they come from. */
+const argGroups: Record<ArgSource, string> = { pr: "Pull requests", branch: "Branches", path: "Files", model: "Models", agent: "Subagents" };
+
+/** One row of the `/` menu: a command, or a value for the argument being typed. */
+interface SlashRow { value: string; label: string; detail?: string; hint?: string; group?: string; tab?: boolean }
+
+/** Open pull requests to offer for a `<pr#>` argument: yours, and the ones in the queue. Those in the chat's repo come first. */
+async function openPulls(repoName: string): Promise<SlashRow[]> {
+  const [mine, items] = await Promise.all([api.githubMyPulls().catch(() => []), api.listItems(["open"]).catch(() => [] as QueueItem[])]);
+  const seen = new Set<string>();
+  const rows: (SlashRow & { here: boolean })[] = [];
+  const add = (repo: string, n: number, title: string) => {
+    if (seen.has(`${repo}#${n}`)) return;
+    seen.add(`${repo}#${n}`);
+    rows.push({ value: String(n), label: `#${n}`, detail: `${repo} · ${title}`, here: repo.split("/").pop()?.toLowerCase() === repoName });
+  };
+  for (const p of mine) add(p.repo, p.number, p.summary.title);
+  for (const i of items) {
+    const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(i.url ?? "");
+    if (m) add(m[1], Number(m[2]), i.title);
+  }
+  return rows.sort((a, b) => Number(b.here) - Number(a.here));
+}
+
 /**
- * The `/` menu: Claude Code's commands, custom commands and skills, as it
- * reported them when it last started. Most are sent as typed and Claude Code
- * runs them; the interactive ones tab answers itself, marked "tab".
+ * The `/` menu. While the command is typed it lists Claude Code's commands,
+ * custom commands, skills and MCP prompts, as the agent described them when
+ * it last started, grouped; tab's own answers are marked "tab". Once a
+ * command is picked, its argument hint shows as ghost text and the values
+ * tab knows for the next argument (enum words, PRs, branches, paths, models,
+ * subagents) are offered.
  */
-function useSlashMenu(text: string) {
+function useSlashMenu(text: string, cwd: string | undefined) {
   const { data } = useQuery({ queryKey: ["slash-commands"], queryFn: api.slashCommands, staleTime: 60_000 });
   const [index, setIndex] = useState(0);
+  const [moved, setMoved] = useState(false);
   const [dismissed, setDismissed] = useState<string | null>(null);
-  const m = /^\/([\w:.-]*)$/.exec(text);
-  const q = m?.[1].toLowerCase() ?? "";
-  const names = [...new Set([...(data?.length ? data : fallbackSlash), ...Object.keys(tabCommands)])];
-  const matches = m
-    ? names
-        .filter((n) => !interactiveOnly.has(n) && n.toLowerCase().includes(q))
-        .sort((a, b) => Number(!a.toLowerCase().startsWith(q)) - Number(!b.toLowerCase().startsWith(q)))
-        .slice(0, 8)
-        .map((name) => ({ name, description: tabCommands[name]?.description ?? slashDescriptions[name], tab: name in tabCommands }))
-    : [];
-  const open = matches.length > 0 && dismissed !== text;
-  useEffect(() => setIndex(0), [q]);
-  const handleKey = (e: React.KeyboardEvent, pick: (name: string) => void) => {
+  const commands: SlashCommand[] = data?.length ? data : fallbackSlash.map((name) => ({ name, description: "", argument_hint: "", aliases: [], kind: "builtin" }));
+  const find = (n: string) => commands.find((c) => c.name.toLowerCase() === n || c.aliases.some((a) => a.toLowerCase() === n));
+
+  // `/name`, or `/name args…` once a space follows.
+  const typing = /^\/([\w:.-]*)$/.exec(text);
+  const withArgs = /^\/([\w:.-]+)\s([^\n]*)$/.exec(text);
+  const q = typing?.[1].toLowerCase() ?? "";
+  const cmd = withArgs && !(withArgs[1].toLowerCase() in tabCommands) ? find(withArgs[1].toLowerCase()) : undefined;
+  const { args, word } = splitArgs(withArgs?.[2] ?? "");
+  const slots = useMemo(() => openSlots(parseHint(cmd?.argument_hint ?? ""), args), [cmd?.argument_hint, args.join(" ")]);
+  const wants = new Set(slots.flatMap((s) => s.sources));
+
+  const repoName = cwd?.split(/[\\/]/).filter(Boolean).pop()?.toLowerCase() ?? "";
+  const pulls = useQuery({ queryKey: ["slash-prs", repoName], queryFn: () => openPulls(repoName), enabled: wants.has("pr"), staleTime: 60_000 });
+  const branches = useQuery({ queryKey: ["slash-branches", cwd], queryFn: () => api.slashArgValues(cwd!, "branch", ""), enabled: wants.has("branch") && !!cwd, staleTime: 30_000 });
+  // A folder's entries, fetched once per folder and filtered as you type.
+  const folder = word.slice(0, word.lastIndexOf("/") + 1) + (word.slice(word.lastIndexOf("/") + 1).startsWith(".") ? "." : "");
+  const paths = useQuery({ queryKey: ["slash-paths", cwd, folder], queryFn: () => api.slashArgValues(cwd!, "path", folder), enabled: wants.has("path") && !!cwd, staleTime: 10_000 });
+  const { data: models = [] } = useModels();
+  const agents = useQuery({ queryKey: ["subagents"], queryFn: api.subagents, enabled: wants.has("agent"), staleTime: 60_000 });
+
+  let rows: SlashRow[] = [];
+  let ghost = "";
+  if (typing) {
+    const hit = (c: { name: string; aliases: string[] }) => [c.name, ...c.aliases].some((n) => n.toLowerCase().includes(q));
+    const starts = (c: { name: string; aliases: string[] }) => [c.name, ...c.aliases].some((n) => n.toLowerCase().startsWith(q));
+    const agentRows = commands
+      .filter((c) => !interactiveOnly.has(c.name) && !(c.name in tabCommands) && !c.description.startsWith("(removed)") && hit(c))
+      .map((c) => ({ c, kind: c.kind as SlashKind | "tab", row: { value: c.name, label: c.name, detail: c.description || slashDescriptions[c.name], hint: c.argument_hint } }));
+    const tabRows = Object.entries(tabCommands)
+      .filter(([name]) => name.includes(q))
+      .map(([name, t]) => ({ c: { name, aliases: [] }, kind: "tab" as const, row: { value: name, label: name, detail: t.description, tab: true } }));
+    rows = [...agentRows, ...tabRows]
+      .sort((a, b) => groupOrder.indexOf(a.kind) - groupOrder.indexOf(b.kind) || Number(!starts(a.c)) - Number(!starts(b.c)))
+      .slice(0, 60)
+      .map(({ kind, row }) => ({ ...row, group: slashGroups[kind] }));
+    // The whole name typed: what it takes, before the space.
+    const exact = q && !(q in tabCommands) ? find(q) : undefined;
+    if (exact?.argument_hint) ghost = ` ${exact.argument_hint}`;
+  } else if (cmd) {
+    const w = word.toLowerCase();
+    const seen = new Set<string>();
+    const offer = (r: SlashRow) => {
+      const match = r.value.toLowerCase().startsWith(w) || (w.length > 1 && !!r.detail?.toLowerCase().includes(w));
+      if (match && !seen.has(r.value)) (seen.add(r.value), rows.push(r));
+    };
+    for (const s of slots) {
+      for (const v of s.values) offer({ value: v, label: v, group: "Options" });
+      for (const src of s.sources) {
+        const group = argGroups[src];
+        if (src === "pr") pulls.data?.forEach((r) => offer({ ...r, group }));
+        if (src === "branch") branches.data?.forEach((b) => offer({ value: b, label: b, group }));
+        if (src === "path") paths.data?.forEach((p) => offer({ value: p, label: p, group }));
+        if (src === "model") models.filter((m) => m.agent === "claude_code").forEach((m) => offer({ value: m.id, label: m.id, detail: m.label, group }));
+        if (src === "agent") agents.data?.forEach((a) => offer({ value: a.name, label: a.name, detail: a.description, group }));
+      }
+    }
+    // Each group together, in the order the hint first offers it.
+    const order = [...new Set(rows.map((r) => r.group))];
+    rows.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group));
+    rows = rows.slice(0, 40);
+    if (!word && slots.length) ghost = slots.map((s) => s.text).join(" ");
+  }
+
+  const open = rows.length > 0 && dismissed !== text;
+  const mode = typing ? "command" : "arg";
+  useEffect(() => (setIndex(0), setMoved(false)), [q, word, cmd?.name, args.length]);
+  /** Fills in the picked row: a command's name, or the argument being typed. */
+  const fill = (row: SlashRow) => {
+    if (mode === "command") return row.value;
+    const before = text.slice(0, text.length - word.length);
+    // A folder goes on to its entries; anything else is a whole argument.
+    return before + row.value + (row.value.endsWith("/") ? "" : " ");
+  };
+  const handleKey = (e: React.KeyboardEvent, pick: (row: SlashRow) => void) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       const d = e.key === "ArrowDown" ? 1 : -1;
-      setIndex((i) => (i + d + matches.length) % matches.length);
+      setIndex((i) => (i + d + rows.length) % rows.length);
+      setMoved(true);
       return true;
     }
     if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing)) {
-      const c = matches[Math.min(index, matches.length - 1)];
-      // A full command already typed sends on Enter.
-      if (e.key === "Enter" && c.name.toLowerCase() === q) return false;
+      const r = rows[Math.min(index, rows.length - 1)];
+      if (e.key === "Enter") {
+        // A full command or value already typed sends on Enter, and so does
+        // Enter after a space unless the person went into the list.
+        if (mode === "command" && (r.value.toLowerCase() === q || find(q)?.name === r.value)) return false;
+        if (mode === "arg" && (r.value.toLowerCase() === word.toLowerCase() || (!word && !moved))) return false;
+      }
       e.preventDefault();
-      pick(c.name);
+      pick(r);
       return true;
     }
     if (e.key === "Escape") {
@@ -1030,7 +1129,30 @@ function useSlashMenu(text: string) {
     }
     return false;
   };
-  return { open, matches, index, setIndex, handleKey, close: () => setDismissed(null) };
+  return { open, mode, rows, index, setIndex, handleKey, fill, ghost: dismissed === text && mode === "command" ? "" : ghost, close: () => setDismissed(null) };
+}
+
+/** The `/` menu's list, with a heading where its group changes. */
+function SlashMenu({ slash, onPick }: { slash: ReturnType<typeof useSlashMenu>; onPick: (row: SlashRow) => void }) {
+  const list = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    list.current?.querySelector(".active")?.scrollIntoView({ block: "nearest" });
+  }, [slash.index]);
+  return (
+    <div ref={list} className="slash-menu" role="listbox">
+      {slash.rows.map((r, i) => (
+        <Fragment key={r.value}>
+          {r.group && r.group !== slash.rows[i - 1]?.group && <div className="slash-group">{r.group}</div>}
+          <button role="option" aria-selected={i === slash.index} className={cx(i === slash.index && "active")} title={r.detail} onMouseDown={(e) => (e.preventDefault(), onPick(r))} onMouseEnter={() => slash.setIndex(i)}>
+            <span className="slash-name">{slash.mode === "command" ? `/${r.label}` : r.label}</span>
+            {r.hint && <span className="slash-hint">{r.hint}</span>}
+            {r.detail && <span className="slash-desc">{r.detail}</span>}
+            {r.tab && <span className="slash-tab" title="tab answers this itself">tab</span>}
+          </button>
+        </Fragment>
+      ))}
+    </div>
+  );
 }
 
 export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat: Chat | undefined; onSend: (text: string, attachments: string[]) => void; placeholder: string; autoFocus?: boolean; extra?: React.ReactNode }) {
@@ -1044,14 +1166,14 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   const running = !!chat?.running;
   const last = chat?.messages[chat.messages.length - 1];
   const suggestion = !running && last?.kind === "suggestion" && config?.agent.suggest_replies !== false ? last.content : "";
-  const slash = useSlashMenu(text);
+  const slash = useSlashMenu(text, chat?.session?.cwd);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [picker, setPicker] = useState<{ which: "model" | "mode"; n: number }>({ which: "model", n: 0 });
   // A tab command runs at once; the agent's own get a space for arguments.
-  const pickSlash = (name: string) => {
+  const pickSlash = (row: SlashRow) => {
     slash.close();
-    if (tabCommands[name]) return runCommand(`/${name}`);
-    setText(`/${name} `);
+    if (slash.mode === "command" && tabCommands[row.value]) return runCommand(`/${row.value}`);
+    setText(slash.mode === "command" ? `/${row.value} ` : slash.fill(row));
     ref.current?.focus();
   };
   /** Answers an interactive command in tab. False when it's for the agent. */
@@ -1125,6 +1247,10 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
           {uploading > 0 && <span className="thumb thumb-busy" style={{ width: 56, height: 56 }}><Icon name="refresh" size={14} /></span>}
         </div>
       )}
+      <div className="composer-input">
+      {slash.ghost && !text.includes("\n") && (
+        <div className="composer-ghost" aria-hidden><span>{text}</span>{slash.ghost}</div>
+      )}
       <textarea
         ref={ref}
         rows={1}
@@ -1144,17 +1270,8 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) (e.preventDefault(), submit());
         }}
       />
-      {slash.open && (
-        <div className="slash-menu" role="listbox">
-          {slash.matches.map((c, i) => (
-            <button key={c.name} role="option" aria-selected={i === slash.index} className={cx(i === slash.index && "active")} onMouseDown={(e) => (e.preventDefault(), pickSlash(c.name))} onMouseEnter={() => slash.setIndex(i)}>
-              <span className="slash-name">/{c.name}</span>
-              {c.description && <span className="slash-desc">{c.description}</span>}
-              {c.tab && <span className="slash-tab" title="tab answers this itself">tab</span>}
-            </button>
-          ))}
-        </div>
-      )}
+      </div>
+      {slash.open && <SlashMenu slash={slash} onPick={pickSlash} />}
       {error && <div className="composer-error">{error}</div>}
       {suggestion && !text && <div className="composer-suggest subtle"><kbd>Tab</kbd> to use the suggested reply, then <kbd>Enter</kbd> to send</div>}
       <div className="composer-foot">

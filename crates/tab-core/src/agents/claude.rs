@@ -21,6 +21,9 @@ const MODES: &[&str] = &["default", "acceptEdits", "plan", "auto", "dontAsk"];
 /// between tool calls, so "Send now" interrupts while one is running.
 type OpenTools = Arc<Mutex<HashSet<String>>>;
 
+/// The id of the `initialize` request tab sends at the start of each turn.
+const INIT_REQUEST: &str = "tab-init";
+
 /// Most of a message quoted back in a reminder.
 const QUOTE: usize = 300;
 
@@ -269,8 +272,13 @@ pub(super) async fn run_turn(
     // stdin stays open so the person can steer mid-turn; it closes when the
     // turn's result arrives (see `steering_close`) and the queue drains.
     let mut stdin = child.stdin.take().expect("piped");
+    // `initialize` first, as the SDK does: its answer describes the slash
+    // commands (what they do, what arguments they take) for the `/` menu.
+    let init = json!({ "type": "control_request", "request_id": INIT_REQUEST, "request": { "subtype": "initialize" } });
     let first = json!({ "type": "user", "message": { "role": "user", "content": prompt } });
-    stdin.write_all(format!("{first}\n").as_bytes()).await?;
+    stdin
+        .write_all(format!("{init}\n{first}\n").as_bytes())
+        .await?;
     let mut steer_rx = hub.steering_open(&session.id);
     let open_tools = OpenTools::default();
     let tools = open_tools.clone();
@@ -310,6 +318,7 @@ pub(super) async fn run_turn(
     parser.open_tools = open_tools;
     parser.unanswered = unanswered;
     parser.strict = strict;
+    parser.cwd = Some(session.cwd.clone().into());
     parser.allowed_mcp = remote.into_iter().map(|(name, _)| name).collect();
     // Rough size of what tab adds to the system prompt (the item and its context).
     parser.tab_context_tokens = (system.len() / 4) as i64;
@@ -416,6 +425,8 @@ struct Parser {
     /// Open calls that only wait on something outside (CI, a deploy):
     /// while any runs the chat shows Monitoring, not Working.
     waits: HashSet<String>,
+    /// The chat's folder, where its project's custom commands are.
+    cwd: Option<std::path::PathBuf>,
 }
 
 /// Whether a chat runs strict: when the person chose it, and always for an
@@ -505,6 +516,64 @@ impl Parser {
             leaked: Vec::new(),
             allowed_mcp: Vec::new(),
             waits: HashSet::new(),
+            cwd: None,
+        }
+    }
+
+    fn save_commands(&self, cmds: &Value) {
+        let cmds: Vec<super::SlashCommand> = cmds
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                let name = c["name"].as_str()?.to_string();
+                let description = c["description"].as_str().unwrap_or_default().to_string();
+                // Commands only a server-launched session can run.
+                if name.starts_with("__") {
+                    return None;
+                }
+                Some(super::SlashCommand {
+                    kind: self.slash_kind(
+                        &name,
+                        c["builtin"].as_bool().unwrap_or(false),
+                        &description,
+                    ),
+                    argument_hint: c["argumentHint"].as_str().unwrap_or_default().to_string(),
+                    aliases: c["aliases"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|a| a.as_str().map(str::to_string))
+                        .collect(),
+                    name,
+                    description,
+                })
+            })
+            .collect();
+        self.hub.save_slash_commands(&cmds);
+    }
+
+    /// Where a command comes from. Claude Code says only whether it's its
+    /// own; a custom command is a file in a `commands` folder (`a:b` is
+    /// `a/b.md`), and anything else is a skill.
+    fn slash_kind(&self, name: &str, builtin: bool, description: &str) -> super::SlashKind {
+        use super::SlashKind;
+        if builtin {
+            return SlashKind::Builtin;
+        }
+        if name.starts_with("mcp__") || description.ends_with("(MCP)") {
+            return SlashKind::Mcp;
+        }
+        let file = format!("{}.md", name.replace(':', "/"));
+        let mut dirs: Vec<std::path::PathBuf> = claude_dir().into_iter().collect();
+        dirs.extend(self.cwd.iter().map(|c| c.join(".claude")));
+        if dirs
+            .iter()
+            .any(|d| d.join("commands").join(&file).is_file())
+        {
+            SlashKind::Command
+        } else {
+            SlashKind::Skill
         }
     }
 
@@ -573,12 +642,31 @@ impl Parser {
                         .iter()
                         .filter_map(|c| c.as_str().map(str::to_string))
                         .collect();
-                    hub.save_slash_commands(&names);
+                    hub.add_slash_names(&names, |n| self.slash_kind(n, false, ""));
                 }
                 if let Some(id) = v["session_id"].as_str() {
                     hub.update(&sid, None, Some(id));
                 }
             }
+            // The answer to `initialize` (see `run_turn`), and the list
+            // again when it changes mid-turn: commands with what they do.
+            "control_response" if v["response"]["request_id"] == INIT_REQUEST => {
+                let r = &v["response"]["response"];
+                self.save_commands(&r["commands"]);
+                let agents: Vec<super::Subagent> = r["agents"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| {
+                        Some(super::Subagent {
+                            name: a["name"].as_str()?.to_string(),
+                            description: a["description"].as_str().unwrap_or_default().to_string(),
+                        })
+                    })
+                    .collect();
+                hub.save_subagents(&agents);
+            }
+            "system" if v["subtype"] == "commands_changed" => self.save_commands(&v["commands"]),
             "stream_event" => {
                 let ev = &v["event"];
                 if ev["type"] == "content_block_delta"
@@ -1253,6 +1341,76 @@ mod tests {
         );
         assert_eq!(got[1].status.as_deref(), Some("needs-auth"));
         assert_eq!(got[2].status, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn the_initialize_answer_saves_commands_with_what_they_take() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let dir = std::env::temp_dir().join(format!("tab-slash-{}", uuid::Uuid::new_v4()));
+        let cwd = dir.join("repo");
+        std::fs::create_dir_all(cwd.join(".claude/commands/team")).unwrap();
+        std::fs::write(cwd.join(".claude/commands/team/ship.md"), "Ship it").unwrap();
+        let hub = AgentHub::new(store.clone(), tx, AgentConfig::default(), dir.clone());
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let mut p = Parser::new(hub.clone(), s.id.clone());
+        p.cwd = Some(cwd);
+        p.handle(&json!({ "type": "control_response", "response": {
+            "subtype": "success", "request_id": INIT_REQUEST, "response": {
+                "commands": [
+                    { "name": "code-review", "description": "Review", "argumentHint": "[low|high] [<pr#>]", "aliases": ["review"], "builtin": true },
+                    { "name": "team:ship", "description": "Ship it", "argumentHint": "" },
+                    { "name": "pdf", "description": "PDFs", "argumentHint": "" },
+                    { "name": "mcp__docs__search", "description": "Search docs", "argumentHint": "<query>" },
+                    { "name": "__remote-workflow", "description": "", "argumentHint": "", "builtin": true },
+                ],
+                "agents": [{ "name": "Explore", "description": "Search code" }],
+            },
+        }}));
+        let cmds = hub.slash_commands();
+        let kinds: Vec<_> = cmds.iter().map(|c| (c.name.as_str(), c.kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                ("code-review", super::super::SlashKind::Builtin),
+                ("team:ship", super::super::SlashKind::Command),
+                ("pdf", super::super::SlashKind::Skill),
+                ("mcp__docs__search", super::super::SlashKind::Mcp),
+            ]
+        );
+        assert_eq!(cmds[0].argument_hint, "[low|high] [<pr#>]");
+        assert_eq!(cmds[0].aliases, ["review"]);
+        assert_eq!(hub.subagents()[0].name, "Explore");
+
+        // The init line adds only names the answer didn't have.
+        p.handle(&json!({ "type": "system", "subtype": "init", "slash_commands": ["code-review", "review", "extra"] }));
+        let names: Vec<_> = hub.slash_commands().into_iter().map(|c| c.name).collect();
+        assert_eq!(
+            names,
+            [
+                "code-review",
+                "team:ship",
+                "pdf",
+                "mcp__docs__search",
+                "extra"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn slash_commands_saved_as_bare_names_still_load() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let dir = std::env::temp_dir().join(format!("tab-slash-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("slash_commands.json"), r#"["compact","deploy"]"#).unwrap();
+        let hub = AgentHub::new(store, tx, AgentConfig::default(), dir.clone());
+        let names: Vec<_> = hub.slash_commands().into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["compact", "deploy"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

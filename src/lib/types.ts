@@ -435,6 +435,12 @@ export interface Harness {
 }
 
 /** One model a harness can run. */
+/** Where a slash command comes from: Claude Code's own, a commands-folder file, a skill, or an MCP server's prompt. */
+export type SlashKind = "builtin" | "command" | "skill" | "mcp";
+/** A slash command as the agent described it when it last started. */
+export interface SlashCommand { name: string; description: string; /** What it takes, e.g. `[low|high] [<pr#>]`. */ argument_hint: string; aliases: string[]; kind: SlashKind }
+export interface Subagent { name: string; description: string }
+
 export interface ModelOption { agent: AgentKind; id: string; label: string; common: boolean }
 
 export interface Pressure {
