@@ -15,7 +15,7 @@ import type { QueueItem } from "../../../lib/types";
 import { ContextDrawer } from "../../work/ContextDrawer";
 import { keys } from "../../../lib/query";
 import { useLanguageServers } from "../lsp";
-import { loadProject, projectStore, setOpener } from "../monaco";
+import { holdProject, loadProject, projectStore, setOpener } from "../monaco";
 import { AiPanel, FixBanner, useAi } from "./ai";
 import { Boot } from "./Boot";
 import { Ctx, type ComposerTarget, type DiffMode, type ReviewCtx } from "./context";
@@ -143,6 +143,8 @@ export default function ReviewWorkspace({ repo, number, sample, item, onBack, on
   }, [openFile]);
 
   // Load the repository's sources so the language service sees every file.
+  // They're freed a while after the last review closes.
+  useEffect(() => holdProject(), []);
   const ws = boot.ws;
   useEffect(() => {
     if (!pr || !ws) return;
