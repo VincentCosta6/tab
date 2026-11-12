@@ -316,6 +316,39 @@ pub struct ProjectRepo {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Something a project knows besides its repos: a website, a document,
+/// email by label or sender, a service (a Cloudflare project, Stripe), each
+/// with who may read it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectResource {
+    pub id: String,
+    pub project_id: String,
+    /// `website`, `file`, `email`, `service`, `link` or `note`.
+    pub kind: String,
+    pub title: String,
+    /// The link; for email the label or sender; for a file its hub hash.
+    pub url: Option<String>,
+    /// What it's for; for a note, its text.
+    pub note: String,
+    /// `all`, `coordinator` or `vault`: who may read it.
+    pub access: String,
+    /// Kind-specific choices (crawl depth, schedule, what agents may do).
+    pub options: serde_json::Value,
+    /// `pending`, `indexed`, `live`, `failed` or `needs_sign_in`.
+    pub status: String,
+    pub chunks: i64,
+    pub pinned: bool,
+    /// `agent` or `user`.
+    pub added_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Who may read a project resource, lowest first.
+pub const RESOURCE_ACCESS: [&str; 3] = ["all", "coordinator", "vault"];
+/// The kinds of project resource.
+pub const RESOURCE_KINDS: [&str; 6] = ["website", "file", "email", "service", "link", "note"];
+
 /// A durable fact about a project, left by an agent or the person, so the
 /// next chat starts with it. One note per topic: writing a topic again
 /// replaces it.

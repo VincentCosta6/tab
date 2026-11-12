@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
-use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint};
+use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint, coordinator};
 use tab_core::config::ConnectorConfig;
 use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
 use tab_core::connectors::registry;
@@ -1377,15 +1377,12 @@ async fn graph_delete(
     state.store.entities_delete(&ids, Utc::now()).map_err(err)
 }
 
-fn ask_chat_key(project_id: Option<&str>) -> String {
-    format!("ask:{}", project_id.unwrap_or("all"))
-}
-
+/// A project's coordinator chat: one per project, long-running.
 #[tauri::command]
-async fn ask_chat_open(state: State<'_, AppState>, project_id: Option<String>) -> CmdResult<Chat> {
+async fn coordinator_chat_open(state: State<'_, AppState>, project_id: String) -> CmdResult<Chat> {
     let session = state
         .store
-        .session_for_key(&ask_chat_key(project_id.as_deref()))
+        .session_for_key(&coordinator::key(&project_id))
         .map_err(err)?;
     let (messages, approvals, running) = match &session {
         Some(s) => (
@@ -1403,14 +1400,13 @@ async fn ask_chat_open(state: State<'_, AppState>, project_id: Option<String>) -
     })
 }
 
-/// A question from the Ask page: one ongoing chat per project (or for
-/// everything), about what tab knows, with the nodes the person selected.
+/// A message to a project's coordinator. It steers a turn in flight, or
+/// starts the next one.
 #[tauri::command]
-async fn ask_chat_send(
+async fn coordinator_chat_send(
     state: State<'_, AppState>,
-    project_id: Option<String>,
+    project_id: String,
     text: String,
-    focus: Option<Vec<String>>,
     attachments: Option<Vec<String>>,
 ) -> CmdResult<Session> {
     let attachments = attachments.unwrap_or_default();
@@ -1424,37 +1420,21 @@ async fn ask_chat_send(
     if state.hub.config().kind.is_none() {
         return Err("Set up an agent first (Settings → Agent).".into());
     }
-    let project = match &project_id {
-        Some(p) => state.store.project_find(p).map_err(err)?,
-        None => None,
-    };
-    if let Some(f) = focus.filter(|f| !f.is_empty()) {
-        text = format!("(Selected in the graph: {})\n\n{text}", f.join(", "));
-    }
-    let brief = format!(
-        "This chat is on tab's Ask page: the person is looking at their knowledge graph (projects, repos, \
-         people, PRs, tickets, email contacts and how they connect) and asking about their work. Answer \
-         from what tab knows: tab_graph_search and tab_graph_expand for the graph, tab_search for items \
-         (with a time window when they mean recent work), tab_project for a project's notes and recent \
-         work. Name the items you rely on. {}",
-        match &project {
-            Some(p) => format!(
-                "They have the graph filtered to the project \"{}\"; scope to it unless they ask wider (tab_search with project \"{}\").",
-                p.name, p.name
-            ),
-            None => "They're looking at everything, across projects.".to_string(),
-        }
-    );
-    let title = match &project {
-        Some(p) => format!("Ask · {}", p.name),
-        None => "Ask".to_string(),
-    };
+    let project = state
+        .store
+        .project_find(&project_id)
+        .map_err(err)?
+        .ok_or("That project was deleted.")?;
     let cwd = state.hub.workdir();
     let session = state
         .hub
-        .session_for_key(&ask_chat_key(project_id.as_deref()), &title, &cwd, &brief)
+        .session_for_key(
+            &coordinator::key(&project.id),
+            &coordinator::title(&project),
+            &cwd,
+            &coordinator::brief(&project),
+        )
         .map_err(err)?;
-    // A turn in flight takes the message as steering; otherwise it starts one.
     if !state
         .hub
         .steer_with(&session.id, &text, &attachments)
@@ -1466,6 +1446,39 @@ async fn ask_chat_send(
             .map_err(err)?;
     }
     Ok(session)
+}
+
+#[tauri::command]
+async fn project_resources(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<tab_core::model::ProjectResource>> {
+    // The person sees everything in their own projects.
+    state
+        .store
+        .project_resources(&project_id, "vault")
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn project_resource_save(
+    state: State<'_, AppState>,
+    project_id: String,
+    resource: tab_core::store::ResourceInput,
+) -> CmdResult<tab_core::model::ProjectResource> {
+    state
+        .store
+        .resource_save(&project_id, &resource, "user", Utc::now())
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn project_resource_delete(
+    state: State<'_, AppState>,
+    project_id: String,
+    id: String,
+) -> CmdResult<bool> {
+    state.store.resource_delete(&project_id, &id).map_err(err)
 }
 
 /// Slash commands the agent last reported, for the composer's `/` menu.
@@ -3144,8 +3157,11 @@ pub fn run() {
             graph_view,
             graph_node,
             graph_delete,
-            ask_chat_open,
-            ask_chat_send,
+            coordinator_chat_open,
+            coordinator_chat_send,
+            project_resources,
+            project_resource_save,
+            project_resource_delete,
             project_notes,
             project_note_save,
             project_note_delete,

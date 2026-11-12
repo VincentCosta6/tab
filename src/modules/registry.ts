@@ -5,7 +5,6 @@
 
 import type { ComponentType } from "react";
 import type { ConnectorInfo } from "../lib/types";
-import { AskTab } from "./ask/AskTab";
 import { ProjectsTab } from "./projects/ProjectsTab";
 import { ConnectionsTab } from "./connections/ConnectionsTab";
 import { ReviewsTab } from "./github/ReviewsTab";
@@ -36,8 +35,7 @@ const installed = (...ids: string[]) => (cs: ConnectorInfo[]) => cs.some((c) => 
 
 export const modules: TabModule[] = [
   { id: "core.work", tabs: [{ id: "work", label: "Work", icon: "inbox", component: WorkTab, shortcut: "1" }] },
-  { id: "core.ask", tabs: [{ id: "ask", label: "Ask", icon: "graph", component: AskTab, shortcut: "2" }] },
-  { id: "core.projects", tabs: [{ id: "projects", label: "Projects", icon: "folder", component: ProjectsTab, shortcut: "6" }] },
+  { id: "core.projects", tabs: [{ id: "projects", label: "Projects", icon: "folder", component: ProjectsTab, shortcut: "2" }] },
   {
     id: "github",
     // Sample data includes PRs, so the review tool can be tried without a token.

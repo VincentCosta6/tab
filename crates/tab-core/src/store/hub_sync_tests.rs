@@ -100,6 +100,18 @@ fn populate(s: &Store) -> String {
         .unwrap();
     s.repo_save(&p.id, "acme/launch", None, None, "me", now())
         .unwrap();
+    s.resource_save(
+        &p.id,
+        &crate::store::ResourceInput {
+            kind: "website".into(),
+            title: "acme.dev".into(),
+            url: Some("https://acme.dev".into()),
+            ..Default::default()
+        },
+        "me",
+        now(),
+    )
+    .unwrap();
     s.context_add(
         &item.id,
         &NewContext {
@@ -131,6 +143,7 @@ fn every_synced_table_round_trips_through_the_outbox() {
         "projects",
         "project_notes",
         "project_repos",
+        "project_resources",
         "item_context",
         "entities",
         "item_entities",
