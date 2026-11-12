@@ -621,20 +621,51 @@ pub(super) async fn run_turn(
         "parts": [{ "type": "text", "text": prompt }],
         "system": system,
     });
-    if let Some((provider, model)) = hub
+    let model = hub
         .config_for(session)
         .model_for(AgentKind::OpenCode)
-        .and_then(|m| m.split_once('/'))
-    {
+        .map(str::to_string);
+    if let Some((provider, model)) = model.as_deref().and_then(|m| m.split_once('/')) {
         body["model"] = json!({ "providerID": provider, "modelID": model });
     }
-    s.client
-        .post(s.url(&format!("/session/{oc_id}/prompt_async")))
-        .query(&s.q())
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?;
+    // OpenCode's commands and skills, for the `/` menu; a message naming one
+    // runs it, which a plain prompt wouldn't.
+    let commands = list_commands(&s).await;
+    if !commands.is_empty() {
+        hub.save_slash_commands(AgentKind::OpenCode, &commands);
+    }
+    if let Some((command, arguments)) = as_command(prompt, &commands) {
+        // It answers when the command's turn ends; the events show it as it goes.
+        let (s, oc_id, done) = (s.clone(), oc_id.clone(), done.clone());
+        let mut req = json!({ "command": command, "arguments": arguments });
+        if let Some(m) = model {
+            req["model"] = json!(m);
+        }
+        tokio::spawn(async move {
+            let sent = s
+                .client
+                .post(s.url(&format!("/session/{oc_id}/command")))
+                .query(&s.q())
+                .json(&req)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status());
+            if let Err(e) = sent
+                && let Some(t) = s.turns.lock().unwrap().get_mut(&oc_id)
+            {
+                t.error = Some(format!("OpenCode couldn't run /{command}: {e}"));
+                done.notify_one();
+            }
+        });
+    } else {
+        s.client
+            .post(s.url(&format!("/session/{oc_id}/prompt_async")))
+            .query(&s.q())
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+    }
 
     // Steering: more prompts to the same session while it works. OpenCode
     // reads the new message at its next step, and the turn ends when the
@@ -682,6 +713,75 @@ pub(super) async fn run_turn(
         hub.update(&session.id, Some(SessionStatus::Idle), None);
     }
     Ok(())
+}
+
+/// OpenCode's commands and skills (`GET /command`), for the `/` menu.
+async fn list_commands(s: &Server) -> Vec<super::SlashCommand> {
+    let got = s
+        .client
+        .get(s.url("/command"))
+        .query(&s.q())
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+    match got {
+        Ok(r) if r.status().is_success() => r
+            .json::<Value>()
+            .await
+            .map(|v| commands(&v))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// OpenCode's own commands; the rest come from the person's config.
+const BUILTIN_COMMANDS: &[&str] = &["init", "review"];
+
+fn commands(list: &Value) -> Vec<super::SlashCommand> {
+    use super::SlashKind;
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let name = c["name"].as_str()?.to_string();
+            let kind = match c["source"].as_str() {
+                Some("skill") => SlashKind::Skill,
+                Some("mcp") => SlashKind::Mcp,
+                _ if BUILTIN_COMMANDS.contains(&name.as_str()) => SlashKind::Builtin,
+                _ => SlashKind::Command,
+            };
+            // Its template's placeholders: `$ARGUMENTS` takes the rest, `$1`… one word each.
+            let hint = c["hints"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|h| h.as_str())
+                .map(|h| match h.strip_prefix('$') {
+                    Some("ARGUMENTS") => "[arguments]".to_string(),
+                    Some(n) => format!("<arg{n}>"),
+                    None => h.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(super::SlashCommand {
+                name,
+                description: c["description"].as_str().unwrap_or_default().to_string(),
+                argument_hint: hint,
+                aliases: Vec::new(),
+                kind,
+            })
+        })
+        .collect()
+}
+
+/// A message that's `/name args…` for one of OpenCode's commands: its name and arguments.
+fn as_command<'a>(prompt: &'a str, commands: &[super::SlashCommand]) -> Option<(String, &'a str)> {
+    let rest = prompt.trim_start().strip_prefix('/')?;
+    let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    commands
+        .iter()
+        .any(|c| c.name == name)
+        .then(|| (name.to_string(), args.trim()))
 }
 
 /// One-shot completion on a throwaway OpenCode session, for small jobs like
@@ -749,6 +849,36 @@ pub(super) async fn complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_come_with_their_kind_and_placeholders() {
+        let list = json!([
+            { "name": "init", "description": "create/update AGENTS.md", "source": "command", "hints": ["$ARGUMENTS"] },
+            { "name": "ship", "description": "Ship it", "source": "command", "hints": ["$1", "$2"] },
+            { "name": "docx", "description": "Word files", "source": "skill", "hints": [] },
+        ]);
+        let cmds = commands(&list);
+        let got: Vec<_> = cmds
+            .iter()
+            .map(|c| (c.name.as_str(), c.kind, c.argument_hint.as_str()))
+            .collect();
+        use super::super::SlashKind::*;
+        assert_eq!(
+            got,
+            [
+                ("init", Builtin, "[arguments]"),
+                ("ship", Command, "<arg1> <arg2>"),
+                ("docx", Skill, "")
+            ]
+        );
+        assert_eq!(
+            as_command("/ship main now", &cmds),
+            Some(("ship".into(), "main now"))
+        );
+        assert_eq!(as_command("/init", &cmds), Some(("init".into(), "")));
+        assert_eq!(as_command("/nope x", &cmds), None);
+        assert_eq!(as_command("ship it", &cmds), None);
+    }
 
     #[test]
     fn reads_mcp_server_names_from_jsonc() {

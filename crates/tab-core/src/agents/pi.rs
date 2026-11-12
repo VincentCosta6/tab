@@ -81,6 +81,19 @@ pub(super) async fn run_turn(
         session: pi_session,
         prompt,
     }));
+    // Pi expands `/template` and `/skill:name` itself; tab only needs the
+    // list for its `/` menu. Strict turns load neither, so don't count them.
+    if !strict {
+        let home = crate::sandbox::home();
+        hub.save_slash_commands(
+            AgentKind::Pi,
+            &commands(
+                pi_dir(home.as_deref()).as_deref(),
+                home.as_deref(),
+                std::path::Path::new(&session.cwd),
+            ),
+        );
+    }
     let mut events = Parser::new(hub.clone(), session.id.clone());
     events.strict = strict;
     per_turn::run(
@@ -97,6 +110,126 @@ pub(super) async fn run_turn(
         cancel,
     )
     .await
+}
+
+/// Pi's folder (`~/.pi/agent`, or `PI_CODING_AGENT_DIR`).
+fn pi_dir(home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    std::env::var_os("PI_CODING_AGENT_DIR")
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.map(|h| h.join(".pi/agent")))
+}
+
+/// Pi's prompt templates (`/name`) and skills (`/skill:name`) for a chat in
+/// `cwd`, read from where Pi looks: its own folder, `~/.agents/skills`, and
+/// the project's `.pi` and `.agents` folders. `--mode json` can't list them.
+fn commands(
+    pi: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+    cwd: &std::path::Path,
+) -> Vec<super::SlashCommand> {
+    use super::{SlashCommand, SlashKind};
+    let mut out: Vec<SlashCommand> = Vec::new();
+    let mut add = |c: SlashCommand| {
+        // The project's shadow the person's.
+        out.retain(|o| o.name != c.name);
+        out.push(c);
+    };
+    let prompt_dirs = [pi.map(|p| p.join("prompts")), Some(cwd.join(".pi/prompts"))];
+    for dir in prompt_dirs.into_iter().flatten() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut files: Vec<_> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "md"))
+            .collect();
+        files.sort();
+        for f in files {
+            let (Some(name), Ok(text)) = (
+                f.file_stem().and_then(|n| n.to_str()),
+                std::fs::read_to_string(&f),
+            ) else {
+                continue;
+            };
+            let (meta, body) = frontmatter(&text);
+            // No description: its first line, as Pi shows it.
+            let first = body
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or_default();
+            add(SlashCommand {
+                name: name.to_string(),
+                description: meta
+                    .get("description")
+                    .cloned()
+                    .unwrap_or_else(|| first.chars().take(120).collect()),
+                argument_hint: meta.get("argument-hint").cloned().unwrap_or_default(),
+                aliases: Vec::new(),
+                kind: SlashKind::Command,
+            });
+        }
+    }
+    let skill_dirs = [
+        pi.map(|p| p.join("skills")),
+        home.map(|h| h.join(".agents/skills")),
+        Some(cwd.join(".pi/skills")),
+        Some(cwd.join(".agents/skills")),
+    ];
+    for dir in skill_dirs.into_iter().flatten() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut dirs: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+        dirs.sort();
+        for d in dirs {
+            let Ok(text) = std::fs::read_to_string(d.join("SKILL.md")) else {
+                continue;
+            };
+            let (meta, _) = frontmatter(&text);
+            // Pi skips a skill with no description.
+            let Some(description) = meta.get("description").cloned() else {
+                continue;
+            };
+            let name = meta
+                .get("name")
+                .cloned()
+                .or_else(|| d.file_name()?.to_str().map(str::to_string));
+            let Some(name) = name else { continue };
+            add(SlashCommand {
+                name: format!("skill:{name}"),
+                description,
+                argument_hint: String::new(),
+                aliases: Vec::new(),
+                kind: SlashKind::Skill,
+            });
+        }
+    }
+    out
+}
+
+/// A markdown file's `key: value` frontmatter, and the text after it.
+fn frontmatter(text: &str) -> (std::collections::HashMap<String, String>, &str) {
+    let mut meta = std::collections::HashMap::new();
+    let Some(rest) = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))
+    else {
+        return (meta, text);
+    };
+    let Some(end) = rest.find("\n---") else {
+        return (meta, text);
+    };
+    for line in rest[..end].lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            let v = v.trim().trim_matches(|c| c == '"' || c == '\'');
+            meta.insert(k.trim().to_string(), v.to_string());
+        }
+    }
+    let body = rest[end + 4..].trim_start_matches(['-', '\r', '\n']);
+    (meta, body)
 }
 
 /// Turns Pi's JSON events into transcript entries.
@@ -324,6 +457,61 @@ pub(super) async fn complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn templates_and_skills_become_slash_commands() {
+        let root = std::env::temp_dir().join(format!("tab-pi-cmds-{}", uuid::Uuid::new_v4()));
+        let (pi, home, cwd) = (root.join("pi"), root.join("home"), root.join("repo"));
+        std::fs::create_dir_all(pi.join("prompts")).unwrap();
+        std::fs::create_dir_all(home.join(".agents/skills/pdf")).unwrap();
+        std::fs::create_dir_all(cwd.join(".pi/prompts")).unwrap();
+        std::fs::create_dir_all(cwd.join(".agents/skills/nodesc")).unwrap();
+        std::fs::write(
+            pi.join("prompts/review.md"),
+            "---\ndescription: Review a change\nargument-hint: \"<pr#> [focus]\"\n---\nReview $1",
+        )
+        .unwrap();
+        std::fs::write(
+            pi.join("prompts/fix.md"),
+            "Fix the failing tests\nthen run them",
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".pi/prompts/review.md"),
+            "---\ndescription: Project review\n---\nx",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".agents/skills/pdf/SKILL.md"),
+            "---\nname: pdf-tools\ndescription: Work with PDFs\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".agents/skills/nodesc/SKILL.md"),
+            "---\nname: nodesc\n---\n",
+        )
+        .unwrap();
+        let cmds = commands(Some(&pi), Some(&home), &cwd);
+        let got: Vec<_> = cmds
+            .iter()
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.description.as_str(),
+                    c.argument_hint.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("fix", "Fix the failing tests", ""),
+                ("review", "Project review", ""),
+                ("skill:pdf-tools", "Work with PDFs", ""),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
     use crate::config::AgentConfig;
     use crate::store::Store;
     use chrono::Utc;

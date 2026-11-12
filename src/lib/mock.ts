@@ -244,7 +244,7 @@ export const mockApi = {
       if (mcp !== NOT_HANDLED) return mcp;
       switch (cmd) {
         case "agent_mcp_servers": return [{ name: "tab", status: "connected" }, ...mcpServersInfo().map((m) => ({ name: m.id, status: m.ready ? "connected" : "needs-auth" })), { name: "playwright", status: "failed" }];
-        case "agent_slash_commands": return mockSlashCommands;
+        case "agent_slash_commands": return args.agent === "claude_code" || !args.agent ? mockSlashCommands : args.agent === "opencode" ? [{ name: "init", description: "create/update AGENTS.md", argument_hint: "[arguments]", aliases: [], kind: "builtin" }, { name: "review", description: "review changes [commit|branch|pr], defaults to uncommitted", argument_hint: "[arguments]", aliases: [], kind: "builtin" }] : [];
         case "agent_subagents": return [{ name: "Explore", description: "Read-only search agent" }, { name: "Plan", description: "Designs implementation plans" }];
         case "slash_arg_values": return args.kind === "branch" ? ["main", "slash-menu-rich", "fix-hub-sync"] : ["src/", "crates/", "docs/", "README.md", "package.json"].map((p) => `${args.typed}${p}`);
         case "agent_activity": return sessions.filter((s) => s.item_id && items.find((i) => i.id === s.item_id)?.state !== "done").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));

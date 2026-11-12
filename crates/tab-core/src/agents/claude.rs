@@ -527,7 +527,7 @@ impl Parser {
                 })
             })
             .collect();
-        self.hub.save_slash_commands(&cmds);
+        self.hub.save_slash_commands(AgentKind::ClaudeCode, &cmds);
     }
 
     /// Where a command comes from. Claude Code says only whether it's its
@@ -1347,7 +1347,7 @@ mod tests {
                 "agents": [{ "name": "Explore", "description": "Search code" }],
             },
         }}));
-        let cmds = hub.slash_commands();
+        let cmds = hub.slash_commands(AgentKind::ClaudeCode);
         let kinds: Vec<_> = cmds.iter().map(|c| (c.name.as_str(), c.kind)).collect();
         assert_eq!(
             kinds,
@@ -1364,7 +1364,11 @@ mod tests {
 
         // The init line adds only names the answer didn't have.
         p.handle(&json!({ "type": "system", "subtype": "init", "slash_commands": ["code-review", "review", "extra"] }));
-        let names: Vec<_> = hub.slash_commands().into_iter().map(|c| c.name).collect();
+        let names: Vec<_> = hub
+            .slash_commands(AgentKind::ClaudeCode)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
         assert_eq!(
             names,
             [
@@ -1386,7 +1390,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("slash_commands.json"), r#"["compact","deploy"]"#).unwrap();
         let hub = AgentHub::new(store, tx, AgentConfig::default(), dir.clone());
-        let names: Vec<_> = hub.slash_commands().into_iter().map(|c| c.name).collect();
+        let names: Vec<_> = hub
+            .slash_commands(AgentKind::ClaudeCode)
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
         assert_eq!(names, ["compact", "deploy"]);
         let _ = std::fs::remove_dir_all(dir);
     }
