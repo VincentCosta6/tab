@@ -1239,7 +1239,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_save_workflow",
-            "description": "Create or update a workflow from its JSON definition. Pass id to update one. It is checked first (actions exist, required inputs are set, templates only read earlier steps, it can't loop with other workflows) and not saved if anything is wrong; fix what it says and try again. It's always saved turned off: the person reviews it in the Workflows tab and turns it on. Missing inputs get the action's defaults.\n\nShape: {\"name\", \"description\", \"trigger\": {\"type\":\"item\",\"changes\":[\"ingested\"],\"sources\":[\"github\"],\"kinds\":[\"github.review_requested\"],\"when\":[conditions]} | {\"type\":\"signal\",\"name\"} | {\"type\":\"schedule\",\"every_minutes\"} | {\"type\":\"manual\"}, \"steps\": [{\"id\":\"pr\",\"type\":\"action\",\"connector\":\"github\",\"action\":\"pr.get\",\"input\":{...},\"when\":[conditions]}, {\"id\":\"small\",\"type\":\"filter\",\"conditions\":[...]}, {\"id\":\"vals\",\"type\":\"set\",\"values\":{...}}, {\"id\":\"tell\",\"type\":\"emit\",\"signal\":\"name\",\"payload\":{...}}, {\"id\":\"test\",\"type\":\"command\",\"program\":\"cargo\",\"args\":[\"test\"],\"folder\":\"\",\"network\":[\"crates.io\",\"*.crates.io\"],\"env\":{},\"image\":\"\",\"timeout_secs\":600}], \"limits\": {\"max_runs_per_hour\":30,\"cooldown_minutes\":0}}. A condition is {\"field\":\"item.kind\",\"op\":\"equals|not_equals|contains|not_contains|starts_with|matches|in|gt|lt|exists|missing\",\"value\":...}. Changes: ingested, updated, ranked, snoozed, woke, done, reopened. Templates: {{item.title}}, {{item.metadata.repo}}, {{item.score}}, {{steps.<id>.<output>}}, {{signal.<key>}}, {{now}}.",
+            "description": "Create or update a workflow from its JSON definition. Pass id to update one. It is checked first (actions exist, required inputs are set, templates only read earlier steps, it can't loop with other workflows) and not saved if anything is wrong; fix what it says and try again. It's always saved turned off: the person reviews it in the Workflows tab and turns it on. Missing inputs get the action's defaults.\n\nShape: {\"name\", \"description\", \"trigger\": {\"type\":\"item\",\"changes\":[\"ingested\"],\"sources\":[\"github\"],\"kinds\":[\"github.review_requested\"],\"when\":[conditions]} | {\"type\":\"signal\",\"name\"} | {\"type\":\"schedule\",\"every_minutes\"} | {\"type\":\"manual\"}, \"steps\": [{\"id\":\"pr\",\"type\":\"action\",\"connector\":\"github\",\"action\":\"pr.get\",\"input\":{...},\"when\":[conditions]}, {\"id\":\"small\",\"type\":\"filter\",\"conditions\":[...]}, {\"id\":\"vals\",\"type\":\"set\",\"values\":{...}}, {\"id\":\"tell\",\"type\":\"emit\",\"signal\":\"name\",\"payload\":{...}}, {\"id\":\"test\",\"type\":\"command\",\"program\":\"cargo\",\"args\":[\"test\"],\"folder\":\"\",\"network\":[\"crates.io\",\"*.crates.io\"],\"env\":{},\"image\":\"\",\"timeout_secs\":600}, {\"id\":\"fix\",\"type\":\"agent\",\"prompt\":\"...\",\"repo\":\"owner/name\",\"family\":\"balanced\"}], \"limits\": {\"max_runs_per_hour\":30,\"cooldown_minutes\":0}}. A condition is {\"field\":\"item.kind\",\"op\":\"equals|not_equals|contains|not_contains|starts_with|matches|in|gt|lt|exists|missing\",\"value\":...}. Changes: ingested, updated, ranked, snoozed, woke, done, reopened. Templates: {{item.title}}, {{item.metadata.repo}}, {{item.score}}, {{steps.<id>.<output>}}, {{signal.<key>}}, {{now}}. An agent step runs on a model family from tab_list_actions (family), or on one harness and model (harness, model), which win when set.",
             "inputSchema": { "type": "object", "properties": {
                 "workflow": { "type": "object", "description": "The workflow definition. Include id to update." }
             }, "required": ["workflow"] }
@@ -2823,9 +2823,16 @@ impl McpServer {
                         })
                     })
                     .collect();
+                let families: Vec<Value> = self
+                    .store
+                    .model_families()?
+                    .into_iter()
+                    .map(|f| json!({ "id": f.id, "name": f.name, "candidates": f.candidates }))
+                    .collect();
                 Ok(text(serde_json::to_string_pretty(&json!({
                     "item_changes": changes,
                     "connections": connections,
+                    "model_families": families,
                     "templates": {
                         "item": "The item that started the run: item.id, item.title, item.body, item.kind, item.source, item.actor, item.context, item.url, item.score, item.urgency, item.state, item.metadata.<key> (GitHub: repo, number, reason, subject_type; email: folder, uid).",
                         "steps": "steps.<step id>.<output key> for an earlier step's output.",
@@ -2868,7 +2875,9 @@ impl McpServer {
                     anyhow::bail!("no workflow {}; leave id out to create one", w.id);
                 }
                 let catalog = self.catalog().await;
-                let (w, issues) = workflow::prepare_save(w, SavedBy::Agent, &catalog, &saved);
+                let families = self.store.model_family_ids()?;
+                let (w, issues) =
+                    workflow::prepare_save(w, SavedBy::Agent, &catalog, &saved, &families);
                 let errors: Vec<_> = issues.iter().filter(|i| i.error).collect();
                 if !errors.is_empty() {
                     let list: Vec<String> = errors

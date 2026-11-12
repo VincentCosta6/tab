@@ -270,6 +270,8 @@ Rule of thumb: a new screen should be composable from these; if it isn't, add th
 
 **Dry runs** execute reads for real and show what each write would do with its rendered inputs.
 
+**Model families.** An agent step pins a harness and model, or names a family (`tab_domain::families`): a named, ordered list of harness and model pairs. tab ships `fast`, `balanced` and `deep`, seeded from each harness's `families` in `harnesses.json`; the person edits them and adds their own in Settings → Agents, kept in the synced `model_families` table (a saved family replaces the built-in with its id). The run copies the family's candidates onto the job (`JobSpec.family`, `.candidates`); a runner may take it when it has any candidate's harness, runs the first it has, and moves on to the next in the same attempt only when the harness's error reads as a model reason (`families::model_trouble`: model unavailable, rate limited, plan used up). What ran and how many times it moved on are on `JobResult.usage`.
+
 **Building with AI.** The builder has an assistant chat (session key `workflows`) whose agent uses MCP tools `tab_list_actions`, `tab_list_workflows`, `tab_save_workflow` and `tab_test_workflow`; the open workflow is sent with each message, and what the agent saves appears on the canvas right away.
 
 ## Item timelines (built)

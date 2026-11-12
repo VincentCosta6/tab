@@ -6,6 +6,7 @@
 
 mod activity;
 mod context;
+mod families;
 mod graph;
 mod http;
 pub mod hub_sync;
@@ -79,6 +80,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/023_session_opened.sql"),
     include_str!("migrations/024_vault.sql"),
     include_str!("migrations/025_session_mode.sql"),
+    include_str!("migrations/026_model_families.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {

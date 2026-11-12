@@ -67,6 +67,11 @@
     ],
     "list_models": null,
     "common_models": [],
+    "families": {
+      "fast": "claude-haiku-5-5",
+      "balanced": "claude-sonnet-5-5",
+      "deep": "claude-opus-5-5"
+    },
     "install": {
       "npm": "@anthropic-ai/claude-code",
       "unix": "curl -fsSL https://claude.ai/install.sh | bash",
@@ -111,6 +116,11 @@
       "anthropic/claude-haiku-5-5",
       "anthropic/claude-fable-5-1"
     ],
+    "families": {
+      "fast": "anthropic/claude-haiku-5-5",
+      "balanced": "anthropic/claude-sonnet-5-5",
+      "deep": "anthropic/claude-opus-5-5"
+    },
     "install": {
       "npm": "opencode-ai",
       "unix": "curl -fsSL https://opencode.ai/install | bash",
@@ -201,6 +211,11 @@
     ],
     "list_models": null,
     "common_models": [],
+    "families": {
+      "fast": "gpt-6-luna",
+      "balanced": "gpt-6-sol",
+      "deep": "gpt-6.1-sol"
+    },
     "install": {
       "npm": "@openai/codex",
       "unix": null,
@@ -246,6 +261,11 @@
       "anthropic/claude-haiku-5-5",
       "openai/gpt-6-sol"
     ],
+    "families": {
+      "fast": "anthropic/claude-haiku-5-5",
+      "balanced": "anthropic/claude-sonnet-5-5",
+      "deep": "anthropic/claude-opus-5-5"
+    },
     "install": {
       "npm": "@earendil-works/pi-coding-agent",
       "unix": "curl -fsSL https://pi.dev/install.sh | sh",

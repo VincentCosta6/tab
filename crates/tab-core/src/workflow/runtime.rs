@@ -824,6 +824,7 @@ impl Runtime {
                     repo,
                     harness,
                     model,
+                    family,
                     placement,
                     deadline_minutes,
                 } => {
@@ -833,18 +834,39 @@ impl Runtime {
                         Value::Null => String::new(),
                         other => other.to_string(),
                     };
-                    let spec = JobSpec {
+                    let mut spec = JobSpec {
                         prompt: agent_prompt(prompt, &ctx),
                         repo: text(repo).trim().to_string(),
                         harness: harness.clone(),
                         model: model.clone(),
                         placement: *placement,
+                        ..Default::default()
                     };
+                    // A family travels with its models as they are now, so
+                    // every runner resolves it the same way.
+                    let mut no_family = false;
+                    if !family.is_empty() && !spec.pinned() {
+                        let found = self
+                            .host
+                            .store()
+                            .model_families()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .find(|f| &f.id == family);
+                        spec.family = family.clone();
+                        match found {
+                            Some(f) => spec.candidates = f.candidates,
+                            None => no_family = true,
+                        }
+                    }
                     sr.input = serde_json::to_value(&spec).unwrap_or(Value::Null);
                     let outside_repo = template::refs(&Value::String(repo.clone()))
                         .into_iter()
                         .find(|p| !trusted_path(p));
-                    if let Some(p) = outside_repo {
+                    if no_family {
+                        sr.status = StepStatus::Failed;
+                        sr.error = Some(format!("There's no model family called {family}."));
+                    } else if let Some(p) = outside_repo {
                         sr.status = StepStatus::Failed;
                         sr.error = Some(format!(
                             "An agent step's repo can't come from {{{{{p}}}}}: text from outside (an item, a PR, an email) could point the agent at any repo. Name the repo, or take it from an earlier step."
@@ -1107,6 +1129,7 @@ mod tests {
                         repo: "acme/api".into(),
                         harness: "codex".into(),
                         model: String::new(),
+                        family: String::new(),
                         placement: Placement::Anywhere,
                         deadline_minutes: 0,
                     },
@@ -1165,6 +1188,48 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("item.body")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_agent_step_hands_out_its_familys_models_unless_it_pins_one() {
+        let (rt, host) = runtime(Store::in_memory().unwrap(), "laptop");
+        let mut w = agent_workflow(&host.store);
+        if let StepKind::Agent {
+            harness, family, ..
+        } = &mut w.steps[0].kind
+        {
+            harness.clear();
+            *family = "deep".into();
+        }
+        let run = rt.run_now(w.clone(), None, false).await.unwrap();
+        assert_eq!(run.status, RunStatus::Waiting);
+        let job = host.store.jobs_open().unwrap().remove(0);
+        assert_eq!(job.spec.family, "deep");
+        assert_eq!(
+            job.spec.candidates,
+            host.store.model_families().unwrap()[2].candidates
+        );
+
+        // A pinned harness wins: no family on the job.
+        let mut pinned = w.clone();
+        if let StepKind::Agent { harness, .. } = &mut pinned.steps[0].kind {
+            *harness = "codex".into();
+        }
+        rt.run_now(pinned, None, false).await.unwrap();
+        let jobs = host.store.jobs_open().unwrap();
+        let job = jobs.iter().find(|j| j.spec.harness == "codex").unwrap();
+        assert!(job.spec.family.is_empty() && job.spec.candidates.is_empty());
+
+        // A family deleted since the workflow was saved fails the step.
+        if let StepKind::Agent { family, .. } = &mut w.steps[0].kind {
+            *family = "gone".into();
+        }
+        let run = rt.run_now(w, None, false).await.unwrap();
+        assert_eq!(run.steps[0].status, StepStatus::Failed);
+        assert_eq!(
+            run.steps[0].error.as_deref(),
+            Some("There's no model family called gone.")
         );
     }
 

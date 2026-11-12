@@ -19,6 +19,8 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+pub use crate::families::Candidate;
+
 /// How long a job lease lasts before it must be renewed.
 pub const JOB_LEASE: Duration = Duration::seconds(90);
 /// Renew this often while working (well inside [`JOB_LEASE`]).
@@ -136,6 +138,36 @@ pub struct JobSpec {
     pub model: String,
     #[serde(default)]
     pub placement: Placement,
+    /// The model family the step asked for, when it pinned neither a
+    /// harness nor a model. Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub family: String,
+    /// That family's candidates, in order, as they were when the job was
+    /// handed out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<Candidate>,
+}
+
+impl JobSpec {
+    /// Whether it pins a harness or a model, which wins over a family.
+    pub fn pinned(&self) -> bool {
+        !self.harness.is_empty() || !self.model.is_empty()
+    }
+
+    /// What a runner with `harnesses` installed tries, in order: the pinned
+    /// harness and model; else the family's candidates it has; else the
+    /// runner's default (one empty candidate). Empty when it has none of a
+    /// family's harnesses.
+    pub fn plan(&self, harnesses: &[String]) -> Vec<Candidate> {
+        if self.pinned() || self.candidates.is_empty() {
+            return vec![Candidate::new(&self.harness, &self.model)];
+        }
+        self.candidates
+            .iter()
+            .filter(|c| harnesses.contains(&c.harness))
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -321,6 +353,12 @@ impl Job {
         if !self.spec.harness.is_empty() && !runner.harnesses.contains(&self.spec.harness) {
             return Err(NotForYou::NoHarness(self.spec.harness.clone()));
         }
+        if self.spec.plan(&runner.harnesses).is_empty() {
+            return Err(NotForYou::NoHarness(format!(
+                "a harness in the {} family",
+                self.spec.family
+            )));
+        }
         if runner.harnesses.is_empty() {
             return Err(NotForYou::NoHarness("any agent".into()));
         }
@@ -408,6 +446,7 @@ mod tests {
                 harness: String::new(),
                 model: String::new(),
                 placement,
+                ..Default::default()
             },
             state: JobState::Waiting,
             attempts: 0,
@@ -564,6 +603,84 @@ mod tests {
         r.seen_at = Some(t(0));
         assert!(r.awake(t(2)));
         assert!(!r.awake(t(3)));
+    }
+
+    fn family_job() -> Job {
+        let mut j = job(Placement::Anywhere);
+        j.spec.family = "deep".into();
+        j.spec.candidates = vec![
+            Candidate::new("codex", "gpt-6.1-sol"),
+            Candidate::new("claude_code", "claude-opus-5-5"),
+            Candidate::new("pi", ""),
+        ];
+        j
+    }
+
+    #[test]
+    fn a_runner_may_take_a_family_job_when_any_candidate_fits() {
+        let now = t(1);
+        let j = family_job();
+        assert!(j.can_take(&laptop(), false, now).is_ok());
+        assert!(j.can_take(&cloud(), false, now).is_ok());
+        let mut opencode = laptop();
+        opencode.harnesses = vec!["opencode".into()];
+        assert_eq!(
+            j.can_take(&opencode, false, now),
+            Err(NotForYou::NoHarness("a harness in the deep family".into()))
+        );
+    }
+
+    #[test]
+    fn a_runner_tries_the_family_in_order_skipping_what_it_lacks() {
+        let j = family_job();
+        assert_eq!(
+            j.spec.plan(&laptop().harnesses),
+            [Candidate::new("claude_code", "claude-opus-5-5")]
+        );
+        let all: Vec<String> = ["pi", "claude_code", "codex"].map(String::from).into();
+        let plan: Vec<_> = j.spec.plan(&all).into_iter().map(|c| c.harness).collect();
+        assert_eq!(plan, ["codex", "claude_code", "pi"]);
+    }
+
+    #[test]
+    fn a_pinned_harness_or_model_wins_over_a_family() {
+        let mut j = family_job();
+        j.spec.harness = "codex".into();
+        assert_eq!(
+            j.spec.plan(&cloud().harnesses),
+            [Candidate::new("codex", "")]
+        );
+        assert_eq!(
+            j.can_take(&laptop(), false, t(1)),
+            Err(NotForYou::NoHarness("codex".into()))
+        );
+        j.spec.harness.clear();
+        j.spec.model = "claude-sonnet-5-5".into();
+        assert_eq!(
+            j.spec.plan(&laptop().harnesses),
+            [Candidate::new("", "claude-sonnet-5-5")]
+        );
+        // No pin and no family: the runner's default.
+        assert_eq!(
+            job(Placement::Anywhere).spec.plan(&[]),
+            [Candidate::default()]
+        );
+    }
+
+    #[test]
+    fn jobs_from_before_families_still_parse() {
+        let old = r#"{"id":"j1","run_id":"r1","step_id":"fix","workflow_id":"w1",
+            "spec":{"prompt":"Fix it","repo":"acme/api","harness":"","model":"","placement":{"type":"anywhere"}},
+            "state":{"state":"waiting"},"attempts":0,"max_attempts":2,
+            "created_at":"2027-01-15T08:00:00Z","deadline":"2027-01-15T09:00:00Z"}"#;
+        let j: Job = serde_json::from_str(old).unwrap();
+        assert!(j.spec.family.is_empty() && j.spec.candidates.is_empty());
+        // And a job without a family writes no family fields, for old runners.
+        let v = serde_json::to_value(&j).unwrap();
+        assert!(v["spec"].get("family").is_none() && v["spec"].get("candidates").is_none());
+        let back: Job =
+            serde_json::from_value(serde_json::to_value(family_job()).unwrap()).unwrap();
+        assert_eq!(back, family_job());
     }
 
     #[test]

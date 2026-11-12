@@ -26,9 +26,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use tab_domain::families::model_trouble;
 pub use tab_domain::runner::RunnerKind as Kind;
 use tab_domain::runner::{
-    CloudGap, JOB_LEASE, JOB_RENEW, Job, JobResult, JobState, RunnerCaps, RunnerKind, job_lease,
+    Candidate, CloudGap, JOB_LEASE, JOB_RENEW, Job, JobResult, JobState, RunnerCaps, RunnerKind,
+    job_lease,
 };
 pub use tokio_util::sync::CancellationToken;
 
@@ -100,10 +102,13 @@ impl Agents for Arc<AgentHub> {
                 let kind = kind
                     .or(self.config().kind)
                     .ok_or_else(|| anyhow::anyhow!("no agent is set up on this runner"))?;
-                // The model comes from the harness's setting on this
-                // runner; a per-job model needs a per-chat model setting.
-                let _ = model;
-                store.session_create_keyed(key, kind, title, cwd, Utc::now())?
+                let s = store.session_create_keyed(key, kind, title, cwd, Utc::now())?;
+                // Empty: the harness's setting on this runner, set on send.
+                if model.trim().is_empty() {
+                    s
+                } else {
+                    store.session_set_model(&s.id, model)?.unwrap_or(s)
+                }
             }
         };
         self.emit(EngineEvent::SessionChanged {
@@ -360,20 +365,23 @@ impl JobRunner {
                 }
             }
         };
-        let kind = (!job.spec.harness.is_empty()).then(|| AgentKind::parse(&job.spec.harness));
+        // The pinned harness and model, the family's models this runner
+        // has, or its default.
+        let plan = job.spec.plan(&self.caps(Utc::now()).await.harnesses);
+        let mut at = 0;
         let title = format!("Workflow job: {}", first_line(&job.spec.prompt));
         let prompt = match self.kind {
             RunnerKind::Computer => job.spec.prompt.clone(),
             RunnerKind::Cloud => format!("{}{CLOUD_NOTE}", job.spec.prompt),
         };
-        let session = match self.agents.start(
-            &format!("job:{}", job.id),
-            kind,
-            &job.spec.model,
-            &title,
-            &cwd,
-            &prompt,
-        ) {
+        let started = match plan.first() {
+            Some(c) => self.start_on(&job, c, 0, &title, &cwd, &prompt),
+            None => Err(anyhow::anyhow!(
+                "this runner has none of the {} family's harnesses",
+                job.spec.family
+            )),
+        };
+        let mut session = match started {
             Ok(s) => s,
             Err(e) => {
                 self.finish(
@@ -389,15 +397,10 @@ impl JobRunner {
                 return Ok(());
             }
         };
-        // Note the chat on the job, so the person can open it.
-        if let Some(mut j) = self.store.job_get(&job.id)?
-            && j.accepts_result_from(&me, token)
-        {
-            if let JobState::Running { session: s, .. } = &mut j.state {
-                *s = Some(session.clone());
-            }
-            self.store.job_put(&j, Utc::now())?;
-        }
+        self.note_session(&job.id, &me, token, &session)?;
+        // What earlier candidates' chats needed, when the family moved on.
+        let mut earlier_gaps = Vec::new();
+        let mut tried = Vec::new();
 
         // Give the turn a moment to start before reading its status.
         tokio::time::sleep(Duration::from_secs(3)).await;
@@ -414,7 +417,7 @@ impl JobRunner {
                         error: "The agent didn't finish before the job's deadline.".into(),
                         finished_at: Utc::now(),
                     },
-                    self.agents.gaps(&session),
+                    [earlier_gaps.clone(), self.agents.gaps(&session)].concat(),
                 )?;
                 break;
             }
@@ -422,6 +425,12 @@ impl JobRunner {
             match s.as_ref().map(|s| s.status) {
                 Some(SessionStatus::Idle) => {
                     let mut result = self.result_of(&session)?;
+                    // What ran, which the family or the runner's default decided.
+                    let (harness, model) = self.ran_on(&session, &plan[at]);
+                    let usage = result.usage.get_or_insert_with(Default::default);
+                    usage.harness = harness;
+                    usage.model = model;
+                    usage.fallbacks = at as u32;
                     if self.kind == RunnerKind::Cloud && !job.spec.repo.is_empty() {
                         match push_branch(
                             Path::new(&cwd),
@@ -450,7 +459,7 @@ impl JobRunner {
                             result,
                             finished_at: Utc::now(),
                         },
-                        self.agents.gaps(&session),
+                        [earlier_gaps.clone(), self.agents.gaps(&session)].concat(),
                     )?;
                     break;
                 }
@@ -463,6 +472,30 @@ impl JobRunner {
                         .find(|m| m.kind == "error")
                         .map(|m| m.content)
                         .unwrap_or_else(|| "The agent stopped with an error.".into());
+                    // A model reason moves on to the family's next model,
+                    // in this same attempt.
+                    if at + 1 < plan.len() && self.model_trouble(&session, &why)? {
+                        tried.push(format!("{}: {why}", label(&plan[at])));
+                        earlier_gaps.extend(self.agents.gaps(&session));
+                        at += 1;
+                        tracing::info!(job = %job.id, next = %label(&plan[at]), "moving on to the family's next model");
+                        match self.start_on(&job, &plan[at], at, &title, &cwd, &prompt) {
+                            Ok(s) => {
+                                session = s;
+                                self.note_session(&job.id, &me, token, &session)?;
+                                tokio::time::sleep(poll).await;
+                                continue;
+                            }
+                            Err(e) => {
+                                tried.push(format!("{}: couldn't start: {e:#}", label(&plan[at])));
+                            }
+                        }
+                    }
+                    let why = if tried.is_empty() {
+                        why
+                    } else {
+                        format!("{why}\n\nTried before: {}", tried.join("; "))
+                    };
                     self.finish_with(
                         &job.id,
                         &me,
@@ -471,7 +504,7 @@ impl JobRunner {
                             error: why,
                             finished_at: Utc::now(),
                         },
-                        self.agents.gaps(&session),
+                        [earlier_gaps.clone(), self.agents.gaps(&session)].concat(),
                     )?;
                     break;
                 }
@@ -497,6 +530,67 @@ impl JobRunner {
         }
         let _ = leases::release(&self.leases, &key).await;
         Ok(())
+    }
+
+    /// Starts candidate `n` of a job's plan in a chat of its own.
+    fn start_on(
+        &self,
+        job: &Job,
+        c: &Candidate,
+        n: usize,
+        title: &str,
+        cwd: &str,
+        prompt: &str,
+    ) -> anyhow::Result<String> {
+        let key = match n {
+            0 => format!("job:{}", job.id),
+            n => format!("job:{}:{n}", job.id),
+        };
+        let kind = (!c.harness.is_empty()).then(|| AgentKind::parse(&c.harness));
+        self.agents.start(&key, kind, &c.model, title, cwd, prompt)
+    }
+
+    /// Notes the chat on the job, so the person can open it.
+    fn note_session(&self, id: &str, me: &str, token: u64, session: &str) -> anyhow::Result<()> {
+        if let Some(mut j) = self.store.job_get(id)?
+            && j.accepts_result_from(me, token)
+        {
+            if let JobState::Running { session: s, .. } = &mut j.state {
+                *s = Some(session.to_string());
+            }
+            self.store.job_put(&j, Utc::now())?;
+        }
+        Ok(())
+    }
+
+    /// Whether a chat failed for a model reason: its error, or a usage
+    /// limit its harness reported on the way (Claude Code's rate-limit
+    /// events become a status line).
+    fn model_trouble(&self, session: &str, why: &str) -> anyhow::Result<bool> {
+        if model_trouble(why).is_some() {
+            return Ok(true);
+        }
+        Ok(self
+            .store
+            .messages(session)?
+            .iter()
+            .rev()
+            .filter(|m| m.kind == "status")
+            .take(3)
+            .any(|m| model_trouble(&m.content).is_some()))
+    }
+
+    /// The harness and model a chat ran on.
+    fn ran_on(&self, session: &str, c: &Candidate) -> (String, String) {
+        match self.store.session_get(session).ok().flatten() {
+            Some(s) => (
+                s.agent.as_str().to_string(),
+                s.model
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| c.model.clone()),
+            ),
+            None => (c.harness.clone(), c.model.clone()),
+        }
     }
 
     /// What came of a chat: its last reply and any pull request it names.
@@ -526,6 +620,16 @@ impl JobRunner {
             pr_url,
             usage: None,
         })
+    }
+}
+
+/// A candidate as the person reads it in an error.
+fn label(c: &Candidate) -> String {
+    match (c.harness.as_str(), c.model.as_str()) {
+        ("", "") => "the default agent".into(),
+        (h, "") => h.into(),
+        ("", m) => m.into(),
+        (h, m) => format!("{h} {m}"),
     }
 }
 
@@ -874,6 +978,130 @@ mod tests {
         assert_eq!(*agents.1.lock().unwrap(), ["Fix the flaky test"]);
         // What the chat needed and didn't have is on the job.
         assert_eq!(j.missing, [linear_gap()]);
+    }
+
+    /// Agents that end each chat as scripted: an error, or done.
+    struct Scripted(
+        Arc<Store>,
+        Mutex<std::collections::VecDeque<Option<&'static str>>>,
+        Mutex<Vec<(String, String)>>,
+    );
+
+    impl Agents for Scripted {
+        fn harnesses(&self) -> BoxFuture<'_, Vec<AgentKind>> {
+            Box::pin(async { vec![AgentKind::ClaudeCode, AgentKind::Codex] })
+        }
+        fn default_folder(&self) -> String {
+            std::env::temp_dir().to_string_lossy().into_owned()
+        }
+        fn start(
+            &self,
+            key: &str,
+            kind: Option<AgentKind>,
+            model: &str,
+            title: &str,
+            cwd: &str,
+            _prompt: &str,
+        ) -> anyhow::Result<String> {
+            let kind = kind.unwrap_or(AgentKind::ClaudeCode);
+            self.2
+                .lock()
+                .unwrap()
+                .push((kind.as_str().into(), model.into()));
+            let s = self
+                .0
+                .session_create_keyed(key, kind, title, cwd, Utc::now())?;
+            let (status, role, kind, text) = match self.1.lock().unwrap().pop_front().flatten() {
+                Some(e) => (SessionStatus::Failed, "system", "error", e),
+                None => (SessionStatus::Idle, "assistant", "text", "Fixed it"),
+            };
+            self.0
+                .message_add(&s.id, role, kind, text, &serde_json::json!({}), Utc::now())?;
+            self.0
+                .session_update(&s.id, Some(status), None, Utc::now())?;
+            Ok(s.id)
+        }
+        fn stop(&self, _session: &str) {}
+    }
+
+    async fn run_family_job(script: &[Option<&'static str>]) -> (Job, Vec<(String, String)>) {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut j = job(Placement::Computers);
+        j.spec.family = "deep".into();
+        j.spec.candidates = vec![
+            Candidate::new("codex", "gpt-6.1-sol"),
+            Candidate::new("pi", "anthropic/claude-opus-5-5"),
+            Candidate::new("claude_code", "claude-opus-5-5"),
+        ];
+        store.job_put(&j, Utc::now()).unwrap();
+        let agents = Arc::new(Scripted(
+            store.clone(),
+            Mutex::new(script.iter().copied().collect()),
+            Mutex::new(vec![]),
+        ));
+        let runner = JobRunner::new(
+            store.clone(),
+            agents.clone(),
+            InMemory::new("laptop"),
+            RunnerKind::Computer,
+            "Laptop",
+        );
+        runner.take(Utc::now()).await;
+        let s = store.clone();
+        until(move || s.job_get("j1").unwrap().unwrap().finished()).await;
+        let started = agents.2.lock().unwrap().clone();
+        (store.job_get("j1").unwrap().unwrap(), started)
+    }
+
+    #[tokio::test]
+    async fn a_family_job_moves_on_to_the_next_model_when_one_is_out_of_plan() {
+        let (j, started) = run_family_job(&[Some("You've hit your usage limit."), None]).await;
+        // Pi isn't installed here, so it's skipped.
+        assert_eq!(
+            started,
+            [
+                ("codex".to_string(), "gpt-6.1-sol".to_string()),
+                ("claude_code".to_string(), "claude-opus-5-5".to_string()),
+            ]
+        );
+        let JobState::Done { result, .. } = &j.state else {
+            panic!("{:?}", j.state)
+        };
+        let usage = result.usage.as_ref().unwrap();
+        assert_eq!(
+            (
+                usage.harness.as_str(),
+                usage.model.as_str(),
+                usage.fallbacks
+            ),
+            ("claude_code", "claude-opus-5-5", 1)
+        );
+        assert_eq!(j.attempts, 1, "a fallback isn't another attempt");
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_failure_doesnt_fall_through_to_the_next_model() {
+        let (j, started) = run_family_job(&[Some("3 tests failed"), None]).await;
+        assert_eq!(started.len(), 1);
+        let JobState::Failed { error, .. } = &j.state else {
+            panic!("{:?}", j.state)
+        };
+        assert_eq!(error, "3 tests failed");
+    }
+
+    #[tokio::test]
+    async fn when_every_model_is_out_the_job_says_what_it_tried() {
+        let (j, started) =
+            run_family_job(&[Some("429 Too Many Requests"), Some("Rate limited")]).await;
+        assert_eq!(started.len(), 2);
+        let JobState::Failed { error, .. } = &j.state else {
+            panic!("{:?}", j.state)
+        };
+        assert!(error.starts_with("Rate limited"), "{error}");
+        assert!(
+            error.contains("Tried before: codex gpt-6.1-sol: 429"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

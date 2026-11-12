@@ -11,6 +11,7 @@ use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint, coordinator}
 use tab_core::config::ConnectorConfig;
 use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
 use tab_core::connectors::registry;
+use tab_core::families::ModelFamily;
 use tab_core::gateway::{Call, RateLimitState};
 use tab_core::live::SteerCommand;
 use tab_core::local_hub::{HubStatusView, LocalHub};
@@ -2491,7 +2492,37 @@ async fn workflow_validate(
 ) -> CmdResult<Vec<Issue>> {
     let catalog = with_engine!(state, e => e.connectors());
     let saved = state.store.workflows().map_err(err)?;
-    Ok(workflow::validate(&workflow, &catalog, &saved))
+    let families = state.store.model_family_ids().map_err(err)?;
+    Ok(workflow::validate(&workflow, &catalog, &saved, &families))
+}
+
+/// Model families agent steps can run on: the built-in ones (or the
+/// person's edits of them), then the person's own.
+#[tauri::command]
+async fn model_families_list(state: State<'_, AppState>) -> CmdResult<Vec<ModelFamily>> {
+    state.store.model_families().map_err(err)
+}
+
+#[tauri::command]
+async fn model_family_save(
+    state: State<'_, AppState>,
+    family: ModelFamily,
+) -> CmdResult<Vec<ModelFamily>> {
+    state
+        .store
+        .model_family_save(&family, Utc::now())
+        .map_err(err)?;
+    state.store.model_families().map_err(err)
+}
+
+/// Deletes the person's family, or resets a built-in one.
+#[tauri::command]
+async fn model_family_delete(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<ModelFamily>> {
+    state.store.model_family_delete(&id).map_err(err)?;
+    state.store.model_families().map_err(err)
 }
 
 #[derive(Serialize)]
@@ -2505,7 +2536,9 @@ struct SavedWorkflow {
 async fn workflow_save(state: State<'_, AppState>, workflow: Workflow) -> CmdResult<SavedWorkflow> {
     let catalog = with_engine!(state, e => e.connectors());
     let saved = state.store.workflows().map_err(err)?;
-    let (w, issues) = workflow::prepare_save(workflow, SavedBy::Person, &catalog, &saved);
+    let families = state.store.model_family_ids().map_err(err)?;
+    let (w, issues) =
+        workflow::prepare_save(workflow, SavedBy::Person, &catalog, &saved, &families);
     let w = state
         .store
         .workflow_save(&w, "user", Utc::now())
@@ -2538,9 +2571,10 @@ async fn workflow_set_enabled(
     if enabled {
         let catalog = with_engine!(state, e => e.connectors());
         let saved = state.store.workflows().map_err(err)?;
+        let families = state.store.model_family_ids().map_err(err)?;
         let mut check = w.clone();
         check.enabled = true;
-        if let Some(i) = workflow::validate(&check, &catalog, &saved)
+        if let Some(i) = workflow::validate(&check, &catalog, &saved, &families)
             .into_iter()
             .find(|i| i.error)
         {
@@ -3670,6 +3704,9 @@ pub fn run() {
             workflow_templates,
             workflow_validate,
             workflow_save,
+            model_families_list,
+            model_family_save,
+            model_family_delete,
             workflow_set_enabled,
             workflow_delete,
             workflow_runs,

@@ -36,7 +36,7 @@ mod tests {
             .collect();
         for mut t in templates() {
             fill_defaults(&mut t, &catalog);
-            let errors: Vec<_> = validate(&t, &catalog, &[])
+            let errors: Vec<_> = validate(&t, &catalog, &[], &[])
                 .into_iter()
                 .filter(|i| i.error)
                 .collect();
@@ -57,7 +57,7 @@ mod tests {
                 input: Map::new(),
             },
         });
-        let issues = validate(&bad, &catalog, &[]);
+        let issues = validate(&bad, &catalog, &[], &[]);
         let msgs: Vec<_> = issues.iter().map(|i| i.message.as_str()).collect();
         assert!(
             msgs.iter().any(|m| m.contains("hasn't run yet")),
