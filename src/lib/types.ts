@@ -64,6 +64,10 @@ export interface QueueItem {
   ranking: Ranking | null;
   snoozed_until: string | null;
   project_id?: string | null;
+  /** The task this is a follow-up of; it shows under that one while it's open. */
+  parent_id?: string | null;
+  /** Tasks not done yet that have to be done before this one. */
+  blocked_by?: string[];
   created_at: string;
   updated_at: string;
 }

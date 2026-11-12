@@ -73,6 +73,24 @@ let items: QueueItem[] = seeds.map(([kind, title, body, actor, context, url, min
   };
 });
 
+// A planning chat that split its work into phases: they fold under it, each
+// waiting on the one before.
+{
+  const task = (id: string, title: string, body: string, score: number, min: number, extra: Partial<QueueItem> = {}): QueueItem => ({
+    id, source: "tab", external_id: id, kind: "tab.task", title, body, url: null, actor: extra.parent_id ? "agent" : "you", context: "tab",
+    occurred_at: ago(min), blocks: [], entities: [], metadata: { created_by: extra.parent_id ? "agent" : "user" },
+    state: "open", snoozed_until: null, created_at: ago(min), updated_at: ago(min),
+    ranking: { score, base_score: score, ai_adjustment: null, urgency: urgency(score), reason: "A task", ranked_by: "rules", fired: [] },
+    ...extra,
+  });
+  items.push(
+    task("plan-hub", "Prototype project hub with resources and coordinator", "Design the hub, then build it in phases.", 52, 30),
+    task("plan-p2", "Projects phase 2: index project resources for search", "Builds on the prototype.", 52, 4, { parent_id: "plan-hub" }),
+    task("plan-p3", "Projects phase 3: coordinator monitoring and auto-compaction", "Builds on phase 2.", 47, 3, { parent_id: "plan-hub", blocked_by: ["plan-p2"] }),
+    task("plan-p4", "Projects phase 4: end-to-end encrypted vault", "Builds on phase 3.", 52, 2, { parent_id: "plan-hub", blocked_by: ["plan-p3"] }),
+  );
+}
+
 const base = { rate_limits: [], category: "built_in", features: [] as string[], builtin: false };
 const plainConnectors: ConnectorInfo[] = [
   { ...base, id: "tab", name: "tab", icon: "tab", builtin: true, description: "tab's own tasks and schedules. Anything you or an agent asks tab to do becomes a task here, with a priority, an optional due time, and its own agent session.", available: true, enabled: true, status: { state: "running", last_sync: ago(0) },
