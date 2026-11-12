@@ -27,6 +27,8 @@ import { Factory } from "./insights/Factory";
 import { InsightsPanel } from "./insights/InsightsPanel";
 import { StepBadges } from "./insights/StepBadges";
 import { useWindowDays, useWorkflowInsights } from "./insights/useInsights";
+import { RunExtras } from "./RunExtras";
+import { takePendingRun } from "./runLinks";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -175,6 +177,18 @@ export function WorkflowsTab() {
   useEffect(() => {
     try { localStorage.setItem("tab.workflows.view", view); } catch { /* private window */ }
   }, [view]);
+
+  // A run opened from elsewhere (an item's runs list) opens in All runs.
+  const [linkedRun, setLinkedRun] = useState<string | null>(() => takePendingRun());
+  useEffect(() => {
+    if (linkedRun) setView("runs");
+  }, [linkedRun]);
+  useEffect(() => {
+    const on = () => { const id = takePendingRun(); if (id) setLinkedRun(id); };
+    on();
+    window.addEventListener("tab:open-run", on);
+    return () => window.removeEventListener("tab:open-run", on);
+  }, []);
 
   // Open the remembered (or first) workflow once the list loads.
   useEffect(() => {
@@ -359,7 +373,7 @@ export function WorkflowsTab() {
       {view === "factory" ? (
         <Factory workflows={list} onOpen={(id) => { const w = list.find((x) => x.id === id); if (w) { if (draft?.id === id) setView("builder"); else open(w); setPanel("insights"); } }} />
       ) : view === "runs" ? (
-        <AllRuns runs={allRuns} workflows={list} onOpenWorkflow={(id) => { const w = list.find((x) => x.id === id); if (w) { if (draft?.id === id) setView("builder"); else open(w); setPanel("runs"); } }} />
+        <AllRuns runs={allRuns} workflows={list} focus={linkedRun} onOpenWorkflow={(id) => { const w = list.find((x) => x.id === id); if (w) { if (draft?.id === id) setView("builder"); else open(w); setPanel("runs"); } }} />
       ) : draft ? (
         <>
           <section className="wf-main">
@@ -1186,6 +1200,7 @@ function RunsPanel({ workflow, focus }: { workflow: Workflow; focus?: string | n
 function RunDetail({ run: r }: { run: WorkflowRun }) {
   return (
             <div className="wf-run-body">
+              {!r.dry_run && <RunExtras runId={r.id} />}
               <CloudGaps runId={r.id} />
               {r.error && <IssueLine issue={{ at: null, error: r.status === "failed", message: r.error }} />}
               {r.chain.length > 0 && <p className="subtle">Started by changes from {r.chain.length} earlier workflow{r.chain.length === 1 ? "" : "s"}.</p>}
@@ -1216,10 +1231,17 @@ function runsSummary(runs: WorkflowRun[]): string {
 
 type RunFilter = "all" | "problems" | "succeeded" | "dry";
 
-function AllRuns({ runs, workflows, onOpenWorkflow }: { runs: WorkflowRun[]; workflows: Workflow[]; onOpenWorkflow: (id: string) => void }) {
+function AllRuns({ runs, workflows, focus, onOpenWorkflow }: { runs: WorkflowRun[]; workflows: Workflow[]; focus?: string | null; onOpenWorkflow: (id: string) => void }) {
   const [filter, setFilter] = useState<RunFilter>("all");
   const [wf, setWf] = useState<string>("");
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(focus ?? null);
+  useEffect(() => {
+    if (!focus) return;
+    setFilter("all");
+    setWf("");
+    setOpen(focus);
+    requestAnimationFrame(() => document.getElementById(`wf-run-${focus}`)?.scrollIntoView({ block: "start" }));
+  }, [focus]);
   const shown = runs.filter((r) => {
     if (wf && r.workflow_id !== wf) return false;
     if (filter === "dry") return r.dry_run;
@@ -1249,7 +1271,7 @@ function AllRuns({ runs, workflows, onOpenWorkflow }: { runs: WorkflowRun[]; wor
       <div className="wf-allruns-body">
         {!shown.length && <p className="subtle wf-pad">{runs.length ? "No runs match." : "No runs yet. When a workflow runs, each run shows here with every step's inputs and outputs, kept for 30 days."}</p>}
         {shown.map((r) => (
-          <div key={r.id} className={cx("wf-run", open === r.id && "open")}>
+          <div key={r.id} id={`wf-run-${r.id}`} className={cx("wf-run", open === r.id && "open")}>
             <button className="wf-run-head wf-allruns-row" onClick={() => setOpen(open === r.id ? null : r.id)}>
               <Badge tone={runTone[r.status]}>{r.dry_run ? "Dry run" : runLabel[r.status]}</Badge>
               <span className="wf-allruns-name">{r.workflow_name}</span>

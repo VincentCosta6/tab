@@ -2,6 +2,7 @@
 // sample data closely enough to design against.
 
 import { NOT_HANDLED, withActions, workflowMock } from "./mock-workflows";
+import { queueRuns, queueWorkflowMock } from "./mock-queue-workflows";
 // The same harness metadata the app ships.
 import harnessData from "../../crates/tab-core/src/agents/harnesses.json";
 import { create, toBinary } from "@bufbuild/protobuf";
@@ -283,7 +284,11 @@ const mockSlashCommands = [
 export const mockApi = {
   async invoke<T>(cmd: string, args: Record<string, any> = {}): Promise<T> {
     const r = await (async () => {
+      const qwf = queueWorkflowMock(cmd, args, { items: () => items, emit });
+      if (qwf !== NOT_HANDLED) return qwf;
       const wf = workflowMock(cmd, args, { items: () => items, connectors: () => connectors, emit });
+      if (cmd === "workflow_runs" && Array.isArray(wf) && !args.workflowId)
+        return [...wf, ...queueRuns(items)].sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, args.limit ?? 50);
       if (wf !== NOT_HANDLED) return wf;
       const mcp = mcpHandle(cmd, args);
       if (mcp !== NOT_HANDLED) return mcp;

@@ -240,6 +240,9 @@ mod tests {
             runner: String::new(),
             resume: None,
             rerun_of: None,
+            started_by: None,
+            caused_by: None,
+            approved: Vec::new(),
         }
     }
 

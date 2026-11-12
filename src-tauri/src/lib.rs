@@ -217,6 +217,19 @@ impl EngineAccess for LiveEngine {
             .run_workflow(w, item_id.as_deref(), true)
             .await
     }
+    async fn run_workflow_for_agent(
+        &self,
+        workflow_id: String,
+        item_id: Option<String>,
+        session: Option<String>,
+    ) -> anyhow::Result<workflow::runtime::AgentRun> {
+        let guard = self.0.engine.read().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
+            .run_workflow_for_agent(&workflow_id, item_id.as_deref(), session.as_deref())
+            .await
+    }
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -2691,6 +2704,98 @@ async fn workflow_run(
         .map_err(err)
 }
 
+/// Each item's workflow status (running, waiting for you, …) for the queue
+/// rows, in one read. Items with nothing to show are left out.
+#[tauri::command]
+async fn workflow_activity(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<workflow::item_status::ItemWorkflowStatus>> {
+    let hub = state.hub.clone();
+    let pending = move |id: &str| !hub.pending_approvals(id).is_empty();
+    workflow::items::statuses(&state.store, &pending, Utc::now()).map_err(err)
+}
+
+/// An item's workflow runs, newest first, with what each links to.
+#[tauri::command]
+async fn item_workflow_runs(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> CmdResult<Vec<workflow::items::RunView>> {
+    let hub = state.hub.clone();
+    let pending = move |id: &str| !hub.pending_approvals(id).is_empty();
+    workflow::items::item_runs(&state.store, &item_id, 20, &pending, Utc::now()).map_err(err)
+}
+
+/// One run with what it links to, for the Runs panel.
+#[tauri::command]
+async fn workflow_run_view(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> CmdResult<Option<workflow::items::RunView>> {
+    let hub = state.hub.clone();
+    let pending = move |id: &str| !hub.pending_approvals(id).is_empty();
+    workflow::items::run_view(&state.store, &run_id, &pending, Utc::now()).map_err(err)
+}
+
+/// The person's answer to a run blocked on a step: approve that one step
+/// for that one run (it carries on from there), or decline and end it.
+/// Only the app's buttons call this; no agent or MCP tool can.
+#[tauri::command]
+async fn workflow_run_answer(
+    state: State<'_, AppState>,
+    run_id: String,
+    approve: bool,
+) -> CmdResult<Run> {
+    let guard = state.engine.read().await;
+    let e = guard.as_ref().ok_or("engine is not running")?;
+    e.answer_workflow_run(&run_id, approve).await.map_err(err)
+}
+
+/// The chat of a workflow job's agent.
+#[tauri::command]
+async fn job_chat_open(state: State<'_, AppState>, job_id: String) -> CmdResult<Chat> {
+    let session = state
+        .store
+        .session_for_key(&format!("job:{job_id}"))
+        .map_err(err)?;
+    let (messages, approvals, running) = match &session {
+        Some(s) => (
+            state.store.messages_current(&s.id, 3).map_err(err)?,
+            state.hub.pending_approvals(&s.id),
+            state.hub.is_running(&s.id),
+        ),
+        None => (Vec::new(), Vec::new(), false),
+    };
+    Ok(Chat {
+        session,
+        messages,
+        approvals,
+        running,
+    })
+}
+
+/// A message (an answer, usually) to a workflow job's agent.
+#[tauri::command]
+async fn job_chat_send(
+    state: State<'_, AppState>,
+    job_id: String,
+    text: String,
+) -> CmdResult<Session> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("message is empty".into());
+    }
+    let session = state
+        .store
+        .session_for_key(&format!("job:{job_id}"))
+        .map_err(err)?
+        .ok_or("that agent's chat isn't on this device")?;
+    if !state.hub.steer(&session.id, &text).map_err(err)? {
+        state.hub.send(&session.id, &text).map_err(err)?;
+    }
+    Ok(session)
+}
+
 #[tauri::command]
 async fn item_activity(
     state: State<'_, AppState>,
@@ -3745,6 +3850,12 @@ pub fn run() {
             workflow_factory,
             workflow_versions,
             workflow_run,
+            workflow_activity,
+            item_workflow_runs,
+            workflow_run_view,
+            workflow_run_answer,
+            job_chat_open,
+            job_chat_send,
             item_activity,
             workflow_chat_open,
             workflow_chat_send,

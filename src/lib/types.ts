@@ -325,6 +325,37 @@ export interface WorkflowRun {
   id: string; workflow_id: string; workflow_name: string; version: number; status: RunStatus; dry_run: boolean;
   trigger: string; trigger_key: string | null; item_id: string | null; chain: string[]; steps: StepRun[];
   error: string | null; started_at: string; finished_at: string | null;
+  /** The agent chat (session id) that started it. */
+  started_by?: string | null;
+  /** The run that led to this one, when known. */
+  caused_by?: string | null;
+  /** Steps the person approved on this run only. */
+  approved?: StepApproval[];
+}
+export interface StepApproval { step: string; input: unknown; at: string }
+
+// --- Workflows on queue items (mirror tab_domain::workflow::item_status and tab_core::workflow::items) ---
+
+/** An item's workflow state, most pressing first. */
+export type ItemWorkflowState = "waiting_for_you" | "running" | "waiting_on_agent" | "failed" | "held_back" | "done";
+export interface ItemWorkflowStatus {
+  item_id: string; state: ItemWorkflowState; run_id: string; workflow_id: string; workflow_name: string; at: string;
+  /** The agent chat waiting on you, when that's why. */
+  session?: string | null;
+  /** Other runs on the item that also show a state. */
+  more: number;
+}
+export interface RunAgentLink { step_id: string; job: string; session: string | null; status: SessionStatus | null; needs_you: boolean }
+export interface RunView {
+  run: WorkflowRun;
+  /** What the run shows on its item now. */
+  state: ItemWorkflowState | null;
+  agents: RunAgentLink[];
+  started_by: { session: string; title: string; item_id: string | null; job: string | null } | null;
+  /** `exact` is false when an item change linked them (the run of that workflow just before). */
+  caused_by: { id: string; workflow_name: string; item_id: string | null; exact: boolean } | null;
+  /** The step waiting for your OK, with what it would do. */
+  approval: { step_id: string; label: string; reason: string | null; input: unknown } | null;
 }
 
 // --- Workflow insights (mirror tab_domain::workflow::{stats, insights}) ---

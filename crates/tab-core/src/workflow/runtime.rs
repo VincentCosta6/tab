@@ -41,6 +41,12 @@ const CONCURRENT_RUNS: usize = 2;
 use tab_domain::workflow::run::{Intervention, InterventionKind};
 pub use tab_domain::workflow::run::{Resume, Run, RunStatus, StepRun, StepStatus};
 
+mod agent;
+mod approve;
+#[cfg(test)]
+mod queue_tests;
+pub use agent::AgentRun;
+
 /// What the runtime needs from the engine.
 #[async_trait]
 pub trait Host: Send + Sync + 'static {
@@ -64,6 +70,7 @@ pub trait Host: Send + Sync + 'static {
 }
 
 /// Where a run came from.
+#[derive(Default)]
 struct Start {
     trigger: String,
     key: Option<String>,
@@ -73,6 +80,10 @@ struct Start {
     dry_run: bool,
     /// The failed run a person is running again.
     rerun_of: Option<String>,
+    /// The agent chat that started it.
+    started_by: Option<String>,
+    /// The run that led to it, when known.
+    caused_by: Option<String>,
 }
 
 pub struct Runtime {
@@ -144,6 +155,14 @@ fn base_ctx(w: &Workflow, trigger: Value, item: Option<&QueueItem>, signal: Valu
         "workflow": { "id": w.id, "name": w.name },
         "now": Utc::now().to_rfc3339(),
     })
+}
+
+/// The person approved this step on this run, with exactly these inputs.
+/// Inputs that came out different need asking again.
+fn approved(run: &Run, step: &str, input: &Value) -> bool {
+    run.approved
+        .iter()
+        .any(|a| a.step == step && &a.input == input)
 }
 
 fn budget_error(e: &anyhow::Error) -> bool {
@@ -265,7 +284,7 @@ impl Runtime {
                     chain: chain.clone(),
                     ctx,
                     dry_run: false,
-                    rerun_of: None,
+                    ..Default::default()
                 },
             );
         }
@@ -277,6 +296,7 @@ impl Runtime {
         payload: Value,
         chain: Vec<String>,
         item: Option<String>,
+        from_run: &str,
     ) {
         for w in self.enabled().iter() {
             let Trigger::Signal { name: on, when } = &w.trigger else {
@@ -303,7 +323,8 @@ impl Runtime {
                     chain: chain.clone(),
                     ctx,
                     dry_run: false,
-                    rerun_of: None,
+                    caused_by: Some(from_run.to_string()),
+                    ..Default::default()
                 },
             );
         }
@@ -336,7 +357,7 @@ impl Runtime {
                     chain: Vec::new(),
                     ctx,
                     dry_run: false,
-                    rerun_of: None,
+                    ..Default::default()
                 },
             );
         }
@@ -506,7 +527,7 @@ impl Runtime {
             chain: Vec::new(),
             ctx,
             dry_run,
-            rerun_of: None,
+            ..Default::default()
         };
         let run = self.clone().begin(&w, start).await?;
         Ok(run)
@@ -545,6 +566,7 @@ impl Runtime {
             ctx,
             dry_run: false,
             rerun_of: Some(old.id),
+            ..Default::default()
         };
         self.clone().begin(&w, start).await
     }
@@ -562,6 +584,9 @@ impl Runtime {
             runner: self.host.leases().holder(),
             resume: None,
             rerun_of: s.rerun_of.clone(),
+            started_by: s.started_by.clone(),
+            caused_by: s.caused_by.clone(),
+            approved: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
             workflow_id: w.id.clone(),
             workflow_name: w.name.clone(),
@@ -805,7 +830,7 @@ impl Runtime {
                     });
                     if run.dry_run {
                         sr.status = StepStatus::Dry;
-                    } else if !w.allow_commands {
+                    } else if !w.allow_commands && !approved(run, &step.id, &sr.input) {
                         sr.status = StepStatus::Blocked;
                         sr.error = Some(
                             "Commands are blocked. Allow commands on this workflow to let it run programs."
@@ -989,7 +1014,7 @@ impl Runtime {
                     if run.dry_run {
                         sr.status = StepStatus::Dry;
                     } else {
-                        self.signal(signal, p, chain.clone(), trigger_item.clone());
+                        self.signal(signal, p, chain.clone(), trigger_item.clone(), &run.id);
                     }
                 }
                 StepKind::Action {
@@ -1014,7 +1039,8 @@ impl Runtime {
                         Some(info)
                             if info.effect == Effect::Destructive
                                 && !w.allow_destructive
-                                && !run.dry_run =>
+                                && !run.dry_run
+                                && !approved(run, &step.id, &rendered) =>
                         {
                             sr.status = StepStatus::Blocked;
                             sr.error = Some(format!(
@@ -1110,6 +1136,14 @@ impl Runtime {
             run.steps.push(sr);
             if let Some(st) = stop {
                 run.status = st;
+                // Kept so the person can approve this step and carry on.
+                if st == RunStatus::Blocked && !run.dry_run {
+                    run.resume = Some(Resume {
+                        job: String::new(),
+                        step: index,
+                        ctx: ctx.clone(),
+                    });
+                }
                 if st != RunStatus::Waiting && run.error.is_none() {
                     run.error = run.steps.last().and_then(|s| s.error.clone());
                 }
@@ -1422,7 +1456,7 @@ mod tests {
             chain: vec![],
             ctx: base_ctx(&w, json!({ "type": "schedule" }), None, Value::Null),
             dry_run: false,
-            rerun_of: None,
+            ..Default::default()
         };
         let run = rt.clone().begin(&w, start()).await.unwrap();
         assert_eq!(run.status, RunStatus::Stopped);
@@ -1457,7 +1491,7 @@ mod tests {
                 chain: vec![],
                 ctx: Value::Null,
                 dry_run: false,
-                rerun_of: None,
+                ..Default::default()
             },
             RunStatus::Running,
         );

@@ -21,6 +21,7 @@ mod sessions;
 mod usage;
 mod vault;
 mod vectors;
+mod workflow_items;
 mod workflows;
 pub use jobs::CloudConnection;
 pub use knowledge::{ChunkHit, IndexTarget, Reader};
@@ -81,6 +82,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/024_vault.sql"),
     include_str!("migrations/025_session_mode.sql"),
     include_str!("migrations/026_model_families.sql"),
+    include_str!("migrations/027_workflow_run_items.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {
