@@ -2751,6 +2751,35 @@ async fn workflow_run_answer(
     e.answer_workflow_run(&run_id, approve).await.map_err(err)
 }
 
+/// Runs a failed run again, as the person asked from the Runs panel or a
+/// failure group. The new run notes the one it re-runs (`rerun_of`).
+#[tauri::command]
+async fn workflow_rerun(state: State<'_, AppState>, run_id: String) -> CmdResult<Run> {
+    let guard = state.engine.read().await;
+    let e = guard.as_ref().ok_or("engine is not running")?;
+    e.rerun_workflow(&run_id).await.map_err(err)
+}
+
+/// What could make a workflow cheaper or steadier, from its runs over the
+/// last `days` days: deterministic rules, each with its evidence and,
+/// where there is one, the changed workflow to load as a draft.
+#[tauri::command]
+async fn workflow_suggestions(
+    state: State<'_, AppState>,
+    workflow_id: String,
+    days: u32,
+    utc_offset_minutes: i32,
+) -> CmdResult<Vec<workflow::suggest::Suggestion>> {
+    workflow::suggest_store::workflow_suggestions(
+        &state.store,
+        &workflow_id,
+        days,
+        utc_offset_minutes,
+        Utc::now(),
+    )
+    .map_err(err)
+}
+
 /// The chat of a workflow job's agent.
 #[tauri::command]
 async fn job_chat_open(state: State<'_, AppState>, job_id: String) -> CmdResult<Chat> {
@@ -3854,6 +3883,8 @@ pub fn run() {
             item_workflow_runs,
             workflow_run_view,
             workflow_run_answer,
+            workflow_rerun,
+            workflow_suggestions,
             job_chat_open,
             job_chat_send,
             item_activity,

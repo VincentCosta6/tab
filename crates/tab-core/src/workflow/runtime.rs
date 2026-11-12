@@ -32,7 +32,7 @@ use tab_domain::runner::{
 };
 
 /// One action may take this long.
-const STEP_TIMEOUT: Duration = Duration::from_secs(60);
+const STEP_TIMEOUT: Duration = Duration::from_secs(tab_domain::workflow::ACTION_STEP_SECS as u64);
 /// How long an item a run touched remembers that run's chain.
 const PROVENANCE_TTL: Duration = Duration::from_secs(10 * 60);
 /// Runs at once.
@@ -672,9 +672,12 @@ impl Runtime {
             }
             let hour = store.workflow_runs_since(&w.id, now - chrono::Duration::hours(1))?;
             if hour >= w.limits.max_runs_per_hour as usize {
-                return self.refuse(w, &s, RunStatus::Throttled, format!(
-                    "Hit its limit of {} runs an hour; later triggers are skipped until the hour rolls over.",
-                    w.limits.max_runs_per_hour));
+                return self.refuse(
+                    w,
+                    &s,
+                    RunStatus::Throttled,
+                    tab_domain::workflow::own_limit_error(w.limits.max_runs_per_hour),
+                );
             }
             if w.limits.cooldown_minutes > 0
                 && let Some(item) = &s.item_id

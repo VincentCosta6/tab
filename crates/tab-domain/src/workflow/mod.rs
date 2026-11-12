@@ -30,6 +30,7 @@ pub mod insights;
 pub mod item_status;
 pub mod run;
 pub mod stats;
+pub mod suggest;
 pub mod template;
 
 use std::collections::{HashMap, HashSet};
@@ -56,6 +57,27 @@ pub const MAX_ACTIONS_PER_RUN: usize = 10;
 pub const GLOBAL_RUNS_PER_HOUR: usize = 200;
 /// The shortest schedule.
 pub const MIN_SCHEDULE_MINUTES: u32 = 5;
+/// How long a connector action step may take.
+pub const ACTION_STEP_SECS: u32 = 60;
+
+const OWN_LIMIT: &str = "Hit its limit of ";
+
+/// Why a run was held back by its workflow's own runs-per-hour limit.
+pub fn own_limit_error(max_runs_per_hour: u32) -> String {
+    format!(
+        "{OWN_LIMIT}{max_runs_per_hour} runs an hour; later triggers are skipped until the hour rolls over."
+    )
+}
+
+/// The run was held back by its workflow's own runs-per-hour limit (not
+/// the cap across every workflow, nor a provider's budget).
+pub fn held_by_own_limit(run: &Run) -> bool {
+    run.status == RunStatus::Throttled
+        && run
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with(OWN_LIMIT))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Workflow {

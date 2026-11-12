@@ -28,6 +28,9 @@ import { InsightsPanel } from "./insights/InsightsPanel";
 import { StepBadges } from "./insights/StepBadges";
 import { useWindowDays, useWorkflowInsights } from "./insights/useInsights";
 import { RunExtras } from "./RunExtras";
+import { isDeclined, RerunButton, RerunOf, StepMetricsView } from "./RunStepDetails";
+import type { Prepared } from "./fixMessage";
+import { duration } from "./insights/format";
 import { takePendingRun } from "./runLinks";
 
 // ---------------------------------------------------------------------------
@@ -67,6 +70,9 @@ const runTone: Record<RunStatus, Tone> = {
 const runLabel: Record<RunStatus, string> = {
   running: "Running", waiting: "Waiting on an agent", succeeded: "Ran", stopped: "Stopped", failed: "Failed", blocked: "Needs your OK", throttled: "Held back", loop_stopped: "Loop stopped",
 };
+/** A run's badge: a run you declined at an approval reads as that, not as a filter stop. */
+const runBadge = (r: WorkflowRun): { tone: Tone; label: string } =>
+  isDeclined(r) ? { tone: "neutral", label: "Declined by you" } : { tone: runTone[r.status], label: runLabel[r.status] };
 const stepTone: Record<StepStatus, Tone> = { ok: "success", waiting: "accent", skipped: "neutral", stopped: "neutral", failed: "danger", blocked: "warning", throttled: "warning", dry: "accent" };
 const stepLabel: Record<StepStatus, string> = { ok: "Done", waiting: "Agent working", skipped: "Skipped", stopped: "Stopped here", failed: "Failed", blocked: "Blocked", throttled: "Held back", dry: "Would run" };
 
@@ -164,6 +170,10 @@ export function WorkflowsTab() {
     return v === "runs" || v === "builder" ? v : "factory";
   });
   const [focusRun, setFocusRun] = useState<string | null>(null);
+  // A message for the assistant, prepared from a failure or a suggestion; sent only when the person says so.
+  const [prepared, setPrepared] = useState<Prepared | null>(null);
+  // The suggestion an unsaved draft came from.
+  const [draftNote, setDraftNote] = useState<string | null>(null);
   const insightDays = useWindowDays();
   const { data: insights } = useWorkflowInsights(view === "builder" && !dirty ? draft?.id : null);
   const stepStats = useMemo(() => new Map((insights?.workflow_id === draft?.id ? insights?.stats.steps ?? [] : []).map((s) => [s.id, s])), [insights, draft?.id]);
@@ -248,6 +258,24 @@ export function WorkflowsTab() {
     setSelected("trigger");
     setDry(null);
     setError(null);
+    setDraftNote(null);
+  };
+
+  // A suggestion's change, loaded unsaved for the person to review and save.
+  const applyDraft = (w: Workflow, from: { title: string; step_id?: string | null }) => {
+    if (dirty && !confirm("Discard your unsaved changes?")) return;
+    setDraft(clone(w));
+    setDirty(true);
+    setDry(null);
+    setError(null);
+    setSelected(from.step_id && w.steps.some((s) => s.id === from.step_id) ? from.step_id : "trigger");
+    setPanel("edit");
+    setDraftNote(from.title);
+  };
+
+  const askAssistant = (p: Prepared) => {
+    setPrepared(p);
+    setPanel("assistant");
   };
 
   const act = async (label: string, f: () => Promise<void>) => {
@@ -261,6 +289,7 @@ export function WorkflowsTab() {
     setDraft(clone(workflow));
     setOpenId(workflow.id);
     setDirty(false);
+    setDraftNote(null);
     await qc.invalidateQueries({ queryKey: ["workflows"] });
   });
 
@@ -351,7 +380,7 @@ export function WorkflowsTab() {
                 <span className="wf-list-text">
                   <span className="wf-list-name">{w.name}</span>
                   <span className="subtle">{describeTrigger(w.trigger, connectors)}</span>
-                  {last && <span className={cx("subtle", "wf-list-last", `tone-${runTone[last.status]}`)}>{runLabel[last.status]} {timeAgo(last.started_at)}</span>}
+                  {last && <span className={cx("subtle", "wf-list-last", `tone-${runBadge(last).tone}`)}>{runBadge(last).label} {timeAgo(last.started_at)}</span>}
                 </span>
                 {w.created_by === "agent" && <Icon name="sparkles" size={12} className="subtle" />}
               </button>
@@ -394,6 +423,13 @@ export function WorkflowsTab() {
             </header>
             {error && <div className="wf-error"><Icon name="alert" size={13} /> {error}</div>}
             {dry && <DryRunBanner run={dry} onClose={() => setDry(null)} />}
+            {draftNote && dirty && (
+              <div className="wf-draft-note" role="status">
+                <Icon name="sparkles" size={13} />
+                <span><strong>Draft from a suggestion:</strong> {draftNote}. Review the change, then save it as a new version, or discard it.</span>
+                {draft.id && <Button size="sm" variant="ghost" onClick={() => { const w = list.find((x) => x.id === draft.id); if (w) { setDraft(clone(w)); setDirty(false); setDraftNote(null); } }}>Discard</Button>}
+              </div>
+            )}
 
             <div className="wf-canvas" onClick={(e) => e.target === e.currentTarget && setSelected("trigger")}>
               <div className="wf-flow">
@@ -454,8 +490,8 @@ export function WorkflowsTab() {
                 />
               )}
               {panel === "runs" && <RunsPanel workflow={draft} focus={focusRun} />}
-              {panel === "insights" && <InsightsPanel workflow={draft} onOpenRun={(id) => { setFocusRun(id); setPanel("runs"); }} />}
-              {panel === "assistant" && <AssistantPanel workflow={draft} />}
+              {panel === "insights" && <InsightsPanel workflow={draft} onOpenRun={(id) => { setFocusRun(id); setPanel("runs"); }} onApplyDraft={applyDraft} onAsk={askAssistant} />}
+              {panel === "assistant" && <AssistantPanel workflow={draft} prepared={prepared} onPreparedDone={() => setPrepared(null)} />}
             </div>
           </aside>
         </>
@@ -1173,11 +1209,13 @@ function RunsPanel({ workflow, focus }: { workflow: Workflow; focus?: string | n
     staleTime: 0,
   });
   const [open, setOpen] = useState<string | null>(focus ?? null);
+  const show = (id: string) => {
+    setOpen(id);
+    requestAnimationFrame(() => document.getElementById(`wf-run-${id}`)?.scrollIntoView({ block: "center" }));
+  };
   // Opened from Insights on one run: show it.
   useEffect(() => {
-    if (!focus) return;
-    setOpen(focus);
-    requestAnimationFrame(() => document.getElementById(`wf-run-${focus}`)?.scrollIntoView({ block: "center" }));
+    if (focus) show(focus);
   }, [focus, runs.length]);
   if (!workflow.id) return <p className="subtle wf-pad">Save the workflow to start keeping its runs. Dry runs show on the canvas.</p>;
   if (!runs.length) return <p className="subtle wf-pad">No runs yet. Each run is kept with every step's inputs and outputs for 30 days.</p>;
@@ -1186,37 +1224,44 @@ function RunsPanel({ workflow, focus }: { workflow: Workflow; focus?: string | n
       {runs.map((r) => (
         <div key={r.id} id={`wf-run-${r.id}`} className={cx("wf-run", open === r.id && "open")}>
           <button className="wf-run-head" onClick={() => setOpen(open === r.id ? null : r.id)}>
-            <Badge tone={runTone[r.status]}>{runLabel[r.status]}</Badge>
+            <Badge tone={runBadge(r).tone}>{runBadge(r).label}</Badge>
+            {r.rerun_of && <Badge tone="info" icon="refresh" title="A re-run of an earlier failed run">Re-run</Badge>}
             <span className="wf-run-trigger" title={r.trigger}>{r.trigger}</span>
             <span className="subtle">{timeAgo(r.started_at)}</span>
           </button>
-          {open === r.id && <RunDetail run={r} />}
+          {open === r.id && <RunDetail run={r} onOpen={show} />}
         </div>
       ))}
     </div>
   );
 }
 
-function RunDetail({ run: r }: { run: WorkflowRun }) {
+function RunDetail({ run: r, onOpen }: { run: WorkflowRun; onOpen?: (id: string) => void }) {
   return (
             <div className="wf-run-body">
+              <RerunOf run={r} onOpen={onOpen} />
               {!r.dry_run && <RunExtras runId={r.id} />}
               <CloudGaps runId={r.id} />
               {r.error && <IssueLine issue={{ at: null, error: r.status === "failed", message: r.error }} />}
               {r.chain.length > 0 && <p className="subtle">Started by changes from {r.chain.length} earlier workflow{r.chain.length === 1 ? "" : "s"}.</p>}
-              {r.steps.map((s) => (
+              {r.steps.map((s, i) => (
                 <div key={s.id} className="wf-run-step">
                   <div className="wf-run-step-head">
-                    <Badge tone={stepTone[s.status]}>{stepLabel[s.status]}</Badge>
+                    {isDeclined(r) && i === r.steps.length - 1 ? <Badge tone="neutral" icon="x-circle">Declined</Badge> : <Badge tone={stepTone[s.status]}>{stepLabel[s.status]}</Badge>}
                     <code>{s.id}</code>
-                    <span className="subtle">{s.ms} ms</span>
+                    {s.label && s.label !== s.id && <span className="wf-run-step-label">{s.label}</span>}
+                    <span className="subtle">{s.metrics && s.metrics.queue_ms + s.metrics.work_ms > 0 ? duration(s.metrics.queue_ms + s.metrics.work_ms) : `${s.ms} ms`}</span>
                   </div>
                   {s.error && <p className="wf-node-error">{s.error}</p>}
+                  <StepMetricsView step={s} />
                   {s.input != null && <details><summary>Input</summary><pre>{JSON.stringify(s.input, null, 2)}</pre></details>}
                   {s.output != null && Object.keys(s.output as object).length > 0 && <details><summary>Output</summary><pre>{JSON.stringify(s.output, null, 2)}</pre></details>}
                 </div>
               ))}
-              {r.item_id && <Button size="sm" icon="external" onClick={() => openItem(r.item_id!)}>Open the item and its timeline</Button>}
+              <div className="wf-run-actions">
+                <RerunButton run={r} onOpen={onOpen} />
+                {r.item_id && <Button size="sm" icon="external" onClick={() => openItem(r.item_id!)}>Open the item and its timeline</Button>}
+              </div>
             </div>
   );
 }
@@ -1235,6 +1280,12 @@ function AllRuns({ runs, workflows, focus, onOpenWorkflow }: { runs: WorkflowRun
   const [filter, setFilter] = useState<RunFilter>("all");
   const [wf, setWf] = useState<string>("");
   const [open, setOpen] = useState<string | null>(focus ?? null);
+  const show = (id: string) => {
+    setFilter("all");
+    setWf("");
+    setOpen(id);
+    requestAnimationFrame(() => document.getElementById(`wf-run-${id}`)?.scrollIntoView({ block: "start" }));
+  };
   useEffect(() => {
     if (!focus) return;
     setFilter("all");
@@ -1273,7 +1324,7 @@ function AllRuns({ runs, workflows, focus, onOpenWorkflow }: { runs: WorkflowRun
         {shown.map((r) => (
           <div key={r.id} id={`wf-run-${r.id}`} className={cx("wf-run", open === r.id && "open")}>
             <button className="wf-run-head wf-allruns-row" onClick={() => setOpen(open === r.id ? null : r.id)}>
-              <Badge tone={runTone[r.status]}>{r.dry_run ? "Dry run" : runLabel[r.status]}</Badge>
+              <Badge tone={r.dry_run ? runTone[r.status] : runBadge(r).tone}>{r.dry_run ? "Dry run" : runBadge(r).label}</Badge>
               <span className="wf-allruns-name">{r.workflow_name}</span>
               <span className="wf-run-trigger subtle" title={r.trigger}>{r.trigger}</span>
               <span className="subtle wf-allruns-steps">{r.steps.length} step{r.steps.length === 1 ? "" : "s"}</span>
@@ -1281,7 +1332,7 @@ function AllRuns({ runs, workflows, focus, onOpenWorkflow }: { runs: WorkflowRun
             </button>
             {open === r.id && (
               <>
-                <RunDetail run={r} />
+                <RunDetail run={r} onOpen={show} />
                 {exists.has(r.workflow_id) && <div className="wf-allruns-open"><Button size="sm" icon="workflow" onClick={() => onOpenWorkflow(r.workflow_id)}>Open the workflow</Button></div>}
               </>
             )}
@@ -1292,7 +1343,7 @@ function AllRuns({ runs, workflows, focus, onOpenWorkflow }: { runs: WorkflowRun
   );
 }
 
-function AssistantPanel({ workflow }: { workflow: Workflow }) {
+function AssistantPanel({ workflow, prepared, onPreparedDone }: { workflow: Workflow; prepared?: Prepared | null; onPreparedDone?: () => void }) {
   const qc = useQueryClient();
   // One conversation per workflow; a new draft has its own until it's saved.
   const key = ["chat", "workflows", workflow.id || "new"];
@@ -1336,6 +1387,20 @@ function AssistantPanel({ workflow }: { workflow: Workflow }) {
           )}
         />
       </div>
+      {prepared && (
+        <div className="wf-prepared" role="region" aria-label="Message ready to send">
+          <div className="wf-prepared-head">
+            <Icon name="sparkles" size={13} />
+            <span className="wf-prepared-title"><strong>Ready to send</strong> <span className="subtle" title={prepared.label}>{prepared.label}</span></span>
+          </div>
+          <pre className="wf-prepared-text" tabIndex={0}>{prepared.text}</pre>
+          <div className="wf-prepared-actions">
+            <span className="subtle">It asks for a new version you review; nothing is turned on.</span>
+            <Button size="sm" variant="ghost" onClick={onPreparedDone}>Discard</Button>
+            <Button size="sm" variant="primary" icon="send" disabled={!!chat?.running} onClick={() => { const t = prepared.text; onPreparedDone?.(); send(t); }}>Send to the assistant</Button>
+          </div>
+        </div>
+      )}
       <Composer chat={chat} onSend={(t) => send(t)} placeholder={workflow.steps.length ? "Ask for a change to this workflow…" : "Describe a workflow…"} />
     </div>
   );

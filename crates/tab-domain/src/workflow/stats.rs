@@ -13,6 +13,9 @@
 //!   it, which isn't a failure), `failed` or `blocked`. Rates are over
 //!   those. Runs still going, held back by a limit, or stopped as a loop
 //!   are counted on their own and left out of the rates.
+//! * A run the person *declined* at an approval ([`Run::declined`]) is
+//!   neither a success nor a failure: it's counted on its own
+//!   ([`Stats::declined`], and on its step) and left out of the rates.
 //! * A run was *attended* when a person stepped in: any step records an
 //!   [`Intervention`](super::Intervention), the run ended `blocked`, or it
 //!   is a person's re-run of a failed run. It is *unplanned* unless every
@@ -24,7 +27,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Billing, InterventionKind, Run, RunStatus, StepRun, StepStatus};
+use super::{Billing, InterventionKind, Run, RunStatus, StepRun, StepStatus, held_by_own_limit};
 
 /// Runs to look at, by when they started: `from <= started_at < to`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -156,6 +159,15 @@ pub struct Stats {
     pub held_back: u32,
     /// Stopped for starting inside their own chain.
     pub loop_stopped: u32,
+    /// Of `held_back`, refused by the workflow's own runs-per-hour limit.
+    /// Such refusals are written down at most once an hour, so this is
+    /// about how many hours it hit its limit.
+    #[serde(default)]
+    pub held_by_limit: u32,
+    /// The person said no at an approval, so the run ended there. Neither
+    /// a success nor a failure.
+    #[serde(default)]
+    pub declined: u32,
     /// Start to finish, for runs that did work.
     pub duration_ms: Quantiles,
     pub spend: Spend,
@@ -196,6 +208,13 @@ pub struct StepStats {
     pub unplanned_interventions: u32,
     /// Times a runner moved on to a family's next model.
     pub fallbacks: u32,
+    /// Times the person OK'd it at an approval and it went ahead.
+    #[serde(default)]
+    pub approved: u32,
+    /// Times the person said no to it at an approval (those runs are left
+    /// out of everything else here).
+    #[serde(default)]
+    pub declined: u32,
 }
 
 impl StepStats {
@@ -292,6 +311,7 @@ pub fn health(runs: &[Run]) -> Health {
 
 fn did_work(run: &Run) -> bool {
     !run.dry_run
+        && !run.declined()
         && matches!(
             run.status,
             RunStatus::Succeeded | RunStatus::Stopped | RunStatus::Failed | RunStatus::Blocked
@@ -424,6 +444,25 @@ struct ModelAcc {
     work: Vec<u64>,
 }
 
+/// The step's running totals, added on first sight.
+fn step_acc<'a>(steps: &'a mut Vec<StepAcc>, sr: &StepRun) -> &'a mut StepAcc {
+    let at = match steps.iter().position(|s| s.stats.id == sr.id) {
+        Some(at) => at,
+        None => {
+            steps.push(StepAcc {
+                stats: StepStats {
+                    id: sr.id.clone(),
+                    label: sr.label.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            steps.len() - 1
+        }
+    };
+    &mut steps[at]
+}
+
 /// Adds up the runs in `window`. Give it one workflow's runs: steps are
 /// told apart by their id alone.
 pub fn summarize(runs: &[Run], window: &Window) -> Stats {
@@ -450,6 +489,16 @@ pub fn summarize(runs: &[Run], window: &Window) -> Stats {
             RunStatus::LoopStopped => stats.loop_stopped += 1,
             _ => {}
         }
+        if held_by_own_limit(run) {
+            stats.held_by_limit += 1;
+        }
+        if run.declined() {
+            stats.declined += 1;
+            if let Some(sr) = run.steps.last() {
+                step_acc(&mut steps, sr).stats.declined += 1;
+            }
+            continue;
+        }
         if !did_work(run) {
             continue;
         }
@@ -460,21 +509,7 @@ pub fn summarize(runs: &[Run], window: &Window) -> Stats {
         days.entry(day).or_default().add(run);
 
         for sr in &run.steps {
-            let at = match steps.iter().position(|s| s.stats.id == sr.id) {
-                Some(at) => at,
-                None => {
-                    steps.push(StepAcc {
-                        stats: StepStats {
-                            id: sr.id.clone(),
-                            label: sr.label.clone(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    });
-                    steps.len() - 1
-                }
-            };
-            let acc = &mut steps[at];
+            let acc = step_acc(&mut steps, sr);
             let s = &mut acc.stats;
             s.interventions += sr.interventions.len() as u32;
             s.unplanned_interventions += sr
@@ -494,6 +529,14 @@ pub fn summarize(runs: &[Run], window: &Window) -> Stats {
                 StepStatus::Throttled => s.throttled += 1,
             }
             s.runs += 1;
+            if sr.status != StepStatus::Blocked
+                && sr
+                    .interventions
+                    .iter()
+                    .any(|i| i.kind == InterventionKind::Approval)
+            {
+                s.approved += 1;
+            }
             s.spend.add(sr);
             acc.ms.push(step_ms(sr));
 
@@ -1035,6 +1078,104 @@ mod tests {
         assert_eq!(v["runs"], 1);
         assert_eq!(v["days"][0]["day"], "2026-11-09");
         assert_eq!(serde_json::from_value::<Stats>(v).unwrap(), s);
+    }
+
+    #[test]
+    fn a_declined_run_is_neither_a_success_nor_a_failure() {
+        let mut no = asked(
+            step("merge", StepStatus::Blocked, 0),
+            InterventionKind::Approval,
+        );
+        no.error = Some("You declined this step.".into());
+        let yes = asked(step("merge", StepStatus::Ok, 4), InterventionKind::Approval);
+        let runs = vec![
+            run(
+                "declined",
+                RunStatus::Stopped,
+                t(10, 1),
+                vec![step("pr", StepStatus::Ok, 1), no],
+            ),
+            run(
+                "approved",
+                RunStatus::Succeeded,
+                t(10, 2),
+                vec![step("pr", StepStatus::Ok, 1), yes],
+            ),
+            run(
+                "filtered",
+                RunStatus::Stopped,
+                t(10, 3),
+                vec![
+                    step("pr", StepStatus::Ok, 1),
+                    step("small", StepStatus::Stopped, 1),
+                ],
+            ),
+        ];
+        let s = summarize(&runs, &window());
+        assert_eq!(s.declined, 1);
+        assert_eq!(
+            (s.counts.runs, s.counts.succeeded, s.counts.failed),
+            (2, 2, 0)
+        );
+        assert_eq!((s.counts.attended, s.counts.unplanned), (1, 0));
+        let merge = s.steps.iter().find(|x| x.id == "merge").unwrap();
+        assert_eq!((merge.runs, merge.approved, merge.declined), (1, 1, 1));
+        let pr = s.steps.iter().find(|x| x.id == "pr").unwrap();
+        assert_eq!(pr.runs, 2, "the declined run's steps don't count");
+        assert_eq!(s.days.iter().map(|d| d.counts.runs).sum::<u32>(), 2);
+        // Nor does it move health.
+        let mut all_declined: Vec<Run> = (0..5)
+            .map(|n| {
+                let mut r = runs[0].clone();
+                r.id = format!("d{n}");
+                r
+            })
+            .collect();
+        assert_eq!(health(&all_declined), Health::Unknown);
+        all_declined.extend((0..3).map(|n| {
+            let mut r = runs[1].clone();
+            r.id = format!("a{n}");
+            r
+        }));
+        assert_eq!(health(&all_declined), Health::Healthy);
+    }
+
+    #[test]
+    fn held_back_by_its_own_limit_is_told_apart_from_other_holds() {
+        let mut own = run("own", RunStatus::Throttled, t(11, 1), vec![]);
+        own.error = Some(crate::workflow::own_limit_error(30));
+        let mut all = run("all", RunStatus::Throttled, t(11, 2), vec![]);
+        all.error =
+            Some("All workflows together hit 200 runs an hour; this one was skipped.".into());
+        let s = summarize(&[own, all], &window());
+        assert_eq!((s.held_back, s.held_by_limit), (2, 1));
+    }
+
+    #[test]
+    fn stats_written_before_declines_were_counted_still_parse() {
+        let mut v = serde_json::to_value(summarize(
+            &[run(
+                "a",
+                RunStatus::Succeeded,
+                t(9, 1),
+                vec![step("a", StepStatus::Ok, 1)],
+            )],
+            &window(),
+        ))
+        .unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("declined");
+        o.remove("held_by_limit");
+        for st in o["steps"].as_array_mut().unwrap() {
+            let st = st.as_object_mut().unwrap();
+            st.remove("approved");
+            st.remove("declined");
+        }
+        let s: Stats = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            (s.declined, s.held_by_limit, s.steps[0].approved),
+            (0, 0, 0)
+        );
     }
 
     #[test]

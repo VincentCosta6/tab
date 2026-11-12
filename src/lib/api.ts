@@ -6,7 +6,7 @@ import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ChatSummary, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceAccess, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem, SlashCommand, Subagent,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
-  Activity, Issue, Workflow, WorkflowRun, ItemWorkflowStatus, RunView, WorkflowFactory, WorkflowInsights, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, ModelFamily, Runner, RunsOn,
+  Activity, Issue, Suggestion, Workflow, WorkflowRun, ItemWorkflowStatus, RunView, WorkflowFactory, WorkflowInsights, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, ModelFamily, Runner, RunsOn,
   AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
   EmailSignInStatus, MailProvider, Segment, SessionMessage, ChatRewound, RewoundFiles, VaultAudit, VaultEntry, VaultEntryInput, VaultStatus,
 } from "./types";
@@ -304,6 +304,11 @@ export const api = {
   workflowRunView: (runId: string) => call<RunView | null>("workflow_run_view", { runId }),
   /** Your answer to a run blocked on a step: approve that step for this run only, or decline and end it. */
   workflowRunAnswer: (runId: string, approve: boolean) => call<WorkflowRun>("workflow_run_answer", { runId, approve }),
+  /** Runs a failed run again; the new run's `rerun_of` names this one. */
+  workflowRerun: (runId: string) => call<WorkflowRun>("workflow_rerun", { runId }),
+  /** What could make a workflow cheaper or steadier, from its runs over the last `days` days. */
+  workflowSuggestions: (workflowId: string, days: number) =>
+    call<Suggestion[]>("workflow_suggestions", { workflowId, days, utcOffsetMinutes: -new Date().getTimezoneOffset() }),
   /** The chat of a workflow job's agent. */
   jobChatOpen: (jobId: string) => call<Chat>("job_chat_open", { jobId }),
   jobChatSend: (jobId: string, text: string) => call<Session>("job_chat_send", { jobId, text }),

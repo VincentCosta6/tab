@@ -4,20 +4,31 @@
 // models compared per agent step, two versions side by side, and what fails.
 
 import { useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, cx } from "../../../design/components";
 import { Icon } from "../../../design/icons";
 import { timeAgo } from "../../../lib/format";
-import type { ModelStats, StepStats, VersionStats, Workflow, WorkflowInsights, WorkflowStats } from "../../../lib/types";
+import { api } from "../../../lib/api";
+import type { FailureGroup, ModelStats, StepStats, Suggestion, VersionStats, Workflow, WorkflowInsights, WorkflowStats } from "../../../lib/types";
+import { failureMessage, suggestionMessage, type Prepared } from "../fixMessage";
 import { Delta, Legend, Ring, SplitBar, StackedBars, toneColor, type Series } from "./charts";
 import {
   dayLabel, duration, hasApi, hasPlan, interventionRate, localDay, MIN_RUNS, pct, planShare, planTokens, plural, rate, rateTone, spendLong, spendShort,
   successRate, tokens, unattendedRate, usd, windowDays,
 } from "./format";
 import { HealthBadge, outcomeSeries, outcomeValues, RateRings, useInsightsLive, WindowPicker } from "./parts";
+import { Suggestions } from "./Suggestions";
 import { useWorkflowInsights } from "./useInsights";
 import "./insights.css";
 
-export function InsightsPanel({ workflow, onOpenRun }: { workflow: Workflow; onOpenRun: (runId: string) => void }) {
+/** What the panel hands back to the builder: a suggested change to load as a draft, or a message for the assistant. */
+interface Actions {
+  onOpenRun: (runId: string) => void;
+  onApplyDraft: (w: Workflow, s: Suggestion) => void;
+  onAsk: (p: Prepared) => void;
+}
+
+export function InsightsPanel({ workflow, ...actions }: { workflow: Workflow } & Actions) {
   const { data, isLoading, error } = useWorkflowInsights(workflow.id || null);
   useInsightsLive();
   if (!workflow.id) return <p className="subtle wf-pad">Save the workflow to start keeping its runs. Insights add them up once it has run.</p>;
@@ -31,12 +42,12 @@ export function InsightsPanel({ workflow, onOpenRun }: { workflow: Workflow; onO
       </div>
       {error && <p className="wf-error"><Icon name="alert" size={13} /> {String(error)}</p>}
       {isLoading && !data && <p className="subtle wf-pad">Adding up runs…</p>}
-      {data && <Body data={data} workflow={workflow} onOpenRun={onOpenRun} />}
+      {data && <Body data={data} workflow={workflow} {...actions} />}
     </div>
   );
 }
 
-function Body({ data, workflow, onOpenRun }: { data: WorkflowInsights; workflow: Workflow; onOpenRun: (id: string) => void }) {
+function Body({ data, workflow, onOpenRun, onApplyDraft, onAsk }: { data: WorkflowInsights; workflow: Workflow } & Actions) {
   const s = data.stats, p = data.previous;
   const label = (id: string, fallback = "") => fallback || workflow.steps.find((x) => x.id === id)?.label || id;
   if (s.runs === 0) {
@@ -68,7 +79,8 @@ function Body({ data, workflow, onOpenRun }: { data: WorkflowInsights; workflow:
           ]} />
         </div>
         <div className="ins-mini-stats">
-          <MiniStat label="Runs" value={String(s.runs)} hint={[s.in_progress && `${s.in_progress} running`, s.held_back && `${s.held_back} held back`, s.loop_stopped && `${s.loop_stopped} loop-stopped`].filter(Boolean).join(" · ") || undefined} />
+          <MiniStat label="Runs" value={String(s.runs)} title={s.declined ? "Runs you declined at an approval count as neither a success nor a failure" : undefined}
+            hint={[s.declined && `${s.declined} declined by you`, s.in_progress && `${s.in_progress} running`, s.held_back && `${s.held_back} held back`, s.loop_stopped && `${s.loop_stopped} loop-stopped`].filter(Boolean).join(" · ") || undefined} />
           <MiniStat label="Median time" value={s.duration_ms.n ? duration(s.duration_ms.p50) : "–"} hint={s.duration_ms.n ? `slow end ${duration(s.duration_ms.p95)}` : undefined}>
             <Delta now={s.duration_ms.n ? s.duration_ms.p50 : null} before={p.duration_ms.n ? p.duration_ms.p50 : null} kind="ratio" better="down" enough={p.duration_ms.n >= MIN_RUNS} />
           </MiniStat>
@@ -84,6 +96,8 @@ function Body({ data, workflow, onOpenRun }: { data: WorkflowInsights; workflow:
         <Legend series={[...outcomeSeries, { key: "v", label: "New version first ran", color: "transparent" }]} />
       </section>
 
+      <Suggestions workflow={workflow} onApply={(x) => x.change && onApplyDraft(x.change, x)} onAsk={(x) => onAsk(suggestionMessage(workflow, x, data.days))} />
+
       {(hasApi(s.spend) || hasPlan(s.spend)) && <SpendTrend data={data} />}
 
       <section className="ins-sec">
@@ -93,7 +107,7 @@ function Body({ data, workflow, onOpenRun }: { data: WorkflowInsights; workflow:
 
       {s.models.length > 0 && <Models stats={s} label={label} />}
       {s.versions.length > 1 && <Versions versions={s.versions} />}
-      <Failures stats={s} label={label} onOpenRun={onOpenRun} />
+      <Failures stats={s} label={label} onOpenRun={onOpenRun} onAsk={(f) => failureMessage(workflow, f, data.days).then(onAsk)} />
     </>
   );
 }
@@ -353,24 +367,62 @@ function Versions({ versions }: { versions: VersionStats[] }) {
 
 const ago = (iso: string) => { const t = timeAgo(iso); return /^\d+[mhd]$/.test(t) ? `${t} ago` : t; };
 
-function Failures({ stats, label, onOpenRun }: { stats: WorkflowStats; label: (id: string, f?: string) => string; onOpenRun: (id: string) => void }) {
+function Failures({ stats, label, onOpenRun, onAsk }: { stats: WorkflowStats; label: (id: string, f?: string) => string; onOpenRun: (id: string) => void; onAsk: (f: FailureGroup) => Promise<void> }) {
   return (
     <section className="ins-sec">
       <h4 className="ins-h">What fails <span className="subtle">{stats.failures.length ? "most often first" : ""}</span></h4>
       {!stats.failures.length && <p className="subtle ins-ok"><Icon name="check" size={13} /> Nothing failed in this window.</p>}
       <div className="ins-failures">
-        {stats.failures.map((f) => (
-          <div key={f.step_id + f.error} className="ins-failure">
-            <span className="ins-failure-count" title={`${f.count} times`}>×{f.count}</span>
-            <div className="ins-failure-body">
-              <span className="ins-failure-step"><Icon name="octagon" size={12} className="text-danger" /> {label(f.step_id, f.label)}</span>
-              <code className="ins-failure-error">{f.error}</code>
-              <span className="subtle ins-failure-when">Last {ago(f.last_seen)}{f.first_seen !== f.last_seen && ` · first ${ago(f.first_seen)}`}</span>
-            </div>
-            <Button size="sm" icon="external" onClick={() => onOpenRun(f.sample_run)} title="Open the latest run it happened in">Run</Button>
-          </div>
-        ))}
+        {stats.failures.map((f) => <FailureRow key={f.step_id + f.error} f={f} label={label} onOpenRun={onOpenRun} onAsk={onAsk} />)}
       </div>
     </section>
+  );
+}
+
+function FailureRow({ f, label, onOpenRun, onAsk }: { f: FailureGroup; label: (id: string, f?: string) => string; onOpenRun: (id: string) => void; onAsk: (f: FailureGroup) => Promise<void> }) {
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState<"rerun" | "ask" | null>(null);
+  const [note, setNote] = useState<{ ok: boolean; text: string; run?: string } | null>(null);
+  const rerun = async () => {
+    setBusy("rerun");
+    setNote(null);
+    try {
+      const r = await api.workflowRerun(f.sample_run);
+      setNote({ ok: true, text: "Running the latest one again", run: r.id });
+      await qc.invalidateQueries({ queryKey: ["workflow-runs"] });
+    } catch (e) {
+      setNote({ ok: false, text: String(e) });
+    } finally {
+      setBusy(null);
+    }
+  };
+  const ask = async () => {
+    setBusy("ask");
+    try { await onAsk(f); } finally { setBusy(null); }
+  };
+  return (
+    <div className="ins-failure">
+      <span className="ins-failure-count" title={`${f.count} times`}>×{f.count}</span>
+      <div className="ins-failure-body">
+        <span className="ins-failure-step"><Icon name="octagon" size={12} className="text-danger" /> {label(f.step_id, f.label)}</span>
+        <code className="ins-failure-error">{f.error}</code>
+        <span className="subtle ins-failure-when">Last {ago(f.last_seen)}{f.first_seen !== f.last_seen && ` · first ${ago(f.first_seen)}`}</span>
+        <div className="ins-failure-actions">
+          <Button size="sm" icon="sparkles" onClick={ask} disabled={!!busy} title="Hand this failure, its latest run's step and the workflow to the builder's assistant">
+            {busy === "ask" ? "Preparing…" : "Ask the assistant to fix it"}
+          </Button>
+          <Button size="sm" icon="refresh" onClick={rerun} disabled={!!busy} title="Run the latest failed run again, as the workflow is saved now">
+            {busy === "rerun" ? "Starting…" : "Run again"}
+          </Button>
+          <Button size="sm" variant="ghost" icon="external" onClick={() => onOpenRun(f.sample_run)} title="Open the latest run it happened in">Latest run</Button>
+        </div>
+        {note && (
+          <span className={note.ok ? "ins-failure-note" : "ins-failure-note text-danger"}>
+            <Icon name={note.ok ? "check" : "alert"} size={12} /> {note.text}
+            {note.run && <> · <button className="link-button" onClick={() => onOpenRun(note.run!)}>open it</button></>}
+          </span>
+        )}
+      </div>
+    </div>
   );
 }
