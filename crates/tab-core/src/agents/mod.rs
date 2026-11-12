@@ -671,10 +671,10 @@ impl AgentHub {
     }
 
     /// The slash commands (built-ins, custom commands, skills and MCP
-    /// prompts) the agent reported when it last started, for the composer's
+    /// prompts) a harness reported when it last started, for the composer's
     /// `/` menu. Files from before descriptions were kept hold bare names.
-    pub fn slash_commands(&self) -> Vec<SlashCommand> {
-        let Ok(b) = std::fs::read(self.dir.join("slash_commands.json")) else {
+    pub fn slash_commands(&self, agent: AgentKind) -> Vec<SlashCommand> {
+        let Ok(b) = std::fs::read(self.slash_path(agent)) else {
             return Vec::new();
         };
         serde_json::from_slice(&b)
@@ -685,19 +685,33 @@ impl AgentHub {
             .unwrap_or_default()
     }
 
-    pub(crate) fn save_slash_commands(&self, cmds: &[SlashCommand]) {
-        if cmds.is_empty() || self.slash_commands() == cmds {
+    /// Claude Code's list keeps the name it had before each harness had one.
+    fn slash_path(&self, agent: AgentKind) -> PathBuf {
+        match agent {
+            AgentKind::ClaudeCode => self.dir.join("slash_commands.json"),
+            other => {
+                let name = serde_json::to_value(other)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                self.dir.join(format!("slash_commands.{name}.json"))
+            }
+        }
+    }
+
+    pub(crate) fn save_slash_commands(&self, agent: AgentKind, cmds: &[SlashCommand]) {
+        if cmds.is_empty() || self.slash_commands(agent) == cmds {
             return;
         }
         if let Ok(b) = serde_json::to_vec(cmds) {
-            let _ = std::fs::write(self.dir.join("slash_commands.json"), b);
+            let _ = std::fs::write(self.slash_path(agent), b);
         }
     }
 
     /// Adds commands the init line names that the saved list lacks (an agent
     /// that didn't answer `initialize`), keeping what's known of the rest.
     pub(crate) fn add_slash_names(&self, names: &[String], kind: impl Fn(&str) -> SlashKind) {
-        let mut cmds = self.slash_commands();
+        let mut cmds = self.slash_commands(AgentKind::ClaudeCode);
         let known: HashSet<String> = cmds
             .iter()
             .flat_map(|c| std::iter::once(&c.name).chain(&c.aliases))
@@ -709,7 +723,7 @@ impl AgentHub {
                 ..SlashCommand::named(n.clone())
             });
         }
-        self.save_slash_commands(&cmds);
+        self.save_slash_commands(AgentKind::ClaudeCode, &cmds);
     }
 
     /// The subagents the agent reported when it last started, for argument

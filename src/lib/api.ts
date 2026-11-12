@@ -65,7 +65,8 @@ export const api = {
   startDictation: () => call<void>("start_dictation"),
   agentActivity: () => call<AgentActivity[]>("agent_activity"),
   contextStatus: (ids: string[]) => call<Record<string, ContextStatus[]>>("context_status", { ids }),
-  slashCommands: () => call<SlashCommand[]>("agent_slash_commands"),
+  /** The slash commands a harness reported when it last started. */
+  slashCommands: (agent: AgentKind | null) => call<SlashCommand[]>("agent_slash_commands", { agent }),
   subagents: () => call<Subagent[]>("agent_subagents"),
   /** Values for a slash command argument from a chat's folder: its git branches, or the paths `typed` could go on to. */
   slashArgValues: (cwd: string, kind: "branch" | "path", typed: string) => call<string[]>("slash_arg_values", { cwd, kind, typed }),

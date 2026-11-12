@@ -989,8 +989,9 @@ const interactiveOnly = new Set(["vim", "exit", "quit", "theme", "terminal-setup
 const fallbackSlash = ["compact", "context", "cost", "mcp", "model", "status", "init", "review", "pr-comments", "security-review"];
 
 /** The `/` menu's groups, in order. */
-const slashGroups: Record<SlashKind | "tab", string> = { builtin: "Claude Code", tab: "Answered by tab", command: "Your commands", skill: "Skills", mcp: "MCP prompts" };
+const slashGroups: Record<SlashKind | "tab", string> = { builtin: "Built in", tab: "Answered by tab", command: "Your commands", skill: "Skills", mcp: "MCP prompts" };
 const groupOrder = Object.keys(slashGroups) as (SlashKind | "tab")[];
+const harnessNames: Record<AgentKind, string> = { claude_code: "Claude Code", opencode: "OpenCode", codex: "Codex", pi: "Pi" };
 /** Headings for argument values, by where they come from. */
 const argGroups: Record<ArgSource, string> = { pr: "Pull requests", branch: "Branches", path: "Files", model: "Models", agent: "Subagents" };
 
@@ -1023,12 +1024,14 @@ async function openPulls(repoName: string): Promise<SlashRow[]> {
  * tab knows for the next argument (enum words, PRs, branches, paths, models,
  * subagents) are offered.
  */
-function useSlashMenu(text: string, cwd: string | undefined) {
-  const { data } = useQuery({ queryKey: ["slash-commands"], queryFn: api.slashCommands, staleTime: 60_000 });
+function useSlashMenu(text: string, cwd: string | undefined, agent: AgentKind | undefined) {
+  const { data } = useQuery({ queryKey: ["slash-commands", agent], queryFn: () => api.slashCommands(agent ?? null), enabled: !!agent, staleTime: 60_000 });
+  // Each harness has its own commands; the built-in names tab knows are Claude Code's.
+  const claude = agent === "claude_code";
   const [index, setIndex] = useState(0);
   const [moved, setMoved] = useState(false);
   const [dismissed, setDismissed] = useState<string | null>(null);
-  const commands: SlashCommand[] = data?.length ? data : fallbackSlash.map((name) => ({ name, description: "", argument_hint: "", aliases: [], kind: "builtin" }));
+  const commands: SlashCommand[] = data?.length || !claude ? data ?? [] : fallbackSlash.map((name) => ({ name, description: "", argument_hint: "", aliases: [], kind: "builtin" }));
   const find = (n: string) => commands.find((c) => c.name.toLowerCase() === n || c.aliases.some((a) => a.toLowerCase() === n));
 
   // `/name`, or `/name args…` once a space follows.
@@ -1047,7 +1050,8 @@ function useSlashMenu(text: string, cwd: string | undefined) {
   const folder = word.slice(0, word.lastIndexOf("/") + 1) + (word.slice(word.lastIndexOf("/") + 1).startsWith(".") ? "." : "");
   const paths = useQuery({ queryKey: ["slash-paths", cwd, folder], queryFn: () => api.slashArgValues(cwd!, "path", folder), enabled: wants.has("path") && !!cwd, staleTime: 10_000 });
   const { data: models = [] } = useModels();
-  const agents = useQuery({ queryKey: ["subagents"], queryFn: api.subagents, enabled: wants.has("agent"), staleTime: 60_000 });
+  // Subagents are Claude Code's.
+  const agents = useQuery({ queryKey: ["subagents"], queryFn: api.subagents, enabled: wants.has("agent") && claude, staleTime: 60_000 });
 
   let rows: SlashRow[] = [];
   let ghost = "";
@@ -1055,15 +1059,15 @@ function useSlashMenu(text: string, cwd: string | undefined) {
     const hit = (c: { name: string; aliases: string[] }) => [c.name, ...c.aliases].some((n) => n.toLowerCase().includes(q));
     const starts = (c: { name: string; aliases: string[] }) => [c.name, ...c.aliases].some((n) => n.toLowerCase().startsWith(q));
     const agentRows = commands
-      .filter((c) => !interactiveOnly.has(c.name) && !(c.name in tabCommands) && !c.description.startsWith("(removed)") && hit(c))
-      .map((c) => ({ c, kind: c.kind as SlashKind | "tab", row: { value: c.name, label: c.name, detail: c.description || slashDescriptions[c.name], hint: c.argument_hint } }));
+      .filter((c) => !(claude && interactiveOnly.has(c.name)) && !(c.name in tabCommands) && !c.description.startsWith("(removed)") && hit(c))
+      .map((c) => ({ c, kind: c.kind as SlashKind | "tab", row: { value: c.name, label: c.name, detail: c.description || (claude ? slashDescriptions[c.name] : undefined), hint: c.argument_hint } }));
     const tabRows = Object.entries(tabCommands)
       .filter(([name]) => name.includes(q))
       .map(([name, t]) => ({ c: { name, aliases: [] }, kind: "tab" as const, row: { value: name, label: name, detail: t.description, tab: true } }));
     rows = [...agentRows, ...tabRows]
       .sort((a, b) => groupOrder.indexOf(a.kind) - groupOrder.indexOf(b.kind) || Number(!starts(a.c)) - Number(!starts(b.c)))
       .slice(0, 60)
-      .map(({ kind, row }) => ({ ...row, group: slashGroups[kind] }));
+      .map(({ kind, row }) => ({ ...row, group: kind === "builtin" && agent ? harnessNames[agent] : slashGroups[kind] }));
     // The whole name typed: what it takes, before the space.
     const exact = q && !(q in tabCommands) ? find(q) : undefined;
     if (exact?.argument_hint) ghost = ` ${exact.argument_hint}`;
@@ -1166,7 +1170,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   const running = !!chat?.running;
   const last = chat?.messages[chat.messages.length - 1];
   const suggestion = !running && last?.kind === "suggestion" && config?.agent.suggest_replies !== false ? last.content : "";
-  const slash = useSlashMenu(text, chat?.session?.cwd);
+  const slash = useSlashMenu(text, chat?.session?.cwd, chat?.session?.agent ?? config?.agent.kind ?? undefined);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [picker, setPicker] = useState<{ which: "model" | "mode"; n: number }>({ which: "model", n: 0 });
   // A tab command runs at once; the agent's own get a space for arguments.

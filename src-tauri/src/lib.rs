@@ -1648,8 +1648,13 @@ async fn project_resource_delete(
 
 /// Slash commands the agent last reported, for the composer's `/` menu.
 #[tauri::command]
-fn agent_slash_commands(state: State<'_, AppState>) -> Vec<tab_core::agents::SlashCommand> {
-    state.hub.slash_commands()
+fn agent_slash_commands(
+    state: State<'_, AppState>,
+    agent: Option<AgentKind>,
+) -> Vec<tab_core::agents::SlashCommand> {
+    state
+        .hub
+        .slash_commands(agent.unwrap_or(AgentKind::ClaudeCode))
 }
 
 /// The subagents the agent last reported, for `/` argument completion.
