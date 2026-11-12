@@ -11,6 +11,10 @@
 //! * `tab_create_task`: create a tab task, optionally scheduled. From a
 //!   chat on a task, the new one is linked both ways (each in the other's
 //!   Context), and `start_agent` can put an agent on it right away.
+//!   The new task is a follow-up of the chat's task, so the queue shows it
+//!   under that one, and `after` orders it behind other tasks.
+//! * `tab_link_tasks`: order tasks (what has to be done first) and nest or
+//!   un-nest follow-ups.
 //! * `tab_graph_search`, `tab_graph_expand`: the knowledge graph (repos,
 //!   people, tickets, projects) and the items around each node.
 //! * `tab_project`, `tab_project_note`, `tab_project_update`,
@@ -46,8 +50,8 @@ use crate::config::ConnectorConfig;
 use crate::engine::EngineEvent;
 use crate::model::Session;
 use crate::model::{
-    ConnectorInfo, ContextSection, Entity, ItemState, NewContext, NewTask, Preview, Project,
-    ProjectNote, ProjectRepo, ProjectResource, QueueItem, SettingKind,
+    Change, ConnectorInfo, ContextSection, Entity, ItemState, LinkKind, NewContext, NewTask,
+    Preview, Project, ProjectNote, ProjectRepo, ProjectResource, QueueItem, SettingKind,
 };
 use crate::sandbox::broker;
 use crate::store::{AuditEntry, Store};
@@ -951,6 +955,21 @@ fn text(t: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": t.into() }] })
 }
 
+/// A list of ids, from a JSON array or a single string.
+fn ids(v: &Value) -> Vec<String> {
+    match v {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect(),
+        _ => vec![],
+    }
+    .into_iter()
+    .filter(|s| !s.trim().is_empty())
+    .collect()
+}
+
 fn brief(i: &QueueItem) -> Value {
     json!({
         "id": i.id,
@@ -963,6 +982,8 @@ fn brief(i: &QueueItem) -> Value {
         "state": i.state,
         "urgency": i.ranking.as_ref().map(|r| r.urgency),
         "score": i.ranking.as_ref().map(|r| r.score),
+        "follow_up_of": i.parent_id,
+        "after": (!i.blocked_by.is_empty()).then_some(&i.blocked_by),
     })
 }
 
@@ -1072,7 +1093,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_create_task",
-            "description": "Create a task in tab's queue, optionally scheduled for later. From a chat on a task, the new task is linked both ways: it goes under this task's Context, and this task under its Context, so whoever picks it up sees where it came from.",
+            "description": "Create a task in tab's queue, optionally scheduled for later. Only when the person asks for it, or for one concrete thing that has to happen and can't be done now; otherwise list possible follow-ups in your reply. From a chat on a task, the new task is a follow-up of it: it shows under this task in the queue, and each is in the other's Context. For work in phases, pass `after` so later phases wait for earlier ones.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string" },
                 "body": { "type": "string", "description": "What to do and why, with what the next agent needs: the repo, files, PRs, decisions made." },
@@ -1080,9 +1101,20 @@ pub fn tools() -> Value {
                 "due_in_minutes": { "type": "integer", "minimum": 1 },
                 "url": { "type": "string" },
                 "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." },
-                "link": { "type": "boolean", "description": "Link it with this chat's task (default true)." },
+                "link": { "type": "boolean", "description": "Make it a follow-up of this chat's task (default true)." },
+                "after": { "type": "array", "items": { "type": "string" }, "description": "Ids of tasks that have to be done before this one, e.g. the previous phase." },
                 "start_agent": { "type": "string", "description": "Only when the person asks for it: start an agent on the new task now, with this as its first message. Not for scheduled tasks." }
             }, "required": ["title"] }
+        },
+        {
+            "name": "tab_link_tasks",
+            "description": "Order tasks and nest follow-ups. `after` lists tasks that have to be done before this one (like Jira's \"is blocked by\"); the queue shows it as waiting until they're done. `follow_up_of` nests it under another task, or \"none\" takes it out.",
+            "inputSchema": { "type": "object", "properties": {
+                "item_id": { "type": "string", "description": "The task to change. Defaults to this session's task." },
+                "after": { "type": "array", "items": { "type": "string" }, "description": "Tasks to finish before this one." },
+                "not_after": { "type": "array", "items": { "type": "string" }, "description": "Tasks this one no longer waits for." },
+                "follow_up_of": { "type": "string", "description": "Task id to nest it under, or \"none\"." }
+            } }
         },
         {
             "name": "tab_graph_search",
@@ -1774,6 +1806,7 @@ impl McpServer {
                         "section": c.section, "title": c.title, "url": c.url,
                         "summary": c.summary, "item": c.ref_item.as_deref().map(brief),
                     })).collect::<Vec<_>>(),
+                    "followups": self.store.followups(&id)?.iter().map(brief).collect::<Vec<_>>(),
                     "related": ctx.related.iter().map(brief).collect::<Vec<_>>(),
                     "timeline": self.store.activity_for(&id, 60)?.iter().map(|a| json!({
                         "when": a.at.format("%Y-%m-%d %H:%M UTC").to_string(),
@@ -1947,7 +1980,24 @@ impl McpServer {
                             Utc::now(),
                         )?;
                     }
-                    said.push_str(", linked with this task (each is in the other's Context)");
+                    self.store
+                        .link_add(&item.id, parent, LinkKind::Followup, Utc::now())?;
+                    said.push_str(", as a follow-up of this task (each is in the other's Context)");
+                }
+                let after = ids(&args["after"]);
+                for first in &after {
+                    self.store
+                        .link_add(first, &item.id, LinkKind::Blocks, Utc::now())?;
+                }
+                if !after.is_empty() {
+                    said.push_str(&format!(", after {}", after.join(", ")));
+                }
+                // The queue got the task before its links; show it in place.
+                if let Some(linked) = self.store.get(&item.id)?.filter(|i| *i != item) {
+                    let _ = self.events.send(EngineEvent::ItemChanged {
+                        change: Change::Updated,
+                        item: linked,
+                    });
                 }
                 if let Some(prompt) = start {
                     let chat = self.hub.session_for_item(&item.id)?;
@@ -1955,6 +2005,34 @@ impl McpServer {
                     said.push_str(&format!(", and started an agent on it (chat {})", chat.id));
                 }
                 Ok(text(said))
+            }
+            "tab_link_tasks" => {
+                let id = self.session_item(session, &args)?;
+                let now = Utc::now();
+                for first in ids(&args["after"]) {
+                    self.store.link_add(&first, &id, LinkKind::Blocks, now)?;
+                }
+                for first in ids(&args["not_after"]) {
+                    self.store.link_remove(&first, &id, LinkKind::Blocks)?;
+                }
+                match s("follow_up_of").as_deref() {
+                    None => {}
+                    Some("none") => {
+                        if let Some(p) = self.store.get(&id)?.and_then(|i| i.parent_id) {
+                            self.store.link_remove(&id, &p, LinkKind::Followup)?;
+                        }
+                    }
+                    Some(p) => self.store.link_add(&id, p, LinkKind::Followup, now)?,
+                }
+                let item = self
+                    .store
+                    .get(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("no item {id}"))?;
+                let _ = self.events.send(EngineEvent::ItemChanged {
+                    change: Change::Updated,
+                    item: item.clone(),
+                });
+                Ok(text(serde_json::to_string_pretty(&brief(&item))?))
             }
             "tab_graph_search" => {
                 let since = args["within_days"]
@@ -2645,7 +2723,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 23);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 24);
         let always: Vec<&str> = list["result"]["tools"]
             .as_array()
             .unwrap()
@@ -4214,7 +4292,7 @@ rl.on('line', (l) => {
 
         let v = server_call(&url, &chat.id, call(json!({ "title": "Phase 2: import" }))).await;
         let said = text(&v);
-        assert!(said.contains("linked with this task"), "{said}");
+        assert!(said.contains("as a follow-up of this task"), "{said}");
         let child = said
             .split_whitespace()
             .nth(2)
@@ -4235,6 +4313,47 @@ rl.on('line', (l) => {
                 .any(|e| e.ref_item.as_ref().is_some_and(|i| i.id == parent.id)
                     && e.title == "Build MCP connections")
         );
+        assert_eq!(
+            store.get(&child).unwrap().unwrap().parent_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+
+        // A later phase waits on the one before it, and can be reordered.
+        let v = server_call(
+            &url,
+            &chat.id,
+            call(json!({ "title": "Phase 3: sync", "after": [child] })),
+        )
+        .await;
+        let next = text(&v)
+            .split_whitespace()
+            .nth(2)
+            .unwrap()
+            .trim_end_matches(',')
+            .to_string();
+        assert_eq!(
+            store.get(&next).unwrap().unwrap().blocked_by,
+            [child.as_str()]
+        );
+        let link = |args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tab_link_tasks","arguments":args}});
+        let v = server_call(
+            &url,
+            &chat.id,
+            link(json!({ "item_id": child, "after": [next] })),
+        )
+        .await;
+        assert!(
+            v["error"].is_object() || v["result"]["isError"] == true,
+            "a loop is refused: {v}"
+        );
+        server_call(
+            &url,
+            &chat.id,
+            link(json!({ "item_id": next, "not_after": [child], "follow_up_of": "none" })),
+        )
+        .await;
+        let next = store.get(&next).unwrap().unwrap();
+        assert!(next.blocked_by.is_empty() && next.parent_id.is_none());
 
         // link: false leaves both alone.
         let v = server_call(
@@ -4243,7 +4362,8 @@ rl.on('line', (l) => {
             call(json!({ "title": "Unrelated", "link": false })),
         )
         .await;
-        assert!(!text(&v).contains("linked"));
+        assert!(!text(&v).contains("follow-up"));
+        // Phase 2 and phase 3.
         assert_eq!(
             store
                 .item_context(&parent.id)
@@ -4251,7 +4371,7 @@ rl.on('line', (l) => {
                 .unwrap()
                 .entries
                 .len(),
-            1
+            2
         );
 
         let before = tasks();

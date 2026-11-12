@@ -97,6 +97,15 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .row-meta .badge { flex: none; }
 .row-reason { color: var(--fg-muted); font-size: var(--text-sm); display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 .row-time { color: var(--fg-subtle); font-size: var(--text-xs); }
+/* Follow-ups fold under the task they came from, indented with a guide line. */
+.followup { margin-left: var(--space-6); border-left: 1px solid var(--border); }
+.followup .row { padding-left: var(--space-3); }
+.followups-toggle { display: flex; align-items: center; gap: 4px; margin: calc(-1 * var(--space-2)) 0 var(--space-1) calc(var(--space-4) + 28px + var(--space-3)); padding: 2px 6px; border: 0; border-radius: var(--radius-sm); background: none; color: var(--fg-subtle); font: inherit; font-size: var(--text-xs); cursor: pointer; }
+.followups-toggle:hover { background: var(--bg-hover); color: var(--fg); }
+.followups-toggle svg { transition: transform 120ms; }
+.followups-toggle.open svg { transform: rotate(90deg); }
+.followups-ready { color: var(--fg-muted); }
+.row-waiting { flex: none; display: inline-flex; align-items: center; gap: 3px; color: var(--fg-muted); font-size: var(--text-xs); }
 
 .detail { min-width: 0; overflow: auto; }
 .detail-inner { max-width: 760px; padding: var(--space-6) var(--space-8) var(--space-8); display: grid; gap: var(--space-5); }
