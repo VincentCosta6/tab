@@ -4,7 +4,7 @@
 // services, email, documents) with who may read each, repos and notes.
 // Agents read the same things with tab_project. See docs/projects-hub.md.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, EmptyState, TextArea, TextInput, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
@@ -28,54 +28,112 @@ export function ProjectsTab() {
   const [selected, setSelected] = useRememberedProject("tab.projects.selected");
   const [creating, setCreating] = useState(false);
   const project = projects.find((p) => p.id === selected) ?? projects[0];
+  const create = () => setCreating(true);
 
   return (
     <div className="pjt">
-      <aside className="pjt-list">
-        <header className="pjt-list-head">
-          <h2>Projects</h2>
-          <Button size="sm" icon="plus" onClick={() => setCreating(true)}>New</Button>
-        </header>
-        <div className="pjt-list-items">
-          {projects.map((p) => <ProjectListItem key={p.id} project={p} active={p.id === project?.id} onSelect={() => setSelected(p.id)} />)}
-          {!projects.length && <p className="subtle pjt-empty-note">No projects yet.</p>}
-        </div>
-        <p className="subtle pjt-list-foot">Work outside a project stays in Work.</p>
-      </aside>
-      <main className="pjt-main">
-        {project ? (
-          <ProjectPage key={project.id} project={project} />
-        ) : (
-          <EmptyState icon="folder" title="No projects yet">
-            Run a piece of work, or a whole business, as a project: a coordinator that watches it, its threads, and everything it knows.
-          </EmptyState>
-        )}
-      </main>
+      {project ? (
+        <ProjectPage key={project.id} project={project} switcher={<ProjectSwitcher projects={projects} current={project} onSelect={setSelected} onCreate={create} />} />
+      ) : (
+        <EmptyState icon="folder" title="No projects yet">
+          Run a piece of work, or a whole business, as a project: a coordinator that watches it, its threads, and everything it knows.
+          <div className="pjt-empty-action"><Button variant="primary" icon="plus" onClick={create}>New project</Button></div>
+        </EmptyState>
+      )}
       {creating && <ProjectEditor project={null} onClose={() => setCreating(false)} onSaved={(p) => setSelected(p.id)} />}
     </div>
   );
 }
 
-function ProjectListItem({ project: p, active, onSelect }: { project: Project; active: boolean; onSelect: () => void }) {
-  const { data: items = [] } = useProjectItems(p.id);
+/** Open threads and how many wait on you, for the switcher. */
+function useProjectPulse(projectId: string) {
+  const { data: items = [] } = useProjectItems(projectId);
   const activity = useAgentActivity();
   const open = items.filter((i) => i.state !== "done");
-  const busy = open.filter((i) => activity.get(i.id)?.status === "needs_input").length;
+  const you = open.filter((i) => ["needs_input", "failed"].includes(activity.get(i.id)?.status ?? "")).length;
+  const working = open.filter((i) => activity.get(i.id)?.status === "working").length;
+  return { open: open.length, you, working };
+}
+
+/**
+ * The project's name in the header, as a menu of every project: what each
+ * is, what's open and what's waiting on you. Keeps the whole width for the
+ * project itself.
+ */
+function ProjectSwitcher({ projects, current, onSelect, onCreate }: { projects: Project[]; current: Project; onSelect: (id: string) => void; onCreate: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  const pulse = useProjectPulse(current.id);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", esc);
+    return () => (window.removeEventListener("mousedown", close), window.removeEventListener("keydown", esc));
+  }, [open]);
+  useEffect(() => setQuery(""), [open]);
+
+  const q = query.trim().toLowerCase();
+  const shown = projects.filter((p) => !q || `${p.name} ${p.about}`.toLowerCase().includes(q));
+  const pick = (id: string) => (onSelect(id), setOpen(false));
+
   return (
-    <button className={cx("pjt-list-item", active && "active")} onClick={onSelect}>
-      <ProjectMark project={p} size={26} />
-      <span className="pjt-list-text">
-        <span className="pjt-list-name">{p.name}</span>
-        <span className="subtle">{open.length ? `${open.length} open` : p.about || "Nothing open"}</span>
+    <div className="pjs" ref={ref}>
+      <button className={cx("pjs-trigger", open && "open")} onClick={() => setOpen((v) => !v)} aria-haspopup="menu" aria-expanded={open}>
+        <ProjectMark project={current} size={30} />
+        <span className="pjs-trigger-text">
+          <span className="pjs-name">{current.name}<Icon name="chevron-down" size={14} className="pjs-chevron" /></span>
+          <span className="pjs-sub">
+            {pulse.you > 0 && <span className="pjs-you">{pulse.you} need{pulse.you === 1 ? "s" : ""} you</span>}
+            <span>{pulse.open ? `${pulse.open} open` : "Nothing open"}</span>
+            {current.about && <span className="pjs-about" title={current.about}>{current.about}</span>}
+          </span>
+        </span>
+      </button>
+      {open && (
+        <div className="pjs-menu" role="menu">
+          {projects.length > 5 && (
+            <div className="pjs-search"><TextInput autoFocus icon="search" placeholder="Find a project" value={query} onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && shown[0] && pick(shown[0].id)} /></div>
+          )}
+          <div className="pjs-list">
+            {shown.map((p) => <SwitcherRow key={p.id} project={p} active={p.id === current.id} onPick={() => pick(p.id)} />)}
+            {!shown.length && <p className="subtle pjs-none">No project matches.</p>}
+          </div>
+          <div className="pjs-foot">
+            <button className="pjs-new" onClick={() => (setOpen(false), onCreate())}><Icon name="plus" size={13} /> New project</button>
+            <span className="subtle">Work outside a project stays in Work.</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SwitcherRow({ project: p, active, onPick }: { project: Project; active: boolean; onPick: () => void }) {
+  const { open, you, working } = useProjectPulse(p.id);
+  return (
+    <button role="menuitem" className={cx("pjs-row", active && "active")} onClick={onPick}>
+      <ProjectMark project={p} size={28} />
+      <span className="pjs-row-text">
+        <span className="pjs-row-name">{p.name}</span>
+        <span className="pjs-row-about">{p.about || "No description yet"}</span>
       </span>
-      {busy > 0 && <span className="pjt-badge" title={`${busy} waiting on you`}>{busy}</span>}
+      <span className="pjs-row-stats">
+        {you > 0 && <span className="pjs-pill you" title="Waiting on you">{you} you</span>}
+        {working > 0 && <span className="pjs-pill working" title="Agents working">{working} working</span>}
+        <span className="pjs-row-open">{open} open</span>
+      </span>
+      {active && <Icon name="check" size={14} className="pjs-check" />}
     </button>
   );
 }
 
 type View = "home" | "queue" | "knowledge" | "notes" | "settings";
 
-function ProjectPage({ project }: { project: Project }) {
+function ProjectPage({ project, switcher }: { project: Project; switcher: React.ReactNode }) {
   const [view, setView] = useState<View>("home");
   const [editing, setEditing] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -98,11 +156,7 @@ function ProjectPage({ project }: { project: Project }) {
   return (
     <div className={cx("pjt-page", tint.className)} style={{ ...tint.style, "--pc": project.color } as React.CSSProperties}>
       <header className="pjt-head">
-        <ProjectMark project={project} size={34} />
-        <div className="pjt-head-text">
-          <h1>{project.name}</h1>
-          {project.about && <p className="subtle" title={project.about}>{project.about}</p>}
-        </div>
+        {switcher}
         <span className="pjt-head-actions">
           <Button size="sm" icon="plus" onClick={() => setAdding(true)}>Add resource</Button>
           <Button size="sm" variant="primary" icon="message" onClick={() => (setFocus({ kind: "new" }), setView("home"))}>New thread</Button>
