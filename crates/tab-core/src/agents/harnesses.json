@@ -52,9 +52,13 @@
         "common": true
       },
       {
-        "id": "claude-fable-5-1",
-        "label": "Fable 5.1",
+        "id": "claude-fable-5-2",
+        "label": "Fable 5.2",
         "common": true
+      },
+      {
+        "id": "claude-fable-5-1",
+        "label": "Fable 5.1"
       },
       {
         "id": "claude-opus-5",
@@ -109,7 +113,7 @@
       "anthropic/claude-opus-5-5",
       "anthropic/claude-sonnet-5-5",
       "anthropic/claude-haiku-5-5",
-      "anthropic/claude-fable-5-1"
+      "anthropic/claude-fable-5-2"
     ],
     "install": {
       "npm": "opencode-ai",
