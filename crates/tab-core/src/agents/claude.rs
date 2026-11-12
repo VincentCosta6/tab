@@ -435,6 +435,21 @@ fn unexpected(init: &Value, allowed: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The MCP servers in Claude Code's init line, with their status.
+fn mcp_servers(init: &Value) -> Vec<super::AgentMcpServer> {
+    init["mcp_servers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            Some(super::AgentMcpServer {
+                name: s["name"].as_str()?.to_string(),
+                status: s["status"].as_str().map(str::to_string),
+            })
+        })
+        .collect()
+}
+
 /// Everything a model call read: new input plus cache writes and reads.
 fn prompt_tokens(u: &Value) -> i64 {
     [
@@ -529,6 +544,7 @@ impl Parser {
                     hub.save_claude_ai_connectors(&names);
                 }
                 self.billing = crate::usage::billing_from_init(v);
+                hub.save_agent_mcp(&sid, &mcp_servers(v));
                 if let Some(cmds) = v["slash_commands"].as_array() {
                     let names: Vec<String> = cmds
                         .iter()
@@ -1189,5 +1205,31 @@ mod tests {
         p.strict = true;
         p.handle(&init);
         assert_eq!(p.leaked, ["MCP server \"health\""]);
+    }
+
+    #[tokio::test]
+    async fn the_init_line_saves_each_mcp_server_status_for_the_chat() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(8);
+        let dir = std::env::temp_dir().join(format!("tab-agent-mcp-{}", std::process::id()));
+        let hub = AgentHub::new(store.clone(), tx, AgentConfig::default(), dir.clone());
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        assert!(hub.agent_mcp(&s.id).is_empty());
+        let init = json!({ "type": "system", "subtype": "init", "mcp_servers": [
+            { "name": "tab", "status": "connected" },
+            { "name": "linear", "status": "needs-auth" },
+            { "name": "odd" },
+        ] });
+        Parser::new(hub.clone(), s.id.clone()).handle(&init);
+        let got = hub.agent_mcp(&s.id);
+        assert_eq!(
+            got.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            ["tab", "linear", "odd"]
+        );
+        assert_eq!(got[1].status.as_deref(), Some("needs-auth"));
+        assert_eq!(got[2].status, None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -861,6 +861,28 @@ body.resizing iframe { pointer-events: none; }
 .slash-menu button.active { background: var(--bg-hover); }
 .slash-name { font-family: var(--font-mono, ui-monospace, monospace); flex: none; }
 .slash-desc { color: var(--fg-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.slash-menu button:has(.slash-tab) .slash-desc { flex: 1; }
+.slash-menu button { min-width: 0; }
+.slash-tab { margin-left: auto; flex: none; padding: 0 6px; border-radius: 999px; font-size: var(--text-xs); color: var(--tone-accent-fg); background: var(--tone-accent-bg); }
+
+/* What tab shows for an interactive command (/mcp, /context…), above the box. */
+.slash-card { margin: 8px 8px 0; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); font-size: var(--text-sm); max-height: min(420px, 50vh); display: flex; flex-direction: column; }
+.slash-card-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-bottom: 1px solid var(--border); }
+.slash-card-head strong { font-family: var(--font-mono, ui-monospace, monospace); font-weight: 500; }
+.slash-card-close { margin-left: auto; }
+.slash-card-body { padding: 10px; display: grid; gap: 10px; overflow-y: auto; }
+.slash-card-body p { margin: 0; }
+.slash-card-body > p.subtle { font-size: var(--text-xs); }
+.slash-card-actions { display: flex; gap: 8px; }
+.slash-mcp { display: grid; gap: 2px; }
+.slash-mcp-line { display: flex; align-items: center; gap: 8px; min-height: 30px; }
+.slash-mcp-name { display: flex; align-items: baseline; gap: 6px; flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.slash-mcp-name:disabled { cursor: default; padding-left: 18px; }
+.slash-mcp-name > svg { align-self: center; flex: none; }
+.slash-mcp-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slash-mcp-status { display: inline-flex; align-items: center; gap: 6px; flex: none; color: var(--fg-muted); font-size: var(--text-xs); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slash-mcp-tools { margin: 2px 0 6px 18px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.slash-mcp-tools > .subtle { padding: 8px; }
 
 /* Above the composer: sign the agent back in, or update it. */
 .agent-notice { display: flex; align-items: flex-start; gap: 8px; margin: 8px 8px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); font-size: var(--text-sm); color: var(--fg-muted); }

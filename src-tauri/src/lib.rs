@@ -1487,6 +1487,15 @@ fn agent_slash_commands(state: State<'_, AppState>) -> Vec<String> {
     state.hub.slash_commands()
 }
 
+/// The MCP servers a chat's agent reported at its last turn, with status.
+#[tauri::command]
+fn agent_mcp_servers(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Vec<tab_core::agents::AgentMcpServer> {
+    state.hub.agent_mcp(&session_id)
+}
+
 /// The state of each item's latest chat (working, needs you, monitoring,
 /// failed or idle), for the queue rows and the nav. Items with no chat are
 /// left out.
@@ -3152,6 +3161,7 @@ pub fn run() {
             agent_activity,
             items_for_link,
             agent_slash_commands,
+            agent_mcp_servers,
             agent_health,
             agent_upgrade,
             graph_view,
