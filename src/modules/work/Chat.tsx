@@ -828,7 +828,51 @@ function SecretCard({ m, onSend }: { m: SessionMessage; onSend?: (text: string) 
 
 function ApprovalCard({ approval }: { approval: Approval }) {
   if (approval.tool === "AskUserQuestion") return <QuestionApproval approval={approval} />;
+  if (approval.tool === "tab_vault") return <VaultApproval approval={approval} />;
   return <ToolApproval approval={approval} />;
+}
+
+/** An agent wants something from the vault: unlock it, release fields, or share them with a thread. */
+function VaultApproval({ approval }: { approval: Approval }) {
+  const input = approval.input as { kind: "unlock" | "release" | "request"; why?: string; entry?: string; fields?: (string | { label: string; masked: string })[]; file?: boolean };
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const allow = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      // Approving opens the vault here first (Touch ID / Windows Hello).
+      const st = await api.vaultStatus();
+      if (st.state === "locked") await api.vaultUnlock();
+      else if (st.state !== "open") throw new Error("This device can't open the vault. Answer on the computer running this chat.");
+      await api.approvalResolve(approval.id, "allow");
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  };
+  const deny = async () => (setBusy(true), await api.approvalResolve(approval.id, "deny"));
+  const fields = input.fields ?? [];
+  return (
+    <div className="approval vault-approval">
+      <div className="approval-head"><Icon name="lock" size={14} /> {approval.summary}</div>
+      {fields.length > 0 && (
+        <div className="vault-approval-fields">
+          {fields.map((f) => typeof f === "string"
+            ? <span key={f} className="vault-chip">{f}</span>
+            : <span key={f.label} className="vault-chip">{f.label} <code>{f.masked}</code></span>)}
+          {input.file && <span className="vault-chip">file text</span>}
+        </div>
+      )}
+      {input.why && <p className="vault-approval-why"><span className="subtle">Why:</span> {input.why}</p>}
+      {input.kind !== "unlock" && <p className="subtle vault-approval-note">Only this one answer gets the values; the saved chat shows them masked. Logged in the vault's activity.</p>}
+      {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
+      <div className="toolbar">
+        <Button size="sm" variant="primary" icon="check" disabled={busy} onClick={allow}>{input.kind === "unlock" ? "Unlock" : input.kind === "release" ? "Show to the coordinator" : "Share"}</Button>
+        <Button size="sm" variant="ghost" icon="x" disabled={busy} onClick={deny}>Deny</Button>
+      </div>
+    </div>
+  );
 }
 
 function ToolApproval({ approval }: { approval: Approval }) {

@@ -18,6 +18,7 @@ mod projects;
 mod segments;
 mod sessions;
 mod usage;
+mod vault;
 mod vectors;
 mod workflows;
 pub use jobs::CloudConnection;
@@ -34,6 +35,7 @@ use rusqlite::Connection;
 pub use http::{AuditEntry, AuditQuery, CachedResponse, UsageRow};
 pub use items::{Scope, Upsert};
 pub use usage::{NewUsage, PlanWindow, UsageSummary};
+pub use vault::{VAULT_TITLE, VaultAuditRow, VaultDevice, VaultGeneration};
 pub use vectors::Doc;
 
 pub struct Store {
@@ -75,6 +77,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/021_item_links.sql"),
     include_str!("migrations/022_coordinator.sql"),
     include_str!("migrations/023_session_opened.sql"),
+    include_str!("migrations/024_vault.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {

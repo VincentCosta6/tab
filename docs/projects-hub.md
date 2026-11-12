@@ -27,7 +27,9 @@ repos, services), searchable by agents within the access level each resource has
   are fenced (`coordinator::fenced`); shell commands and WebFetch always ask; remote tools named like
   send/merge/deploy/refund/post/share/delete ask even when allowed elsewhere; on turns tab started
   itself, WebSearch and starting an agent ask too.
-- Sync: plaintext rows to the hub. No end-to-end encryption, no device keys. `vault.rs` is OS keychain/DPAPI, per device.
+- Sync: plaintext rows to the hub, except the vault (phase 4, `crate::e2e`), which syncs only public keys,
+  wrapped keys, MACs and ciphertext. `vault.rs` is the OS keychain/DPAPI per device; it holds each
+  device's vault private key.
 
 ## Access levels
 
@@ -62,7 +64,8 @@ Remote MCP services marked `coordinator` are only offered to the coordinator ses
    summary (open threads, decisions, watching, new notes; vault values never included), the old agent
    session is archived as a history segment (still indexed for the coordinator), and the next turn starts
    a fresh `--session-id` with the summary in the brief. Threshold is a project setting.
-4. **Vault (end-to-end encrypted).** See below.
+4. **Vault (end-to-end encrypted).** See below. Knowledge → Vault: set up (recovery key shown once),
+   unlock for 10 minutes, entries with masked fields, devices (approve by code, remove = new key), activity.
 
 ## Vault design
 
@@ -87,6 +90,34 @@ an existing device (or your recovery key) lets it in; indexing happens only on d
   you reveal them. A worker thread calls `tab_vault_request(fields, why)`, which shows an approval card;
   approved values are passed in that one tool result only. Synced transcripts store the masked form;
   compaction summaries drop vault values. Every read goes to an append-only `vault_audit`.
+
+### As built (phase 4)
+
+- **Tables** (all synced): `vault_devices` (public key, pending/active/removed, a `vouch` MAC under the
+  vault key over id + public key, so rotation never wraps for a key the hub swapped in),
+  `vault_generations` (each new key carries the previous one sealed under it and is endorsed by a MAC
+  under the previous one), `vault_keys` (one wrap per device per generation; X25519 ephemeral-static +
+  HKDF-SHA256 + XChaCha20-Poly1305, bound to key id and recipient), `vault_audit` (append only: update
+  and delete triggers ignore, so neither this device nor the hub can rewrite it; details sealed).
+  `vault_trust` (not synced) keeps fingerprints of generations this device opened: a newer one must
+  chain back to one of them, so a key the hub made up is passed over.
+- **Recovery key**: 24 BIP-39 words derive an X25519 key pair, so "recovery" is wrapped for like a
+  device and rewrapped on rotation without the words. No passkey PRF yet.
+- **Entries** are `project_resources` rows with `access = 'vault'`, kind `note` (fields + note) or
+  `file`, title "Vault entry"; the real body is sealed in `options.sealed`, bound to project, id and
+  kind. `resource_save` still refuses `vault` (nothing plaintext can be saved as one); `crate::e2e`
+  writes them with `vault_entry_put`.
+- **Index**: in memory while open, saved as `vault-index.sealed` (sealed JSON under a key derived from
+  the vault key), not SQLCipher/sqlite-vec: a vault is tens of entries, matched by words. The index
+  blob isn't synced yet; a new device re-reads the entries when it first opens the vault.
+- **Use**: `tab_vault_search` / `tab_vault_get` are listed only to `coordinator:<project>` chats with
+  Person trust running on this device; other Person-trust threads in the project get
+  `tab_vault_request(fields, why)`. Unlocking, releasing values to the coordinator and sharing with a
+  thread all go through an approval card (`tool = "tab_vault"`); approving a locked vault runs Touch ID /
+  Windows Hello first. Released values are remembered for the app's run and masked by
+  `e2e::redact` in every stored (and so synced) chat message except this device's tool output, in
+  compaction transcripts and in summaries.
+- **Rotation** on removing a device reseals every entry and re-uploads every file.
 
 ## Open questions
 

@@ -14,6 +14,7 @@ import type {
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceInput, Segment, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
+  VaultAudit, VaultDevice, VaultEntry, VaultEntryInput, VaultStatus,
 } from "./types";
 
 const harnesses = harnessData as unknown as Harness[];
@@ -32,6 +33,49 @@ const mockModels = (): ModelOption[] => {
 };
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+
+// The vault, in memory. `?vault=none` starts without one, `?vault=locked` locked.
+const vaultStart = (typeof location !== "undefined" && new URLSearchParams(location.search).get("vault")) || "open";
+const vaultMask = (v: string) => (v.replace(/\s/g, "").length <= 4 ? "••••" : `•••• ${v.replace(/\s/g, "").slice(-4)}`);
+const mockVault = {
+  made: vaultStart !== "none",
+  openUntil: vaultStart === "open" ? Date.now() + 10 * 60_000 : 0,
+  devices: [
+    { id: "device-mac", name: "Vincent's MacBook Pro", state: "active", code: "482 913", this: true, approved_by: null, created_at: ago(60 * 24 * 30) },
+    { id: "device-pc", name: "DESKTOP-7Q2", state: "active", code: "105 337", this: false, approved_by: "Vincent's MacBook Pro", created_at: ago(60 * 24 * 12) },
+    { id: "device-new", name: "Vincent's iPad", state: "pending", code: "731 064", this: false, approved_by: null, created_at: ago(3) },
+  ] as VaultDevice[],
+  entries: [] as (Omit<VaultEntry, "fields"> & { fields: { label: string; value: string }[] })[],
+  audit: [] as VaultAudit[],
+};
+function vaultLog(action: string, actor: VaultAudit["actor"], detail: VaultAudit["detail"] = null, resource_id: string | null = null) {
+  mockVault.audit.unshift({ id: `va-${Date.now()}-${mockVault.audit.length}`, at: new Date().toISOString(), device: "Vincent's MacBook Pro", action, actor, session_id: null, project_id: null, resource_id, detail });
+}
+const vaultSeeded = new Set<string>();
+/** Sample entries the first time a project's vault is opened. */
+function vaultSeed(projectId: string) {
+  if (vaultSeeded.has(projectId) || vaultStart === "none") return;
+  vaultSeeded.add(projectId);
+  const at = ago(60 * 24 * 9);
+  mockVault.entries.push(
+    { id: `ve-ids-${projectId}`, project_id: projectId, kind: "note", title: "Company IDs", note: "From the IRS CP 575 letter and the state registration.", fields: [{ label: "EIN", value: "12-3456789" }, { label: "State tax ID", value: "CA 0451-2290" }, { label: "DUNS", value: "08-146-6849" }], created_at: at, updated_at: at },
+    { id: `ve-bank-${projectId}`, project_id: projectId, kind: "note", title: "Operating account (Mercury)", note: "", fields: [{ label: "Routing number", value: "084106768" }, { label: "Account number", value: "9800 1234 5521" }], created_at: at, updated_at: ago(60 * 30) },
+    { id: `ve-tax-${projectId}`, project_id: projectId, kind: "file", title: "2024 Form 1120.pdf", note: "", fields: [], file: { name: "2024 Form 1120.pdf", size: 412_000 }, created_at: ago(60 * 24 * 40), updated_at: ago(60 * 24 * 40) },
+  );
+  mockVault.audit.push(
+    { id: "va-s1", at: ago(14), device: "Vincent's MacBook Pro", action: "reveal", actor: "thread", session_id: "s-w9", project_id: projectId, resource_id: `ve-ids-${projectId}`, detail: { title: "Company IDs", fields: ["EIN"], why: "Filling in the W-9 for Acme's vendor portal" } },
+    { id: "va-s2", at: ago(15), device: "Vincent's MacBook Pro", action: "approve", actor: "person", session_id: "s-w9", project_id: projectId, resource_id: null, detail: { fields: ["EIN"], why: "Filling in the W-9 for Acme's vendor portal" } },
+    { id: "va-s3", at: ago(16), device: "Vincent's MacBook Pro", action: "request", actor: "thread", session_id: "s-w9", project_id: projectId, resource_id: null, detail: { fields: ["EIN"], why: "Filling in the W-9 for Acme's vendor portal" } },
+    { id: "va-s4", at: ago(95), device: "Vincent's MacBook Pro", action: "search", actor: "coordinator", session_id: "s-coord", project_id: projectId, resource_id: null, detail: { query: "estimated tax due", results: 1 } },
+    { id: "va-s5", at: ago(60 * 26), device: "DESKTOP-7Q2", action: "unlock", actor: "person", session_id: null, project_id: null, resource_id: null, detail: null },
+  );
+}
+const vaultOpen = () => mockVault.openUntil > Date.now();
+const vaultView = (e: (typeof mockVault.entries)[number]): VaultEntry => ({ ...e, fields: e.fields.map((f) => ({ label: f.label, masked: vaultMask(f.value) })) });
+function vaultMustBeOpen() {
+  if (!vaultOpen()) throw new Error("The vault is locked. Unlock it on this device first.");
+}
+
 
 type Seed = [kind: string, title: string, body: string, actor: string, context: string, url: string, min: number, score: number, base: number, reason: string];
 
@@ -287,7 +331,7 @@ export const mockApi = {
         case "project_resource_save": {
           const now = new Date().toISOString();
           const r = args.resource as ResourceInput;
-          if (r.access === "vault") throw new Error("the vault isn't available yet: it needs end-to-end encryption, which comes in a later release");
+          if (r.access === "vault") throw new Error("vault entries are added in the project's Vault, where they're encrypted on this device");
           if (!r.title.trim()) throw new Error("a resource needs a title");
           if (!r.url && r.kind !== "note") throw new Error(`a ${r.kind} needs a link`);
           const old = resources.find((x) => x.project_id === args.projectId && (r.id ? x.id === r.id : x.kind === r.kind && x.url === r.url));
@@ -307,6 +351,75 @@ export const mockApi = {
           setTimeout(() => Object.assign(fresh, { status: "indexed", chunks: Math.max(1, Math.round(fresh.options.size as number / 1200)), indexed_at: new Date().toISOString() }), 1500);
           return fresh;
         }
+        case "vault_status": {
+          const me = mockVault.devices.find((d) => d.this)!;
+          const st: VaultStatus = {
+            state: !mockVault.made ? "none" : vaultOpen() ? "open" : "locked",
+            open_until: vaultOpen() ? new Date(mockVault.openUntil).toISOString() : null,
+            device: me,
+            devices: mockVault.devices.filter((d) => d.state !== "removed"),
+            presence: "Touch ID",
+          };
+          return st;
+        }
+        case "vault_create": {
+          mockVault.made = true;
+          mockVault.openUntil = Date.now() + 10 * 60_000;
+          mockVault.devices = mockVault.devices.filter((d) => d.this);
+          vaultLog("create", "person");
+          return "abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual";
+        }
+        case "vault_unlock": await new Promise((r) => setTimeout(r, 400)); mockVault.openUntil = Date.now() + 10 * 60_000; vaultLog("unlock", "person"); return null;
+        case "vault_lock": mockVault.openUntil = 0; return null;
+        case "vault_ask": return "731 064";
+        case "vault_recover": mockVault.openUntil = Date.now() + 10 * 60_000; return null;
+        case "vault_approve": case "vault_deny": {
+          const d = mockVault.devices.find((x) => x.id === args.deviceId);
+          if (cmd === "vault_approve") vaultMustBeOpen();
+          if (d) Object.assign(d, cmd === "vault_approve" ? { state: "active", approved_by: "Vincent's MacBook Pro" } : { state: "removed" });
+          if (cmd === "vault_approve") vaultLog("device_approve", "person", { device: d?.name });
+          return null;
+        }
+        case "vault_remove_device": {
+          vaultMustBeOpen();
+          const d = mockVault.devices.find((x) => x.id === args.deviceId);
+          if (d) d.state = "removed";
+          vaultLog("device_remove", "person", { device: d?.name });
+          vaultLog("rotate", "person");
+          return null;
+        }
+        case "vault_entries": vaultMustBeOpen(); vaultSeed(args.projectId); return mockVault.entries.filter((e) => e.project_id === args.projectId).map(vaultView);
+        case "vault_entry_save": {
+          vaultMustBeOpen();
+          const input = args.entry as VaultEntryInput;
+          if (!input.title.trim()) throw new Error("a vault entry needs a name");
+          const now = new Date().toISOString();
+          const old = mockVault.entries.find((e) => e.id === input.id);
+          const fields = input.fields.filter((f) => f.label.trim()).map((f) => ({ label: f.label.trim(), value: f.value ?? old?.fields.find((o) => o.label === f.label)?.value ?? "" }));
+          if (old) Object.assign(old, { title: input.title, note: input.note, fields, updated_at: now });
+          const e = old ?? { id: `ve-${Date.now()}`, project_id: args.projectId, kind: "note" as const, title: input.title, note: input.note, fields, created_at: now, updated_at: now };
+          if (!old) mockVault.entries.push(e);
+          vaultLog(old ? "edit" : "add", "person", { title: e.title }, e.id);
+          return vaultView(e);
+        }
+        case "vault_file_add": {
+          vaultMustBeOpen();
+          const now = new Date().toISOString();
+          const name = String(args.name);
+          const e = { id: `ve-${Date.now()}`, project_id: args.projectId, kind: "file" as const, title: name, note: "", fields: [], file: { name, size: (args.bytes as Uint8Array).length }, created_at: now, updated_at: now };
+          mockVault.entries.push(e);
+          vaultLog("add", "person", { title: name }, e.id);
+          return vaultView(e);
+        }
+        case "vault_entry_delete": vaultMustBeOpen(); mockVault.entries = mockVault.entries.filter((e) => e.id !== args.id); vaultLog("delete", "person", null, args.id); return null;
+        case "vault_reveal": {
+          vaultMustBeOpen();
+          const v = mockVault.entries.find((e) => e.id === args.id)?.fields.find((f) => f.label === args.label)?.value ?? "";
+          vaultLog("reveal", "person", { fields: [args.label] }, args.id);
+          return v;
+        }
+        case "vault_file_export": vaultMustBeOpen(); return `~/Downloads/${mockVault.entries.find((e) => e.id === args.id)?.file?.name ?? "file"}`;
+        case "vault_audit": return mockVault.audit.map((a) => (vaultOpen() ? a : { ...a, detail: null }));
         case "project_resource_reindex": return null;
         case "project_resource_delete": {
           const n = resources.length;
