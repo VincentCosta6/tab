@@ -37,6 +37,19 @@ fn add(store: &Store, id: &str, title: &str) -> QueueItem {
     }
 }
 
+/// An item under its own id, as devices gave them before ids were shared.
+fn add_legacy(store: &Store, id: &str, title: &str, legacy_id: &str) -> QueueItem {
+    let item = add(store, id, title);
+    store
+        .conn()
+        .execute(
+            "UPDATE items SET id = ?2 WHERE id = ?1",
+            [&item.id, legacy_id],
+        )
+        .unwrap();
+    store.get(legacy_id).unwrap().unwrap()
+}
+
 fn hub_item(hub: &LocalHub, id: &str) -> Option<serde_json::Value> {
     hub.hub
         .lock()
@@ -311,9 +324,10 @@ fn joining_a_hub_with_data_takes_its_rows_and_adds_the_rest() {
     let shared = add(&first, "1", "Hub's title");
     hub.sync(&first).unwrap();
 
-    // The same notification, ingested here under its own id.
+    // The same notification, ingested here under its own id (before ids
+    // were shared).
     let other = Store::in_memory().unwrap();
-    let twin = add(&other, "1", "Local title");
+    let twin = add_legacy(&other, "1", "Local title", "legacy-1");
     assert_ne!(twin.id, shared.id);
     let only_here = add(&other, "9", "Only here");
     hub.introduce(&other).unwrap();
@@ -379,9 +393,9 @@ fn the_same_item_ingested_on_two_devices_ends_up_once() {
     let pc = Store::in_memory().unwrap();
     hub.introduce(&mac).unwrap();
     hub.introduce(&pc).unwrap();
-    let first = add(&mac, "42", "From the Mac");
+    let first = add_legacy(&mac, "42", "From the Mac", "legacy-mac");
     hub.sync(&mac).unwrap();
-    let second = add(&pc, "42", "From the PC");
+    let second = add_legacy(&pc, "42", "From the PC", "legacy-pc");
     hub.sync(&pc).unwrap();
     hub.sync(&mac).unwrap();
     hub.sync(&pc).unwrap();
@@ -399,6 +413,40 @@ fn the_same_item_ingested_on_two_devices_ends_up_once() {
         .collect();
     assert_eq!(on_mac.len(), 1, "{on_mac:?}");
     assert_eq!(on_mac, on_pc);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_same_item_brought_in_on_two_devices_shares_one_row_and_keeps_done() {
+    let (hub, dir) = temp_hub("shared-ids");
+    let mac = Store::in_memory().unwrap();
+    let pc = Store::in_memory().unwrap();
+    hub.introduce(&mac).unwrap();
+    hub.introduce(&pc).unwrap();
+    let item = add(&mac, "42", "From the Mac");
+    mac.set_state(
+        &item.id,
+        ItemState::Done,
+        None,
+        when() + chrono::Duration::hours(1),
+    )
+    .unwrap();
+    hub.sync(&mac).unwrap();
+    // The PC polls before it has synced and brings the same thing in.
+    assert_eq!(add(&pc, "42", "From the PC").id, item.id);
+    // Each device syncs again after a commit, as the app does. The Mac's
+    // Done wins over the PC's late arrival and goes back to the hub once;
+    // after that nothing is left to send.
+    for _ in 0..3 {
+        hub.sync(&mac).unwrap();
+        hub.sync(&pc).unwrap();
+    }
+
+    for store in [&mac, &pc] {
+        assert_eq!(store.get(&item.id).unwrap().unwrap().state, ItemState::Done);
+        assert_eq!(store.hub_outbox_len().unwrap(), 0);
+    }
+    assert_eq!(hub_item(&hub, &item.id).unwrap()["state"], "done");
     let _ = std::fs::remove_dir_all(dir);
 }
 

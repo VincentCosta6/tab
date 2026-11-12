@@ -26,6 +26,17 @@ pub(crate) fn fingerprint(e: &IncomingEvent) -> String {
     )
 }
 
+/// Where item ids are derived from (a random v4 id, fixed for good).
+const ITEM_ID_NAMESPACE: uuid::Uuid = uuid::uuid!("6f1b5c2e-8d4a-4f3e-9b7c-2a1d0e5f4c3b");
+
+/// An item's id: a v5 UUID of its source and external id, so every device
+/// that brings in the same thing gives it the same id and they share one
+/// row through the hub instead of each keeping a copy.
+pub fn item_id(source: &str, external_id: &str) -> String {
+    let name = format!("{source}\x1f{external_id}");
+    uuid::Uuid::new_v5(&ITEM_ID_NAMESPACE, name.as_bytes()).to_string()
+}
+
 const COLUMNS: &str = "items.id, items.source, items.external_id, items.kind, items.title, items.body, items.url, \
     items.actor, items.context, items.occurred_at, items.blocks, items.entities, items.metadata, items.state, \
     items.snoozed_until, items.score, items.base_score, items.ai_adjustment, items.urgency, items.reason, \
@@ -174,7 +185,7 @@ impl Store {
                 tx.execute(
                     "UPDATE items SET kind = ?2, title = ?3, body = ?4, url = ?5, actor = ?6, context = ?7,
                          occurred_at = ?8, blocks = ?9, entities = ?10, metadata = ?11, fingerprint = ?12,
-                         state = 'open', snoozed_until = NULL, score = NULL, base_score = NULL,
+                         state = 'open', snoozed_until = NULL, state_at = ?13, score = NULL, base_score = NULL,
                          ai_adjustment = NULL, urgency = NULL, reason = NULL, ranked_by = NULL, fired = NULL, updated_at = ?13
                      WHERE id = ?1",
                     params![
@@ -185,11 +196,13 @@ impl Store {
                 (id, false)
             }
             None => {
-                let id = uuid::Uuid::new_v4().to_string();
+                let id = item_id(&e.source, &e.external_id);
+                // Arriving opens it as of when the activity happened, so a
+                // device that hasn't synced yet doesn't undo a later Done.
                 tx.execute(
                     "INSERT INTO items (id, source, external_id, kind, title, body, url, actor, context,
-                         occurred_at, blocks, entities, metadata, fingerprint, state, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'open', ?15, ?15)",
+                         occurred_at, blocks, entities, metadata, fingerprint, state, state_at, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'open', ?10, ?15, ?15)",
                     params![
                         id, e.source, e.external_id, e.kind, e.title, e.body, e.url, e.actor, e.context,
                         ts(e.occurred_at), blocks, entities, metadata, fp, ts(now)
@@ -297,7 +310,7 @@ impl Store {
     ) -> anyhow::Result<Option<QueueItem>> {
         let conn = self.conn();
         conn.execute(
-            "UPDATE items SET state = ?2, snoozed_until = ?3, updated_at = ?4 WHERE id = ?1",
+            "UPDATE items SET state = ?2, snoozed_until = ?3, state_at = ?4, updated_at = ?4 WHERE id = ?1",
             params![id, state.as_str(), snoozed_until.map(ts), ts(now)],
         )?;
         get_item(&conn, id)
@@ -334,7 +347,7 @@ impl Store {
         let mut out = Vec::with_capacity(ids.len());
         for id in ids {
             conn.execute(
-                "UPDATE items SET state = 'open', snoozed_until = NULL, updated_at = ?2 WHERE id = ?1",
+                "UPDATE items SET state = 'open', snoozed_until = NULL, state_at = ?2, updated_at = ?2 WHERE id = ?1",
                 params![id, ts(now)],
             )?;
             out.extend(get_item(&conn, &id)?);
