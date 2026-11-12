@@ -12,7 +12,9 @@
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "proto": "buf generate",
-    "proto:lint": "buf lint"
+    "proto:lint": "buf lint",
+    "licenses:check": "node scripts/licenses/check-js.mjs",
+    "licenses:notices": "sh scripts/licenses/notices.sh"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.17.0",

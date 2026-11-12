@@ -13,6 +13,7 @@
 //! * Agents reach back into tab through the MCP server ([`crate::mcp`]) to
 //!   search the queue, attach context, file what they find and create tasks.
 
+mod acp;
 pub mod catalog;
 pub use coordinator::COORDINATOR_KEY_PREFIX;
 mod claude;
@@ -285,26 +286,6 @@ async fn brew_latest(upgrade: &str) -> Option<String> {
     Some(version.split(',').next()?.to_string())
 }
 
-/// Drops ANSI escape sequences from installer output.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            if chars.next_if_eq(&'[').is_some() {
-                for n in chars.by_ref() {
-                    if n.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
 /// Runs the update command for the agent CLI at `path`, the same one tab shows
 /// in [`AgentProbe::upgrade`], and passes each line it prints to `on_line`.
 /// Installers redraw spinners with `\r`, so `\r` ends a line too.
@@ -421,14 +402,16 @@ async fn run_streaming(
                 }
                 pending.push_str(&String::from_utf8_lossy(&buf[..n]));
                 while let Some(i) = pending.find(['\r', '\n']) {
-                    let line = strip_ansi(&pending[..i]).trim().to_string();
+                    let line = crate::term::plain(&pending.as_bytes()[..i])
+                        .trim()
+                        .to_string();
                     pending.drain(..=i);
                     if !line.is_empty() {
                         let _ = tx.send(line);
                     }
                 }
             }
-            let line = strip_ansi(&pending).trim().to_string();
+            let line = crate::term::plain(pending.as_bytes()).trim().to_string();
             if !line.is_empty() {
                 let _ = tx.send(line);
             }
@@ -1452,7 +1435,9 @@ impl AgentHub {
         let hub = self.clone();
         tokio::spawn(async move {
             let system = hub.system_prompt(&session);
+            let acp = acp::enabled(&hub.config_for(&session), session.agent);
             let result = match session.agent {
+                _ if acp => acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await,
                 AgentKind::ClaudeCode => {
                     claude::run_turn(
                         &hub,
@@ -1626,8 +1611,10 @@ impl AgentHub {
         let (output, code) = match tokio::time::timeout(SHELL_TIMEOUT, run).await {
             Ok(out) => {
                 let (out, err, status) = out?;
-                let mut text = String::from_utf8_lossy(&out).into_owned();
-                let err = String::from_utf8_lossy(&err);
+                // As the terminal would show it: colours and progress
+                // redraws resolved, not left in the text.
+                let mut text = crate::term::plain(&out);
+                let err = crate::term::plain(&err);
                 if !err.trim().is_empty() {
                     if !text.is_empty() && !text.ends_with('\n') {
                         text.push('\n');
@@ -2794,7 +2781,10 @@ Publisher: Anthropic PBC
 
     #[test]
     fn installer_colour_codes_are_dropped() {
-        assert_eq!(strip_ansi("\u{1b}[32mDone\u{1b}[0m in 3s"), "Done in 3s");
+        assert_eq!(
+            crate::term::plain("\u{1b}[32mDone\u{1b}[0m in 3s".as_bytes()),
+            "Done in 3s"
+        );
     }
 }
 

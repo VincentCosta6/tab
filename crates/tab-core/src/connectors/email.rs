@@ -24,7 +24,6 @@ use chrono::{DateTime, TimeZone, Utc};
 use futures_util::TryStreamExt;
 use mail_parser::{Address, HeaderValue, Message, MessageParser};
 use serde_json::json;
-use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls;
@@ -37,7 +36,7 @@ use crate::model::{
     FieldType, IncomingEvent, KindInfo, QueueItem, SettingField, SettingKind, Tone,
 };
 
-type Imap = Session<TlsStream<TcpStream>>;
+type Imap = Session<TlsStream<crate::net::Stream>>;
 
 const MAX_BODY: usize = 4000;
 /// Bigger messages come in with headers only.
@@ -278,8 +277,9 @@ async fn open(
     host: &str,
     port: u16,
     wait: Duration,
-) -> anyhow::Result<async_imap::Client<TlsStream<TcpStream>>> {
-    let tcp = tokio::time::timeout(wait, TcpStream::connect((host, port)))
+) -> anyhow::Result<async_imap::Client<TlsStream<crate::net::Stream>>> {
+    // Through the company proxy when one is set (see crate::net).
+    let tcp = tokio::time::timeout(wait, crate::net::connect(host, port, true))
         .await
         .map_err(|_| anyhow::anyhow!("{host} didn't answer on port {port}"))??;
     let name = rustls::pki_types::ServerName::try_from(host.to_string())?;
@@ -688,7 +688,7 @@ pub fn sort_message(
         None => "direct",
     };
     let subject = m.subject().unwrap_or("(no subject)").trim().to_string();
-    let mut body = m.body_text(0).map(|b| b.into_owned()).unwrap_or_default();
+    let mut body = body_text(&m);
     // Drop quoted replies below the new text.
     if let Some(i) = body.find("\nOn ").filter(|i| {
         body[*i + 1..]
@@ -1006,7 +1006,7 @@ pub async fn read_selection(
                 })
                 .unwrap_or_default();
             let date = m.date().map(|d| d.to_rfc3339()).unwrap_or_default();
-            let body = m.body_text(0).map(|t| t.into_owned()).unwrap_or_default();
+            let body = body_text(&m);
             let mid = m.message_id().unwrap_or_default().to_string();
             docs.push(crate::knowledge::chunk::Doc {
                 title: subject.clone(),
@@ -1266,8 +1266,39 @@ impl Connector for EmailConnector {
     }
 }
 
+/// A message's text for the ranker and agents: its plain-text part, or,
+/// for HTML-only mail, the HTML as Markdown (mail-parser's own conversion
+/// drops links, tables and lists).
+fn body_text(m: &mail_parser::Message) -> String {
+    let html_only = m.text_part(0).is_some_and(|p| p.is_text_html());
+    if html_only
+        && let Some(md) = m
+            .body_html(0)
+            .and_then(|h| crate::knowledge::extract::html_to_markdown(&h))
+    {
+        return md;
+    }
+    m.body_text(0).map(|b| b.into_owned()).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn html_only_mail_reads_as_markdown() {
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/html\r\n\r\n<p>Ship it: <a href=\"https://x.dev/pr/1\">PR 1</a></p><ul><li>one</li><li>two</li></ul>";
+        let m = mail_parser::MessageParser::default()
+            .parse(&raw[..])
+            .unwrap();
+        let body = super::body_text(&m);
+        assert!(body.contains("- one\n- two"), "{body}");
+        let plain = b"From: a@b.c\r\nSubject: x\r\n\r\nJust text";
+        let m = mail_parser::MessageParser::default()
+            .parse(&plain[..])
+            .unwrap();
+        assert_eq!(super::body_text(&m).trim(), "Just text");
+    }
+
     use super::*;
 
     fn settings(bulk: BulkMode) -> Settings {

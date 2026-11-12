@@ -127,7 +127,20 @@
     "bin_dirs": [
       ".opencode/bin",
       ".local/bin"
-    ]
+    ],
+    "acp": {
+      "command": null,
+      "args": [
+        "acp"
+      ],
+      "env": {},
+      "strict_args": [],
+      "strict_env": {
+        "OPENCODE_DISABLE_CLAUDE_CODE": "1"
+      },
+      "mcp_tool_name": "{server}_{tool}",
+      "adapter": null
+    }
   },
   {
     "id": "codex",

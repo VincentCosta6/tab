@@ -62,7 +62,7 @@ impl Server {
 
 /// MCP servers in OpenCode config tab doesn't own: the person's global
 /// config, and for code nobody here wrote, the checkout's too.
-fn own_mcp_servers(directory: &Path, trust: Trust) -> Vec<String> {
+pub(super) fn own_mcp_servers(directory: &Path, trust: Trust) -> Vec<String> {
     let mut dirs = Vec::new();
     match std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
         Some(d) => dirs.push(Path::new(&d).join("opencode")),

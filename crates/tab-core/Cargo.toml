@@ -61,6 +61,23 @@ getrandom = "0.3"
 zeroize = "1"
 bip39 = { version = "2", default-features = false, features = ["std"] }
 
+# Zed's crates come from git, pinned to one commit (never a branch), with
+# default features off. deny.toml allows this repository only, and checks the
+# license of everything they pull in; see CLAUDE.md before adding another.
+# HTML email and web pages as Markdown, for the ranker and agent context.
+html_to_markdown = { git = "https://github.com/zed-industries/zed", rev = "78f5d7446c55f6c1aa9b66e8111f6b3f4625ebb0", default-features = false }
+# HTTP CONNECT and SOCKS5 through a company proxy, for connections reqwest
+# doesn't make (IMAP, the hub socket, the sandbox's egress proxy).
+proxy_handshake = { git = "https://github.com/zed-industries/zed", rev = "78f5d7446c55f6c1aa9b66e8111f6b3f4625ebb0", default-features = false, features = ["tokio"] }
+# Agent Client Protocol messages (agents::acp). Types only: tab runs the
+# process and the JSON-RPC itself, under its sandbox.
+agent-client-protocol-schema = { version = "1.17", default-features = false }
+# Language server messages (crate::lsp).
+lsp-types = "0.97"
+# A terminal emulator's screen, for turning command output (colours, `\r`
+# progress bars, cursor moves) into the text a person would have seen.
+alacritty_terminal = { version = "0.26", default-features = false }
+
 # The cloud hub's sync socket.
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 

@@ -341,7 +341,7 @@ impl CloudLink {
 }
 
 type Socket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<crate::net::Stream>>;
 
 async fn open(url: &str, token: &TokenSource) -> anyhow::Result<Socket> {
     let mut req = url.into_client_request()?;
@@ -352,8 +352,17 @@ async fn open(url: &str, token: &TokenSource) -> anyhow::Result<Socket> {
         "user-agent",
         format!("tab-desktop/{}", env!("CARGO_PKG_VERSION")).parse()?,
     );
+    // Through the company proxy when one is set (see crate::net).
+    let uri = req.uri();
+    let secure = uri.scheme_str() != Some("ws");
+    let host = uri
+        .host()
+        .ok_or_else(|| anyhow::anyhow!("no host in {url}"))?
+        .to_string();
+    let port = uri.port_u16().unwrap_or(if secure { 443 } else { 80 });
+    let stream = crate::net::connect(&host, port, secure).await?;
     let (ws, _) =
-        tokio_tungstenite::connect_async_tls_with_config(req, None, false, Some(tls())).await?;
+        tokio_tungstenite::client_async_tls_with_config(req, stream, None, Some(tls())).await?;
     Ok(ws)
 }
 

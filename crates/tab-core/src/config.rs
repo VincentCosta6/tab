@@ -84,6 +84,11 @@ pub struct AgentConfig {
     /// default; review chats are always strict.
     #[serde(default = "default_true")]
     pub strict: bool,
+    /// Harnesses (`opencode`) whose chats run through the Agent Client
+    /// Protocol instead of their own adapter. A preview, per harness, until
+    /// the chats match (see `agents::acp`).
+    #[serde(default)]
+    pub acp: Vec<String>,
 }
 
 /// The titler: after the first few turns of a chat, a small model renames
@@ -234,6 +239,7 @@ impl Default for AgentConfig {
             suggest_replies: true,
             titler: TitlerConfig::default(),
             strict: true,
+            acp: Vec::new(),
         }
     }
 }
