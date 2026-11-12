@@ -8,7 +8,7 @@ import type {
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
   AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
-  EmailSignInStatus, MailProvider,
+  EmailSignInStatus, MailProvider, Segment, SessionMessage,
 } from "./types";
 import { mockApi } from "./mock";
 import { HubListSchema, HubStatusSchema, RunnerStatusSchema, decode } from "./protocol/cloud";
@@ -73,6 +73,13 @@ export const api = {
   graphDelete: (id: number, withExclusive: boolean) => call<number>("graph_delete", { id, withExclusive }),
   coordinatorChatOpen: (projectId: string) => call<Chat>("coordinator_chat_open", { projectId }),
   coordinatorChatSend: (projectId: string, text: string, attachments: string[] = []) => call<Session>("coordinator_chat_send", { projectId, text, attachments }),
+  coordinatorSettingsSave: (projectId: string, p: { watch?: boolean; brief?: string; compactAt?: number }) =>
+    call<Project>("coordinator_settings_save", { projectId, watch: p.watch ?? null, brief: p.brief ?? null, compactAt: p.compactAt ?? null }),
+  coordinatorHistory: (projectId: string) => call<Segment[]>("coordinator_history", { projectId }),
+  coordinatorSegment: (segmentId: string) => call<Segment | null>("coordinator_segment", { segmentId }),
+  coordinatorSegmentMessages: (segmentId: string) => call<SessionMessage[]>("coordinator_segment_messages", { segmentId }),
+  coordinatorSummarySave: (segmentId: string, summary: string) => call<Segment>("coordinator_summary_save", { segmentId, summary }),
+  coordinatorCompact: (projectId: string) => call<Segment>("coordinator_compact", { projectId }),
   searchIndexStatus: () => call<IndexStatus>("search_index_status"),
   projectsList: () => call<Project[]>("projects_list"),
   projectSave: (p: { id?: string; name: string; color: string; icon: string }) =>

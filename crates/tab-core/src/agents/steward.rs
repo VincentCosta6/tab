@@ -286,6 +286,9 @@ mod tests {
             icon: String::new(),
             about: "A work queue.".into(),
             rules: String::new(),
+            coordinator_watch: true,
+            coordinator_brief: String::new(),
+            compact_at: 0,
             created_at: Utc::now(),
         };
         let s = prompt(

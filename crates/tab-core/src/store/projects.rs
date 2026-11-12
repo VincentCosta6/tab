@@ -12,7 +12,7 @@ use crate::model::{
     RESOURCE_KINDS,
 };
 
-const PROJECT_COLS: &str = "id, name, color, icon, about, rules, created_at";
+const PROJECT_COLS: &str = "id, name, color, icon, about, rules, coordinator_watch, coordinator_brief, compact_at, created_at";
 const REPO_COLS: &str = "id, project_id, repo, path, note, added_by, created_at, updated_at";
 
 fn repo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRepo> {
@@ -133,6 +133,9 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         icon: r.get("icon")?,
         about: r.get("about")?,
         rules: r.get("rules")?,
+        coordinator_watch: r.get("coordinator_watch")?,
+        coordinator_brief: r.get("coordinator_brief")?,
+        compact_at: r.get("compact_at")?,
         created_at: parse_ts(&r.get::<_, String>("created_at")?)?,
     })
 }
@@ -199,6 +202,43 @@ impl Store {
                      WHERE id = ?1 RETURNING {PROJECT_COLS}"
                 ),
                 params![id, about.map(str::trim), rules.map(str::trim), ts(now)],
+                row,
+            )
+            .optional()?)
+    }
+
+    /// The coordinator's settings: whether it watches the queue, when it
+    /// briefs, and where its chat compacts.
+    pub fn project_set_coordinator(
+        &self,
+        id: &str,
+        watch: Option<bool>,
+        brief: Option<&str>,
+        compact_at: Option<i64>,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<Project>> {
+        if let Some(b) = brief.map(str::trim).filter(|b| !b.is_empty()) {
+            anyhow::ensure!(
+                chrono::NaiveTime::parse_from_str(b, "%H:%M").is_ok(),
+                "the brief time should look like 08:00"
+            );
+        }
+        let conn = self.conn();
+        Ok(conn
+            .query_row(
+                &format!(
+                    "UPDATE projects SET coordinator_watch = COALESCE(?2, coordinator_watch),
+                         coordinator_brief = COALESCE(?3, coordinator_brief),
+                         compact_at = COALESCE(?4, compact_at), updated_at = ?5
+                     WHERE id = ?1 RETURNING {PROJECT_COLS}"
+                ),
+                params![
+                    id,
+                    watch,
+                    brief.map(str::trim),
+                    compact_at.map(|n| n.max(0)),
+                    ts(now)
+                ],
                 row,
             )
             .optional()?)

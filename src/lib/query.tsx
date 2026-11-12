@@ -87,6 +87,8 @@ export const keys = {
   repos: (projectId: string) => ["project-repos", projectId] as const,
   resources: (projectId: string) => ["project-resources", projectId] as const,
   coordinator: (projectId: string) => ["chat", `coordinator:${projectId}`] as const,
+  coordinatorHistory: (projectId: string) => ["coordinator-history", projectId] as const,
+  segment: (id: string) => ["segment", id] as const,
   projectItems: (projectId: string) => ["project-items", projectId] as const,
   pressure: ["pressure"] as const,
   pull: (repo: string, n: number) => ["pull", repo, n] as const,

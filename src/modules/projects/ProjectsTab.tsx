@@ -20,6 +20,7 @@ import { actOnItem, type ItemAction } from "../work/optimistic";
 import { ProjectEditor, ProjectMark, ProjectNotes, useProjectTint, useRememberedProject } from "../work/Projects";
 import { taskStatus, unread, useContextStatus, useSeen, type TaskStatus } from "../work/taskStatus";
 import { QueueRow } from "../work/WorkTab";
+import { CompactMeter, CoordinatorSettings, HistoryDialog } from "./Compaction";
 import { AddResource, KnowledgeRail, KnowledgeView } from "./Knowledge";
 import "./projects.css";
 
@@ -197,6 +198,7 @@ function ProjectPage({ project, switcher }: { project: Project; switcher: React.
               </div>
               <ProfileField project={project} field="about" label="About" placeholder="What is this project, and what does it do?" empty="Nothing yet. An agent fills this in once it learns what the project is, or write it yourself." />
               <ProfileField project={project} field="rules" label="Instructions" placeholder={"How should agents work here? One per line, e.g.\n- Reply to customers short and technical\n- Refunds over $100 need me"} empty="No instructions yet. Add how agents should work here: tone, approvals, what not to touch." />
+              <CoordinatorSettings project={project} />
               <Repos projectId={project.id} />
             </div>
           </div>
@@ -238,6 +240,7 @@ function Coordinator({ project }: { project: Project }) {
   const key = keys.coordinator(project.id);
   const { data: chat } = useQuery<Chat>({ queryKey: key, queryFn: () => api.coordinatorChatOpen(project.id), staleTime: 0, refetchOnMount: "always" });
   const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState(false);
 
   const send = async (text: string, attachments: string[] = []) => {
     setError(null);
@@ -265,7 +268,14 @@ function Coordinator({ project }: { project: Project }) {
         <span className="pjh-coord-mark"><Icon name="sparkles" size={13} /></span>
         <strong>Coordinator</strong>
         {chat?.session && <AgentStatus chat={chat} />}
+        {chat?.session && (
+          <span className="pjc-head-right">
+            <CompactMeter chat={chat} project={project} />
+            <Button size="sm" variant="ghost" icon="layers" onClick={() => setHistory(true)}>History</Button>
+          </span>
+        )}
       </header>
+      {history && <HistoryDialog project={project} chat={chat} onClose={() => setHistory(false)} />}
       {empty ? (
         <div className="pjh-coord-intro">
           <span className="pjh-coord-mark big"><Icon name="sparkles" size={20} /></span>
