@@ -9,6 +9,7 @@ pub mod insights_store;
 pub mod items;
 pub mod rollups;
 pub mod runtime;
+pub mod suggest_store;
 
 /// The builder assistant's chat key for one workflow: each workflow gets its
 /// own conversation, and an unsaved draft uses `workflows:new` until the

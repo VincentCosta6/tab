@@ -9,8 +9,8 @@
 // its numbers from Rust.
 
 import type {
-  CapUsage, DayStats, FactoryWorkflow, FailureGroup, ModelStats, Quantiles, RunCounts, Spend, StepStats, StepStatus, VersionStats, Workflow, WorkflowFactory,
-  WorkflowHealth, WorkflowInsights, WorkflowRun, WorkflowStats,
+  CapUsage, DayStats, FactoryWorkflow, FailureGroup, ModelFamily, ModelStats, Placement, Quantiles, RunCounts, Spend, Step, StepStats, StepStatus, Suggestion,
+  SuggestionFact, VersionStats, Workflow, WorkflowFactory, WorkflowHealth, WorkflowInsights, WorkflowRun, WorkflowStats,
 } from "./types";
 
 type Billing = "api" | "subscription";
@@ -27,8 +27,8 @@ type MRun = Omit<WorkflowRun, "steps"> & { steps: MStep[]; rerun_of: string | nu
 // ---------------------------------------------------------------------------
 
 const base = { when: [], continue_on_error: false };
-const agentStep = (id: string, label: string, prompt: string, repo: string) =>
-  ({ ...base, id, label, type: "agent" as const, prompt, repo, harness: "", model: "", placement: { type: "anywhere" as const }, deadline_minutes: 45 });
+const agentStep = (id: string, label: string, prompt: string, repo: string, family = "") =>
+  ({ ...base, id, label, type: "agent" as const, prompt, repo, harness: "", model: "", family, placement: { type: "anywhere" as const }, deadline_minutes: 45 });
 
 export function extraWorkflows(ago: (min: number) => string): Workflow[] {
   const w = (id: string, name: string, description: string, trigger: Workflow["trigger"], steps: Workflow["steps"], version: number, extra: Partial<Workflow> = {}): Workflow => ({
@@ -54,9 +54,9 @@ export function extraWorkflows(ago: (min: number) => string): Workflow[] {
       { type: "item", changes: ["ingested"], sources: ["github"], kinds: ["github.review_requested"], when: [{ field: "item.actor", op: "equals", value: "dependabot[bot]" }] },
       [
         { ...base, id: "pr", label: "Read the PR", type: "action", connector: "github", action: "pr.get", input: { repo: "{{item.metadata.repo}}", number: "{{item.metadata.number}}" } },
-        agentStep("review", "Review the changelog", "Read the changelog of the bumped package and say if anything breaks us.", "{{item.metadata.repo}}"),
+        agentStep("review", "Review the changelog", "Read the changelog of the bumped package and say if anything breaks us.", "{{item.metadata.repo}}", "deep"),
         { ...base, id: "merge", label: "Merge", type: "action", connector: "github", action: "pr.merge", input: { repo: "{{item.metadata.repo}}", number: "{{item.metadata.number}}" } },
-      ], 2, { allow_destructive: true }),
+      ], 2),
     w("wf-stale", "Close stale issues", "Every Monday, close issues nobody has touched in 90 days.", { type: "schedule", every_minutes: 10080 },
       [{ ...base, id: "close", label: "Close", type: "action", connector: "github", action: "issue.close", input: { repo: "vincentcosta6/tab", number: "{{item.metadata.number}}" } }], 1, { enabled: false }),
   ];
@@ -83,6 +83,7 @@ const MODELS = {
   opus: { harness: "claude_code", model: "claude-opus-4-1", family: "balanced", billing: "subscription" as Billing, perK: 0 },
   codex: { harness: "codex", model: "gpt-5-codex", family: "", billing: "api" as Billing, perK: 0.0042 },
   haiku: { harness: "claude_code", model: "claude-haiku-4-5", family: "fast", billing: "api" as Billing, perK: 0.0011 },
+  deep: { harness: "claude_code", model: "claude-opus-4-1", family: "deep", billing: "api" as Billing, perK: 0.015 },
 };
 
 function generate(workflows: Workflow[], now: number): MRun[] {
@@ -184,13 +185,19 @@ function generate(workflows: Workflow[], now: number): MRun[] {
       }
     }
     // Merge green Dependabot PRs: always asks for the OK to merge, by design.
-    for (let i = many(0, 3); i > 0; i--) {
+    // v2 moved the changelog review to the deep family, and it never needs help there.
+    for (let i = d === 10 ? Math.max(1, many(3, 5)) : many(3, 5); i > 0; i--) {
       const t = at();
-      const review = agent("review", "Review the changelog", "ok", r() < 0.5 ? "haiku" : "sonnet", between(60_000, 200_000));
+      const review = agent("review", "Review the changelog", "ok", d > 20 ? (r() < 0.5 ? "haiku" : "sonnet") : "deep", between(60_000, 200_000));
       const merge = ask(plain("merge", "Merge", "ok", between(400, 1200)), "approval", t + 200_000);
-      merge.ms += Math.round(between(600_000, 7_200_000)); // the wait for the OK
       if (d > 240) continue; // added eight months ago
-      out.push(run("wf-merge", d > 20 ? 1 : 2, t, [plain("pr", "Read the PR", "ok", between(300, 800)), review, merge], r() < 0.02 ? "failed" : "succeeded"));
+      if (d === 10 && i === 1) {
+        // The person said no once: the run ends there, neither a success nor a failure.
+        merge.status = "blocked"; merge.error = "You declined this step."; merge.ms = 0;
+        out.push(run("wf-merge", 2, t, [plain("pr", "Read the PR", "ok", between(300, 800)), review, merge], "stopped", { error: "You declined Merge, so the run ended there." }));
+        continue;
+      }
+      out.push(run("wf-merge", d > 20 ? 1 : 2, t, [plain("pr", "Read the PR", "ok", between(300, 800)), review, merge], "succeeded"));
     }
   }
   // Label PRs that fail CI: turned on only recently.
@@ -198,7 +205,11 @@ function generate(workflows: Workflow[], now: number): MRun[] {
   out.push(run("wf-2", 3, now - 1.3 * DAY, [plain("label", "", "failed", 2100, "Label ci-failed does not exist in tab")], "failed"));
   // A few that did no work, so in-progress and held-back counts show.
   out.push(run("wf-ci", 5, now - 25 * 60_000, [plain("pr", "Read the PR", "ok", 400), { ...agent("fix", "Fix the failing job", "waiting", "sonnet", 0), metrics: null }], "waiting", { finished_at: null }));
-  out.push(run("wf-1", 2, now - 3 * 3600_000, [], "throttled"));
+  // CI went over its $12 monthly cap: held back, but not by its hourly limit.
+  out.push(run("wf-ci", 5, now - 2 * 3600_000, [], "throttled", { error: "This month's $12.00 spend cap is reached; runs start again on the 1st (UTC)." }));
+  // Small PRs keeps hitting its hourly limit on busy afternoons.
+  for (const h of [3, 27, 51, 75])
+    out.push(run("wf-1", 2, now - h * 3600_000, [], "throttled", { error: "Hit its limit of 30 runs an hour; later triggers are skipped until the hour rolls over." }));
   return out.sort((a, b) => b.started_at.localeCompare(a.started_at));
 }
 
@@ -220,7 +231,10 @@ function addSpend(s: Spend, m: Metrics | null) {
   if (m.billing === "subscription") { s.plan_input_tokens += m.input_tokens; s.plan_output_tokens += m.output_tokens; s.plan_share += m.plan_share; }
   else s.cost_usd += m.cost_usd;
 }
-const didWork = (r: MRun) => !r.dry_run && ["succeeded", "stopped", "failed", "blocked"].includes(r.status);
+/** The person said no at an approval (mirror `Run::declined`): stopped with its last step still blocked. */
+export const isDeclined = (r: Pick<WorkflowRun, "status" | "steps">) => r.status === "stopped" && r.steps[r.steps.length - 1]?.status === "blocked";
+const ownLimit = (r: MRun) => r.status === "throttled" && !!r.error?.startsWith("Hit its limit of ");
+const didWork = (r: MRun) => !r.dry_run && !isDeclined(r) && ["succeeded", "stopped", "failed", "blocked"].includes(r.status);
 const succeeded = (r: MRun) => r.status === "succeeded" || r.status === "stopped";
 function attendance(r: MRun): boolean | null {
   const kinds: Kind[] = r.steps.flatMap((s) => s.interventions.map((i) => i.kind));
@@ -253,13 +267,24 @@ function summarize(runs: MRun[], from: number, to: number, offsetMin: number): W
   const steps: (StepStats & { a: number[]; q: number[]; w: number[]; h: number[] })[] = [];
   const models: (ModelStats & { w: number[] })[] = [];
   const failures: FailureGroup[] = [];
-  let in_progress = 0, held_back = 0, loop_stopped = 0;
+  let in_progress = 0, held_back = 0, loop_stopped = 0, held_by_limit = 0, declined = 0;
+  const stepFor = (sr: MStep) => {
+    let s = steps.find((x) => x.id === sr.id);
+    if (!s) {
+      const q = quantiles([]);
+      s = { id: sr.id, label: sr.label, runs: 0, ok: 0, failed: 0, blocked: 0, throttled: 0, skipped: 0, ms: q, queue_ms: q, work_ms: q, human_wait_ms: q, spend: zeroSpend(), interventions: 0, unplanned_interventions: 0, fallbacks: 0, approved: 0, declined: 0, a: [], q: [], w: [], h: [] };
+      steps.push(s);
+    }
+    return s;
+  };
   const sorted = runs.filter((r) => !r.dry_run && Date.parse(r.started_at) >= from && Date.parse(r.started_at) < to)
     .sort((a, b) => b.started_at.localeCompare(a.started_at));
   for (const run of sorted) {
     if (run.status === "running" || run.status === "waiting") in_progress++;
     else if (run.status === "throttled") held_back++;
     else if (run.status === "loop_stopped") loop_stopped++;
+    if (ownLimit(run)) held_by_limit++;
+    if (isDeclined(run)) { declined++; const last = run.steps[run.steps.length - 1]; stepFor(last).declined!++; continue; }
     if (!didWork(run)) continue;
     addGroup(all, run);
     if (!versions.has(run.version)) versions.set(run.version, group());
@@ -268,12 +293,7 @@ function summarize(runs: MRun[], from: number, to: number, offsetMin: number): W
     if (!days.has(day)) days.set(day, group());
     addGroup(days.get(day)!, run);
     for (const sr of run.steps) {
-      let s = steps.find((x) => x.id === sr.id);
-      if (!s) {
-        const q = quantiles([]);
-        s = { id: sr.id, label: sr.label, runs: 0, ok: 0, failed: 0, blocked: 0, throttled: 0, skipped: 0, ms: q, queue_ms: q, work_ms: q, human_wait_ms: q, spend: zeroSpend(), interventions: 0, unplanned_interventions: 0, fallbacks: 0, a: [], q: [], w: [], h: [] };
-        steps.push(s);
-      }
+      const s = stepFor(sr);
       s.interventions += sr.interventions.length;
       s.unplanned_interventions += sr.interventions.filter((i) => i.kind !== "approval").length;
       if (sr.status === "skipped") { s.skipped++; continue; }
@@ -283,6 +303,7 @@ function summarize(runs: MRun[], from: number, to: number, offsetMin: number): W
       else if (sr.status === "blocked") s.blocked++;
       else s.throttled++;
       s.runs++;
+      if (sr.status !== "blocked" && sr.interventions.some((i) => i.kind === "approval")) s.approved!++;
       addSpend(s.spend, sr.metrics);
       s.a.push(stepMs(sr));
       if (sr.status === "failed") {
@@ -309,7 +330,7 @@ function summarize(runs: MRun[], from: number, to: number, offsetMin: number): W
   const dayList: DayStats[] = [...days.entries()].sort((a, b) => a[0].localeCompare(b[0]))
     .map(([day, g]) => ({ day, ...g.counts, duration_ms: quantiles(g.durations), spend: g.spend }));
   return {
-    ...all.counts, in_progress, held_back, loop_stopped, duration_ms: quantiles(all.durations), spend: all.spend,
+    ...all.counts, in_progress, held_back, loop_stopped, held_by_limit, declined, duration_ms: quantiles(all.durations), spend: all.spend,
     steps: steps.map(({ a, q, w, h, ...s }) => ({ ...s, ms: quantiles(a), queue_ms: quantiles(q), work_ms: quantiles(w), human_wait_ms: quantiles(h) })),
     models: models.map(({ w, ...m }) => ({ ...m, work_ms: quantiles(w) })).sort((a, b) => b.spend.cost_usd - a.spend.cost_usd || b.runs - a.runs),
     versions: versionList,
@@ -378,7 +399,114 @@ export function insightRuns(workflows: Workflow[]): WorkflowRun[] {
   return runsFor(workflows).filter((r) => r.started_at >= from) as unknown as WorkflowRun[];
 }
 
-export function insightsMock(cmd: string, args: Record<string, any>, workflows: Workflow[]): unknown {
+// ---------------------------------------------------------------------------
+// A small copy of tab_domain::workflow::suggest (same rules and minimums)
+// ---------------------------------------------------------------------------
+
+const LADDER = ["fast", "balanced", "deep"];
+const fact = (label: string, value: number, unit: SuggestionFact["unit"], of?: number): SuggestionFact => ({ label, value, unit, of: of ?? null });
+const stepName = (s: Step) => s.label.trim() || s.id;
+const withStep = (w: Workflow, id: string, f: (s: Step) => void): Workflow => {
+  const out: Workflow = JSON.parse(JSON.stringify(w));
+  const s = out.steps.find((x) => x.id === id);
+  if (s) f(s);
+  return out;
+};
+const human = (ms: number) => {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return s % 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s / 60} min`;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return m ? `${h} h ${m} min` : `${h} h`;
+};
+const roundUp = (n: number, to: number) => Math.ceil(n / to) * to;
+
+export function suggestMock(w: Workflow, st: WorkflowStats, families: ModelFamily[]): Suggestion[] {
+  const ladder = LADDER.filter((id) => families.some((f) => f.id === id));
+  const tally = (stepId: string, family: string) => st.models.filter((m) => m.step_id === stepId && m.family === family)
+    .reduce((t, m) => ({ runs: t.runs + m.runs, failed: t.failed + m.failed, unattended: t.unattended + m.unattended }), { runs: 0, failed: 0, unattended: 0 });
+  const of = (s: Step) => st.steps.find((x) => x.id === s.id);
+  const family = (s: Step) => (s.type === "agent" && !s.harness && !s.model && s.family ? s.family : null);
+  const stronger: Suggestion[] = [], time: Suggestion[] = [], place: Suggestion[] = [], cheaper: Suggestion[] = [], approvals: Suggestion[] = [];
+  for (const s of w.steps) {
+    const f = family(s), at = f ? ladder.indexOf(f) : -1;
+    if (f && at >= 0) {
+      const t = tally(s.id, f);
+      const fails = t.runs ? t.failed / t.runs : 0, alone = t.runs ? t.unattended / t.runs : 0;
+      if (at + 1 < ladder.length && t.runs >= 10 && (fails >= 0.25 || alone < 0.6))
+        stronger.push({ id: `stronger_model:${s.id}`, kind: "stronger_model", step_id: s.id, title: `Try ${stepName(s)} on ${ladder[at + 1]}`,
+          because: fails >= 0.25 ? `It failed ${t.failed} of ${t.runs} times on ${f} (${Math.round(fails * 100)}%).` : `It finished on its own only ${t.unattended} of ${t.runs} times on ${f} (${Math.round(alone * 100)}%); someone had to step in on the rest.`,
+          facts: [fact(`Failed on ${f}`, t.failed, "count", t.runs), fact(`Finished on its own on ${f}`, t.unattended, "count", t.runs)],
+          change: withStep(w, s.id, (x) => { if (x.type === "agent") x.family = ladder[at + 1]; }) });
+      if (at > 0 && t.runs >= 20 && alone >= 0.95)
+        cheaper.push({ id: `cheaper_model:${s.id}`, kind: "cheaper_model", step_id: s.id, title: `Try ${stepName(s)} on ${ladder[at - 1]}`,
+          because: `It finished on its own ${t.unattended} of ${t.runs} times on ${f}; ${ladder[at - 1]} is cheaper.`,
+          facts: [fact(`Finished on its own on ${f}`, t.unattended, "count", t.runs), fact("Failed", fails, "rate")],
+          change: withStep(w, s.id, (x) => { if (x.type === "agent") x.family = ladder[at - 1]; }) });
+    }
+    const ss = of(s);
+    if (!ss) continue;
+    if (ss.ms.n >= 10 && (s.type === "agent" || s.type === "command" || s.type === "action")) {
+      const now = s.type === "agent" ? (s.deadline_minutes || 1440) * 60_000 : s.type === "command" ? (s.timeout_secs || 600) * 1000 : 60_000;
+      if (ss.ms.p95 >= now * 0.8) {
+        const to = s.type === "agent" ? Math.min(roundUp(ss.ms.p95 * 1.5, 300_000), Math.max(10080 * 60_000, now))
+          : s.type === "command" ? Math.min(roundUp(ss.ms.p95 * 1.5, 30_000), Math.max(3_600_000, now)) : now;
+        time.push({ id: `more_time:${s.id}`, kind: "more_time", step_id: s.id,
+          title: to > now ? (s.type === "agent" ? `Give ${stepName(s)} ${human(to)} before it's given up` : `Give ${stepName(s)} ${human(to)}`) : `${stepName(s)} runs close to its ${human(now)} limit`,
+          because: `1 in 20 runs takes ${human(ss.ms.p95)} or more, against a limit of ${human(now)}.`,
+          facts: [fact("Slow end (p95)", ss.ms.p95, "ms"), fact("Limit", now, "ms"), fact("Runs", ss.ms.n, "count"), fact("Failed", ss.failed, "count", ss.runs)],
+          change: to > now ? withStep(w, s.id, (x) => { if (x.type === "agent") x.deadline_minutes = to / 60_000; else if (x.type === "command") x.timeout_secs = to / 1000; }) : null });
+      }
+    }
+    if (s.type === "agent" && ss.queue_ms.n >= 10 && ss.queue_ms.p50 >= 300_000 && ss.queue_ms.p50 >= (ss.queue_ms.p50 + ss.work_ms.p50) * 0.5) {
+      const p = s.placement;
+      const to: Placement | null = p.type === "computers" ? { type: "prefer_computer", minutes: 10 } : p.type === "prefer_computer" && p.minutes > 5 ? { type: "prefer_computer", minutes: Math.max(5, Math.floor(p.minutes / 2)) } : p.type === "cloud" ? { type: "anywhere" } : null;
+      place.push({ id: `placement:${s.id}`, kind: "placement", step_id: s.id, title: to ? `Let tab cloud take ${stepName(s)} sooner` : `${stepName(s)} waits a long time for a runner`,
+        because: `Half its runs wait ${human(ss.queue_ms.p50)} or more for a runner, longer than the agent then works (${human(ss.work_ms.p50)}).`,
+        facts: [fact("Middle wait for a runner", ss.queue_ms.p50, "ms"), fact("Middle work", ss.work_ms.p50, "ms"), fact("Runs", ss.queue_ms.n, "count")],
+        change: to ? withStep(w, s.id, (x) => { if (x.type === "agent") x.placement = to; }) : null });
+    }
+    const allowed = s.type === "command" ? w.allow_commands : s.type === "action" ? w.allow_destructive : true;
+    if ((ss.approved ?? 0) >= 10 && !ss.declined && !allowed)
+      approvals.push({ id: `always_approved:${s.id}`, kind: "always_approved", step_id: s.id, title: `You've OK'd ${stepName(s)} every time`,
+        because: `You approved it all ${ss.approved} times it asked and never declined. If you trust it, you can allow ${s.type === "command" ? "commands" : "destructive steps"} on this workflow so it stops asking; only you can.`,
+        facts: [fact("Approved", ss.approved ?? 0, "count"), fact("Declined", 0, "count")], change: null });
+  }
+  const limit: Suggestion[] = [];
+  if ((st.held_by_limit ?? 0) >= 3) {
+    const now = w.limits.max_runs_per_hour, to = Math.min(200, now * 2);
+    const perItem = w.trigger.type === "item" && !w.limits.cooldown_minutes;
+    limit.push({ id: "rate_limit", kind: "rate_limit", title: to > now ? `Raise its limit to ${to} runs an hour` : `It keeps hitting its limit of ${now} runs an hour`,
+      because: `It hit its limit of ${now} runs an hour in ${st.held_by_limit} separate hours, and triggers past it were skipped.${perItem ? " If the same items keep starting it, a cool-down per item may suit better." : ""}`,
+      facts: [fact("Hours it hit its limit", st.held_by_limit ?? 0, "count"), fact("Runs an hour allowed", now, "count"), fact("Runs that did work", st.runs, "count")],
+      change: to > now ? { ...JSON.parse(JSON.stringify(w)), limits: { ...w.limits, max_runs_per_hour: to } } : null });
+  }
+  return [...stronger, ...time, ...limit, ...place, ...cheaper, ...approvals];
+}
+
+/** Runs a failed made-up run again: the new one says which it re-runs. */
+export function rerunMock(runId: string, workflows: Workflow[]): WorkflowRun {
+  const old = runsFor(workflows).find((r) => r.id === runId);
+  if (!old || old.status !== "failed") throw "only a failed run can be run again";
+  const now = new Date();
+  const run: MRun = {
+    ...JSON.parse(JSON.stringify(old)), id: `run-rerun-${now.getTime().toString(36)}`, trigger: `by hand, again after: ${old.trigger}`, rerun_of: old.id,
+    status: "succeeded", error: null, started_at: now.toISOString(), finished_at: new Date(now.getTime() + 4000).toISOString(),
+  };
+  run.steps = run.steps.map((s) => ({ ...s, status: "ok", error: null }));
+  cache!.runs.unshift(run);
+  return run as unknown as WorkflowRun;
+}
+
+export function insightsMock(cmd: string, args: Record<string, any>, workflows: Workflow[], families: ModelFamily[] = []): unknown {
+  if (cmd === "workflow_rerun") return rerunMock(args.runId, workflows);
+  if (cmd === "workflow_suggestions") {
+    const w = workflows.find((x) => x.id === args.workflowId);
+    if (!w) throw `no workflow ${args.workflowId}`;
+    // At most the last 30 days, like the app: suggestions need the run log's detail.
+    const win = windows(Math.min(30, args.days ?? 7), args.utcOffsetMinutes ?? 0);
+    return suggestMock(w, summarize(runsFor(workflows).filter((r) => r.workflow_id === w.id), win.from, win.to, args.utcOffsetMinutes ?? 0), families);
+  }
   if (cmd !== "workflow_insights" && cmd !== "workflow_factory") return undefined;
   const runs = runsFor(workflows);
   const w = windows(args.days ?? 7, args.utcOffsetMinutes ?? 0);

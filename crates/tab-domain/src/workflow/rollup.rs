@@ -9,13 +9,17 @@
 //! # What a rollup holds
 //!
 //! [`DayRollup`] is the day's [`Counts`], the runs that did no work (still
-//! going, held back, loop-stopped), [`Spend`] (API dollars and subscription
+//! going, held back and how many by the workflow's own hourly limit,
+//! loop-stopped, declined at an approval), [`Spend`] (API dollars and subscription
 //! usage kept apart, as everywhere), each step's counts and spend, and
 //! timing in a form that can be merged ([`Timing`]). Counts and spend add
 //! up exactly, so a 90-day window's counts, spend and daily chart are
 //! exact. Medians can't be added up, so timing is kept as a small
 //! histogram and quantiles are read back from the merged histogram; see
-//! [`Timing`] for how close that is.
+//! [`Timing`] for how close that is. The declined and own-limit counts
+//! (and per-step approved and declined) were added later: a row written
+//! without them reads them as 0, so a day rolled up before then undercounts
+//! them.
 //!
 //! # When rollups are written, and why devices sharing a hub agree
 //!
@@ -238,6 +242,9 @@ pub struct StepRollup {
     pub interventions: u32,
     pub unplanned_interventions: u32,
     pub fallbacks: u32,
+    /// Times the person approved it, and declined it (see [`StepStats`]).
+    pub approved: u32,
+    pub declined: u32,
 }
 
 /// What one version of a workflow's runs added up to on one UTC day. Every
@@ -250,6 +257,11 @@ pub struct DayRollup {
     pub in_progress: u32,
     pub held_back: u32,
     pub loop_stopped: u32,
+    /// Held back by the workflow's own runs-per-hour limit (part of
+    /// `held_back`), and declined by the person at an approval. Rows rolled
+    /// up before these were added read 0, so those days undercount them.
+    pub held_by_limit: u32,
+    pub declined: u32,
     /// Start to finish, for runs that did work.
     pub duration_ms: Timing,
     /// Spent by runs that did work.
@@ -395,6 +407,8 @@ fn body(runs: &[Run], window: &Window) -> DayRollup {
                 interventions: st.interventions,
                 unplanned_interventions: st.unplanned_interventions,
                 fallbacks: st.fallbacks,
+                approved: st.approved,
+                declined: st.declined,
             }
         })
         .collect();
@@ -404,6 +418,8 @@ fn body(runs: &[Run], window: &Window) -> DayRollup {
         in_progress: s.in_progress,
         held_back: s.held_back,
         loop_stopped: s.loop_stopped,
+        held_by_limit: s.held_by_limit,
+        declined: s.declined,
         duration_ms: duration,
         spend: s.spend,
         other_spend,
@@ -543,6 +559,8 @@ pub fn combine(rollups: &[Rollup]) -> Stats {
         stats.in_progress += b.in_progress;
         stats.held_back += b.held_back;
         stats.loop_stopped += b.loop_stopped;
+        stats.held_by_limit += b.held_by_limit;
+        stats.declined += b.declined;
         all.add(b);
         if b.counts.runs > 0 {
             versions.entry(r.version).or_default().add(b);
@@ -575,6 +593,8 @@ pub fn combine(rollups: &[Rollup]) -> Stats {
             s.interventions += st.interventions;
             s.unplanned_interventions += st.unplanned_interventions;
             s.fallbacks += st.fallbacks;
+            s.approved += st.approved;
+            s.declined += st.declined;
         }
     }
     stats.counts = all.counts;
@@ -599,6 +619,8 @@ pub fn combine(rollups: &[Rollup]) -> Stats {
             interventions: s.interventions,
             unplanned_interventions: s.unplanned_interventions,
             fallbacks: s.fallbacks,
+            approved: s.approved,
+            declined: s.declined,
         })
         .collect();
     stats.versions = versions
@@ -717,6 +739,7 @@ mod tests {
     use super::*;
     use crate::workflow::{
         Billing, Intervention, InterventionKind, RunStatus, StepMetrics, StepRun,
+        held_by_own_limit, own_limit_error,
     };
 
     fn at(day: u32, hour: u32) -> DateTime<Utc> {
@@ -808,6 +831,28 @@ mod tests {
                     at: start,
                 });
                 r.steps[0].metrics.as_mut().unwrap().billing = Billing::Subscription;
+            }
+            if status == RunStatus::Throttled {
+                // Held back by its own hourly limit, or by a monthly cap.
+                r.error = Some(if n % 2 == 0 {
+                    own_limit_error(30)
+                } else {
+                    "This month's $20.00 spend cap is reached; runs start again on the 1st (UTC)."
+                        .into()
+                });
+            }
+            if n % 13 == 4 && status == RunStatus::Succeeded {
+                // Approved at a step, then declined at the next.
+                r.steps[0].interventions.push(Intervention {
+                    kind: InterventionKind::Approval,
+                    at: start,
+                });
+                if n % 2 == 0 {
+                    r.status = RunStatus::Stopped;
+                    let mut merge = agent(StepStatus::Blocked, Billing::Api, 0.0, 0);
+                    merge.id = "merge".into();
+                    r.steps.push(merge);
+                }
             }
             out.push(r);
         }
@@ -1056,9 +1101,26 @@ mod tests {
         // Counts, spend and days are exact.
         assert_eq!(span.counts, exact.counts);
         assert_eq!(
-            (span.in_progress, span.held_back),
-            (exact.in_progress, exact.held_back)
+            (span.in_progress, span.held_back, span.loop_stopped),
+            (exact.in_progress, exact.held_back, exact.loop_stopped)
         );
+        // Declined runs and own-limit refusals too; a cap refusal is held
+        // back but not by the hourly limit.
+        assert_eq!(
+            (span.declined, span.held_by_limit),
+            (exact.declined, exact.held_by_limit)
+        );
+        assert!(span.declined > 0 && span.held_by_limit > 0);
+        assert!(span.held_by_limit < span.held_back);
+        let steps = |s: &Stats| {
+            s.steps
+                .iter()
+                .map(|x| (x.id.clone(), x.runs, x.ok, x.approved, x.declined))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(steps(&span), steps(&exact));
+        assert!(span.steps.iter().any(|x| x.approved > 0));
+        assert!(span.steps.iter().any(|x| x.declined > 0));
         assert!((span.spend.cost_usd - exact.spend.cost_usd).abs() < 1e-6);
         assert_eq!(span.spend.plan_input_tokens, exact.spend.plan_input_tokens);
         assert_eq!(
@@ -1151,6 +1213,44 @@ mod tests {
     }
 
     #[test]
+    fn a_cap_refusal_is_held_back_but_not_by_the_hourly_limit() {
+        let mut capped = run("c", "w", 1, RunStatus::Throttled, at(3, 1));
+        capped.error = crate::workflow::cap::reached(
+            &crate::workflow::Limits {
+                monthly_cap_usd: 1.0,
+                ..Default::default()
+            },
+            &Spend {
+                cost_usd: 2.0,
+                ..Default::default()
+            },
+        );
+        let mut hourly = run("h", "w", 1, RunStatus::Throttled, at(3, 2));
+        hourly.error = Some(own_limit_error(30));
+        assert!(!held_by_own_limit(&capped) && held_by_own_limit(&hourly));
+        let b = &roll_up("w", &[capped, hourly], d(9, 3))[0].body;
+        assert_eq!((b.held_back, b.held_by_limit), (2, 1));
+    }
+
+    #[test]
+    fn a_declined_runs_spend_counts_toward_the_month_but_not_the_views() {
+        let now = at(28, 12);
+        let mut declined = run("d", "w", 1, RunStatus::Stopped, at(27, 1));
+        let mut blocked = agent(StepStatus::Blocked, Billing::Api, 0.0, 0);
+        blocked.id = "merge".into();
+        declined.steps.push(blocked);
+        assert!(declined.declined());
+        let runs = vec![declined, run("ok", "w", 1, RunStatus::Succeeded, at(27, 2))];
+        let body = &roll_up("w", &runs, d(9, 27))[0].body;
+        assert_eq!((body.declined, body.counts.runs), (1, 1));
+        // Money spent is spent: the declined run's agent step ($0.125)
+        // counts toward a cap, though it's left out of the view's spend.
+        assert!((body.spend.cost_usd - 0.125).abs() < 1e-9);
+        assert!((body.other_spend.cost_usd - 0.125).abs() < 1e-9);
+        assert!((month_spend(&runs, &[], now).cost_usd - 0.25).abs() < 1e-9);
+    }
+
+    #[test]
     fn days_and_retention_are_utc() {
         let now = Utc.with_ymd_and_hms(2026, 11, 12, 23, 30, 0).unwrap();
         assert_eq!(run_log_start(now), day_start(d(10, 13)));
@@ -1166,6 +1266,8 @@ mod tests {
         let body: DayRollup = serde_json::from_str(r#"{"counts":{"runs":2,"succeeded":2,"unattended":2,"failed":0,"attended":0,"unplanned":0}}"#).unwrap();
         assert_eq!(body.counts.runs, 2);
         assert_eq!(body.duration_ms, Timing::default());
+        // Rows from before declined and own-limit counts read them as 0.
+        assert_eq!((body.declined, body.held_by_limit), (0, 0));
         // A newer app's extra fields are ignored.
         let newer: DayRollup =
             serde_json::from_str(r#"{"steps":[{"id":"a","p99":1}],"retries":3}"#).unwrap();

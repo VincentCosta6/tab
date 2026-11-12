@@ -243,6 +243,19 @@ impl Run {
             .as_ref()
             .filter(|r| self.status == RunStatus::Blocked && !self.dry_run && r.job.is_empty())
     }
+
+    /// The person said no at an approval, so the run ended there. Such a
+    /// run is `stopped` with its last step still `blocked`: a filter that
+    /// ends a run marks its step `stopped`, and runs stopped before any
+    /// step (a repeat trigger, a cool-down) have no steps, so nothing else
+    /// has this shape. Runs declined before this was asked still have it.
+    pub fn declined(&self) -> bool {
+        self.status == RunStatus::Stopped
+            && self
+                .steps
+                .last()
+                .is_some_and(|s| s.status == StepStatus::Blocked)
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +278,33 @@ mod tests {
         );
         let again = serde_json::to_value(&run).unwrap();
         assert!(again.get("approved").is_none() && again.get("started_by").is_none());
+    }
+
+    #[test]
+    fn a_run_the_person_declined_is_told_apart_from_a_filter_stop() {
+        // As the runtime writes a declined run, and as runs stored before
+        // `declined` was asked for look.
+        let declined: Run = serde_json::from_str(
+            r#"{"id":"r","workflow_id":"w","workflow_name":"W","version":1,"status":"stopped",
+            "dry_run":false,"trigger":"t","trigger_key":null,"item_id":null,"chain":[],
+            "steps":[{"id":"pr","label":"","status":"ok","error":null,"ms":3},
+                     {"id":"merge","label":"Merge","status":"blocked","error":"You declined this step.","ms":0,
+                      "interventions":[{"kind":"approval","at":"2026-01-02T03:04:06Z"}]}],
+            "error":"You declined Merge, so the run ended there.","started_at":"2026-01-02T03:04:05Z",
+            "finished_at":"2026-01-02T03:05:00Z"}"#,
+        )
+        .unwrap();
+        assert!(declined.declined());
+
+        let mut filtered = declined.clone();
+        filtered.steps[1].status = StepStatus::Stopped;
+        assert!(!filtered.declined(), "a filter ended it");
+        let mut repeat = declined.clone();
+        repeat.steps.clear();
+        assert!(!repeat.declined(), "stopped before any step");
+        let mut waiting = declined;
+        waiting.status = RunStatus::Blocked;
+        assert!(!waiting.declined(), "still waiting for an answer");
     }
 
     #[test]
