@@ -726,8 +726,9 @@ struct Chat {
 async fn chat_open(state: State<'_, AppState>, item_id: String) -> CmdResult<Chat> {
     let session = state.store.session_for_item(&item_id).map_err(err)?;
     let (messages, approvals, running) = match &session {
+        // Since it was last compacted, with the last few lines before.
         Some(s) => (
-            state.store.messages(&s.id).map_err(err)?,
+            state.store.messages_current(&s.id, 3).map_err(err)?,
             state.hub.pending_approvals(&s.id),
             state.hub.is_running(&s.id),
         ),
@@ -840,8 +841,9 @@ async fn review_chat_open(
         .session_for_key(&review_chat_key(&repo, number))
         .map_err(err)?;
     let (messages, approvals, running) = match &session {
+        // Since it was last compacted, with the last few lines before.
         Some(s) => (
-            state.store.messages(&s.id).map_err(err)?,
+            state.store.messages_current(&s.id, 3).map_err(err)?,
             state.hub.pending_approvals(&s.id),
             state.hub.is_running(&s.id),
         ),
@@ -1407,8 +1409,9 @@ async fn coordinator_chat_open(state: State<'_, AppState>, project_id: String) -
         .session_for_key(&coordinator::key(&project_id))
         .map_err(err)?;
     let (messages, approvals, running) = match &session {
+        // Since it was last compacted, with the last few lines before.
         Some(s) => (
-            state.store.messages(&s.id).map_err(err)?,
+            state.store.messages_current(&s.id, 3).map_err(err)?,
             state.hub.pending_approvals(&s.id),
             state.hub.is_running(&s.id),
         ),
@@ -1468,6 +1471,88 @@ async fn coordinator_chat_send(
             .map_err(err)?;
     }
     Ok(session)
+}
+
+/// The coordinator's settings: watching the queue, the morning brief and
+/// where its chat compacts.
+#[tauri::command]
+async fn coordinator_settings_save(
+    state: State<'_, AppState>,
+    project_id: String,
+    watch: Option<bool>,
+    brief: Option<String>,
+    compact_at: Option<i64>,
+) -> CmdResult<tab_core::model::Project> {
+    state
+        .store
+        .project_set_coordinator(&project_id, watch, brief.as_deref(), compact_at, Utc::now())
+        .map_err(err)?
+        .ok_or_else(|| "That project was deleted.".into())
+}
+
+/// The coordinator chat's compacted stretches, newest first.
+#[tauri::command]
+async fn coordinator_history(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<tab_core::store::Segment>> {
+    match state
+        .store
+        .session_for_key(&coordinator::key(&project_id))
+        .map_err(err)?
+    {
+        Some(s) => state.store.segments(&s.id).map_err(err),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[tauri::command]
+async fn coordinator_segment(
+    state: State<'_, AppState>,
+    segment_id: String,
+) -> CmdResult<Option<tab_core::store::Segment>> {
+    state.store.segment_get(&segment_id).map_err(err)
+}
+
+#[tauri::command]
+async fn coordinator_segment_messages(
+    state: State<'_, AppState>,
+    segment_id: String,
+) -> CmdResult<Vec<tab_core::model::SessionMessage>> {
+    state.store.segment_messages(&segment_id).map_err(err)
+}
+
+/// The person's edit to what the coordinator carried forward.
+#[tauri::command]
+async fn coordinator_summary_save(
+    state: State<'_, AppState>,
+    segment_id: String,
+    summary: String,
+) -> CmdResult<tab_core::store::Segment> {
+    state
+        .store
+        .segment_set_summary(&segment_id, &summary, Utc::now())
+        .map_err(err)?
+        .ok_or_else(|| "That summary is gone.".into())
+}
+
+/// Compacts the coordinator's chat now.
+#[tauri::command]
+async fn coordinator_compact(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<tab_core::store::Segment> {
+    let session = state
+        .store
+        .session_for_key(&coordinator::key(&project_id))
+        .map_err(err)?
+        .ok_or("The coordinator hasn't started yet.")?;
+    if !state.hub.runs_here(&session) {
+        return Err("The coordinator runs on another device; compact it there.".into());
+    }
+    coordinator::compact(&state.hub, &session.id, "manual")
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -2404,8 +2489,9 @@ async fn workflow_chat_open(
     let key = tab_core::workflow::chat_key(workflow_id.as_deref().unwrap_or(""));
     let session = state.store.session_for_key(&key).map_err(err)?;
     let (messages, approvals, running) = match &session {
+        // Since it was last compacted, with the last few lines before.
         Some(s) => (
-            state.store.messages(&s.id).map_err(err)?,
+            state.store.messages_current(&s.id, 3).map_err(err)?,
             state.hub.pending_approvals(&s.id),
             state.hub.is_running(&s.id),
         ),
@@ -3205,6 +3291,7 @@ pub fn run() {
                         *state.mcp_url.lock().unwrap() = Some(url);
                         // Turns cut off by the last quit carry on now.
                         hub.resume_interrupted();
+                        coordinator::spawn_monitor(hub.clone());
                     }
                     Err(e) => tracing::error!(error = %e, "MCP server failed to start"),
                 }
@@ -3286,6 +3373,12 @@ pub fn run() {
             graph_delete,
             coordinator_chat_open,
             coordinator_chat_send,
+            coordinator_settings_save,
+            coordinator_history,
+            coordinator_segment,
+            coordinator_segment_messages,
+            coordinator_summary_save,
+            coordinator_compact,
             project_resources,
             project_resource_save,
             project_resource_delete,

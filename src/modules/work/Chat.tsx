@@ -11,6 +11,7 @@ import { useStage } from "../../lib/stage";
 import { sessionLook } from "../shell/AppHeader";
 import { AgentNotice } from "./AgentNotice";
 import { ContextMeter } from "./ContextMeter";
+import { CompactedDivider } from "../projects/Compaction";
 import { SlashPanel, tabCommand, tabCommands, type Panel } from "./SlashPanels";
 import { openSlots, parseHint, splitArgs, type ArgSource } from "./slashArgs";
 import { Dictation } from "./Dictation";
@@ -645,6 +646,8 @@ function MessageView({ m, result, onSend }: { m: SessionMessage; result?: Sessio
     );
   }
   if (m.kind === "secret_request") return m.meta?.superseded ? null : <SecretCard m={m} onSend={onSend} />;
+  if (m.kind === "compacted") return <CompactedDivider m={m} />;
+  if (m.kind === "wake") return <div className="msg-note msg-wake"><Icon name="clock" size={12} /> {m.content}</div>;
   if (m.kind === "text") return <div className="msg msg-assistant"><Markdown text={m.content} /></div>;
   if (m.kind === "tool" && m.meta?.tool === "AskUserQuestion") {
     // Answered through tab (or still waiting on its card): the card did the talking.

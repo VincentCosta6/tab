@@ -323,7 +323,31 @@ pub struct Project {
     /// How to work in it: conventions, do's and don'ts, who to ask.
     #[serde(default)]
     pub rules: String,
+    /// The coordinator wakes on queue changes and checks hourly.
+    #[serde(default = "yes")]
+    pub coordinator_watch: bool,
+    /// Weekday morning brief at this local time (`HH:MM`), `""` for none.
+    #[serde(default = "default_brief")]
+    pub coordinator_brief: String,
+    /// The coordinator's chat compacts when a turn ends above this many
+    /// tokens of context; 0 never.
+    #[serde(default = "default_compact_at")]
+    pub compact_at: i64,
     pub created_at: DateTime<Utc>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn default_brief() -> String {
+    "08:00".into()
+}
+
+pub const DEFAULT_COMPACT_AT: i64 = 200_000;
+
+fn default_compact_at() -> i64 {
+    DEFAULT_COMPACT_AT
 }
 
 /// A repo a project's work happens in, so agents know where to work.

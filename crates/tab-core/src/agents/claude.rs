@@ -143,7 +143,27 @@ pub(super) async fn run_turn(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mut policy = hub.policy(session);
     own_conversation(&mut policy, std::path::Path::new(&session.cwd), &agent_id);
-    let settings = crate::sandbox::current().claude_settings(&policy);
+    let mut settings = crate::sandbox::current().claude_settings(&policy);
+    // A project's coordinator reads outside content (bug reports, email)
+    // with access other chats lack, so it asks before any shell command (a
+    // deploy, a payment CLI) and web fetch; `gh` and `git` already ask
+    // before merging or pushing.
+    let coordinator =
+        super::coordinator::project_of(hub.store.session_key(&session.id)?.as_deref()).is_some();
+    if coordinator {
+        settings["permissions"]["allow"] = json!(if policy.brokered {
+            vec!["Bash(gh:*)", "Bash(git:*)"]
+        } else {
+            Vec::new()
+        });
+        // A fetched page can carry data out in its URL. On a turn tab
+        // started itself, nobody is reading along, so searches ask too.
+        let mut ask = vec!["WebFetch"];
+        if hub.is_woken(&session.id) {
+            ask.push("WebSearch");
+        }
+        settings["permissions"]["ask"] = json!(ask);
+    }
     // A copy to look at when debugging; Claude Code gets the JSON itself.
     // Given a file, it vets every folder on the path first and refuses the
     // file when one can't be examined, which happens under the sandbox.
@@ -164,7 +184,10 @@ pub(super) async fn run_turn(
         "--verbose",
         "--include-partial-messages",
     ]);
-    let mode = if MODES.contains(&cfg.permission_mode.as_str()) {
+    // The coordinator's asks reach the person whatever mode other chats use.
+    let mode = if coordinator {
+        "default"
+    } else if MODES.contains(&cfg.permission_mode.as_str()) {
         cfg.permission_mode.as_str()
     } else {
         "default"

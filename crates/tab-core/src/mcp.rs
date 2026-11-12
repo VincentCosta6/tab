@@ -1291,7 +1291,16 @@ impl McpServer {
             .get(server)
             .map(|c| c.name)
             .unwrap_or_else(|| server.to_string());
-        match remote.policy(server, tool) {
+        let mut policy = remote.policy(server, tool);
+        // A project's coordinator asks before anything that sends, merges,
+        // deploys or refunds, whatever other chats may do.
+        if policy == ToolPolicy::Allow
+            && self.coordinator_of(Some(&session.id)).is_some()
+            && crate::agents::coordinator::needs_person(tool)
+        {
+            policy = ToolPolicy::Ask;
+        }
+        match policy {
             ToolPolicy::Allow => None,
             // Nobody can answer in the cloud (approvals stay on the runner).
             ToolPolicy::Off | ToolPolicy::Ask if remote.in_cloud() => {
@@ -1910,6 +1919,24 @@ impl McpServer {
                         "start_agent is for tasks to do now; a scheduled task waits for its time"
                     );
                     self.may_start_agents(session)?;
+                }
+                // A coordinator tab woke on its own may be acting on outside
+                // content (a bug report, an email): the person says whether an
+                // agent starts. Declined, the task is still created.
+                let mut start = start;
+                if let (Some(sid), Some(p)) = (session, start.as_ref())
+                    && self.hub.is_woken(sid)
+                {
+                    let title = s("title").unwrap_or_default();
+                    let summary = format!("Start an agent on \"{title}\"");
+                    let input = json!({ "title": title, "start_agent": p });
+                    if let Decision::Deny(_) = self
+                        .hub
+                        .request_approval(sid, "tab_create_task", summary, input)
+                        .await
+                    {
+                        start = None;
+                    }
                 }
                 // Follow-ups land in the same project as the chat's task.
                 let project_id = self.project_arg(session, &args)?.map(|p| p.id);

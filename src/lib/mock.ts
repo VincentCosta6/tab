@@ -12,7 +12,7 @@ import type {
   EmailSignInStatus, MailProvider,
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
-  Entity, GraphView, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceInput, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
+  Entity, GraphView, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceInput, Segment, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
 
 const harnesses = harnessData as unknown as Harness[];
@@ -324,7 +324,7 @@ export const mockApi = {
         case "projects_list": return [...projects].sort((a, b) => a.name.localeCompare(b.name));
         case "project_save": {
           const old = projects.find((x) => x.id === args.id);
-          const p: Project = { id: args.id ?? `p-${Date.now()}`, name: String(args.name).trim(), color: args.color, icon: args.icon, about: old?.about ?? "", rules: old?.rules ?? "", created_at: old?.created_at ?? new Date().toISOString() };
+          const p: Project = { id: args.id ?? `p-${Date.now()}`, name: String(args.name).trim(), color: args.color, icon: args.icon, about: old?.about ?? "", rules: old?.rules ?? "", coordinator_watch: old?.coordinator_watch ?? true, coordinator_brief: old?.coordinator_brief ?? "08:00", compact_at: old?.compact_at ?? 200000, created_at: old?.created_at ?? new Date().toISOString() };
           if (!p.name) throw new Error("a project needs a name");
           projects = [...projects.filter((x) => x.id !== p.id), p];
           return p;
@@ -352,6 +352,49 @@ export const mockApi = {
           return i;
         }
         case "titler_default_rules": return "Name the thread the way a good engineer names a ticket: 3 to 7 words, at most 60 characters.";
+        case "coordinator_settings_save": {
+          const p = projects.find((x) => x.id === args.projectId);
+          if (!p) throw new Error("That project was deleted.");
+          if (args.watch != null) p.coordinator_watch = !!args.watch;
+          if (args.brief != null) p.coordinator_brief = String(args.brief).trim();
+          if (args.compactAt != null) p.compact_at = Math.max(0, Number(args.compactAt));
+          return { ...p };
+        }
+        case "coordinator_history": {
+          const session = sessions.find((s) => s.cwd === `coordinator:${args.projectId}`);
+          return session ? segments.filter((g) => g.session_id === session.id).sort((a, b) => b.ended_at.localeCompare(a.ended_at)) : [];
+        }
+        case "coordinator_segment": return segments.find((g) => g.id === args.segmentId) ?? null;
+        case "coordinator_segment_messages": {
+          const g = segments.find((x) => x.id === args.segmentId);
+          if (!g) return [];
+          const all = messages.filter((m) => m.session_id === g.session_id);
+          const end = all.findIndex((m) => m.kind === "compacted" && m.meta?.segment_id === g.id);
+          const start = all.slice(0, end).map((m) => m.kind).lastIndexOf("compacted");
+          return all.slice(start + 1, end);
+        }
+        case "coordinator_summary_save": {
+          const g = segments.find((x) => x.id === args.segmentId);
+          if (!g) throw new Error("That summary is gone.");
+          g.summary = String(args.summary).trim();
+          g.updated_at = new Date().toISOString();
+          return { ...g };
+        }
+        case "coordinator_compact": {
+          const session = sessions.find((s) => s.cwd === `coordinator:${args.projectId}`);
+          if (!session) throw new Error("The coordinator hasn't started yet.");
+          const all = messages.filter((m) => m.session_id === session.id);
+          const from = all.map((m) => m.kind).lastIndexOf("compacted") + 1;
+          const stretch = all.slice(from);
+          if (!stretch.some((m) => m.role === "assistant" && m.kind === "text")) throw new Error("there's nothing to compact yet");
+          const used = [...stretch].reverse().find((m) => m.kind === "result")?.meta?.context?.used ?? 0;
+          const now = new Date().toISOString();
+          const g: Segment = { id: `seg-${Date.now()}`, session_id: session.id, project_id: String(args.projectId), agent_session_id: session.agent_session_id, summary: "**Open:** Refund for Linear Ltd (waiting on you) · checkout deploy failing since the env rename\n**Decisions:** refunds over $100 need you\n**Watching:** 3 threads; trial cohort ends Nov 15", tokens: used, messages: stretch.length, reason: "manual", started_at: stretch[0]?.created_at ?? now, ended_at: now, updated_at: now };
+          segments.push(g);
+          session.agent_session_id = null;
+          post(session, "system", "compacted", "", { segment_id: g.id, tokens: used, messages: g.messages, reason: "manual", started_at: g.started_at });
+          return g;
+        }
         case "project_set_profile": {
           const p = projects.find((x) => x.id === args.id);
           if (!p) return null;
@@ -955,9 +998,10 @@ let mockAppUpdated = false;
 // A link an agent attached, to show links rendered by what they point at.
 let contexts: ContextEntry[] = items.slice(0, 4).map((i) => ({ id: `ctx-seed-${i.id}`, item_id: i.id, section: "context", pinned: false, ref_item: null, url: "https://github.com/acme/payments/pull/491", title: "https://github.com/acme/payments/pull/491", summary: null, added_by: "agent", created_at: new Date().toISOString() }));
 let projects: Project[] = [
-  { id: "p-pay", name: "Payments", color: "#7c5cff", icon: "zap", about: "Checkout, the ledger and refunds: everything that moves money for Acme's customers.", rules: "- Every change to the ledger needs a review from Priya.\n- Feature-flag anything customer-facing.", created_at: ago(9000) },
-  { id: "p-sec", name: "SOC 2", color: "#e5484d", icon: "shield", about: "", rules: "", created_at: ago(9000) },
+  { id: "p-pay", name: "Payments", color: "#7c5cff", icon: "zap", about: "Checkout, the ledger and refunds: everything that moves money for Acme's customers.", rules: "- Every change to the ledger needs a review from Priya.\n- Feature-flag anything customer-facing.", coordinator_watch: true, coordinator_brief: "08:00", compact_at: 200000, created_at: ago(9000) },
+  { id: "p-sec", name: "SOC 2", color: "#e5484d", icon: "shield", about: "", rules: "", coordinator_watch: true, coordinator_brief: "08:00", compact_at: 200000, created_at: ago(9000) },
 ];
+let segments: Segment[] = [];
 let repos: ProjectRepo[] = [
   { id: "r1", project_id: "p-pay", repo: "acme/payments", path: "~/src/payments", note: "Checkout API and ledger service", added_by: "agent", created_at: ago(3000), updated_at: ago(3000) },
   { id: "r2", project_id: "p-pay", repo: "acme/web", path: null, note: "Checkout UI", added_by: "user", created_at: ago(900), updated_at: ago(900) },

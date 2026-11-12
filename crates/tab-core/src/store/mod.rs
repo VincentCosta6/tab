@@ -15,6 +15,7 @@ mod knowledge;
 mod links;
 mod previews;
 mod projects;
+mod segments;
 mod sessions;
 mod usage;
 mod vectors;
@@ -22,6 +23,7 @@ mod workflows;
 pub use jobs::CloudConnection;
 pub use knowledge::{ChunkHit, IndexTarget, Reader};
 pub use projects::ResourceInput;
+pub use segments::{DIVIDER as COMPACTED, ProjectChange, Segment, WatchState};
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -71,6 +73,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/019_project_resources.sql"),
     include_str!("migrations/020_resource_chunks.sql"),
     include_str!("migrations/021_item_links.sql"),
+    include_str!("migrations/022_coordinator.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {

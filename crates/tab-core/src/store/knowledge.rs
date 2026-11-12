@@ -58,16 +58,27 @@ pub struct ChunkHit {
 
 /// Joins a piece to what it belongs to and keeps only what `?1` (the
 /// coordinated project) and `?2` (a project filter) allow.
+/// A compacted stretch of a coordinator's chat (`session_segments`) is
+/// searchable like a coordinator-only resource of its project.
 const READABLE: &str = "FROM resource_chunks c
      LEFT JOIN project_resources r ON r.id = c.resource_id
      LEFT JOIN project_repos p ON p.id = c.resource_id
-     WHERE (r.id IS NOT NULL OR p.id IS NOT NULL)
-       AND (COALESCE(r.access, 'all') = 'all'
-            OR (r.access = 'coordinator' AND c.project_id = ?1))
+     LEFT JOIN session_segments g ON g.id = c.resource_id
+     WHERE (r.id IS NOT NULL OR p.id IS NOT NULL OR g.id IS NOT NULL)
+       AND (COALESCE(r.access, IIF(g.id IS NULL, 'all', 'coordinator')) = 'all'
+            OR (COALESCE(r.access, IIF(g.id IS NULL, NULL, 'coordinator')) = 'coordinator'
+                AND c.project_id = ?1))
        AND (?2 IS NULL OR c.project_id = ?2)";
 
-const HIT_COLS: &str = "c.id, c.resource_id, c.project_id, COALESCE(r.title, p.repo) AS resource,
-     COALESCE(r.kind, 'repo') AS kind, c.title, c.source, c.text, COALESCE(r.access, 'all') AS access";
+/// The joins [`HIT_COLS`] reads from, for queries that select from `c` alone.
+const HIT_JOINS: &str = "LEFT JOIN project_resources r ON r.id = c.resource_id
+     LEFT JOIN project_repos p ON p.id = c.resource_id
+     LEFT JOIN session_segments g ON g.id = c.resource_id";
+
+const HIT_COLS: &str = "c.id, c.resource_id, c.project_id,
+     COALESCE(r.title, p.repo, 'Coordinator history') AS resource,
+     COALESCE(r.kind, IIF(g.id IS NULL, 'repo', 'history')) AS kind, c.title, c.source, c.text,
+     COALESCE(r.access, IIF(g.id IS NULL, 'all', 'coordinator')) AS access";
 
 fn hit_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, ChunkHit)> {
     Ok((
@@ -343,9 +354,7 @@ impl Store {
         if let Some(m) = fts_words(query) {
             let found: Vec<(i64, ChunkHit)> = conn
                 .prepare(&format!(
-                    "SELECT {HIT_COLS} FROM resource_chunks_fts f JOIN ({}) c ON c.id = f.rowid
-                         LEFT JOIN project_resources r ON r.id = c.resource_id
-                         LEFT JOIN project_repos p ON p.id = c.resource_id
+                    "SELECT {HIT_COLS} FROM resource_chunks_fts f JOIN ({}) c ON c.id = f.rowid {HIT_JOINS}
                      WHERE resource_chunks_fts MATCH ?3
                      ORDER BY bm25(resource_chunks_fts, 3.0, 1.0) LIMIT ?4",
                     format_args!("SELECT c.* {READABLE}")

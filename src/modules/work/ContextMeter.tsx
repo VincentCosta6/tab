@@ -27,7 +27,9 @@ type Usage = NonNullable<ReturnType<typeof contextUsage>>;
  * Null before the first turn has finished.
  */
 function contextUsage(messages: SessionMessage[], now: number) {
-  const turns = messages.filter((m) => m.kind === "result" && m.meta?.context?.used);
+  // A compacted chat starts over: only turns since the last divider count.
+  const since = messages.map((m) => m.kind).lastIndexOf("compacted") + 1;
+  const turns = messages.slice(since).filter((m) => m.kind === "result" && m.meta?.context?.used);
   const lastTurn = turns[turns.length - 1];
   const last = lastTurn?.meta.context;
   if (!last) return null;

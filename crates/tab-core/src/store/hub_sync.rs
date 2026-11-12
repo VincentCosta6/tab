@@ -42,6 +42,7 @@ pub const SYNCED: &[(&str, &[&str])] = &[
     ("items", &["id"]),
     ("sessions", &["id"]),
     ("session_messages", &["uid"]),
+    ("session_segments", &["id"]),
     ("project_notes", &["id"]),
     ("project_repos", &["id"]),
     ("project_resources", &["id"]),

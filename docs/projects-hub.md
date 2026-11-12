@@ -14,7 +14,19 @@ repos, services), searchable by agents within the access level each resource has
   `resource_chunks` (+ FTS5, `doc:res:<id>:<n>` vectors), on each device. `tab_search` returns passages
   under `resources`, filtered by the reader's level from the session key; `resource_index` keeps
   schedule, errors and "last used" per device.
-- Sessions: Claude Code per turn with `--resume`; each turn reports `meta.context.used`. No compaction.
+- Sessions: Claude Code per turn with `--resume`; each turn reports `meta.context.used`.
+- Coordinator (phase 3, `agents/coordinator.rs`): a monitor on the device that runs the chat wakes it
+  with a turn of tab's own (a `wake` note in the chat) on settled queue changes (2 min quiet, 10 min
+  max), hourly while something urgent or a thread waits, and on weekdays at the brief time. When a turn
+  ends above `projects.compact_at`, a small-model call writes the carry-forward summary, the stretch
+  becomes a synced `session_segments` row (old agent session id, editable summary), a `compacted`
+  divider is posted and the next turn starts a fresh session with the summary in its system prompt.
+  Segment transcripts are indexed into `resource_chunks` as coordinator-only "Coordinator history".
+- Prompt injection: the coordinator reads outside content with more access than other chats. Its
+  brief says outside content is data; wake prompts, summarizer input and the carried-forward summary
+  are fenced (`coordinator::fenced`); shell commands and WebFetch always ask; remote tools named like
+  send/merge/deploy/refund/post/share/delete ask even when allowed elsewhere; on turns tab started
+  itself, WebSearch and starting an agent ask too.
 - Sync: plaintext rows to the hub. No end-to-end encryption, no device keys. `vault.rs` is OS keychain/DPAPI, per device.
 
 ## Access levels

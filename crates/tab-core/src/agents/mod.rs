@@ -475,6 +475,10 @@ pub struct AgentHub {
     /// Messages that arrived after a turn stopped taking steering (its result
     /// is in, the process hasn't exited). They run as the next turn.
     followups: Mutex<HashMap<String, Vec<String>>>,
+    /// Chats whose running turn tab started on its own (a coordinator
+    /// woken by its monitor), with nobody reading along until the person
+    /// writes in it. Their tools are held tighter (see `crate::mcp`).
+    woken: Mutex<std::collections::HashSet<String>>,
     approvals: Mutex<HashMap<String, (Approval, oneshot::Sender<Decision>)>>,
     /// OpenCode servers by chat id (see `opencode::server`).
     opencode: tokio::sync::Mutex<HashMap<String, Arc<opencode::Server>>>,
@@ -538,6 +542,7 @@ impl AgentHub {
             steering: Mutex::new(HashMap::new()),
             steering_rx: Mutex::new(HashMap::new()),
             followups: Mutex::new(HashMap::new()),
+            woken: Mutex::new(Default::default()),
             approvals: Mutex::new(HashMap::new()),
             opencode: tokio::sync::Mutex::new(HashMap::new()),
             file_sink: std::sync::OnceLock::new(),
@@ -1095,6 +1100,12 @@ impl AgentHub {
         }
     }
 
+    /// Whether the chat's running turn was started by tab on its own, with
+    /// nobody reading along (see [`coordinator`]).
+    pub fn is_woken(&self, session_id: &str) -> bool {
+        self.woken.lock().unwrap().contains(session_id)
+    }
+
     pub fn is_running(&self, session_id: &str) -> bool {
         self.running.lock().unwrap().contains_key(session_id)
     }
@@ -1141,6 +1152,8 @@ impl AgentHub {
         );
         self.check_attachments(attachments)?;
         let prompt = with_attachments(text, attachments);
+        // The person is here now.
+        self.woken.lock().unwrap().remove(session_id);
         let tx = self.steering.lock().unwrap().get(session_id).cloned();
         let sent = tx.is_some_and(|tx| tx.send(Steer::Message(prompt.clone())).is_ok());
         if !sent {
@@ -1371,6 +1384,7 @@ impl AgentHub {
             let followups = {
                 let mut running = hub.running.lock().unwrap();
                 running.remove(&session.id);
+                hub.woken.lock().unwrap().remove(&session.id);
                 hub.steering_close(&session.id);
                 hub.steering_rx.lock().unwrap().remove(&session.id);
                 hub.followups
@@ -1411,6 +1425,8 @@ impl AgentHub {
                 Ok(()) => {
                     hub.mark_waiting_if_asked(&session.id);
                     suggest::spawn(hub.clone(), session.id.clone());
+                    // A coordinator that ran long starts its next turn fresh.
+                    coordinator::after_turn(hub.clone(), session.id.clone());
                 }
                 Err(e) => {
                     tracing::warn!(session = %session.id, error = %e, "agent turn failed");
@@ -1742,6 +1758,10 @@ impl AgentHub {
             out.push('\n');
             out.push_str(&brief);
             out.push('\n');
+        }
+        if let Ok(Some(summary)) = self.store.carried_forward(&session.id) {
+            out.push('\n');
+            out.push_str(&coordinator::carried_forward(&summary));
         }
         let Some(item_id) = &session.item_id else {
             return out;

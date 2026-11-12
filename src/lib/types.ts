@@ -109,7 +109,29 @@ export interface Project {
   about: string;
   /** How to work in it. Agents follow these. */
   rules: string;
+  /** The coordinator wakes on queue changes and checks hourly. */
+  coordinator_watch: boolean;
+  /** Weekday morning brief at this local time ("08:00"), "" for none. */
+  coordinator_brief: string;
+  /** The coordinator's chat compacts when a turn ends above this many tokens; 0 never. */
+  compact_at: number;
   created_at: string;
+}
+
+/** A compacted stretch of the coordinator's chat, with what it carried forward. */
+export interface Segment {
+  id: string;
+  session_id: string;
+  project_id: string | null;
+  agent_session_id: string | null;
+  /** Markdown; the person can edit it. */
+  summary: string;
+  tokens: number;
+  messages: number;
+  reason: "auto" | "manual";
+  started_at: string;
+  ended_at: string;
+  updated_at: string;
 }
 
 /** A repo a project's work happens in. */
@@ -365,7 +387,7 @@ export interface SessionMessage {
   id: number;
   session_id: string;
   role: "user" | "assistant" | "tool" | "system";
-  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request" | "suggestion";
+  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request" | "suggestion" | "note" | "wake" | "compacted";
   content: string;
   meta: any;
   created_at: string;
