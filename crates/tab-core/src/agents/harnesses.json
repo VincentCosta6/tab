@@ -31,7 +31,6 @@
           "help": "Reads and plans, changes nothing"
         }
       ],
-      "external_server": false,
       "budget_cap": true
     },
     "model_hint": "e.g. sonnet or opus",
@@ -91,11 +90,10 @@
       "brand": "opencode"
     },
     "command": "opencode",
-    "pitch": "Open source and works with any model provider. tab starts its server and streams every session.",
+    "pitch": "Open source and works with any model provider. tab runs it over the Agent Client Protocol.",
     "capabilities": {
       "strict": true,
       "permission_modes": [],
-      "external_server": true,
       "budget_cap": false
     },
     "model_hint": "provider/model, e.g. anthropic/claude-sonnet-5-5",
@@ -139,7 +137,8 @@
         "OPENCODE_DISABLE_CLAUDE_CODE": "1"
       },
       "mcp_tool_name": "{server}_{tool}",
-      "adapter": null
+      "adapter": null,
+      "preview": false
     }
   },
   {
@@ -154,7 +153,6 @@
     "capabilities": {
       "strict": true,
       "permission_modes": [],
-      "external_server": false,
       "budget_cap": false
     },
     "model_hint": "e.g. gpt-6-sol",
@@ -231,7 +229,6 @@
     "capabilities": {
       "strict": true,
       "permission_modes": [],
-      "external_server": false,
       "budget_cap": false
     },
     "model_hint": "provider/model, e.g. anthropic/claude-sonnet-5-5",

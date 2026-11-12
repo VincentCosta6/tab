@@ -53,7 +53,7 @@ pub(super) async fn complete(
                 .or(cfg.model_for(kind));
             let text = match kind {
                 AgentKind::OpenCode => {
-                    super::opencode::complete(hub, &system, ask.prompt, model).await?
+                    super::acp::complete(hub, kind, &system, ask.prompt, model).await?
                 }
                 AgentKind::Codex => super::codex::complete(hub, &system, ask.prompt, model).await?,
                 AgentKind::Pi => super::pi::complete(hub, &system, ask.prompt, model).await?,

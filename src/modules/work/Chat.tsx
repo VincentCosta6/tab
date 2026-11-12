@@ -146,8 +146,8 @@ export function SandboxPill() {
 
 /**
  * Strict mode: blue "Strict" when chats load only tab's connections, amber
- * "Not strict" when strict is on but this agent can't be held to it (an
- * OpenCode server you run yourself), nothing when it's off.
+ * "Not strict" when strict is on but this agent can't be held to it,
+ * nothing when it's off.
  */
 export function StrictPill({ kind }: { kind?: AgentKind | null }) {
   const { data: config } = useConfig();
@@ -155,10 +155,10 @@ export function StrictPill({ kind }: { kind?: AgentKind | null }) {
   const agent = config?.agent;
   const harness = harnesses?.find((h) => h.id === (kind ?? agent?.kind));
   if (!agent || !harness || agent.strict === false) return null;
-  // Its adapter can't keep your setup out, or it's attached to a server you run.
-  const remote = !harness.capabilities.strict || (harness.capabilities.external_server && !!agent.opencode_url?.trim() && !agent.acp?.includes(harness.id));
+  // Its adapter can't keep your setup out.
+  const remote = !harness.capabilities.strict;
   const title = remote
-    ? `Strict mode is on, but tab can't control what ${harness.name} loads here${harness.capabilities.external_server ? " (it's attached to a server you started)" : ""}.`
+    ? `Strict mode is on, but tab can't control what ${harness.name} loads here.`
     : "Strict mode: this chat loads only tab's connections. Your personal MCP servers, connectors, plugins, hooks and user settings stay out; the repo's own config still loads. If anything else loads, tab stops the turn.";
   return (
     <span className={cx("strict-pill", remote && "limited")} title={title}>

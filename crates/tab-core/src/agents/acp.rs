@@ -40,10 +40,15 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// After `session/cancel`, how long the agent gets to end the turn itself.
 const CANCEL_GRACE: Duration = Duration::from_secs(3);
 
-/// Whether `kind`'s chats run through ACP: the person turned it on for that
-/// harness and `harnesses.json` says how.
+/// Whether `kind`'s chats run through ACP: `harnesses.json` says how, and
+/// either it's the harness's only way (OpenCode) or, for an entry still in
+/// preview, the person turned it on.
 pub(crate) fn enabled(cfg: &crate::config::AgentConfig, kind: AgentKind) -> bool {
-    cfg.acp.iter().any(|k| k == kind.as_str()) && catalog::harness(kind).acp.is_some()
+    match &catalog::harness(kind).acp {
+        Some(spec) if spec.preview => cfg.acp.iter().any(|k| k == kind.as_str()),
+        Some(_) => true,
+        None => false,
+    }
 }
 
 pub(super) async fn run_turn(
@@ -145,6 +150,15 @@ async fn run(
     let (conn, mut incoming) = Conn::start(stdin, stdout);
 
     let mut events = Translator::new(hub.clone(), session.id.clone(), kind);
+    events.model = cfg.model_for(kind).map(str::to_string);
+    if let Ok(dir) = hub.session_dir(&session.id) {
+        let file = dir.join("acp-cost");
+        events.cost_before = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|c| c.trim().parse().ok())
+            .unwrap_or(0.0);
+        events.cost_file = Some(file);
+    }
     events.strict = strict;
     events.mcp_tool_name = spec.mcp_tool_name.clone();
     events.foreign = foreign;
@@ -293,10 +307,27 @@ async fn run(
     }
     .await;
 
+    // The reply is in (or the turn is over): read what the agent logged
+    // before deciding how it ended.
+    child.kill_tree();
+    let _ = child.wait().await;
+    let stderr = err_task.await.unwrap_or_default();
     let finish = match outcome {
         Ok(Some(Ok(r))) => {
+            let usage = r.get("usage").cloned();
             let r: acp::PromptResponse = serde_json::from_value(r)?;
-            events.finish(Ok(r.stop_reason));
+            events.usage = usage;
+            let stop = match empty_turn(&events, &r.stop_reason) {
+                // OpenCode ends a turn whose model call failed as `end_turn`
+                // with nothing in it, and logs the error.
+                true => Err(format!(
+                    "{} ended the turn without replying.{}",
+                    harness.name,
+                    super::per_turn::tail(&stderr)
+                )),
+                false => Ok(r.stop_reason),
+            };
+            events.finish(stop);
             Ok(())
         }
         Ok(Some(Err(e))) => {
@@ -306,9 +337,6 @@ async fn run(
         Ok(None) => Ok(()),
         Err(e) => Err(e),
     };
-    child.kill_tree();
-    let _ = child.wait().await;
-    let stderr = err_task.await.unwrap_or_default();
     if let Some(what) = events.leaked.take() {
         anyhow::bail!(
             "Strict mode stopped this turn: {} used {what}, which isn't one of tab's connections.",
@@ -322,6 +350,140 @@ async fn run(
             super::per_turn::tail(&stderr)
         )
     })
+}
+
+/// One answer for background helpers (titles, suggested replies): a
+/// throwaway session in an empty folder, with none of tab's MCP servers,
+/// and every permission refused, so the agent answers instead of acting.
+pub(super) async fn complete(
+    hub: &Arc<AgentHub>,
+    kind: AgentKind,
+    system: &str,
+    prompt: &str,
+    model: Option<&str>,
+) -> anyhow::Result<String> {
+    let harness = catalog::harness(kind);
+    let spec = harness
+        .acp
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("{} has no ACP entry", harness.name))?;
+    let cfg = hub.config();
+    let exe = match &spec.command {
+        Some(c) => super::resolve(c)?,
+        None => super::agent_exe(&cfg, kind)?,
+    };
+    let dir = std::env::temp_dir().join(format!("tab-ask-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir)?;
+    let result = async {
+        let sandbox = crate::sandbox::current();
+        let policy = sandbox.chat_policy();
+        let mut prepared = sandbox
+            .command(&exe, &spec.args_for(true), &dir, &policy)
+            .await?;
+        for (k, v) in spec.env_for(true) {
+            prepared.cmd.env(k, v);
+        }
+        if kind == AgentKind::OpenCode {
+            let off: serde_json::Map<_, _> = super::opencode::own_mcp_servers(&dir, Trust::Person)
+                .into_iter()
+                .map(|n| (n, json!({ "enabled": false })))
+                .collect();
+            prepared
+                .cmd
+                .env("OPENCODE_CONFIG_CONTENT", json!({ "mcp": off }).to_string());
+        }
+        prepared
+            .cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = prepared.spawn()?;
+        let (conn, mut incoming) =
+            Conn::start(child.stdin.take().expect("piped"), child.stdout.take().expect("piped"));
+        let answer = tokio::time::timeout(Duration::from_secs(90), async {
+            let init: acp::InitializeResponse = serde_json::from_value(
+                conn.request(
+                    "initialize",
+                    acp::InitializeRequest::new(ProtocolVersion::V1)
+                        .client_capabilities(acp::ClientCapabilities::default())
+                        .client_info(acp::Implementation::new("tab", env!("CARGO_PKG_VERSION"))),
+                )
+                .await?,
+            )?;
+            let takes_system = init.agent_capabilities.session_capabilities.system_prompt.is_some();
+            let mut new = acp::NewSessionRequest::new(dir.clone());
+            if takes_system {
+                new = new.system_prompt(acp::SystemPrompt::new(vec![text_block(system)]));
+            }
+            let r = conn.request("session/new", new).await?;
+            let id = serde_json::from_value::<acp::NewSessionResponse>(r.clone())?
+                .session_id
+                .0
+                .to_string();
+            if let Some(m) = model {
+                set_model(&conn, &r, m).await;
+            }
+            let text = if takes_system {
+                prompt.to_string()
+            } else {
+                format!("<instructions>\n{system}\n</instructions>\n\n{prompt}")
+            };
+            let reply = conn.request(
+                "session/prompt",
+                acp::PromptRequest::new(id, vec![text_block(&text)]),
+            );
+            tokio::pin!(reply);
+            let mut out = String::new();
+            loop {
+                tokio::select! {
+                    r = &mut reply => { r?; break; }
+                    m = incoming.recv() => match m {
+                        Some(Incoming::Notification { method, params }) if method == "session/update" => {
+                            if let Ok(n) = serde_json::from_value::<acp::SessionNotification>(params)
+                                && let acp::SessionUpdate::AgentMessageChunk(c) = n.update
+                                && let acp::ContentBlock::Text(t) = c.content
+                            {
+                                out.push_str(&t.text);
+                            }
+                        }
+                        Some(Incoming::Request { id, method, .. }) => {
+                            if method == "session/request_permission" {
+                                conn.respond(id, Ok(cancelled_permission()));
+                            } else {
+                                conn.respond(id, Err(RpcError { code: -32601, message: format!("tab doesn't offer {method}") }));
+                            }
+                        }
+                        Some(_) => {}
+                        None => anyhow::bail!("it closed the connection"),
+                    },
+                }
+            }
+            anyhow::Ok(out)
+        })
+        .await;
+        child.kill_tree();
+        let _ = child.wait().await;
+        match answer {
+            Ok(r) => r,
+            Err(_) => anyhow::bail!("{} took too long to answer", harness.name),
+        }
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(&dir);
+    let answer = result?.trim().to_string();
+    anyhow::ensure!(!answer.is_empty(), "{} answered with nothing", harness.name);
+    Ok(answer)
+}
+
+/// A turn that "ended" with no text, no tool call and no tokens out: the
+/// model call failed somewhere the protocol didn't say.
+fn empty_turn(events: &Translator, stop: &acp::StopReason) -> bool {
+    let out = events
+        .usage
+        .as_ref()
+        .and_then(|u| u["outputTokens"].as_i64())
+        .unwrap_or(0);
+    *stop == acp::StopReason::EndTurn && !events.said_anything && out == 0
 }
 
 /// Picks the chat's model: through the session's `model` option, or the
@@ -666,9 +828,19 @@ struct Translator {
     /// The agent message being written.
     text: String,
     tools: HashMap<String, Tool>,
-    cost: f64,
+    /// The session's total cost, as the agent last reported it this turn.
+    cost: Option<f64>,
+    /// Its total before this turn: from the last turn (`cost_file`), or
+    /// what the agent reported while loading the session.
+    cost_before: f64,
+    cost_file: Option<std::path::PathBuf>,
+    /// The turn's tokens, if the agent reports them (`PromptResponse.usage`).
+    usage: Option<Value>,
+    model: Option<String>,
     /// Updates that replay a loaded session's history.
     replaying: bool,
+    /// The agent wrote text or called a tool this turn.
+    said_anything: bool,
     finished: bool,
     strict: bool,
     /// How the agent names MCP tools (`mcp__{server}__{tool}` or
@@ -689,8 +861,13 @@ impl Translator {
             kind,
             text: String::new(),
             tools: HashMap::new(),
-            cost: 0.0,
+            cost: None,
+            cost_before: 0.0,
+            cost_file: None,
+            usage: None,
+            model: None,
             replaying: false,
+            said_anything: false,
             finished: false,
             strict: false,
             mcp_tool_name: None,
@@ -705,6 +882,17 @@ impl Translator {
             self.commands(&c.available_commands);
             return;
         }
+        if let acp::SessionUpdate::UsageUpdate(u) = u {
+            // The session's running total, in dollars.
+            if let Some(c) = u.cost.as_ref().filter(|c| c.currency == "USD") {
+                if self.replaying {
+                    self.cost_before = c.amount;
+                } else {
+                    self.cost = Some(c.amount);
+                }
+            }
+            return;
+        }
         if self.replaying {
             return;
         }
@@ -712,11 +900,13 @@ impl Translator {
         match u {
             acp::SessionUpdate::AgentMessageChunk(c) => {
                 if let acp::ContentBlock::Text(t) = &c.content {
+                    self.said_anything |= !t.text.trim().is_empty();
                     self.hub.delta(&sid, &t.text);
                     self.text.push_str(&t.text);
                 }
             }
             acp::SessionUpdate::ToolCall(tc) => {
+                self.said_anything = true;
                 self.flush();
                 let id = tc.tool_call_id.0.to_string();
                 let name = tc
@@ -772,12 +962,6 @@ impl Translator {
                         f.content.as_deref().unwrap_or_default(),
                         f.raw_output.as_ref(),
                     );
-                }
-            }
-            acp::SessionUpdate::UsageUpdate(u) => {
-                if let Some(c) = u.cost.as_ref().filter(|c| c.currency == "USD") {
-                    // The session's total so far.
-                    self.cost = c.amount;
                 }
             }
             _ => {}
@@ -872,10 +1056,43 @@ impl Translator {
         }
     }
 
+    /// What this turn cost: the change in the session's total.
+    fn turn_cost(&self) -> f64 {
+        self.cost
+            .map(|c| (c - self.cost_before).max(0.0))
+            .unwrap_or(0.0)
+    }
+
+    /// Keeps the turn's cost and tokens for the usage page, and the
+    /// session's total for the next turn's baseline.
+    fn record_usage(&self) {
+        if let (Some(total), Some(f)) = (self.cost, &self.cost_file) {
+            let _ = std::fs::write(f, total.to_string());
+        }
+        let n = |k: &str| self.usage.as_ref().and_then(|u| u[k].as_i64()).unwrap_or(0);
+        if self.cost.is_none() && self.usage.is_none() {
+            return;
+        }
+        let u = crate::store::NewUsage {
+            purpose: "agent",
+            session_id: Some(self.session_id.clone()),
+            agent: self.kind.as_str().into(),
+            model: self.model.clone(),
+            billing: "api",
+            cost_usd: self.turn_cost(),
+            input_tokens: n("inputTokens") + n("cachedReadTokens") + n("cachedWriteTokens"),
+            output_tokens: n("outputTokens") + n("thoughtTokens"),
+        };
+        if let Err(e) = self.hub.store.usage_add(&u, chrono::Utc::now()) {
+            tracing::warn!(error = %e, "couldn't store usage");
+        }
+    }
+
     fn finish(&mut self, stop: Result<acp::StopReason, String>) {
         if std::mem::replace(&mut self.finished, true) {
             return;
         }
+        self.record_usage();
         self.flush();
         let sid = self.session_id.clone();
         let error = match stop {
@@ -896,7 +1113,7 @@ impl Translator {
             "system",
             "result",
             "",
-            json!({ "cost_usd": self.cost }),
+            json!({ "cost_usd": self.turn_cost() }),
         );
         self.hub.update(
             &sid,
@@ -1030,6 +1247,127 @@ mod tests {
         t.replaying = false;
         t.flush();
         assert!(store.messages(&s.id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_turn_costs_what_the_session_total_rose_by() {
+        let (hub, store, s) = hub_and_session("tab-acp-test-cost");
+        let mut t = Translator::new(hub, s.id.clone(), AgentKind::OpenCode);
+        let file = std::env::temp_dir().join(format!("tab-acp-cost-{}", s.id));
+        t.cost_file = Some(file.clone());
+        // Loading the session reports what it had cost so far.
+        t.replaying = true;
+        update(
+            &mut t,
+            json!({ "sessionUpdate": "usage_update", "used": 1, "size": 9, "cost": { "amount": 1.25, "currency": "USD" } }),
+        );
+        t.replaying = false;
+        update(
+            &mut t,
+            json!({ "sessionUpdate": "usage_update", "used": 2, "size": 9, "cost": { "amount": 1.5, "currency": "USD" } }),
+        );
+        t.usage = Some(
+            json!({ "totalTokens": 30, "inputTokens": 10, "outputTokens": 5, "cachedReadTokens": 15 }),
+        );
+        t.finish(Ok(acp::StopReason::EndTurn));
+        let m = store.messages(&s.id).unwrap();
+        let result = m.iter().find(|m| m.kind == "result").unwrap();
+        assert!((result.meta["cost_usd"].as_f64().unwrap() - 0.25).abs() < 1e-9);
+        // The next turn starts from this total.
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "1.5");
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// Against a real `opencode acp` with a signed-in provider:
+    /// `TAB_ACP_LIVE_MODEL=google/gemini-flash-latest cargo test -p tab-core live_opencode -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn live_opencode() {
+        let Ok(model) = std::env::var("TAB_ACP_LIVE_MODEL") else {
+            return;
+        };
+        let (hub, store, s) = hub_and_session("tab-acp-live");
+        let answer = complete(
+            &hub,
+            AgentKind::OpenCode,
+            "Answer in one word.",
+            "What colour is a clear daytime sky?",
+            Some(&model),
+        )
+        .await
+        .unwrap();
+        println!("complete: {answer}");
+        assert!(answer.to_lowercase().contains("blue"), "{answer}");
+
+        let mut cfg = AgentConfig::default();
+        cfg.set_model(AgentKind::OpenCode, Some(model));
+        hub.set_config(cfg).await;
+        let dir = std::env::temp_dir().join(format!("tab-acp-live-{}", s.id));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "the code word is pelican\n").unwrap();
+        let s = store
+            .session_create(
+                None,
+                AgentKind::OpenCode,
+                "t",
+                &dir.to_string_lossy(),
+                Utc::now(),
+            )
+            .unwrap();
+        for prompt in [
+            "Read notes.txt and tell me the code word.",
+            "What was the code word again? Answer from memory.",
+        ] {
+            let s = store.session_get(&s.id).unwrap().unwrap();
+            run_turn(
+                &hub,
+                &s,
+                prompt,
+                "You are being tested.",
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        }
+        let m = store.messages(&s.id).unwrap();
+        for x in &m {
+            println!(
+                "{}/{}: {}",
+                x.role,
+                x.kind,
+                x.content.chars().take(120).collect::<String>()
+            );
+        }
+        let texts: Vec<_> = m.iter().filter(|m| m.kind == "text").collect();
+        assert!(texts.len() >= 2, "two replies");
+        assert!(
+            texts
+                .iter()
+                .all(|t| t.content.to_lowercase().contains("pelican"))
+        );
+        assert!(m.iter().any(|m| m.kind == "tool"), "it read the file");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_nothing_in_it_is_a_failure() {
+        let (hub, _store, s) = hub_and_session("tab-acp-test-empty");
+        let mut t = Translator::new(hub, s.id.clone(), AgentKind::OpenCode);
+        t.usage = Some(json!({ "totalTokens": 0, "inputTokens": 0, "outputTokens": 0 }));
+        assert!(empty_turn(&t, &acp::StopReason::EndTurn));
+        assert!(!empty_turn(&t, &acp::StopReason::Cancelled));
+        update(
+            &mut t,
+            json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Hi" } }),
+        );
+        assert!(!empty_turn(&t, &acp::StopReason::EndTurn));
+    }
+
+    #[test]
+    fn opencode_always_runs_over_acp() {
+        let cfg = AgentConfig::default();
+        assert!(enabled(&cfg, AgentKind::OpenCode));
+        assert!(!enabled(&cfg, AgentKind::Codex));
     }
 
     #[tokio::test]

@@ -166,7 +166,6 @@ fn setup(store: &Store, secrets: &[(String, String)], work: &Path) -> Setup {
     let mut agent = agent.unwrap_or_default();
     // Paths from the person's computer mean nothing here.
     agent.command = None;
-    agent.opencode_url = None;
     agent.workdir = Some(work.to_string_lossy().into_owned());
     config.agent = agent;
     config.connectors.clear();

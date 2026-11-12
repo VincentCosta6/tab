@@ -66,9 +66,6 @@ pub struct AgentConfig {
     /// routed to tab's chat either way.
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
-    /// Use an OpenCode server that is already running instead of starting one.
-    #[serde(default)]
-    pub opencode_url: Option<String>,
     #[serde(default)]
     pub budget: BudgetConfig,
     /// Offer a likely next reply after each turn (Tab fills it, Enter sends).
@@ -234,7 +231,6 @@ impl Default for AgentConfig {
             models: BTreeMap::new(),
             workdir: None,
             permission_mode: default_permission_mode(),
-            opencode_url: None,
             budget: BudgetConfig::default(),
             suggest_replies: true,
             titler: TitlerConfig::default(),

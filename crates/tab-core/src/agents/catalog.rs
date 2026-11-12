@@ -70,6 +70,10 @@ pub struct AcpSpec {
     /// `{server}_{tool}`), so strict mode can spot a server tab didn't add.
     #[serde(default)]
     pub mcp_tool_name: Option<String>,
+    /// Still in preview: chats use it only when the person turns it on
+    /// (`AgentConfig.acp`); otherwise it's the harness's only way to run.
+    #[serde(default)]
+    pub preview: bool,
     /// The adapter, when it's a program of its own. Its license is checked
     /// before tab offers it (see `every_acp_adapter_has_an_allowed_license`).
     #[serde(default)]
@@ -118,9 +122,6 @@ pub struct Capabilities {
     /// Permission modes it takes; empty hides the picker.
     #[serde(default)]
     pub permission_modes: Vec<Choice>,
-    /// It can attach to a server the person runs (where strict can't apply).
-    #[serde(default)]
-    pub external_server: bool,
     /// It stops a turn past a spend cap (`per_turn_usd`).
     #[serde(default)]
     pub budget_cap: bool,

@@ -473,7 +473,6 @@ export interface Harness {
   capabilities: {
     strict: boolean;
     permission_modes: { value: string; label: string; help?: string | null }[];
-    external_server: boolean;
     budget_cap: boolean;
   };
   model_hint: string;
@@ -481,7 +480,7 @@ export interface Harness {
   small_model: string | null;
   install: { npm: string | null; unix: string | null; windows: string | null };
   /** How to run it over the Agent Client Protocol, when its chats can go through it. */
-  acp?: { command: string | null; adapter: { npm: string | null; repo: string; license: string } | null } | null;
+  acp?: { command: string | null; preview?: boolean; adapter: { npm: string | null; repo: string; license: string } | null } | null;
 }
 
 /** One model a harness can run. */
@@ -882,7 +881,6 @@ export interface AgentConfig {
   titler?: TitlerConfig;
   /** Only tab's connections load in chats, never the person's own agent setup. On unless turned off. */
   strict?: boolean;
-  opencode_url: string | null;
   /** Harnesses whose chats run through the Agent Client Protocol (a preview). */
   acp?: string[];
   budget: BudgetConfig;
