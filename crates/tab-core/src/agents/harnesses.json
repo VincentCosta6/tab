@@ -138,7 +138,8 @@
       },
       "mcp_tool_name": "{server}_{tool}",
       "adapter": null,
-      "preview": false
+      "preview": false,
+      "steering": true
     }
   },
   {

@@ -58,10 +58,11 @@ pub(super) async fn run_turn(
     system: &str,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    // ACP has no input mid-turn: what's sent from here on waits for the next turn.
+    // Messages sent mid-turn: agents that take them (`acp.steering`) get
+    // them now; the rest, and anything left over, run as the next turn.
     hub.steering_close(&session.id);
     let mut queued = hub.steering_open(&session.id);
-    let result = run(hub, session, prompt, system, cancel).await;
+    let result = run(hub, session, prompt, system, &mut queued, cancel).await;
     let mut later = Vec::new();
     while let Ok(s) = queued.try_recv() {
         if let Steer::Message(m) = s {
@@ -84,6 +85,7 @@ async fn run(
     session: &Session,
     prompt: &str,
     system: &str,
+    steering: &mut mpsc::UnboundedReceiver<Steer>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let kind = session.agent;
@@ -280,12 +282,14 @@ async fn run(
             prompt.to_string()
         };
         let request = acp::PromptRequest::new(acp_session.clone(), vec![text_block(&text)]);
-        let r = drive(
+        let r = prompt_turn(
             &conn,
             &mut incoming,
             &mut events,
             &cancel,
             conn.request("session/prompt", request),
+            spec.steering.then_some(&mut *steering),
+            &acp_session,
         )
         .await?;
         match r {
@@ -556,31 +560,90 @@ where
     F: std::future::Future<Output = Result<Value, RpcError>>,
 {
     tokio::pin!(fut);
+    let mut open_in = true;
     let deadline = tokio::time::sleep(START_TIMEOUT);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
             r = &mut fut => return Ok(Some(r)),
-            m = incoming.recv() => match m {
-                Some(Incoming::Notification { method, params }) => {
-                    if method == "session/update" {
-                        match serde_json::from_value::<acp::SessionNotification>(params) {
-                            Ok(n) => events.update(&n.update),
-                            Err(e) => tracing::debug!(error = %e, "unreadable session/update"),
-                        }
-                    }
-                    if events.leaked.is_some() {
-                        anyhow::bail!("strict");
-                    }
-                }
-                Some(Incoming::Request { id, method, params }) => {
-                    on_request(conn, events, id, &method, params);
-                }
-                None => anyhow::bail!("it closed the connection"),
-            },
+            m = incoming.recv(), if open_in => open_in = handle(conn, events, m)?,
             _ = cancel.cancelled() => return Ok(None),
             // Only the start has a deadline; a turn runs as long as it needs.
             _ = &mut deadline, if events.replaying => anyhow::bail!("it didn't answer in time"),
+        }
+    }
+}
+
+/// One message from the agent: an update for the chat, or a request.
+/// `false` once the agent closed its side; answers that came before it are
+/// with their requests already, and the rest fail as "the agent exited".
+fn handle(conn: &Conn, events: &mut Translator, m: Option<Incoming>) -> anyhow::Result<bool> {
+    match m {
+        Some(Incoming::Notification { method, params }) => {
+            if method == "session/update" {
+                match serde_json::from_value::<acp::SessionNotification>(params) {
+                    Ok(n) => events.update(&n.update),
+                    Err(e) => tracing::debug!(error = %e, "unreadable session/update"),
+                }
+            }
+            anyhow::ensure!(events.leaked.is_none(), "strict");
+        }
+        Some(Incoming::Request { id, method, params }) => {
+            on_request(conn, events, id, &method, params);
+        }
+        None => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// The turn itself: waits for the prompt's answer while handling what the
+/// agent sends. With `steering`, a message the person sends meanwhile goes
+/// to the agent as another `session/prompt` on the same session, which an
+/// agent that steers (OpenCode) reads at its next step; the turn ends once
+/// every prompt has its answer, so nothing sent is left unanswered.
+async fn prompt_turn<F>(
+    conn: &Conn,
+    incoming: &mut mpsc::UnboundedReceiver<Incoming>,
+    events: &mut Translator,
+    cancel: &CancellationToken,
+    fut: F,
+    mut steering: Option<&mut mpsc::UnboundedReceiver<Steer>>,
+    session: &str,
+) -> anyhow::Result<Option<Result<Value, RpcError>>>
+where
+    F: std::future::Future<Output = Result<Value, RpcError>>,
+{
+    use futures_util::StreamExt;
+    use futures_util::stream::FuturesUnordered;
+    tokio::pin!(fut);
+    let mut steered = FuturesUnordered::new();
+    let mut open_in = true;
+    let mut answer: Option<Result<Value, RpcError>> = None;
+    loop {
+        if answer.is_some() && steered.is_empty() {
+            return Ok(answer);
+        }
+        let open = answer.is_none() && steering.is_some();
+        tokio::select! {
+            r = &mut fut, if answer.is_none() => answer = Some(r),
+            Some(r) = steered.next(), if !steered.is_empty() => {
+                if let Ok(Value::Object(o)) = &r
+                    && let Some(u) = o.get("usage")
+                {
+                    events.more_usage.push(u.clone());
+                }
+            }
+            s = async { steering.as_mut().expect("open").recv().await }, if open => match s {
+                Some(Steer::Message(text)) => steered.push(conn.request(
+                    "session/prompt",
+                    acp::PromptRequest::new(session.to_string(), vec![text_block(&text)]),
+                )),
+                // Nothing in ACP stops one tool and keeps the turn.
+                Some(_) => {}
+                None => steering = None,
+            },
+            m = incoming.recv(), if open_in => open_in = handle(conn, events, m)?,
+            _ = cancel.cancelled() => return Ok(None),
         }
     }
 }
@@ -836,6 +899,8 @@ struct Translator {
     cost_file: Option<std::path::PathBuf>,
     /// The turn's tokens, if the agent reports them (`PromptResponse.usage`).
     usage: Option<Value>,
+    /// Tokens of the prompts sent mid-turn.
+    more_usage: Vec<Value>,
     model: Option<String>,
     /// Updates that replay a loaded session's history.
     replaying: bool,
@@ -865,6 +930,7 @@ impl Translator {
             cost_before: 0.0,
             cost_file: None,
             usage: None,
+            more_usage: Vec::new(),
             model: None,
             replaying: false,
             said_anything: false,
@@ -1069,7 +1135,13 @@ impl Translator {
         if let (Some(total), Some(f)) = (self.cost, &self.cost_file) {
             let _ = std::fs::write(f, total.to_string());
         }
-        let n = |k: &str| self.usage.as_ref().and_then(|u| u[k].as_i64()).unwrap_or(0);
+        let n = |k: &str| {
+            self.usage
+                .iter()
+                .chain(&self.more_usage)
+                .filter_map(|u| u[k].as_i64())
+                .sum::<i64>()
+        };
         if self.cost.is_none() && self.usage.is_none() {
             return;
         }
@@ -1361,6 +1433,69 @@ mod tests {
             json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Hi" } }),
         );
         assert!(!empty_turn(&t, &acp::StopReason::EndTurn));
+    }
+
+    /// The person sends a message mid-turn: it reaches the agent as a second
+    /// `session/prompt`, and the turn ends only once both are answered.
+    #[tokio::test]
+    async fn a_message_mid_turn_steers_the_running_turn() {
+        let (hub, store, s) = hub_and_session("tab-acp-test-steer");
+        let (client_io, agent_io) = tokio::io::duplex(1 << 16);
+        let (cr, cw) = tokio::io::split(client_io);
+        let (conn, mut incoming) = Conn::start(cw, cr);
+        let (ar, mut aw) = tokio::io::split(agent_io);
+        let (steer_tx, mut steer_rx) = mpsc::unbounded_channel();
+        let agent = tokio::spawn(async move {
+            let mut lines = BufReader::new(ar).lines();
+            let mut next = async || -> Value {
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap()
+            };
+            let first = next().await;
+            assert_eq!(first["params"]["prompt"][0]["text"], "fix the bug");
+            // Working on it; the person steers now.
+            let chunk = json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "s1", "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Looking." } } } });
+            aw.write_all(format!("{chunk}\n").as_bytes()).await.unwrap();
+            steer_tx
+                .send(Steer::Message("use the other file".into()))
+                .unwrap();
+            let second = next().await;
+            assert_eq!(second["method"], "session/prompt");
+            assert_eq!(second["params"]["sessionId"], "s1");
+            assert_eq!(second["params"]["prompt"][0]["text"], "use the other file");
+            // Both end with the loop, the steered one last.
+            for (id, out) in [(&first["id"], 5), (&second["id"], 7)] {
+                let r = json!({ "jsonrpc": "2.0", "id": id, "result": { "stopReason": "end_turn", "usage": { "totalTokens": out, "inputTokens": 0, "outputTokens": out } } });
+                aw.write_all(format!("{r}\n").as_bytes()).await.unwrap();
+            }
+        });
+        let mut t = Translator::new(hub, s.id.clone(), AgentKind::OpenCode);
+        let r = prompt_turn(
+            &conn,
+            &mut incoming,
+            &mut t,
+            &CancellationToken::new(),
+            conn.request(
+                "session/prompt",
+                acp::PromptRequest::new("s1", vec![text_block("fix the bug")]),
+            ),
+            Some(&mut steer_rx),
+            "s1",
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        agent.await.unwrap();
+        assert_eq!(r["usage"]["outputTokens"], 5);
+        // The steered prompt's tokens count too.
+        assert_eq!(t.more_usage.len(), 1);
+        t.usage = Some(r["usage"].clone());
+        t.finish(Ok(acp::StopReason::EndTurn));
+        let m = store.messages(&s.id).unwrap();
+        assert!(
+            m.iter()
+                .any(|m| m.kind == "text" && m.content == "Looking.")
+        );
     }
 
     #[test]

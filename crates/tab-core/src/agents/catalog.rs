@@ -70,6 +70,11 @@ pub struct AcpSpec {
     /// `{server}_{tool}`), so strict mode can spot a server tab didn't add.
     #[serde(default)]
     pub mcp_tool_name: Option<String>,
+    /// A message sent mid-turn can go to the agent as another
+    /// `session/prompt` on the running session, and it reads it at its next
+    /// step (OpenCode does). Otherwise such messages wait for the next turn.
+    #[serde(default)]
+    pub steering: bool,
     /// Still in preview: chats use it only when the person turns it on
     /// (`AgentConfig.acp`); otherwise it's the harness's only way to run.
     #[serde(default)]
