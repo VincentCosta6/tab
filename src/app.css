@@ -83,6 +83,8 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .chip.active { background: var(--fg); color: var(--bg-raised); border-color: var(--fg); }
 .chip .count { font-variant-numeric: tabular-nums; opacity: 0.7; font-size: var(--text-xs); }
 .queue-list { flex: 1; overflow: auto; }
+.transcript-earlier { display: flex; justify-content: center; padding: var(--space-2) 0; }
+.queue-more { display: flex; justify-content: center; padding: var(--space-3); }
 .urgency-group { padding: var(--space-3) var(--space-4) var(--space-1); font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--u, var(--fg-subtle)); position: sticky; top: 0; background: var(--bg-raised); z-index: 1; }
 .row { position: relative; display: grid; grid-template-columns: auto 1fr; gap: var(--space-3); align-items: start; padding: var(--space-3) var(--space-4); cursor: pointer; border-left: 2px solid transparent; }
 .row:hover { background: var(--bg-hover); }

@@ -182,6 +182,9 @@ export function AgentStatus({ chat }: { chat: Chat | undefined }) {
   );
 }
 
+/** Chat turns drawn at a time. */
+const TURN_PAGE = 30;
+
 export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { chat: Chat | undefined; suggestions?: string[]; onSuggest?: (s: string) => void; onSend?: (text: string) => void; intro?: React.ReactNode }) {
   const stream = useStream(chat?.session?.id);
   const box = useRef<HTMLDivElement>(null);
@@ -209,6 +212,23 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
   const rewindable = chat?.session?.agent === "claude_code" && !chat.running;
   const folded = useMemo(() => foldedTexts(messages, !!chat?.running), [messages, chat?.running]);
   const turns = useMemo(() => splitTurns(messages, base), [messages, base]);
+
+  // Draw the latest turns only; earlier ones come in as the person scrolls up.
+  // Every message costs DOM, and a long chat held hundreds of MB.
+  const [drawnTurns, setDrawnTurns] = useState(TURN_PAGE);
+  const hidden = Math.max(0, turns.length - drawnTurns);
+  const heightBefore = useRef<number | null>(null);
+  const showEarlier = () => {
+    if (heightBefore.current !== null) return;
+    heightBefore.current = box.current?.scrollHeight ?? 0;
+    setDrawnTurns((n) => n + TURN_PAGE);
+  };
+  // Keep what the person was reading in place as turns are added above it.
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (el && heightBefore.current !== null) el.scrollTop += el.scrollHeight - heightBefore.current;
+    heightBefore.current = null;
+  }, [drawnTurns]);
 
   // Follow new output while the person is at the bottom; leave them be once they scroll up.
   // Their own message always brings them back down.
@@ -238,9 +258,18 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
 
   return (
     <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null, imagesAtEnd: true }}>
-    <div className="transcript" ref={box} onScroll={(e) => { const el = e.currentTarget; stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}>
+    <div className="transcript" ref={box} onScroll={(e) => {
+      const el = e.currentTarget;
+      stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+      if (hidden && el.scrollTop < 400) showEarlier();
+    }}>
       <div className="transcript-head"><AgentStatus chat={chat} /></div>
-      {turns.map((t) => (
+      {hidden > 0 && (
+        <div className="transcript-earlier">
+          <Button variant="ghost" size="sm" onClick={showEarlier}>Show {Math.min(hidden, TURN_PAGE)} earlier turn{Math.min(hidden, TURN_PAGE) === 1 ? "" : "s"} of {hidden}</Button>
+        </div>
+      )}
+      {turns.slice(hidden).map((t) => (
         <Fragment key={t.messages[0].id}>
           {groupTools(t.messages, paired, folded).map((g) =>
             Array.isArray(g)
