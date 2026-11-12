@@ -435,7 +435,7 @@ impl Store {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::EntityRef;
     use chrono::Duration;

@@ -77,6 +77,7 @@ export const keys = {
   context: (id: string) => ["context", id] as const,
   linkedTasks: (url: string) => ["linked-tasks", url] as const,
   chat: (itemId: string) => ["chat", itemId] as const,
+  chats: (itemId: string) => ["chats", itemId] as const,
   stream: (sessionId: string) => ["stream", sessionId] as const,
   connectors: ["connectors"] as const,
   config: ["config"] as const,
@@ -207,13 +208,21 @@ function LiveEvents() {
             // Keyed sessions (a PR's review chat) are found by id.
             const key = chatKeyForSession(qc, s.id);
             if (key) qc.setQueryData<Chat>(key, (c) => (c ? { ...c, session: s, running: isRunning(s, c.running) } : c));
-          } else
-            qc.setQueryData<Chat>(keys.chat(s.item_id), (c) => ({
-              session: s,
-              messages: c?.session?.id === s.id ? c.messages : [],
-              approvals: c?.session?.id === s.id ? c.approvals : [],
-              running: isRunning(s, c?.running ?? false),
-            }));
+          } else {
+            qc.invalidateQueries({ queryKey: keys.chats(s.item_id) });
+            qc.setQueryData<Chat>(keys.chat(s.item_id), (c) =>
+              // An earlier chat of the task (after /clear) carries on in
+              // the background without taking the task's view back.
+              c?.session && c.session.id !== s.id && opened(s) < opened(c.session)
+                ? c
+                : {
+                    session: s,
+                    messages: c?.session?.id === s.id ? c.messages : [],
+                    approvals: c?.session?.id === s.id ? c.approvals : [],
+                    running: isRunning(s, c?.running ?? false),
+                  },
+            );
+          }
           break;
         }
         case "session_message": {
@@ -252,6 +261,9 @@ function LiveEvents() {
   }, [qc]);
   return null;
 }
+
+/** When a chat became its task's current one; older copies don't say, so it's when it was created. */
+const opened = (s: Session) => s.opened_at ?? s.created_at;
 
 /**
  * Whether a session's turn is still going. "Needs you" means either an

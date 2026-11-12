@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, Row, params};
 use super::{Store, parse_ts, ts};
 use crate::model::{AgentKind, Session, SessionMessage, SessionStatus};
 
-const COLS: &str = "id, item_id, agent, agent_session_id, title, status, cwd, created_at, updated_at, device, model";
+const COLS: &str = "id, item_id, agent, agent_session_id, title, status, cwd, created_at, updated_at, device, model, opened_at";
 
 fn row_to_session(r: &Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
@@ -21,6 +21,10 @@ fn row_to_session(r: &Row<'_>) -> rusqlite::Result<Session> {
         updated_at: parse_ts(&r.get::<_, String>(8)?)?,
         device: r.get(9)?,
         model: r.get(10)?,
+        opened_at: r
+            .get::<_, Option<String>>(11)?
+            .map(|t| parse_ts(&t))
+            .transpose()?,
     })
 }
 
@@ -48,8 +52,8 @@ impl Store {
         let id = uuid::Uuid::new_v4().to_string();
         let device = self.device_id()?;
         self.conn().execute(
-            "INSERT INTO sessions (id, item_id, agent, title, status, cwd, created_at, updated_at, device)
-             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?6, ?7)",
+            "INSERT INTO sessions (id, item_id, agent, title, status, cwd, created_at, updated_at, device, opened_at)
+             VALUES (?1, ?2, ?3, ?4, 'idle', ?5, ?6, ?6, ?7, ?6)",
             params![id, item_id, agent.as_str(), title, cwd, ts(now), device],
         )?;
         Ok(self.session_get(&id)?.expect("just written"))
@@ -66,16 +70,53 @@ impl Store {
             .optional()?)
     }
 
-    /// The session to reuse for an item: the most recently active one.
+    /// An item's current chat: the one opened last ([`Self::session_open`]).
     pub fn session_for_item(&self, item_id: &str) -> anyhow::Result<Option<Session>> {
-        Ok(self
-            .conn()
-            .query_row(
-                &format!("SELECT {COLS} FROM sessions WHERE item_id = ?1 ORDER BY updated_at DESC LIMIT 1"),
-                [item_id],
-                row_to_session,
-            )
-            .optional()?)
+        Ok(self.sessions_for_item(item_id)?.into_iter().next())
+    }
+
+    /// Every chat an item has had, the current one first.
+    pub fn sessions_for_item(&self, item_id: &str) -> anyhow::Result<Vec<Session>> {
+        let conn = self.conn();
+        let rows = conn
+            .prepare(&format!(
+                "SELECT {COLS} FROM sessions WHERE item_id = ?1
+                 ORDER BY COALESCE(opened_at, created_at) DESC, created_at DESC"
+            ))?
+            .query_map([item_id], row_to_session)?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Makes a chat its item's current one again (`/resume`).
+    pub fn session_open(&self, id: &str, now: DateTime<Utc>) -> anyhow::Result<Option<Session>> {
+        self.conn().execute(
+            "UPDATE sessions SET opened_at = ?2 WHERE id = ?1",
+            params![id, ts(now)],
+        )?;
+        self.session_get(id)
+    }
+
+    /// The first thing the person said in each chat, for telling them apart.
+    pub fn sessions_first_prompt(
+        &self,
+        ids: &[String],
+    ) -> anyhow::Result<std::collections::HashMap<String, (String, usize)>> {
+        let conn = self.conn();
+        let mut first = conn.prepare(
+            "SELECT content FROM session_messages
+             WHERE session_id = ?1 AND role = 'user' AND kind = 'text' ORDER BY id LIMIT 1",
+        )?;
+        let mut count = conn.prepare(
+            "SELECT COUNT(*) FROM session_messages WHERE session_id = ?1 AND kind = 'text'",
+        )?;
+        let mut out = std::collections::HashMap::new();
+        for id in ids {
+            let text: Option<String> = first.query_row([id], |r| r.get(0)).optional()?;
+            let n: usize = count.query_row([id], |r| r.get(0))?;
+            out.insert(id.clone(), (text.unwrap_or_default(), n));
+        }
+        Ok(out)
     }
 
     /// The newest session with this key (e.g. `review:owner/name#12`).
@@ -437,5 +478,124 @@ mod tests {
         assert_eq!(got.hash, new);
         assert_eq!(s.named_file("/tmp/aYb/shot.png").unwrap(), None);
         assert_eq!(s.named_file("/tmp/a%/shot.png").unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod several_chats {
+    use super::*;
+    use crate::store::Upsert;
+    use crate::store::items::tests::ev;
+    use chrono::Duration;
+
+    #[test]
+    fn a_task_shows_the_chat_opened_last() {
+        let s = Store::in_memory().unwrap();
+        let t0 = Utc::now();
+        let Upsert::Inserted(item) = s.upsert(&ev("1", "Fix login"), t0).unwrap() else {
+            panic!()
+        };
+        let first = s
+            .session_create(Some(&item.id), AgentKind::ClaudeCode, "Fix login", "/w", t0)
+            .unwrap();
+        assert_eq!(first.opened_at, Some(first.created_at));
+
+        // /clear: a newer chat becomes the task's.
+        let second = s
+            .session_create(
+                Some(&item.id),
+                AgentKind::ClaudeCode,
+                "Fix login",
+                "/w",
+                t0 + Duration::seconds(1),
+            )
+            .unwrap();
+        assert_eq!(s.session_for_item(&item.id).unwrap().unwrap().id, second.id);
+
+        // The old one carrying on doesn't take it back.
+        s.session_update(
+            &first.id,
+            Some(SessionStatus::Working),
+            None,
+            t0 + Duration::seconds(5),
+        )
+        .unwrap();
+        assert_eq!(s.session_for_item(&item.id).unwrap().unwrap().id, second.id);
+
+        // /resume does.
+        s.session_open(&first.id, t0 + Duration::seconds(9))
+            .unwrap();
+        let all: Vec<String> = s
+            .sessions_for_item(&item.id)
+            .unwrap()
+            .into_iter()
+            .map(|x| x.id)
+            .collect();
+        assert_eq!(all, [first.id.clone(), second.id.clone()]);
+
+        s.message_add(
+            &first.id,
+            "user",
+            "text",
+            "Why does login 500?",
+            &serde_json::Value::Null,
+            t0,
+        )
+        .unwrap();
+        s.message_add(
+            &first.id,
+            "assistant",
+            "text",
+            "Looking.",
+            &serde_json::Value::Null,
+            t0,
+        )
+        .unwrap();
+        s.message_add(
+            &first.id,
+            "user",
+            "text",
+            "Thanks",
+            &serde_json::Value::Null,
+            t0,
+        )
+        .unwrap();
+        let firsts = s
+            .sessions_first_prompt(&[first.id.clone(), second.id.clone()])
+            .unwrap();
+        assert_eq!(firsts[&first.id], ("Why does login 500?".to_string(), 3));
+        assert_eq!(firsts[&second.id], (String::new(), 0));
+    }
+
+    #[test]
+    fn chats_from_older_copies_count_from_created_at() {
+        let s = Store::in_memory().unwrap();
+        let t0 = Utc::now();
+        let Upsert::Inserted(item) = s.upsert(&ev("1", "Fix login"), t0).unwrap() else {
+            panic!()
+        };
+        let old = s
+            .session_create(
+                Some(&item.id),
+                AgentKind::ClaudeCode,
+                "t",
+                "/w",
+                t0 + Duration::seconds(3),
+            )
+            .unwrap();
+        s.conn()
+            .execute(
+                "UPDATE sessions SET opened_at = NULL WHERE id = ?1",
+                [&old.id],
+            )
+            .unwrap();
+        let newer = s
+            .session_create(Some(&item.id), AgentKind::ClaudeCode, "t", "/w", t0)
+            .unwrap();
+        assert_eq!(s.session_get(&old.id).unwrap().unwrap().opened_at, None);
+        assert_eq!(s.session_for_item(&item.id).unwrap().unwrap().id, old.id);
+        s.session_open(&newer.id, t0 + Duration::seconds(4))
+            .unwrap();
+        assert_eq!(s.session_for_item(&item.id).unwrap().unwrap().id, newer.id);
     }
 }

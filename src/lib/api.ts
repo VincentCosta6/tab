@@ -3,7 +3,7 @@
 // and screenshotted without the desktop shell.
 
 import type {
-  AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
+  AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ChatSummary, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceAccess, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem, SlashCommand, Subagent,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
@@ -51,6 +51,9 @@ export const api = {
   contextRemove: (id: string) => call<void>("context_remove", { id }),
   createTask: (task: NewTask) => call<QueueItem>("create_task", { task }),
   chatOpen: (itemId: string) => call<Chat>("chat_open", { itemId }),
+  chatClear: (itemId: string) => call<Chat>("chat_clear", { itemId }),
+  chatList: (itemId: string) => call<ChatSummary[]>("chat_list", { itemId }),
+  chatResume: (sessionId: string) => call<Chat>("chat_resume", { sessionId }),
   chatSend: (itemId: string | null, text: string, projectId?: string | null, attachments: string[] = []) => call<ChatStarted>("chat_send", { itemId, text, projectId: projectId ?? null, attachments }),
   attachmentSave: async (name: string, bytes: Uint8Array): Promise<string> => {
     if (!inTauri) return mockApi.invoke<string>("attachment_save", { name, bytes });
@@ -65,7 +68,8 @@ export const api = {
   startDictation: () => call<void>("start_dictation"),
   agentActivity: () => call<AgentActivity[]>("agent_activity"),
   contextStatus: (ids: string[]) => call<Record<string, ContextStatus[]>>("context_status", { ids }),
-  slashCommands: () => call<SlashCommand[]>("agent_slash_commands"),
+  /** The slash commands a harness reported when it last started. */
+  slashCommands: (agent: AgentKind | null) => call<SlashCommand[]>("agent_slash_commands", { agent }),
   subagents: () => call<Subagent[]>("agent_subagents"),
   /** Values for a slash command argument from a chat's folder: its git branches, or the paths `typed` could go on to. */
   slashArgValues: (cwd: string, kind: "branch" | "path", typed: string) => call<string[]>("slash_arg_values", { cwd, kind, typed }),

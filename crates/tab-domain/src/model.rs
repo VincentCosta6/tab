@@ -894,6 +894,10 @@ pub struct Session {
     /// tab's default.
     #[serde(default)]
     pub model: Option<String>,
+    /// When it last became its task's chat: created, or picked again with
+    /// `/resume`. A task shows the chat opened last.
+    #[serde(default)]
+    pub opened_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

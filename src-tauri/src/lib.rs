@@ -726,6 +726,10 @@ struct Chat {
 #[tauri::command]
 async fn chat_open(state: State<'_, AppState>, item_id: String) -> CmdResult<Chat> {
     let session = state.store.session_for_item(&item_id).map_err(err)?;
+    chat_of(&state, session)
+}
+
+fn chat_of(state: &AppState, session: Option<Session>) -> CmdResult<Chat> {
     let (messages, approvals, running) = match &session {
         // Since it was last compacted, with the last few lines before.
         Some(s) => (
@@ -741,6 +745,62 @@ async fn chat_open(state: State<'_, AppState>, item_id: String) -> CmdResult<Cha
         approvals,
         running,
     })
+}
+
+/// `/clear`: a fresh chat on the same task. The old one stays for `/resume`.
+#[tauri::command]
+async fn chat_clear(state: State<'_, AppState>, item_id: String) -> CmdResult<Chat> {
+    if state.hub.config().kind.is_none() {
+        return Err("Set up an agent first (Settings → Agent).".into());
+    }
+    let session = state.hub.session_new_for_item(&item_id).map_err(err)?;
+    chat_of(&state, Some(session))
+}
+
+/// One of a task's chats, for `/resume`.
+#[derive(Serialize)]
+struct ChatSummary {
+    session: Session,
+    /// The first thing the person said in it.
+    first: String,
+    /// How many messages it has, the person's and the agent's.
+    messages: usize,
+    running: bool,
+}
+
+/// `/resume`: every chat a task has had, the current one first.
+#[tauri::command]
+async fn chat_list(state: State<'_, AppState>, item_id: String) -> CmdResult<Vec<ChatSummary>> {
+    let sessions = state.store.sessions_for_item(&item_id).map_err(err)?;
+    let ids: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
+    let mut firsts = state.store.sessions_first_prompt(&ids).map_err(err)?;
+    Ok(sessions
+        .into_iter()
+        .map(|s| {
+            let (first, messages) = firsts.remove(&s.id).unwrap_or_default();
+            let running = state.hub.is_running(&s.id);
+            ChatSummary {
+                session: s,
+                first,
+                messages,
+                running,
+            }
+        })
+        .collect())
+}
+
+/// `/resume`: makes one of a task's earlier chats its current one again.
+#[tauri::command]
+async fn chat_resume(state: State<'_, AppState>, session_id: String) -> CmdResult<Chat> {
+    let session = state
+        .store
+        .session_open(&session_id, Utc::now())
+        .map_err(err)?
+        .ok_or("that chat no longer exists")?;
+    let _ = state.events.send(EngineEvent::SessionChanged {
+        session: session.clone(),
+    });
+    chat_of(&state, Some(session))
 }
 
 #[derive(Serialize)]
@@ -1649,8 +1709,13 @@ async fn project_resource_delete(
 
 /// Slash commands the agent last reported, for the composer's `/` menu.
 #[tauri::command]
-fn agent_slash_commands(state: State<'_, AppState>) -> Vec<tab_core::agents::SlashCommand> {
-    state.hub.slash_commands()
+fn agent_slash_commands(
+    state: State<'_, AppState>,
+    agent: Option<AgentKind>,
+) -> Vec<tab_core::agents::SlashCommand> {
+    state
+        .hub
+        .slash_commands(agent.unwrap_or(AgentKind::ClaudeCode))
 }
 
 /// The subagents the agent last reported, for `/` argument completion.
@@ -3366,6 +3431,9 @@ pub fn run() {
             context_remove,
             create_task,
             chat_open,
+            chat_clear,
+            chat_list,
+            chat_resume,
             chat_send,
             chat_stop,
             chat_interrupt,

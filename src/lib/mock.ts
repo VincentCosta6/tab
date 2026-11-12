@@ -8,6 +8,7 @@ import { create, toBinary } from "@bufbuild/protobuf";
 import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
 import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, RunnerState, RunnerStatusSchema, type HubStatus } from "./protocol/cloud";
 import type {
+  ChatSummary,
   McpCatalogEntry, McpCloudState, JobGaps, McpImportCandidate, McpImportResult, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
   EmailSignInStatus, MailProvider,
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
@@ -288,7 +289,7 @@ export const mockApi = {
       if (mcp !== NOT_HANDLED) return mcp;
       switch (cmd) {
         case "agent_mcp_servers": return [{ name: "tab", status: "connected" }, ...mcpServersInfo().map((m) => ({ name: m.id, status: m.ready ? "connected" : "needs-auth" })), { name: "playwright", status: "failed" }];
-        case "agent_slash_commands": return mockSlashCommands;
+        case "agent_slash_commands": return args.agent === "claude_code" || !args.agent ? mockSlashCommands : args.agent === "opencode" ? [{ name: "init", description: "create/update AGENTS.md", argument_hint: "[arguments]", aliases: [], kind: "builtin" }, { name: "review", description: "review changes [commit|branch|pr], defaults to uncommitted", argument_hint: "[arguments]", aliases: [], kind: "builtin" }] : [];
         case "agent_subagents": return [{ name: "Explore", description: "Read-only search agent" }, { name: "Plan", description: "Designs implementation plans" }];
         case "slash_arg_values": return args.kind === "branch" ? ["main", "slash-menu-rich", "fix-hub-sync"] : ["src/", "crates/", "docs/", "README.md", "package.json"].map((p) => `${args.typed}${p}`);
         case "agent_activity": return sessions.filter((s) => s.item_id && items.find((i) => i.id === s.item_id)?.state !== "done").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));
@@ -623,12 +624,31 @@ export const mockApi = {
         }
         case "create_task": return createTask(args.task.title, args.task.body ?? null);
         case "chat_open": {
-          const session = sessions.find((s) => s.item_id === args.itemId) ?? null;
+          const session = chatsOf(args.itemId)[0] ?? null;
           return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: session?.status === "working" } satisfies Chat;
+        }
+        case "chat_clear": {
+          const item = items.find((i) => i.id === args.itemId)!;
+          const now = new Date().toISOString();
+          const session: Session = { id: `sess-${Date.now()}`, item_id: item.id, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: item.title, status: "idle", cwd: "~/code", created_at: now, updated_at: now, opened_at: now };
+          sessions.push(session);
+          emit({ type: "session_changed", session });
+          return { session, messages: [], approvals: [], running: false } satisfies Chat;
+        }
+        case "chat_list":
+          return chatsOf(args.itemId).map((session) => {
+            const own = messages.filter((m) => m.session_id === session.id && m.kind === "text");
+            return { session, first: own.find((m) => m.role === "user")?.content ?? "", messages: own.length, running: session.status === "working" } satisfies ChatSummary;
+          });
+        case "chat_resume": {
+          const session = sessions.find((s) => s.id === args.sessionId)!;
+          session.opened_at = new Date().toISOString();
+          emit({ type: "session_changed", session });
+          return { session, messages: messages.filter((m) => m.session_id === session.id), approvals: [], running: session.status === "working" } satisfies Chat;
         }
         case "chat_send": {
           const item = args.itemId ? items.find((i) => i.id === args.itemId)! : createTask(String(args.text).split("\n")[0].slice(0, 80), null, args.projectId ?? null);
-          let session = sessions.find((s) => s.item_id === item.id);
+          let session = chatsOf(item.id)[0];
           if (!session) {
             session = { id: `sess-${Date.now()}`, item_id: item.id, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: item.title, status: "working", cwd: "~/code", created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
             sessions.push(session);
@@ -1136,6 +1156,12 @@ let notes: ProjectNote[] = [
 // Put some of the sample work into projects.
 items = items.map((i) => ({ ...i, project_id: /checkout|payment|PAY-|ledger|refund/i.test(`${i.title} ${i.body}`) ? "p-pay" : /SOC 2|security|audit/i.test(`${i.title} ${i.body}`) ? "p-sec" : null }));
 const sessions: Session[] = [];
+
+/** A task's chats, the one opened last first. */
+function chatsOf(itemId: string) {
+  const opened = (s: Session) => s.opened_at ?? s.created_at;
+  return sessions.filter((s) => s.item_id === itemId).sort((a, b) => opened(b).localeCompare(opened(a)));
+}
 const messages: SessionMessage[] = [];
 let msgId = 1;
 
