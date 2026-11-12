@@ -21,6 +21,7 @@ pub mod coordinator;
 mod opencode;
 mod per_turn;
 mod pi;
+pub mod slash_args;
 mod small;
 pub mod steward;
 mod suggest;
@@ -28,7 +29,7 @@ mod titler;
 
 pub use titler::DEFAULT_RULES as TITLER_DEFAULT_RULES;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -54,6 +55,56 @@ pub enum Decision {
     Deny(String),
     /// Answers to AskUserQuestion, by question text.
     Answer(serde_json::Value),
+}
+
+/// Where a slash command comes from, for grouping the `/` menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SlashKind {
+    /// Claude Code's own, bundled skills included.
+    Builtin,
+    /// A markdown file in a `commands` folder.
+    Command,
+    /// A skill, the person's or a plugin's.
+    #[default]
+    Skill,
+    /// A prompt an MCP server offers.
+    Mcp,
+}
+
+/// One slash command as the agent described it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlashCommand {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// What it takes, e.g. `[low|medium|high] [<pr#>]`.
+    #[serde(default)]
+    pub argument_hint: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub kind: SlashKind,
+}
+
+impl SlashCommand {
+    fn named(name: String) -> Self {
+        Self {
+            name,
+            description: String::new(),
+            argument_hint: String::new(),
+            aliases: Vec::new(),
+            kind: SlashKind::default(),
+        }
+    }
+}
+
+/// A subagent the agent can hand work to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subagent {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// Where agents reach tab's MCP server.
@@ -614,21 +665,63 @@ impl AgentHub {
         self.dir.join("attachments")
     }
 
-    /// The slash commands (built-ins, custom commands and skills) the agent
-    /// reported when it last started, for the composer's `/` menu.
-    pub fn slash_commands(&self) -> Vec<String> {
-        std::fs::read(self.dir.join("slash_commands.json"))
+    /// The slash commands (built-ins, custom commands, skills and MCP
+    /// prompts) the agent reported when it last started, for the composer's
+    /// `/` menu. Files from before descriptions were kept hold bare names.
+    pub fn slash_commands(&self) -> Vec<SlashCommand> {
+        let Ok(b) = std::fs::read(self.dir.join("slash_commands.json")) else {
+            return Vec::new();
+        };
+        serde_json::from_slice(&b)
+            .or_else(|_| {
+                serde_json::from_slice::<Vec<String>>(&b)
+                    .map(|names| names.into_iter().map(SlashCommand::named).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn save_slash_commands(&self, cmds: &[SlashCommand]) {
+        if cmds.is_empty() || self.slash_commands() == cmds {
+            return;
+        }
+        if let Ok(b) = serde_json::to_vec(cmds) {
+            let _ = std::fs::write(self.dir.join("slash_commands.json"), b);
+        }
+    }
+
+    /// Adds commands the init line names that the saved list lacks (an agent
+    /// that didn't answer `initialize`), keeping what's known of the rest.
+    pub(crate) fn add_slash_names(&self, names: &[String], kind: impl Fn(&str) -> SlashKind) {
+        let mut cmds = self.slash_commands();
+        let known: HashSet<String> = cmds
+            .iter()
+            .flat_map(|c| std::iter::once(&c.name).chain(&c.aliases))
+            .cloned()
+            .collect();
+        for n in names.iter().filter(|n| !known.contains(*n)) {
+            cmds.push(SlashCommand {
+                kind: kind(n),
+                ..SlashCommand::named(n.clone())
+            });
+        }
+        self.save_slash_commands(&cmds);
+    }
+
+    /// The subagents the agent reported when it last started, for argument
+    /// completion in the `/` menu.
+    pub fn subagents(&self) -> Vec<Subagent> {
+        std::fs::read(self.dir.join("subagents.json"))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default()
     }
 
-    pub(crate) fn save_slash_commands(&self, names: &[String]) {
-        if names.is_empty() || self.slash_commands() == names {
+    pub(crate) fn save_subagents(&self, agents: &[Subagent]) {
+        if agents.is_empty() || self.subagents() == agents {
             return;
         }
-        if let Ok(b) = serde_json::to_vec(names) {
-            let _ = std::fs::write(self.dir.join("slash_commands.json"), b);
+        if let Ok(b) = serde_json::to_vec(agents) {
+            let _ = std::fs::write(self.dir.join("subagents.json"), b);
         }
     }
 

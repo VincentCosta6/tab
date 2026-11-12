@@ -1563,8 +1563,31 @@ async fn project_resource_delete(
 
 /// Slash commands the agent last reported, for the composer's `/` menu.
 #[tauri::command]
-fn agent_slash_commands(state: State<'_, AppState>) -> Vec<String> {
+fn agent_slash_commands(state: State<'_, AppState>) -> Vec<tab_core::agents::SlashCommand> {
     state.hub.slash_commands()
+}
+
+/// The subagents the agent last reported, for `/` argument completion.
+#[tauri::command]
+fn agent_subagents(state: State<'_, AppState>) -> Vec<tab_core::agents::Subagent> {
+    state.hub.subagents()
+}
+
+/// Values for a slash command argument from the chat's folder: `branch`
+/// names, or the `path`s that what's typed could go on to.
+#[tauri::command]
+async fn slash_arg_values(cwd: String, kind: String, typed: String) -> Vec<String> {
+    use tab_core::agents::slash_args;
+    tauri::async_runtime::spawn_blocking(move || {
+        let cwd = std::path::Path::new(&cwd);
+        match kind.as_str() {
+            "branch" => slash_args::branches(cwd),
+            "path" => slash_args::paths(cwd, &typed),
+            _ => Vec::new(),
+        }
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// The MCP servers a chat's agent reported at its last turn, with status.
@@ -3253,6 +3276,8 @@ pub fn run() {
             agent_activity,
             items_for_link,
             agent_slash_commands,
+            agent_subagents,
+            slash_arg_values,
             agent_mcp_servers,
             agent_health,
             agent_upgrade,
