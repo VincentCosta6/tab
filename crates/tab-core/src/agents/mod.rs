@@ -1058,6 +1058,12 @@ impl AgentHub {
         if let Some(s) = self.store.session_for_item(item_id)? {
             return Ok(s);
         }
+        self.session_new_for_item(item_id)
+    }
+
+    /// A fresh chat for an item (`/clear`), which becomes its current one.
+    /// Earlier chats stay, for `/resume`.
+    pub fn session_new_for_item(&self, item_id: &str) -> anyhow::Result<Session> {
         let item = self
             .store
             .get(item_id)?

@@ -7,8 +7,9 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, StatusDot, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
 import { api, onMcpSignIn, openUrl } from "../../lib/api";
+import { timeAgo } from "../../lib/format";
 import { keys } from "../../lib/query";
-import type { Chat, McpServerInfo, McpTool, Tone, ToolPolicy } from "../../lib/types";
+import type { Chat, ChatSummary, McpServerInfo, McpTool, Tone, ToolPolicy } from "../../lib/types";
 import { openConnection } from "../connections/ConnectionsTab";
 import { policies, useMcpServers } from "../connections/RemoteMcp";
 import { openSettings } from "../settings/SettingsTab";
@@ -50,7 +51,7 @@ const titles: Record<Panel, string> = {
 };
 
 /** A tab command's card, above the composer box. */
-export function SlashPanel({ panel, chat, onClose, onSend }: { panel: Panel; chat: Chat | undefined; onClose: () => void; onSend: (text: string) => void }) {
+export function SlashPanel({ panel, chat, onClose }: { panel: Panel; chat: Chat | undefined; onClose: () => void }) {
   const messages = chat?.messages ?? [];
   useEffect(() => {
     const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -68,18 +69,92 @@ export function SlashPanel({ panel, chat, onClose, onSend }: { panel: Panel; cha
         {panel === "mcp" && <McpPanel chat={chat} />}
         {panel === "context" && <ContextDetails messages={messages} />}
         {panel === "cost" && <CostDetails messages={messages} />}
-        {panel === "clear" && (
-          <>
-            <p>tab keeps one chat per task, so it can't empty this one yet. <code>/compact</code> summarises the conversation so far and frees most of the context.</p>
-            <div className="slash-card-actions">
-              <Button size="sm" variant="primary" disabled={!chat?.session || chat.running} onClick={() => (onClose(), onSend("/compact"))}>Compact this chat</Button>
-            </div>
-          </>
-        )}
-        {panel === "resume" && <p>Each task keeps its own chat: open the task in your queue to pick it back up.</p>}
+        {panel === "clear" && <ClearPanel chat={chat} onClose={onClose} />}
+        {panel === "resume" && <ResumePanel chat={chat} onClose={onClose} />}
         {panel === "rewind" && <p>Rewinding to a checkpoint isn't in tab yet.</p>}
       </div>
     </div>
+  );
+}
+
+/**
+ * `/clear`: a fresh chat on the same task. The old one stays, and
+ * `/resume` goes back to it. Review and workflow chats have one each.
+ */
+function ClearPanel({ chat, onClose }: { chat: Chat | undefined; onClose: () => void }) {
+  const qc = useQueryClient();
+  const item = chat?.session?.item_id;
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  if (!chat?.session) return <p>This chat hasn't started yet, so it's already empty.</p>;
+  if (!item) return <p>This chat can't be cleared. <code>/compact</code> summarises it and frees most of the context.</p>;
+  const clear = async () => {
+    setBusy(true);
+    try {
+      qc.setQueryData(keys.chat(item), await api.chatClear(item));
+      qc.invalidateQueries({ queryKey: keys.chats(item) });
+      onClose();
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <p>Start a new chat on this task with an empty context. This one stays: <code>/resume</code> goes back to it.</p>
+      {chat.running && <p className="subtle">The agent is still working here. It carries on in the background.</p>}
+      {error && <p className="text-danger">{error}</p>}
+      <div className="slash-card-actions">
+        <Button size="sm" variant="primary" disabled={busy} onClick={clear} autoFocus>New chat</Button>
+      </div>
+    </>
+  );
+}
+
+/** `/resume`: the task's chats, newest opened first; picking one makes it the task's chat again. */
+function ResumePanel({ chat, onClose }: { chat: Chat | undefined; onClose: () => void }) {
+  const qc = useQueryClient();
+  const item = chat?.session?.item_id;
+  const current = chat?.session?.id;
+  const { data: chats, isLoading } = useQuery({
+    queryKey: keys.chats(item ?? ""),
+    queryFn: () => api.chatList(item!),
+    enabled: !!item,
+    staleTime: 0,
+  });
+  const [error, setError] = useState<string | null>(null);
+  if (!chat?.session) return <p>This task has no chats yet.</p>;
+  if (!item) return <p>This chat is the only one here.</p>;
+  const resume = async (c: ChatSummary) => {
+    if (c.session.id === current) return onClose();
+    try {
+      qc.setQueryData(keys.chat(item), await api.chatResume(c.session.id));
+      qc.invalidateQueries({ queryKey: keys.chats(item) });
+      onClose();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  return (
+    <>
+      {isLoading && <div className="subtle">Loading…</div>}
+      {chats && chats.length < 2 && <p>This is the task's only chat. <code>/clear</code> starts another.</p>}
+      {chats && chats.length > 1 && (
+        <div className="slash-chats">
+          {chats.map((c) => (
+            <button key={c.session.id} className={cx("slash-chat", c.session.id === current && "current")} onClick={() => resume(c)}>
+              <span className="slash-chat-first">{c.first.trim() || <em className="subtle">No messages yet</em>}</span>
+              <span className="slash-chat-meta subtle">
+                {c.session.id === current ? "This chat · " : ""}
+                {c.running ? "Working · " : ""}
+                {c.messages} {c.messages === 1 ? "message" : "messages"} · {timeAgo(c.session.updated_at)}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      {error && <p className="text-danger">{error}</p>}
+    </>
   );
 }
 

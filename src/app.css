@@ -883,6 +883,12 @@ body.resizing iframe { pointer-events: none; }
 .slash-card-body p { margin: 0; }
 .slash-card-body > p.subtle { font-size: var(--text-xs); }
 .slash-card-actions { display: flex; gap: 8px; }
+.slash-chats { display: grid; gap: 2px; }
+.slash-chat { display: grid; gap: 2px; text-align: left; padding: 6px 8px; border: 0; border-radius: var(--radius-sm); background: none; color: inherit; font: inherit; cursor: pointer; }
+.slash-chat:hover, .slash-chat:focus-visible { background: var(--bg-hover); }
+.slash-chat.current { background: var(--bg-selected); }
+.slash-chat-first { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slash-chat-meta { font-size: var(--text-xs); }
 .slash-mcp { display: grid; gap: 2px; }
 .slash-mcp-line { display: flex; align-items: center; gap: 8px; min-height: 30px; }
 .slash-mcp-name { display: flex; align-items: baseline; gap: 6px; flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }

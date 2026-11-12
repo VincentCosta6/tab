@@ -382,6 +382,8 @@ export interface Session {
   device?: string | null;
   /** The model it runs on, set at its first message: "" for the harness's default, null for older chats that follow tab's. */
   model?: string | null;
+  /** When it last became its task's chat (created, or picked with /resume). A task shows the chat opened last. */
+  opened_at?: string | null;
 }
 export interface SessionMessage {
   id: number;
@@ -394,6 +396,8 @@ export interface SessionMessage {
 }
 export interface Approval { id: string; session_id: string; tool: string; summary: string; input: unknown }
 export interface Chat { session: Session | null; messages: SessionMessage[]; approvals: Approval[]; running: boolean }
+/** One of a task's chats, for /resume. */
+export interface ChatSummary { session: Session; first: string; messages: number; running: boolean }
 export interface ChatStarted { item: QueueItem; session: Session }
 export interface NewTask { title: string; body?: string | null; priority?: string | null; due_at?: string | null; url?: string | null; created_by: string }
 export interface GhStatus {
