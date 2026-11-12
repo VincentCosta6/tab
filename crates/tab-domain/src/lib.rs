@@ -18,6 +18,7 @@
 
 pub mod blob;
 pub mod cli;
+pub mod families;
 pub mod lease;
 pub mod links;
 pub mod model;

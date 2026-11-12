@@ -19,6 +19,9 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+pub use crate::families::Candidate;
+use crate::workflow::{Intervention, StepMetrics};
+
 /// How long a job lease lasts before it must be renewed.
 pub const JOB_LEASE: Duration = Duration::seconds(90);
 /// Renew this often while working (well inside [`JOB_LEASE`]).
@@ -136,6 +139,36 @@ pub struct JobSpec {
     pub model: String,
     #[serde(default)]
     pub placement: Placement,
+    /// The model family the step asked for, when it pinned neither a
+    /// harness nor a model. Empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub family: String,
+    /// That family's candidates, in order, as they were when the job was
+    /// handed out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<Candidate>,
+}
+
+impl JobSpec {
+    /// Whether it pins a harness or a model, which wins over a family.
+    pub fn pinned(&self) -> bool {
+        !self.harness.is_empty() || !self.model.is_empty()
+    }
+
+    /// What a runner with `harnesses` installed tries, in order: the pinned
+    /// harness and model; else the family's candidates it has; else the
+    /// runner's default (one empty candidate). Empty when it has none of a
+    /// family's harnesses.
+    pub fn plan(&self, harnesses: &[String]) -> Vec<Candidate> {
+        if self.pinned() || self.candidates.is_empty() {
+            return vec![Candidate::new(&self.harness, &self.model)];
+        }
+        self.candidates
+            .iter()
+            .filter(|c| harnesses.contains(&c.harness))
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -160,6 +193,10 @@ pub enum JobState {
     Failed {
         error: String,
         finished_at: DateTime<Utc>,
+        /// What the agent's session spent before it failed, when a runner
+        /// got as far as starting one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<JobUsage>,
     },
 }
 
@@ -175,6 +212,31 @@ pub struct JobResult {
     /// A pull request it opened.
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// What the agent's session spent, when the runner knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<JobUsage>,
+}
+
+/// What a job's agent session spent, reported by the runner that ran it
+/// (usage counters themselves never leave that device).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct JobUsage {
+    pub billing: crate::workflow::Billing,
+    /// What was billed; zero on a subscription.
+    pub cost_usd: f64,
+    /// On a subscription: the part of the plan's allowance it used, 0.0
+    /// to 1.0, when the harness reports its plan windows.
+    pub plan_share: f64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// The harness and model that ran, which a family or a default decided.
+    pub harness: String,
+    pub model: String,
+    /// Time the session spent waiting on the person.
+    pub human_wait_ms: u64,
+    /// Times the runner moved on to the family's next model.
+    pub fallbacks: u32,
 }
 
 /// One job, as stored and synced.
@@ -199,6 +261,12 @@ pub struct Job {
     /// to redo. The person's computers show these with one-click fixes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<CloudGap>,
+    /// When a runner first claimed it: the end of its time in the queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<DateTime<Utc>>,
+    /// Each time a person stepped in while it ran, as the runner saw it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interventions: Vec<Intervention>,
 }
 
 /// Something a job in tab cloud needed and didn't have.
@@ -296,6 +364,12 @@ impl Job {
         if !self.spec.harness.is_empty() && !runner.harnesses.contains(&self.spec.harness) {
             return Err(NotForYou::NoHarness(self.spec.harness.clone()));
         }
+        if self.spec.plan(&runner.harnesses).is_empty() {
+            return Err(NotForYou::NoHarness(format!(
+                "a harness in the {} family",
+                self.spec.family
+            )));
+        }
         if runner.harnesses.is_empty() {
             return Err(NotForYou::NoHarness("any agent".into()));
         }
@@ -319,6 +393,7 @@ impl Job {
         if !same {
             j.attempts += 1;
         }
+        j.claimed_at.get_or_insert(now);
         j.state = JobState::Running {
             runner: runner.into(),
             token,
@@ -336,6 +411,53 @@ impl Job {
     /// can't overwrite the new holder's work.
     pub fn accepts_result_from(&self, runner: &str, token: u64) -> bool {
         matches!(&self.state, JobState::Running { runner: r, token: t, .. } if r == runner && *t == token)
+    }
+
+    /// What the step that handed out this job took and spent, once the job
+    /// has ended: its time waiting for a runner and at work, its claims,
+    /// and what its runner reported. Work counts from the first claim, so
+    /// a retry's wait for a second runner counts as work.
+    pub fn metrics(&self) -> Option<StepMetrics> {
+        let (finished_at, usage) = match &self.state {
+            JobState::Done {
+                result,
+                finished_at,
+                ..
+            } => (*finished_at, result.usage.as_ref()),
+            JobState::Failed {
+                finished_at, usage, ..
+            } => (*finished_at, usage.as_ref()),
+            _ => return None,
+        };
+        let ms =
+            |from: DateTime<Utc>, to: DateTime<Utc>| (to - from).num_milliseconds().max(0) as u64;
+        let (queue_ms, work_ms) = match self.claimed_at {
+            Some(c) => (ms(self.created_at, c), ms(c, finished_at)),
+            // Claimed by a runner from before claims were timed.
+            None if self.attempts > 0 => (0, ms(self.created_at, finished_at)),
+            None => (ms(self.created_at, finished_at), 0),
+        };
+        let u = usage.cloned().unwrap_or_default();
+        Some(StepMetrics {
+            queue_ms,
+            work_ms,
+            human_wait_ms: u.human_wait_ms.min(work_ms),
+            billing: u.billing,
+            cost_usd: u.cost_usd,
+            plan_share: u.plan_share,
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+            family: self.spec.family.clone(),
+            // A job that names a harness only runs on it.
+            harness: if u.harness.is_empty() {
+                self.spec.harness.clone()
+            } else {
+                u.harness
+            },
+            model: u.model,
+            attempts: self.attempts,
+            fallbacks: u.fallbacks,
+        })
     }
 
     /// Whether the job has ended, one way or another.
@@ -383,6 +505,7 @@ mod tests {
                 harness: String::new(),
                 model: String::new(),
                 placement,
+                ..Default::default()
             },
             state: JobState::Waiting,
             attempts: 0,
@@ -390,6 +513,8 @@ mod tests {
             created_at: t(0),
             deadline: t(60),
             missing: Vec::new(),
+            claimed_at: None,
+            interventions: Vec::new(),
         }
     }
 
@@ -541,6 +666,84 @@ mod tests {
         assert!(!r.awake(t(3)));
     }
 
+    fn family_job() -> Job {
+        let mut j = job(Placement::Anywhere);
+        j.spec.family = "deep".into();
+        j.spec.candidates = vec![
+            Candidate::new("codex", "gpt-6.1-sol"),
+            Candidate::new("claude_code", "claude-opus-5-5"),
+            Candidate::new("pi", ""),
+        ];
+        j
+    }
+
+    #[test]
+    fn a_runner_may_take_a_family_job_when_any_candidate_fits() {
+        let now = t(1);
+        let j = family_job();
+        assert!(j.can_take(&laptop(), false, now).is_ok());
+        assert!(j.can_take(&cloud(), false, now).is_ok());
+        let mut opencode = laptop();
+        opencode.harnesses = vec!["opencode".into()];
+        assert_eq!(
+            j.can_take(&opencode, false, now),
+            Err(NotForYou::NoHarness("a harness in the deep family".into()))
+        );
+    }
+
+    #[test]
+    fn a_runner_tries_the_family_in_order_skipping_what_it_lacks() {
+        let j = family_job();
+        assert_eq!(
+            j.spec.plan(&laptop().harnesses),
+            [Candidate::new("claude_code", "claude-opus-5-5")]
+        );
+        let all: Vec<String> = ["pi", "claude_code", "codex"].map(String::from).into();
+        let plan: Vec<_> = j.spec.plan(&all).into_iter().map(|c| c.harness).collect();
+        assert_eq!(plan, ["codex", "claude_code", "pi"]);
+    }
+
+    #[test]
+    fn a_pinned_harness_or_model_wins_over_a_family() {
+        let mut j = family_job();
+        j.spec.harness = "codex".into();
+        assert_eq!(
+            j.spec.plan(&cloud().harnesses),
+            [Candidate::new("codex", "")]
+        );
+        assert_eq!(
+            j.can_take(&laptop(), false, t(1)),
+            Err(NotForYou::NoHarness("codex".into()))
+        );
+        j.spec.harness.clear();
+        j.spec.model = "claude-sonnet-5-5".into();
+        assert_eq!(
+            j.spec.plan(&laptop().harnesses),
+            [Candidate::new("", "claude-sonnet-5-5")]
+        );
+        // No pin and no family: the runner's default.
+        assert_eq!(
+            job(Placement::Anywhere).spec.plan(&[]),
+            [Candidate::default()]
+        );
+    }
+
+    #[test]
+    fn jobs_from_before_families_still_parse() {
+        let old = r#"{"id":"j1","run_id":"r1","step_id":"fix","workflow_id":"w1",
+            "spec":{"prompt":"Fix it","repo":"acme/api","harness":"","model":"","placement":{"type":"anywhere"}},
+            "state":{"state":"waiting"},"attempts":0,"max_attempts":2,
+            "created_at":"2027-01-15T08:00:00Z","deadline":"2027-01-15T09:00:00Z"}"#;
+        let j: Job = serde_json::from_str(old).unwrap();
+        assert!(j.spec.family.is_empty() && j.spec.candidates.is_empty());
+        // And a job without a family writes no family fields, for old runners.
+        let v = serde_json::to_value(&j).unwrap();
+        assert!(v["spec"].get("family").is_none() && v["spec"].get("candidates").is_none());
+        let back: Job =
+            serde_json::from_value(serde_json::to_value(family_job()).unwrap()).unwrap();
+        assert_eq!(back, family_job());
+    }
+
     #[test]
     fn jobs_and_settings_round_trip_as_json() {
         let j = job(Placement::PreferComputer { minutes: 15 }).claimed("laptop", 3, t(1));
@@ -554,5 +757,86 @@ mod tests {
             serde_json::from_str::<Placement>(r#"{"type":"cloud"}"#).unwrap(),
             Placement::Cloud
         );
+    }
+
+    #[test]
+    fn a_job_remembers_its_first_claim() {
+        let j = job(Placement::Anywhere)
+            .claimed("laptop", 7, t(4))
+            .claimed("cloud", 8, t(20));
+        assert_eq!(j.claimed_at, Some(t(4)));
+        assert_eq!(j.attempts, 2);
+    }
+
+    #[test]
+    fn a_finished_job_says_how_long_it_queued_and_worked_and_what_it_spent() {
+        let mut j = job(Placement::Anywhere).claimed("laptop", 7, t(2));
+        assert_eq!(j.metrics(), None, "still running");
+        j.state = JobState::Done {
+            runner: "laptop".into(),
+            result: JobResult {
+                usage: Some(JobUsage {
+                    billing: crate::workflow::Billing::Api,
+                    cost_usd: 0.42,
+                    input_tokens: 1000,
+                    output_tokens: 200,
+                    harness: "claude_code".into(),
+                    model: "claude-opus-5-5".into(),
+                    human_wait_ms: 60_000,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            finished_at: t(12),
+        };
+        let m = j.metrics().unwrap();
+        assert_eq!((m.queue_ms, m.work_ms), (2 * 60_000, 10 * 60_000));
+        assert_eq!(m.human_wait_ms, 60_000);
+        assert_eq!(m.attempts, 1);
+        assert_eq!(m.billing, crate::workflow::Billing::Api);
+        assert!((m.cost_usd - 0.42).abs() < 1e-9);
+        assert_eq!((m.input_tokens, m.output_tokens), (1000, 200));
+        assert_eq!(
+            (m.harness.as_str(), m.model.as_str()),
+            ("claude_code", "claude-opus-5-5")
+        );
+    }
+
+    #[test]
+    fn a_job_nobody_took_spent_its_whole_time_in_the_queue() {
+        let mut j = job(Placement::Anywhere);
+        j.spec.harness = "codex".into();
+        j.state = JobState::Failed {
+            error: "No runner finished it before its deadline.".into(),
+            finished_at: t(60),
+            usage: None,
+        };
+        let m = j.metrics().unwrap();
+        assert_eq!((m.queue_ms, m.work_ms, m.attempts), (60 * 60_000, 0, 0));
+        // The harness it named is the only one it could have run on.
+        assert_eq!(m.harness, "codex");
+        assert_eq!(m.model, "");
+    }
+
+    #[test]
+    fn a_job_from_before_metrics_still_reads() {
+        let old = serde_json::json!({
+            "id": "j1", "run_id": "r1", "step_id": "fix", "workflow_id": "w1",
+            "spec": { "prompt": "Fix it" },
+            "state": { "state": "failed", "error": "boom", "finished_at": "2027-01-15T08:10:00Z" },
+            "attempts": 1, "max_attempts": 2,
+            "created_at": "2027-01-15T08:00:00Z", "deadline": "2027-01-16T08:00:00Z",
+        });
+        let j: Job = serde_json::from_value(old).unwrap();
+        assert_eq!(j.claimed_at, None);
+        assert!(j.interventions.is_empty());
+        assert!(matches!(j.state, JobState::Failed { usage: None, .. }));
+        // Claimed, but nobody timed the claim: it all counts as work.
+        let m = j.metrics().unwrap();
+        assert_eq!((m.queue_ms, m.work_ms), (0, 10 * 60_000));
+        // And what's new isn't written when there's nothing to say.
+        let back = serde_json::to_value(&j).unwrap();
+        assert!(back.get("claimed_at").is_none() && back.get("interventions").is_none());
+        assert!(back["state"].get("usage").is_none());
     }
 }

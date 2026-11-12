@@ -38,6 +38,10 @@ pub struct Harness {
     /// Listed models shown first.
     #[serde(default)]
     pub common_models: Vec<String>,
+    /// Its model in each built-in model family (`fast`, `balanced`,
+    /// `deep`), which seeds those families.
+    #[serde(default)]
+    pub families: std::collections::BTreeMap<String, String>,
     pub install: Install,
     pub upgrade: Upgrade,
     /// Where its installers put it, relative to home, for when the app's
@@ -201,6 +205,23 @@ static HARNESSES: LazyLock<Vec<Harness>> = LazyLock::new(|| {
 /// Every harness tab has an adapter for.
 pub fn harnesses() -> &'static [Harness] {
     &HARNESSES
+}
+
+/// The model families tab ships: each lists every harness's model for it,
+/// in `harnesses.json` order.
+pub fn built_in_families() -> Vec<tab_domain::families::ModelFamily> {
+    use tab_domain::families::{BUILT_IN, Candidate, ModelFamily};
+    BUILT_IN
+        .iter()
+        .map(|id| ModelFamily {
+            id: id.to_string(),
+            name: format!("{}{}", id[..1].to_uppercase(), &id[1..]),
+            candidates: HARNESSES
+                .iter()
+                .filter_map(|h| h.families.get(*id).map(|m| Candidate::new(&h.id, m)))
+                .collect(),
+        })
+        .collect()
 }
 
 pub fn harness(kind: AgentKind) -> &'static Harness {
@@ -456,6 +477,30 @@ mod tests {
                 ("openai/gpt-6-sol".to_string(), true),
             ]
         );
+    }
+
+    #[test]
+    fn built_in_families_are_seeded_from_every_harness_in_order() {
+        let all = built_in_families();
+        let ids: Vec<_> = all.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, ["fast", "balanced", "deep"]);
+        assert_eq!(all[0].name, "Fast");
+        for f in &all {
+            assert!(tab_domain::families::check(f).is_none(), "{f:?}");
+            assert_eq!(f.candidates[0].harness, "claude_code", "{f:?}");
+            assert_eq!(f.candidates.len(), harnesses().len(), "{f:?}");
+        }
+        assert_eq!(all[0].candidates[0].model, "claude-haiku-5-5");
+        // Every seeded model is one the harness offers.
+        for h in harnesses() {
+            for m in h.families.values() {
+                assert!(
+                    h.models.iter().any(|s| &s.id == m) || h.common_models.contains(m),
+                    "{}: {m}",
+                    h.id
+                );
+            }
+        }
     }
 
     #[test]

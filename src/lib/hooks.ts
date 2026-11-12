@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { keys } from "./query";
 import { hidePending } from "../modules/work/optimistic";
-import type { AgentActivity, Chat, ItemState, TabConfig } from "./types";
+import type { AgentActivity, Chat, ItemState, ItemWorkflowStatus, TabConfig } from "./types";
 
 /** Why `path` can't be a work folder, checked as the person types. */
 export function useFolderProblem(path: string | null | undefined) {
@@ -95,6 +95,12 @@ export function useSaveConfig() {
 export function useAgentActivity(): Map<string, AgentActivity> {
   const { data = [] } = useQuery({ queryKey: keys.agentActivity, queryFn: api.agentActivity, staleTime: 0, refetchInterval: 30_000 });
   return new Map(data.map((a) => [a.item_id, a]));
+}
+
+/** Each item's workflow status, like `useAgentActivity`. Kept live by run and session events. */
+export function useWorkflowActivity(): Map<string, ItemWorkflowStatus> {
+  const { data = [] } = useQuery({ queryKey: keys.workflowActivity, queryFn: api.workflowActivity, staleTime: 0, refetchInterval: 30_000 });
+  return new Map(data.map((s) => [s.item_id, s]));
 }
 
 /** Polls quickly while the index is busy, slowly otherwise. */

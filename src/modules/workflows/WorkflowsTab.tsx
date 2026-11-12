@@ -13,7 +13,7 @@ import { api, onEngineEvent } from "../../lib/api";
 import { timeAgo } from "../../lib/format";
 import { useConnectors, useItems } from "../../lib/hooks";
 import type {
-  ActionField, ActionInfo, Change, Chat, Condition, ConnectorInfo, Effect, Issue, Op, Placement, Runner, Step, StepRun, StepStatus, Tone, Trigger, Workflow, WorkflowRun, RunStatus,
+  ActionField, ActionInfo, AgentKind, Change, Chat, Condition, ConnectorInfo, Effect, Issue, ModelFamily, Op, Placement, Runner, Step, StepRun, StepStats, StepStatus, Tone, Trigger, Workflow, WorkflowRun, RunStatus,
 } from "../../lib/types";
 import harnessData from "../../../crates/tab-core/src/agents/harnesses.json";
 
@@ -21,7 +21,14 @@ import harnessData from "../../../crates/tab-core/src/agents/harnesses.json";
 const harnesses = (harnessData as { id: string; name: string }[]).map(({ id, name }) => ({ id, name }));
 import { CloudGaps } from "../connections/CloudGaps";
 import { AgentStatus, Composer, Transcript, openItem } from "../work/Chat";
+import { ModelMenu } from "../work/ModelMenu";
 import "./workflows.css";
+import { Factory } from "./insights/Factory";
+import { InsightsPanel } from "./insights/InsightsPanel";
+import { StepBadges } from "./insights/StepBadges";
+import { useWindowDays, useWorkflowInsights } from "./insights/useInsights";
+import { RunExtras } from "./RunExtras";
+import { takePendingRun } from "./runLinks";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -135,7 +142,8 @@ function variables(w: Workflow, upTo: number, connectors: ConnectorInfo[]): { pa
 // The tab
 // ---------------------------------------------------------------------------
 
-type Panel = "edit" | "runs" | "assistant";
+type Panel = "edit" | "runs" | "insights" | "assistant";
+type View = "factory" | "builder" | "runs";
 
 export function WorkflowsTab() {
   const qc = useQueryClient();
@@ -151,7 +159,14 @@ export function WorkflowsTab() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [testItem, setTestItem] = useState<string>("");
-  const [view, setView] = useState<"builder" | "runs">(() => (localStorage.getItem("tab.workflows.view") === "runs" ? "runs" : "builder"));
+  const [view, setView] = useState<View>(() => {
+    const v = localStorage.getItem("tab.workflows.view");
+    return v === "runs" || v === "builder" ? v : "factory";
+  });
+  const [focusRun, setFocusRun] = useState<string | null>(null);
+  const insightDays = useWindowDays();
+  const { data: insights } = useWorkflowInsights(view === "builder" && !dirty ? draft?.id : null);
+  const stepStats = useMemo(() => new Map((insights?.workflow_id === draft?.id ? insights?.stats.steps ?? [] : []).map((s) => [s.id, s])), [insights, draft?.id]);
   const { data: allRuns = [] } = useQuery({ queryKey: ["workflow-runs", "all"], queryFn: () => api.workflowRuns(null, 200), staleTime: 0 });
   const lastRun = useMemo(() => {
     const m = new Map<string, WorkflowRun>();
@@ -162,6 +177,18 @@ export function WorkflowsTab() {
   useEffect(() => {
     try { localStorage.setItem("tab.workflows.view", view); } catch { /* private window */ }
   }, [view]);
+
+  // A run opened from elsewhere (an item's runs list) opens in All runs.
+  const [linkedRun, setLinkedRun] = useState<string | null>(() => takePendingRun());
+  useEffect(() => {
+    if (linkedRun) setView("runs");
+  }, [linkedRun]);
+  useEffect(() => {
+    const on = () => { const id = takePendingRun(); if (id) setLinkedRun(id); };
+    on();
+    window.addEventListener("tab:open-run", on);
+    return () => window.removeEventListener("tab:open-run", on);
+  }, []);
 
   // Open the remembered (or first) workflow once the list loads.
   useEffect(() => {
@@ -291,7 +318,7 @@ export function WorkflowsTab() {
   const errors = issues.filter((i) => i.error).length;
 
   return (
-    <div className="wf">
+    <div className={cx("wf", view === "builder" && panel === "insights" && "wf-wide")}>
       <aside className="wf-list">
         <header className="wf-list-head">
           <h2>Workflows</h2>
@@ -301,6 +328,13 @@ export function WorkflowsTab() {
           </span>
         </header>
         <div className="wf-list-items">
+          <button className={cx("wf-list-item", view === "factory" && "active")} onClick={() => setView("factory")}>
+            <Icon name="gauge" size={14} className="subtle" />
+            <span className="wf-list-text">
+              <span className="wf-list-name">Factory</span>
+              <span className="subtle">How every workflow is doing</span>
+            </span>
+          </button>
           <button className={cx("wf-list-item", view === "runs" && "active")} onClick={() => setView("runs")}>
             <Icon name="list" size={14} className="subtle" />
             <span className="wf-list-text">
@@ -336,8 +370,10 @@ export function WorkflowsTab() {
         </div>
       </aside>
 
-      {view === "runs" ? (
-        <AllRuns runs={allRuns} workflows={list} onOpenWorkflow={(id) => { const w = list.find((x) => x.id === id); if (w) { if (draft?.id === id) setView("builder"); else open(w); setPanel("runs"); } }} />
+      {view === "factory" ? (
+        <Factory workflows={list} onOpen={(id) => { const w = list.find((x) => x.id === id); if (w) { if (draft?.id === id) setView("builder"); else open(w); setPanel("insights"); } }} />
+      ) : view === "runs" ? (
+        <AllRuns runs={allRuns} workflows={list} focus={linkedRun} onOpenWorkflow={(id) => { const w = list.find((x) => x.id === id); if (w) { if (draft?.id === id) setView("builder"); else open(w); setPanel("runs"); } }} />
       ) : draft ? (
         <>
           <section className="wf-main">
@@ -372,6 +408,8 @@ export function WorkflowsTab() {
                       issues={issuesAt(s.id)}
                       result={dryById.get(s.id)}
                       unreached={!!dry && !dryById.has(s.id)}
+                      stats={dirty ? undefined : stepStats.get(s.id)}
+                      statsDays={insightDays}
                       onClick={() => { setSelected(s.id); setPanel("edit"); }}
                     />
                   </div>
@@ -394,9 +432,9 @@ export function WorkflowsTab() {
 
           <aside className="wf-side">
             <div className="wf-side-tabs" role="tablist">
-              {(["edit", "runs", "assistant"] as const).map((p) => (
+              {(["edit", "runs", "insights", "assistant"] as const).map((p) => (
                 <button key={p} role="tab" aria-selected={panel === p} className={cx("pane-tab", panel === p && "active")} onClick={() => setPanel(p)}>
-                  {p === "edit" ? (selected === "trigger" ? "Trigger" : "Step") : p === "runs" ? "Runs" : <><Icon name="sparkles" size={12} /> Assistant</>}
+                  {p === "edit" ? (selected === "trigger" ? "Trigger" : "Step") : p === "runs" ? "Runs" : p === "insights" ? <><Icon name="gauge" size={12} /> Insights</> : <><Icon name="sparkles" size={12} /> Assistant</>}
                 </button>
               ))}
             </div>
@@ -415,7 +453,8 @@ export function WorkflowsTab() {
                   onSelect={setSelected}
                 />
               )}
-              {panel === "runs" && <RunsPanel workflow={draft} />}
+              {panel === "runs" && <RunsPanel workflow={draft} focus={focusRun} />}
+              {panel === "insights" && <InsightsPanel workflow={draft} onOpenRun={(id) => { setFocusRun(id); setPanel("runs"); }} />}
               {panel === "assistant" && <AssistantPanel workflow={draft} />}
             </div>
           </aside>
@@ -447,7 +486,7 @@ function insertStep(w: Workflow, at: number, kind: NewStep, connectors: Connecto
     step = { ...base, id: uniqueId(w, kind.action.split(".").pop() ?? "step"), type: "action", connector: kind.connector, action: kind.action, input };
   } else if (kind.type === "filter") step = { ...base, id: uniqueId(w, "only_if"), type: "filter", conditions: [{ field: "item.title", op: "contains", value: "" }] };
   else if (kind.type === "set") step = { ...base, id: uniqueId(w, "values"), type: "set", values: { name: "" } };
-  else if (kind.type === "agent") step = { ...base, id: uniqueId(w, "agent"), type: "agent", prompt: "", repo: "", harness: "", model: "", placement: { type: "computers" }, deadline_minutes: 0 };
+  else if (kind.type === "agent") step = { ...base, id: uniqueId(w, "agent"), type: "agent", prompt: "", repo: "", harness: "", model: "", family: "balanced", placement: { type: "computers" }, deadline_minutes: 0 };
   else if (kind.type === "command") step = { ...base, id: uniqueId(w, "run"), type: "command", program: "", args: [], folder: "", network: [], env: {}, image: "", timeout_secs: 0 };
   else step = { ...base, id: uniqueId(w, "signal"), type: "emit", signal: "", payload: {} };
   w.steps.splice(at, 0, step);
@@ -497,7 +536,7 @@ function TriggerNode({ workflow, connectors, selected, issues, onClick }: { work
   );
 }
 
-function StepNode({ step, connectors, selected, issues, result, unreached, onClick }: { step: Step; connectors: ConnectorInfo[]; selected: boolean; issues: Issue[]; result?: StepRun; unreached?: boolean; onClick: () => void }) {
+function StepNode({ step, connectors, selected, issues, result, unreached, onClick, stats, statsDays }: { step: Step; connectors: ConnectorInfo[]; selected: boolean; issues: Issue[]; result?: StepRun; unreached?: boolean; onClick: () => void; stats?: StepStats; statsDays: number }) {
   let icon = "dot", tone: Tone = "neutral", kicker = "", title = "", lines: string[] = [], effect: Effect | null = null;
   if (step.type === "action") {
     const c = connectors.find((x) => x.id === step.connector);
@@ -544,6 +583,7 @@ function StepNode({ step, connectors, selected, issues, result, unreached, onCli
           {result.error && <span className="wf-node-error">{result.error}</span>}
         </div>
       )}
+      {!result && <StepBadges stats={stats} days={statsDays} />}
       <span className="wf-node-id">{step.id}</span>
     </button>
   );
@@ -804,13 +844,14 @@ function AgentFields({ step, vars, set }: { step: AgentStep; vars: { path: strin
         <Field label="Repo" help="owner/name. A computer uses its checkout; tab cloud clones it.">
           <VarInput mono value={step.repo} vars={vars} placeholder="{{item.metadata.repo}}" onChange={(v) => ag((s) => (s.repo = v))} />
         </Field>
-        <Field label="Harness" help="Empty uses the runner's default.">
-          <select className="wf-select" value={step.harness} onChange={(e) => ag((s) => (s.harness = e.target.value))}>
-            <option value="">The runner's default</option>
-            {harnesses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
-          </select>
-        </Field>
+        <ModelChoice step={step} ag={ag} />
       </div>
+      {!!(step.harness || step.model) && (
+        <Field label="Harness and model" help="Empty model uses the harness's default.">
+          <ModelMenu variant="field" value={step.harness ? { agent: step.harness as AgentKind, model: step.model || null } : null} onChange={(p) => ag((s) => { s.harness = p.agent; s.model = p.model ?? ""; })} />
+        </Field>
+      )}
+      {!step.harness && !step.model && step.family && <FamilyNote id={step.family} />}
       <Field label="Where it may run" help={cloud ? undefined : "tab cloud runs agents on paid plans once your hub is in tab cloud."}>
         <select className="wf-select" value={place} onChange={(e) => ag((s) => {
           const t = e.target.value as Placement["type"];
@@ -840,6 +881,42 @@ function AgentFields({ step, vars, set }: { step: AgentStep; vars: { path: strin
       </p>
     </>
   );
+}
+
+function useFamilies(): ModelFamily[] {
+  return useQuery({ queryKey: ["model-families"], queryFn: api.modelFamilies }).data ?? [];
+}
+
+/** The model an agent step runs on: a family, one harness and model, or the runner's default. */
+function ModelChoice({ step, ag }: { step: AgentStep; ag: (f: (s: AgentStep) => void) => void }) {
+  const families = useFamilies();
+  const pinned = !!(step.harness || step.model);
+  const value = pinned ? "pin" : step.family ? `family:${step.family}` : "";
+  const missing = !pinned && step.family && !families.some((f) => f.id === step.family);
+  return (
+    <Field label="Model" help="A family tries its models in order on the runner.">
+      <select className="wf-select" value={value} onChange={(e) => ag((s) => {
+        const v = e.target.value;
+        if (v === "pin") { s.family = ""; s.harness = harnesses[0]?.id ?? "claude_code"; s.model = ""; }
+        else { s.harness = ""; s.model = ""; s.family = v.startsWith("family:") ? v.slice(7) : ""; }
+      })}>
+        <option value="">The runner's default</option>
+        <optgroup label="Families">
+          {families.map((f) => <option key={f.id} value={`family:${f.id}`}>{f.name || f.id}</option>)}
+          {missing && <option value={`family:${step.family}`}>{step.family} (missing)</option>}
+        </optgroup>
+        <option value="pin">A specific harness and model</option>
+      </select>
+    </Field>
+  );
+}
+
+/** What a family will try, in order. */
+function FamilyNote({ id }: { id: string }) {
+  const f = useFamilies().find((x) => x.id === id);
+  if (!f) return null;
+  const list = f.candidates.map((c) => `${harnessName(c.harness)}${c.model ? ` ${c.model}` : ""}`).join(", then ");
+  return <p className="subtle">Tries {list}. A runner skips harnesses it doesn't have, and moves on when a model is unavailable, rate limited or out of plan. Edit families in Settings → Agents.</p>;
 }
 
 /** Who could take this step's job right now. */
@@ -1088,20 +1165,26 @@ function Pairs({ value, onChange, vars, keyLabel }: { value: Record<string, unkn
 // Runs and the assistant
 // ---------------------------------------------------------------------------
 
-function RunsPanel({ workflow }: { workflow: Workflow }) {
+function RunsPanel({ workflow, focus }: { workflow: Workflow; focus?: string | null }) {
   const { data: runs = [] } = useQuery({
     queryKey: ["workflow-runs", workflow.id],
     queryFn: () => api.workflowRuns(workflow.id || null, 50),
     enabled: !!workflow.id,
     staleTime: 0,
   });
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(focus ?? null);
+  // Opened from Insights on one run: show it.
+  useEffect(() => {
+    if (!focus) return;
+    setOpen(focus);
+    requestAnimationFrame(() => document.getElementById(`wf-run-${focus}`)?.scrollIntoView({ block: "center" }));
+  }, [focus, runs.length]);
   if (!workflow.id) return <p className="subtle wf-pad">Save the workflow to start keeping its runs. Dry runs show on the canvas.</p>;
   if (!runs.length) return <p className="subtle wf-pad">No runs yet. Each run is kept with every step's inputs and outputs for 30 days.</p>;
   return (
     <div className="wf-runs">
       {runs.map((r) => (
-        <div key={r.id} className={cx("wf-run", open === r.id && "open")}>
+        <div key={r.id} id={`wf-run-${r.id}`} className={cx("wf-run", open === r.id && "open")}>
           <button className="wf-run-head" onClick={() => setOpen(open === r.id ? null : r.id)}>
             <Badge tone={runTone[r.status]}>{runLabel[r.status]}</Badge>
             <span className="wf-run-trigger" title={r.trigger}>{r.trigger}</span>
@@ -1117,6 +1200,7 @@ function RunsPanel({ workflow }: { workflow: Workflow }) {
 function RunDetail({ run: r }: { run: WorkflowRun }) {
   return (
             <div className="wf-run-body">
+              {!r.dry_run && <RunExtras runId={r.id} />}
               <CloudGaps runId={r.id} />
               {r.error && <IssueLine issue={{ at: null, error: r.status === "failed", message: r.error }} />}
               {r.chain.length > 0 && <p className="subtle">Started by changes from {r.chain.length} earlier workflow{r.chain.length === 1 ? "" : "s"}.</p>}
@@ -1147,10 +1231,17 @@ function runsSummary(runs: WorkflowRun[]): string {
 
 type RunFilter = "all" | "problems" | "succeeded" | "dry";
 
-function AllRuns({ runs, workflows, onOpenWorkflow }: { runs: WorkflowRun[]; workflows: Workflow[]; onOpenWorkflow: (id: string) => void }) {
+function AllRuns({ runs, workflows, focus, onOpenWorkflow }: { runs: WorkflowRun[]; workflows: Workflow[]; focus?: string | null; onOpenWorkflow: (id: string) => void }) {
   const [filter, setFilter] = useState<RunFilter>("all");
   const [wf, setWf] = useState<string>("");
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(focus ?? null);
+  useEffect(() => {
+    if (!focus) return;
+    setFilter("all");
+    setWf("");
+    setOpen(focus);
+    requestAnimationFrame(() => document.getElementById(`wf-run-${focus}`)?.scrollIntoView({ block: "start" }));
+  }, [focus]);
   const shown = runs.filter((r) => {
     if (wf && r.workflow_id !== wf) return false;
     if (filter === "dry") return r.dry_run;
@@ -1180,7 +1271,7 @@ function AllRuns({ runs, workflows, onOpenWorkflow }: { runs: WorkflowRun[]; wor
       <div className="wf-allruns-body">
         {!shown.length && <p className="subtle wf-pad">{runs.length ? "No runs match." : "No runs yet. When a workflow runs, each run shows here with every step's inputs and outputs, kept for 30 days."}</p>}
         {shown.map((r) => (
-          <div key={r.id} className={cx("wf-run", open === r.id && "open")}>
+          <div key={r.id} id={`wf-run-${r.id}`} className={cx("wf-run", open === r.id && "open")}>
             <button className="wf-run-head wf-allruns-row" onClick={() => setOpen(open === r.id ? null : r.id)}>
               <Badge tone={runTone[r.status]}>{r.dry_run ? "Dry run" : runLabel[r.status]}</Badge>
               <span className="wf-allruns-name">{r.workflow_name}</span>

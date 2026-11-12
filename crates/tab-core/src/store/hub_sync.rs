@@ -63,6 +63,7 @@ pub const SYNCED: &[(&str, &[&str])] = &[
     ("jobs", &["id"]),
     ("runners", &["id"]),
     ("cloud_connections", &["id"]),
+    ("model_families", &["id"]),
 ];
 
 /// Columns that only mean something in this copy, so they aren't sent and

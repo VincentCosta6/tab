@@ -305,6 +305,8 @@ export type StepKind =
   | {
       /** Hands work to an agent on a runner (one of the person's computers, or tab cloud) and waits for it. */
       type: "agent"; prompt: string; repo: string; harness: string; model: string;
+      /** A model family to run on, used when harness and model are empty. */
+      family?: string;
       placement: Placement; deadline_minutes: number;
     };
 export type Step = { id: string; label: string; when: Condition[]; continue_on_error: boolean } & StepKind;
@@ -323,7 +325,73 @@ export interface WorkflowRun {
   id: string; workflow_id: string; workflow_name: string; version: number; status: RunStatus; dry_run: boolean;
   trigger: string; trigger_key: string | null; item_id: string | null; chain: string[]; steps: StepRun[];
   error: string | null; started_at: string; finished_at: string | null;
+  /** The agent chat (session id) that started it. */
+  started_by?: string | null;
+  /** The run that led to this one, when known. */
+  caused_by?: string | null;
+  /** Steps the person approved on this run only. */
+  approved?: StepApproval[];
 }
+export interface StepApproval { step: string; input: unknown; at: string }
+
+// --- Workflows on queue items (mirror tab_domain::workflow::item_status and tab_core::workflow::items) ---
+
+/** An item's workflow state, most pressing first. */
+export type ItemWorkflowState = "waiting_for_you" | "running" | "waiting_on_agent" | "failed" | "held_back" | "done";
+export interface ItemWorkflowStatus {
+  item_id: string; state: ItemWorkflowState; run_id: string; workflow_id: string; workflow_name: string; at: string;
+  /** The agent chat waiting on you, when that's why. */
+  session?: string | null;
+  /** Other runs on the item that also show a state. */
+  more: number;
+}
+export interface RunAgentLink { step_id: string; job: string; session: string | null; status: SessionStatus | null; needs_you: boolean }
+export interface RunView {
+  run: WorkflowRun;
+  /** What the run shows on its item now. */
+  state: ItemWorkflowState | null;
+  agents: RunAgentLink[];
+  started_by: { session: string; title: string; item_id: string | null; job: string | null } | null;
+  /** `exact` is false when an item change linked them (the run of that workflow just before). */
+  caused_by: { id: string; workflow_name: string; item_id: string | null; exact: boolean } | null;
+  /** The step waiting for your OK, with what it would do. */
+  approval: { step_id: string; label: string; reason: string | null; input: unknown } | null;
+}
+
+// --- Workflow insights (mirror tab_domain::workflow::{stats, insights}) ---
+
+/** The middle and the slow end of a set of times, in ms. `n` 0 means the rest say nothing. */
+export interface Quantiles { n: number; p50: number; p95: number }
+/** What was spent. API-key sessions cost dollars; subscription sessions use plan tokens and allowance and never get a dollar figure. */
+export interface Spend {
+  cost_usd: number; input_tokens: number; output_tokens: number;
+  plan_input_tokens: number; plan_output_tokens: number;
+  /** Plan allowance used, as a sum of shares (0.5 is half a window). */
+  plan_share: number;
+}
+/** Run counts every breakdown shares. `runs` (runs that did work) is the denominator of every rate. */
+export interface RunCounts { runs: number; succeeded: number; unattended: number; failed: number; attended: number; unplanned: number }
+export interface StepStats {
+  id: string; label: string; runs: number; ok: number; failed: number; blocked: number; throttled: number; skipped: number;
+  ms: Quantiles; queue_ms: Quantiles; work_ms: Quantiles; human_wait_ms: Quantiles; spend: Spend;
+  interventions: number; unplanned_interventions: number; fallbacks: number;
+}
+export interface ModelStats {
+  step_id: string; harness: string; model: string; family: string;
+  runs: number; ok: number; failed: number; unattended: number; work_ms: Quantiles; spend: Spend;
+}
+export interface VersionStats extends RunCounts { version: number; duration_ms: Quantiles; spend: Spend; first_run: string | null }
+export interface FailureGroup { step_id: string; label: string; error: string; count: number; first_seen: string; last_seen: string; sample_run: string }
+export interface DayStats extends RunCounts { day: string; duration_ms: Quantiles; spend: Spend }
+export interface WorkflowStats extends RunCounts {
+  in_progress: number; held_back: number; loop_stopped: number; duration_ms: Quantiles; spend: Spend;
+  steps: StepStats[]; models: ModelStats[]; versions: VersionStats[]; failures: FailureGroup[]; days: DayStats[];
+}
+export type WorkflowHealth = "unknown" | "healthy" | "degraded" | "failing";
+export interface WorkflowInsights { workflow_id: string; days: number; from: string; to: string; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats }
+export interface FactoryWorkflow { id: string; name: string; enabled: boolean; version: number; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats }
+/** `totals` are run-level only: their steps, models, versions and failures are empty. */
+export interface WorkflowFactory { days: number; from: string; to: string; totals: WorkflowStats; previous_totals: WorkflowStats; workflows: FactoryWorkflow[] }
 
 // --- Runners and jobs (mirror tab_domain::runner) ---
 
@@ -335,6 +403,11 @@ export type Placement =
   | { type: "computers" }
   | { type: "cloud" }
   | { type: "prefer_computer"; minutes: number };
+/** One harness and model a family may run on; an empty model is the harness's default. */
+export interface FamilyCandidate { harness: string; model: string }
+/** A named, ordered list of models an agent step can ask for. Tried in order. */
+export interface ModelFamily { id: string; name: string; candidates: FamilyCandidate[] }
+
 export interface Runner {
   id: string; name: string; kind: "computer" | "cloud";
   harnesses: string[]; repos: string[]; connections: string[];
@@ -478,6 +551,8 @@ export interface Harness {
   model_hint: string;
   /** What background helpers use when no model is set; null is the harness's own default. */
   small_model: string | null;
+  /** Its model in each built-in model family. */
+  families?: Record<string, string>;
   install: { npm: string | null; unix: string | null; windows: string | null };
   /** How to run it over the Agent Client Protocol, when its chats can go through it. */
   acp?: { command: string | null; preview?: boolean; adapter: { npm: string | null; repo: string; license: string } | null } | null;

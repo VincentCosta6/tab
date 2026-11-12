@@ -26,7 +26,10 @@
 //!   turns them on, and destructive actions (merge, close, move mail) stay
 //!   blocked until the person allows them on that workflow.
 
+pub mod insights;
+pub mod item_status;
 pub mod run;
+pub mod stats;
 pub mod template;
 
 use std::collections::{HashMap, HashSet};
@@ -38,7 +41,10 @@ use serde_json::{Map, Value};
 use crate::model::Change;
 use crate::model::{ActionInfo, ConnectorInfo, Effect};
 
-pub use run::{Resume, Run, RunStatus, StepRun, StepStatus};
+pub use run::{
+    Billing, Intervention, InterventionKind, Resume, Run, RunStatus, StepApproval, StepMetrics,
+    StepRun, StepStatus,
+};
 
 /// A run that was caused by another run stops after this many links.
 pub const MAX_CHAIN: usize = 3;
@@ -222,6 +228,11 @@ pub enum StepKind {
         harness: String,
         #[serde(default)]
         model: String,
+        /// A model family ([`crate::families`]) to run on, used when
+        /// `harness` and `model` are empty: the runner takes the first of
+        /// its models it can run, and the next if one is unavailable.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        family: String,
         #[serde(default)]
         placement: crate::runner::Placement,
         /// Fail the step if no runner finishes it within this long. 0 means
@@ -388,9 +399,15 @@ pub fn find_action<'a>(
         .find(|a| a.id == action)
 }
 
-/// Checks a workflow against what connectors offer and against the other
-/// workflows (for loops). `others` may include an older copy of `w`.
-pub fn validate(w: &Workflow, catalog: &[ConnectorInfo], others: &[Workflow]) -> Vec<Issue> {
+/// Checks a workflow against what connectors offer, the model families
+/// there are (their ids) and the other workflows (for loops). `others` may
+/// include an older copy of `w`.
+pub fn validate(
+    w: &Workflow,
+    catalog: &[ConnectorInfo],
+    others: &[Workflow],
+    families: &[String],
+) -> Vec<Issue> {
     let mut out = Vec::new();
     if w.name.trim().is_empty() {
         out.push(Issue::err(None, "Give the workflow a name."));
@@ -653,6 +670,8 @@ pub fn validate(w: &Workflow, catalog: &[ConnectorInfo], others: &[Workflow]) ->
                 prompt,
                 repo,
                 harness,
+                model,
+                family,
                 placement,
                 ..
             } => {
@@ -667,6 +686,19 @@ pub fn validate(w: &Workflow, catalog: &[ConnectorInfo], others: &[Workflow]) ->
                         at,
                         format!("{harness} isn't a harness tab knows."),
                     ));
+                }
+                if !family.is_empty() {
+                    if !families.contains(family) {
+                        out.push(Issue::err(
+                            at,
+                            format!("There's no model family called {family}."),
+                        ));
+                    } else if !harness.is_empty() || !model.is_empty() {
+                        out.push(Issue::warn(
+                            at,
+                            format!("The pinned model wins, so the {family} family isn't used."),
+                        ));
+                    }
                 }
                 if matches!(placement, crate::runner::Placement::Cloud) {
                     out.push(Issue::warn(
@@ -1010,6 +1042,7 @@ pub fn prepare_save(
     by: SavedBy,
     catalog: &[ConnectorInfo],
     saved: &[Workflow],
+    families: &[String],
 ) -> (Workflow, Vec<Issue>) {
     let existing = saved.iter().find(|o| !w.id.is_empty() && o.id == w.id);
     if by == SavedBy::Agent {
@@ -1021,7 +1054,7 @@ pub fn prepare_save(
         }
     }
     fill_defaults(&mut w, catalog);
-    let issues = validate(&w, catalog, saved);
+    let issues = validate(&w, catalog, saved, families);
     if issues.iter().any(|i| i.error) {
         w.enabled = false;
     }
@@ -1190,7 +1223,7 @@ mod tests {
             ..Default::default()
         };
         let msgs = |w: &Workflow| -> Vec<(bool, String)> {
-            validate(w, &[], &[])
+            validate(w, &[], &[], &[])
                 .into_iter()
                 .map(|i| (i.error, i.message))
                 .collect()
@@ -1223,13 +1256,83 @@ mod tests {
         let mut allowed = ok.clone();
         allowed.id = "wf1".into();
         allowed.allow_commands = true;
-        let (agent, _) = prepare_save(allowed.clone(), SavedBy::Agent, &[], &[]);
+        let (agent, _) = prepare_save(allowed.clone(), SavedBy::Agent, &[], &[], &[]);
         assert!(!agent.allow_commands);
         let mut kept = allowed.clone();
         kept.allow_commands = false;
-        let (resaved, _) = prepare_save(kept, SavedBy::Agent, &[], &[allowed.clone()]);
+        let (resaved, _) = prepare_save(kept, SavedBy::Agent, &[], &[allowed.clone()], &[]);
         assert!(resaved.allow_commands, "the person's choice stays");
-        let (person, _) = prepare_save(allowed, SavedBy::Person, &[], &[]);
+        let (person, _) = prepare_save(allowed, SavedBy::Person, &[], &[], &[]);
         assert!(person.allow_commands);
+    }
+
+    fn agent_step(family: &str, harness: &str) -> Workflow {
+        Workflow {
+            name: "Fix".into(),
+            trigger: Trigger::Manual,
+            steps: vec![Step {
+                id: "fix".into(),
+                label: String::new(),
+                when: vec![],
+                continue_on_error: false,
+                kind: StepKind::Agent {
+                    prompt: "Fix the flaky test".into(),
+                    repo: String::new(),
+                    harness: harness.into(),
+                    model: String::new(),
+                    family: family.into(),
+                    placement: crate::runner::Placement::Anywhere,
+                    deadline_minutes: 0,
+                },
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_agent_step_may_only_ask_for_a_family_that_exists() {
+        let families = ["fast".to_string(), "mine".to_string()];
+        let issues = |w: &Workflow| validate(w, &[], &[], &families);
+        assert!(issues(&agent_step("mine", "")).is_empty());
+        assert!(issues(&agent_step("", "")).is_empty());
+        let missing = issues(&agent_step("huge", ""));
+        assert!(
+            missing
+                .iter()
+                .any(|i| i.error && i.message == "There's no model family called huge."),
+            "{missing:?}"
+        );
+        let pinned = issues(&agent_step("fast", "codex"));
+        assert!(
+            pinned
+                .iter()
+                .any(|i| !i.error && i.message.contains("pinned model wins")),
+            "{pinned:?}"
+        );
+        let (saved, _) = prepare_save(agent_step("huge", ""), SavedBy::Person, &[], &[], &families);
+        assert!(
+            !saved.enabled,
+            "a missing family is an error, so it's saved off"
+        );
+    }
+
+    #[test]
+    fn workflows_from_before_families_still_parse() {
+        let old = json!({
+            "name": "Fix", "trigger": { "type": "manual" },
+            "steps": [{ "id": "fix", "type": "agent", "prompt": "Fix it", "harness": "codex", "model": "" }]
+        });
+        let w: Workflow = serde_json::from_value(old).unwrap();
+        let StepKind::Agent {
+            family, harness, ..
+        } = &w.steps[0].kind
+        else {
+            panic!("not an agent step: {:?}", w.steps[0].kind);
+        };
+        assert!(family.is_empty());
+        assert_eq!(harness, "codex");
+        // And a step without a family writes none, for old apps.
+        let v = serde_json::to_value(&w).unwrap();
+        assert!(v["steps"][0].get("family").is_none());
     }
 }

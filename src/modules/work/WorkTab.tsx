@@ -7,12 +7,13 @@ import { FlapTitle } from "../../design/FlapTitle";
 import { Icon } from "../../design/icons";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
-import { useAgentActivity, useItems } from "../../lib/hooks";
+import { useAgentActivity, useItems, useWorkflowActivity } from "../../lib/hooks";
 import { SessionPill, StatusPill, sessionLook } from "./SessionPill";
 import { taskStatus, unread, useContextStatus, useMarkSeen, useSeen, type TaskStatus } from "./taskStatus";
 import { setHere, takePendingDone } from "../../lib/nav";
 import { keys } from "../../lib/query";
-import type { AgentActivity, ItemState, QueueItem, Urgency } from "../../lib/types";
+import type { AgentActivity, ItemState, ItemWorkflowStatus, QueueItem, Urgency } from "../../lib/types";
+import { WorkflowPill } from "./WorkflowStatus";
 import { takePendingOpen } from "./Chat";
 import { ItemPane } from "./ItemPane";
 import { NewChat } from "./NewChat";
@@ -309,6 +310,7 @@ export function WorkTab() {
   }, [move]);
 
   const activity = useAgentActivity();
+  const workflows = useWorkflowActivity();
   const seen = useSeen();
   // Opening a chat reads its latest reply.
   const openId = selected && selected !== NEW ? selected : null;
@@ -321,7 +323,7 @@ export function WorkTab() {
     const waiting = (i.blocked_by ?? []).map((b) => titles.get(b) ?? "another task");
     return (
       <div key={i.id} className={cx(depth > 0 && "followup")}>
-        <QueueRow item={i} agent={activity.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} waiting={waiting} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
+        <QueueRow item={i} agent={activity.get(i.id)} workflow={workflows.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} waiting={waiting} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
         {kids && (
           <button className={cx("followups-toggle", open && "open")} aria-expanded={open} onClick={() => toggleFollowups(i.id)}>
             <Icon name="chevron-right" size={12} />
@@ -427,11 +429,13 @@ function byline(item: QueueItem): string {
   return [actor, same(item.context) ? null : item.context].filter(Boolean).join(" · ");
 }
 
-export function QueueRow({ item, agent, status, waiting, selected, leaving, onSelect, onAct, compact }: {
+export function QueueRow({ item, agent, workflow, status, waiting, selected, leaving, onSelect, onAct, compact }: {
   item: QueueItem;
   /** Titles of the tasks this one waits on. */
   waiting?: string[];
   agent?: AgentActivity;
+  /** Where the item's workflows stand, shown beside the agent's status. */
+  workflow?: ItemWorkflowStatus;
   /** The task's one status; without it the row shows the agent's. */
   status?: TaskStatus | null;
   selected: boolean;
@@ -459,6 +463,7 @@ export function QueueRow({ item, agent, status, waiting, selected, leaving, onSe
           <span className="row-meta-main">
             {status ? <StatusPill status={agent ? { ...status, title: `${status.title} · chat updated ${timeAgo(agent.updated_at)}` } : status} />
               : agent && <SessionPill status={agent.status} title={`Chat ${sessionLook[agent.status].label.toLowerCase()} · updated ${timeAgo(agent.updated_at)}`} />}
+            {workflow && <WorkflowPill status={workflow} />}
             <ProjectChip id={item.project_id} />
             <span className="row-byline">{byline(item)}</span>
           </span>

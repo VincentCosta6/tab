@@ -3,7 +3,9 @@
 // designed against the real metadata.
 
 import catalog from "./mock-workflows.json";
-import type { ActionInfo, Activity, Chat, Condition, ConnectorInfo, EngineEvent, Issue, KindInfo, QueueItem, Session, StepRun, Workflow, WorkflowRun } from "./types";
+import harnessData from "../../crates/tab-core/src/agents/harnesses.json";
+import { extraWorkflows, insightRuns, insightsMock } from "./mock-insights";
+import type { ActionInfo, Activity, Chat, Condition, ConnectorInfo, EngineEvent, Issue, KindInfo, ModelFamily, QueueItem, Session, StepRun, Workflow, WorkflowRun } from "./types";
 
 export const NOT_HANDLED = Symbol("not handled");
 
@@ -26,9 +28,24 @@ export function withActions(connectors: ConnectorInfo[]): ConnectorInfo[] {
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 
-let workflows: Workflow[] = cat.templates.slice(0, 3).map((t, i) => ({
+let workflows: Workflow[] = cat.templates.slice(0, 3).map((t, i): Workflow => ({
   ...clone(t), id: `wf-${i}`, enabled: i !== 2, version: i + 1, created_by: i === 1 ? "agent" : "user", updated_at: ago(60 * (i + 2)),
+})).concat(extraWorkflows(ago));
+
+// Model families, as the app seeds them from harnesses.json; saved ones
+// replace a built-in with their id, and the person's own follow by name.
+const BUILT_IN = ["fast", "balanced", "deep"];
+const builtIn = (): ModelFamily[] => BUILT_IN.map((id) => ({
+  id, name: id[0].toUpperCase() + id.slice(1),
+  candidates: (harnessData as { id: string; families?: Record<string, string> }[])
+    .filter((h) => h.families?.[id]).map((h) => ({ harness: h.id, model: h.families![id] })),
 }));
+let savedFamilies: ModelFamily[] = [];
+function families(): ModelFamily[] {
+  const base = builtIn().map((b) => savedFamilies.find((s) => s.id === b.id) ?? b);
+  const own = savedFamilies.filter((s) => !BUILT_IN.includes(s.id)).sort((a, b) => a.name.localeCompare(b.name));
+  return clone([...base, ...own]);
+}
 
 function lookup(ctx: unknown, path: string): unknown {
   let cur: any = ctx;
@@ -97,6 +114,10 @@ function validate(w: Workflow, connectors: ConnectorInfo[]): Issue[] {
         for (const m of String(v ?? "").matchAll(/\{\{\s*steps\.([a-z0-9_]+)/gi))
           if (!seen.has(m[1])) out.push({ at: s.id, error: true, message: `{{steps.${m[1]}…}} reads a step that hasn't run yet.` });
     }
+    if (s.type === "agent" && s.family) {
+      if (!families().some((f) => f.id === s.family)) out.push({ at: s.id, error: true, message: `There's no model family called ${s.family}.` });
+      else if (s.harness || s.model) out.push({ at: s.id, error: false, message: `The pinned model wins, so the ${s.family} family isn't used.` });
+    }
     seen.add(s.id);
   }
   // The real check walks every enabled workflow; this catches the common one.
@@ -121,7 +142,8 @@ function execute(w: Workflow, item: QueueItem | null, dry: boolean, connectors: 
     } else if (s.type === "set") sr.output = render(s.values, ctx);
     else if (s.type === "emit") { sr.input = { signal: s.signal, payload: render(s.payload, ctx) }; if (dry) sr.status = "dry"; }
     else if (s.type === "agent") {
-      sr.input = { prompt: render(s.prompt, ctx), repo: render(s.repo, ctx), placement: s.placement };
+      const fam = !s.harness && !s.model && s.family ? families().find((f) => f.id === s.family) : undefined;
+      sr.input = { prompt: render(s.prompt, ctx), repo: render(s.repo, ctx), harness: s.harness, model: s.model, placement: s.placement, ...(fam ? { family: fam.id, candidates: fam.candidates } : {}) };
       if (dry) { sr.status = "dry"; sr.output = { summary: "<what the agent says>", branch: "<branch>", pr_url: "<pull request>" }; }
       else { sr.status = "waiting"; status = "waiting"; }
     }
@@ -168,6 +190,16 @@ export function workflowMock(cmd: string, args: Record<string, any>, env: { item
     if (ci) runs.push({ ...execute(workflows[1], ci, false, connectors), started_at: ago(35), finished_at: ago(35), trigger: `github.review_requested ingested: ${ci.title}` });
   }
   switch (cmd) {
+    case "model_families_list": return families();
+    case "model_family_save": {
+      const f: ModelFamily = clone(args.family);
+      if (!/^[A-Za-z0-9_-]+$/.test(f.id)) throw `Family ids are letters, digits, - and _, got "${f.id}".`;
+      if (!f.candidates.length) throw "Add at least one model to the family.";
+      if (f.candidates.some((c) => !c.harness.trim())) throw "Pick a harness for every model in the family.";
+      savedFamilies = [...savedFamilies.filter((s) => s.id !== f.id), f];
+      return families();
+    }
+    case "model_family_delete": savedFamilies = savedFamilies.filter((s) => s.id !== args.id); return families();
     case "workflows_list": return clone(workflows);
     case "workflow_templates": return clone(cat.templates);
     case "workflow_validate": return validate(args.workflow, connectors);
@@ -191,7 +223,8 @@ export function workflowMock(cmd: string, args: Record<string, any>, env: { item
       return clone(w);
     }
     case "workflow_delete": workflows = workflows.filter((w) => w.id !== args.id); return null;
-    case "workflow_runs": return runs.filter((r) => !args.workflowId || r.workflow_id === args.workflowId).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, args.limit ?? 50);
+    case "workflow_insights": case "workflow_factory": return insightsMock(cmd, args, workflows);
+    case "workflow_runs": return [...runs, ...insightRuns(workflows)].filter((r) => !args.workflowId || r.workflow_id === args.workflowId).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, args.limit ?? 50);
     case "workflow_run": {
       const item = env.items().find((i) => i.id === args.itemId) ?? null;
       const run = execute(args.workflow, item, args.dryRun, connectors);

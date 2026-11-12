@@ -6,6 +6,7 @@
 
 mod activity;
 mod context;
+mod families;
 mod graph;
 mod http;
 pub mod hub_sync;
@@ -20,6 +21,7 @@ mod sessions;
 mod usage;
 mod vault;
 mod vectors;
+mod workflow_items;
 mod workflows;
 pub use jobs::CloudConnection;
 pub use knowledge::{ChunkHit, IndexTarget, Reader};
@@ -34,7 +36,7 @@ use rusqlite::Connection;
 
 pub use http::{AuditEntry, AuditQuery, CachedResponse, UsageRow};
 pub use items::{Scope, Upsert};
-pub use usage::{NewUsage, PlanWindow, UsageSummary};
+pub use usage::{NewUsage, PlanWindow, TurnUsage, UsageSummary};
 pub use vault::{VAULT_TITLE, VaultAuditRow, VaultDevice, VaultGeneration};
 pub use vectors::Doc;
 
@@ -79,6 +81,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/023_session_opened.sql"),
     include_str!("migrations/024_vault.sql"),
     include_str!("migrations/025_session_mode.sql"),
+    include_str!("migrations/026_model_families.sql"),
+    include_str!("migrations/027_workflow_run_items.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {

@@ -99,6 +99,8 @@ export const keys = {
   config: ["config"] as const,
   projects: ["projects"] as const,
   agentActivity: ["agent-activity"] as const,
+  workflowActivity: ["workflow-activity"] as const,
+  itemWorkflowRuns: (itemId: string) => ["item-workflow-runs", itemId] as const,
   contextStatus: (ids: string[]) => ["context-status", ids] as const,
   notes: (projectId: string) => ["notes", projectId] as const,
   repos: (projectId: string) => ["project-repos", projectId] as const,
@@ -205,6 +207,9 @@ function LiveEvents() {
           break;
         case "workflow_run":
           qc.invalidateQueries({ queryKey: ["workflow-runs"] });
+          qc.invalidateQueries({ queryKey: keys.workflowActivity });
+          qc.invalidateQueries({ queryKey: ["workflow-run-view", e.run.id] });
+          if (e.run.item_id) qc.invalidateQueries({ queryKey: keys.itemWorkflowRuns(e.run.item_id) });
           if (e.run.item_id && e.run.finished_at) qc.invalidateQueries({ queryKey: ["activity", e.run.item_id] });
           break;
         case "approval_requested":
@@ -212,7 +217,12 @@ function LiveEvents() {
         case "session_changed":
           if (e.type === "session_changed" && e.session.item_id) qc.invalidateQueries({ queryKey: ["activity", e.session.item_id] });
           clearTimeout(activity);
-          activity = window.setTimeout(() => qc.invalidateQueries({ queryKey: keys.agentActivity }), 150);
+          activity = window.setTimeout(() => {
+            qc.invalidateQueries({ queryKey: keys.agentActivity });
+            // A workflow's agent asking you something moves its item to "Waiting for you".
+            qc.invalidateQueries({ queryKey: keys.workflowActivity });
+            qc.invalidateQueries({ queryKey: ["item-workflow-runs"] });
+          }, 150);
           break;
       }
       switch (e.type) {
