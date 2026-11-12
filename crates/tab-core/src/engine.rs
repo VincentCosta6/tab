@@ -1181,6 +1181,12 @@ impl EngineHandle {
         self.workflows.run_now(w, item, dry_run).await
     }
 
+    /// Runs a failed run again, as the person asked; the new run notes
+    /// which one it re-runs.
+    pub async fn rerun_workflow(&self, run_id: &str) -> anyhow::Result<Run> {
+        self.workflows.rerun(run_id).await
+    }
+
     /// Rich content for an item. Cached content is returned immediately,
     /// however old; if it is past the connector's TTL a background refresh
     /// is queued and arrives as [`EngineEvent::PreviewChanged`]. Only a
