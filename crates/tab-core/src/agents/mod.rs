@@ -16,6 +16,7 @@
 pub mod catalog;
 pub use coordinator::COORDINATOR_KEY_PREFIX;
 mod claude;
+pub use claude::RewoundFiles;
 mod codex;
 pub mod coordinator;
 mod opencode;
@@ -42,7 +43,9 @@ use tokio_util::sync::CancellationToken;
 use crate::NewContext;
 use crate::config::AgentConfig;
 use crate::engine::EngineEvent;
-use crate::model::{AgentKind, Approval, ContextSection, ProjectNote, Session, SessionStatus};
+use crate::model::{
+    AgentKind, Approval, ContextSection, ProjectNote, Session, SessionMessage, SessionStatus,
+};
 use crate::store::Store;
 
 /// How long an approval waits for the person before it is denied.
@@ -455,6 +458,8 @@ pub(crate) enum Steer {
     /// From tab, not the person: read like a message, but not one the
     /// agent owes a reply to (see `claude::Unanswered`).
     Reminder(String),
+    /// The person switched the chat's permission mode.
+    Mode(String),
 }
 
 pub struct AgentHub {
@@ -589,7 +594,33 @@ impl AgentHub {
         if let Some(m) = &session.model {
             cfg.set_model(session.agent, Some(m.clone()));
         }
+        if let Some(m) = session.permission_mode.as_ref().filter(|m| !m.is_empty()) {
+            cfg.permission_mode = m.clone();
+        }
         cfg
+    }
+
+    /// Switches one chat's permission mode. A Claude Code turn under way
+    /// switches at once, as Shift+Tab does in its terminal; otherwise it
+    /// applies from the next message. Other chats keep theirs.
+    pub fn set_session_mode(&self, session_id: &str, mode: &str) -> anyhow::Result<Session> {
+        let session = self
+            .store
+            .session_set_mode(session_id, mode)?
+            .ok_or_else(|| anyhow::anyhow!("no such session"))?;
+        // A coordinator always asks (see `claude::run_turn`).
+        let coordinator =
+            coordinator::project_of(self.store.session_key(session_id)?.as_deref()).is_some();
+        if session.agent == AgentKind::ClaudeCode
+            && !coordinator
+            && let Some(tx) = self.steering.lock().unwrap().get(session_id)
+        {
+            let _ = tx.send(Steer::Mode(mode.to_string()));
+        }
+        self.emit(EngineEvent::SessionChanged {
+            session: session.clone(),
+        });
+        Ok(session)
     }
 
     /// Switches one chat's model (`None` for the harness's default), from
@@ -1171,7 +1202,7 @@ impl AgentHub {
             "message is empty"
         );
         self.check_attachments(attachments)?;
-        let prompt = with_attachments(text, attachments);
+        let prompt = self.with_shell(session_id, with_attachments(text, attachments));
         // The person is here now.
         self.woken.lock().unwrap().remove(session_id);
         let tx = self.steering.lock().unwrap().get(session_id).cloned();
@@ -1343,6 +1374,16 @@ impl AgentHub {
         {
             anyhow::bail!(why);
         }
+        // And the permission mode.
+        let session = match session.permission_mode {
+            Some(_) => session,
+            None => {
+                let m = self.config().permission_mode;
+                self.store
+                    .session_set_mode(session_id, &m)?
+                    .ok_or_else(|| anyhow::anyhow!("no such session"))?
+            }
+        };
         // A chat keeps the model it starts on, whatever other chats pick later.
         let session = match session.model {
             Some(_) => session,
@@ -1365,15 +1406,28 @@ impl AgentHub {
             running.insert(session_id.into(), cancel.clone());
             self.steering_prepare(session_id);
         }
+        // Commands the person ran with `!` since their last message go first.
+        let prompt = self.with_shell(session_id, with_attachments(text, attachments));
+        // Claude Code keeps tab's id for the message, so a rewind can name it.
+        let uuid = (visible && session.agent == AgentKind::ClaudeCode)
+            .then(|| uuid::Uuid::new_v4().to_string());
         if visible {
-            let meta = if attachments.is_empty() {
+            let mut meta = serde_json::Map::new();
+            if !attachments.is_empty() {
+                // `files` names them in the hub, so other devices can show them.
+                meta.insert("attachments".into(), serde_json::json!(attachments));
+                meta.insert(
+                    "files".into(),
+                    serde_json::json!(crate::live::file_refs(attachments)),
+                );
+            }
+            if let Some(u) = &uuid {
+                meta.insert("agent_uuid".into(), serde_json::json!(u));
+            }
+            let meta = if meta.is_empty() {
                 serde_json::Value::Null
             } else {
-                // `files` names them in the hub, so other devices can show them.
-                serde_json::json!({
-                    "attachments": attachments,
-                    "files": crate::live::file_refs(attachments),
-                })
+                serde_json::Value::Object(meta)
             };
             self.post(session_id, "user", "text", text, meta);
             self.attach_pasted_links(session_id, text);
@@ -1384,12 +1438,19 @@ impl AgentHub {
         self.update(session_id, Some(SessionStatus::Working), None);
 
         let hub = self.clone();
-        let prompt = with_attachments(text, attachments);
         tokio::spawn(async move {
             let system = hub.system_prompt(&session);
             let result = match session.agent {
                 AgentKind::ClaudeCode => {
-                    claude::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
+                    claude::run_turn(
+                        &hub,
+                        &session,
+                        &prompt,
+                        &system,
+                        uuid.as_deref(),
+                        cancel.clone(),
+                    )
+                    .await
                 }
                 AgentKind::OpenCode => {
                     opencode::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
@@ -1486,6 +1547,208 @@ impl AgentHub {
         if asked {
             self.update(session_id, Some(SessionStatus::NeedsInput), None);
         }
+    }
+
+    /// `text` with what the person ran with `!` since their last message
+    /// before it, as Claude Code's terminal shows the agent its bash mode.
+    fn with_shell(&self, session_id: &str, text: String) -> String {
+        let Ok(messages) = self.store.messages(session_id) else {
+            return text;
+        };
+        let ran = shell_since_last_message(&messages);
+        if ran.is_empty() {
+            return text;
+        }
+        format!("{ran}\n\n{text}")
+    }
+
+    /// Runs a command the person typed after `!` in the chat's folder, under
+    /// the chat's sandbox, and puts it and its output in the chat. The agent
+    /// sees both with the next message, and no turn starts.
+    pub async fn run_shell(&self, session_id: &str, command: &str) -> anyhow::Result<()> {
+        let command = command.trim();
+        anyhow::ensure!(!command.is_empty(), "type a command after !");
+        let session = self
+            .store
+            .session_get(session_id)?
+            .ok_or_else(|| anyhow::anyhow!("no such session"))?;
+        anyhow::ensure!(
+            self.runs_here(&session),
+            "this chat runs on another device; run the command there"
+        );
+        if let Some(why) = crate::config::folder_problem(&session.cwd) {
+            anyhow::bail!("This chat's folder can't be used: {why}");
+        }
+        let policy = self.policy(&session);
+        let (exe, args): (&str, Vec<std::ffi::OsString>) = if cfg!(windows) {
+            ("cmd", vec!["/C".into(), command.into()])
+        } else {
+            ("/bin/sh", vec!["-c".into(), command.into()])
+        };
+        let exe = if cfg!(windows) {
+            resolve(exe)?
+        } else {
+            PathBuf::from(exe)
+        };
+        let mut prepared = crate::sandbox::current()
+            .command(&exe, &args, Path::new(&session.cwd), &policy)
+            .await?;
+        self.add_shims(&session, &mut prepared.cmd);
+        prepared
+            .cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = prepared.spawn()?;
+        let mut stdout = child.stdout.take().expect("piped");
+        let mut stderr = child.stderr.take().expect("piped");
+        let run = async {
+            use tokio::io::AsyncReadExt;
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let (a, b) = tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
+            a?;
+            b?;
+            let status = child.wait().await?;
+            anyhow::Ok((out, err, status))
+        };
+        let (output, code) = match tokio::time::timeout(SHELL_TIMEOUT, run).await {
+            Ok(out) => {
+                let (out, err, status) = out?;
+                let mut text = String::from_utf8_lossy(&out).into_owned();
+                let err = String::from_utf8_lossy(&err);
+                if !err.trim().is_empty() {
+                    if !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(&err);
+                }
+                (text, status.code())
+            }
+            Err(_) => (
+                format!("Stopped after {} seconds.", SHELL_TIMEOUT.as_secs()),
+                None,
+            ),
+        };
+        let output = cut_output(output.trim_end());
+        self.post(
+            session_id,
+            "system",
+            "shell",
+            command,
+            serde_json::json!({ "output": output, "exit_code": code }),
+        );
+        Ok(())
+    }
+
+    /// Takes the chat back to before one of the person's messages, as
+    /// Claude Code's rewind does: the conversation (the agent forgets that
+    /// message and what came after, and tab drops them from the chat), the
+    /// files the agent changed since, or both. Returns the message, so it
+    /// can be edited and sent again.
+    pub async fn rewind(
+        self: &Arc<Self>,
+        session_id: &str,
+        message_id: i64,
+        conversation: bool,
+        files: bool,
+    ) -> anyhow::Result<Rewound> {
+        anyhow::ensure!(conversation || files, "nothing to rewind");
+        let (session, messages, at) = self.rewind_target(session_id, message_id)?;
+        let m = &messages[at];
+        let uuid = m.meta["agent_uuid"].as_str().unwrap_or_default();
+        let resume = if conversation {
+            Some(rewind_point(&messages[..at])?)
+        } else {
+            None
+        };
+        let changed = if files {
+            claude::rewind_files(self, &session, uuid, false).await?
+        } else {
+            Default::default()
+        };
+        let quote = quote_message(&m.content);
+        if let Some(resume) = resume {
+            claude::set_rewind(&self.session_dir(session_id)?, &resume)?;
+            self.store.messages_delete_from(session_id, message_id)?;
+            let note = if files {
+                format!("Rewound the conversation and code to before “{quote}”.")
+            } else {
+                format!(
+                    "Rewound the conversation to before “{quote}”. Files were left as they are."
+                )
+            };
+            self.post(session_id, "system", "note", &note, serde_json::Value::Null);
+        } else {
+            let n = changed.files.len();
+            let note = format!(
+                "Restored {} to before “{quote}”. The conversation was left as it is.",
+                if n == 1 {
+                    "1 file".to_string()
+                } else {
+                    format!("{n} files")
+                }
+            );
+            self.post(session_id, "system", "note", &note, serde_json::Value::Null);
+        }
+        self.emit(EngineEvent::SessionChanged {
+            session: self.store.session_get(session_id)?.unwrap_or(session),
+        });
+        Ok(Rewound {
+            text: m.content.clone(),
+            attachments: m.meta["attachments"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str().map(str::to_string))
+                .collect(),
+            files: changed,
+        })
+    }
+
+    /// What rewinding the files to before a message would change.
+    pub async fn rewind_preview(
+        self: &Arc<Self>,
+        session_id: &str,
+        message_id: i64,
+    ) -> anyhow::Result<claude::RewoundFiles> {
+        let (session, messages, at) = self.rewind_target(session_id, message_id)?;
+        let uuid = messages[at].meta["agent_uuid"].as_str().unwrap_or_default();
+        claude::rewind_files(self, &session, uuid, true).await
+    }
+
+    /// The chat, its messages and where the one to rewind to is, once it's
+    /// clear a rewind can happen.
+    fn rewind_target(
+        &self,
+        session_id: &str,
+        message_id: i64,
+    ) -> anyhow::Result<(Session, Vec<SessionMessage>, usize)> {
+        let session = self
+            .store
+            .session_get(session_id)?
+            .ok_or_else(|| anyhow::anyhow!("no such session"))?;
+        anyhow::ensure!(
+            session.agent == AgentKind::ClaudeCode,
+            "Rewind works in Claude Code chats only for now."
+        );
+        anyhow::ensure!(
+            self.runs_here(&session),
+            "This chat runs on another device; rewind it there."
+        );
+        anyhow::ensure!(
+            !self.is_running(session_id),
+            "The agent is still working. Stop it first, then rewind."
+        );
+        let messages = self.store.messages(session_id)?;
+        let at = messages
+            .iter()
+            .position(|m| m.id == message_id)
+            .ok_or_else(|| anyhow::anyhow!("that message is gone"))?;
+        anyhow::ensure!(
+            messages[at].role == "user" && messages[at].meta["agent_uuid"].is_string(),
+            "tab can't rewind to that message (it was sent mid-turn, or before tab kept checkpoints)."
+        );
+        Ok((session, messages, at))
     }
 
     pub fn stop(&self, session_id: &str) {
@@ -1913,6 +2176,81 @@ impl AgentHub {
 
 /// The message as the agent sees it: the text, then the attached files to
 /// open.
+/// The longest a `!` command runs.
+const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// The most of a `!` command's output kept, from its start and its end.
+const SHELL_OUTPUT: usize = 16_000;
+
+/// A command's output cut to [`SHELL_OUTPUT`]: its start and its end, which
+/// is where errors and summaries are.
+fn cut_output(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= SHELL_OUTPUT {
+        return s.to_string();
+    }
+    let half = SHELL_OUTPUT / 2;
+    let head: String = chars[..half].iter().collect();
+    let tail: String = chars[chars.len() - half..].iter().collect();
+    format!(
+        "{head}\n… {} characters cut …\n{tail}",
+        chars.len() - SHELL_OUTPUT
+    )
+}
+
+/// The `!` commands since the person's last message, as Claude Code's
+/// terminal hands bash-mode input and output to the agent.
+fn shell_since_last_message(messages: &[SessionMessage]) -> String {
+    let start = messages
+        .iter()
+        .rposition(|m| m.role == "user" && m.kind == "text")
+        .map_or(0, |i| i + 1);
+    messages[start..]
+        .iter()
+        .filter(|m| m.kind == "shell")
+        .map(|m| {
+            format!(
+                "<bash-input>{}</bash-input>\n<bash-stdout>{}</bash-stdout>",
+                m.content,
+                m.meta["output"].as_str().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Where the conversation picks up when it's rewound to the message after
+/// `before`: the agent's last reply in them, or from nothing.
+fn rewind_point(before: &[SessionMessage]) -> anyhow::Result<claude::Rewind> {
+    let Some(last) = before.iter().rev().find(|m| m.kind == "result") else {
+        return Ok(claude::Rewind::Fresh);
+    };
+    match last.meta["agent_uuid"].as_str() {
+        Some(u) => Ok(claude::Rewind::At(u.to_string())),
+        None => anyhow::bail!(
+            "The turn before that message ran before tab kept checkpoints, so the conversation can't go back there. Code can still be restored."
+        ),
+    }
+}
+
+/// A message's first line, cut short, to name it in a note.
+fn quote_message(text: &str) -> String {
+    let first = text.lines().next().unwrap_or_default().trim();
+    if first.chars().count() > 60 {
+        first.chars().take(57).collect::<String>() + "…"
+    } else {
+        first.to_string()
+    }
+}
+
+/// What [`AgentHub::rewind`] took back.
+#[derive(Debug, Clone, Serialize)]
+pub struct Rewound {
+    /// The message rewound to, to edit and send again.
+    pub text: String,
+    pub attachments: Vec<String>,
+    pub files: claude::RewoundFiles,
+}
+
 fn with_attachments(text: &str, attachments: &[String]) -> String {
     if attachments.is_empty() {
         return text.to_string();
@@ -2445,5 +2783,118 @@ Publisher: Anthropic PBC
     #[test]
     fn installer_colour_codes_are_dropped() {
         assert_eq!(strip_ansi("\u{1b}[32mDone\u{1b}[0m in 3s"), "Done in 3s");
+    }
+}
+
+#[cfg(test)]
+mod rewind_tests {
+    use super::*;
+
+    fn msg(
+        id: i64,
+        role: &str,
+        kind: &str,
+        content: &str,
+        meta: serde_json::Value,
+    ) -> SessionMessage {
+        SessionMessage {
+            id,
+            session_id: "s".into(),
+            role: role.into(),
+            kind: kind.into(),
+            content: content.into(),
+            meta,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_rewind_resumes_after_the_reply_before_the_message() {
+        let null = serde_json::Value::Null;
+        assert_eq!(rewind_point(&[]).unwrap(), claude::Rewind::Fresh);
+        let turn = [
+            msg(
+                1,
+                "user",
+                "text",
+                "hi",
+                serde_json::json!({ "agent_uuid": "u1" }),
+            ),
+            msg(2, "assistant", "text", "hello", null.clone()),
+            msg(
+                3,
+                "system",
+                "result",
+                "",
+                serde_json::json!({ "agent_uuid": "a1" }),
+            ),
+        ];
+        assert_eq!(
+            rewind_point(&turn).unwrap(),
+            claude::Rewind::At("a1".into())
+        );
+        // A turn from before tab kept checkpoints can't be resumed at.
+        let old = [msg(1, "system", "result", "", null)];
+        assert!(rewind_point(&old).is_err());
+    }
+
+    #[test]
+    fn shell_commands_go_to_the_agent_with_the_next_message_only() {
+        let null = serde_json::Value::Null;
+        let ran = |id, cmd: &str, out: &str| {
+            msg(
+                id,
+                "system",
+                "shell",
+                cmd,
+                serde_json::json!({ "output": out }),
+            )
+        };
+        let messages = [
+            ran(1, "ls", "old"),
+            msg(2, "user", "text", "hi", null.clone()),
+            msg(3, "assistant", "text", "hello", null),
+            ran(4, "git status", "clean"),
+            ran(5, "pwd", "/r"),
+        ];
+        assert_eq!(
+            shell_since_last_message(&messages),
+            "<bash-input>git status</bash-input>\n<bash-stdout>clean</bash-stdout>\n<bash-input>pwd</bash-input>\n<bash-stdout>/r</bash-stdout>"
+        );
+        assert_eq!(shell_since_last_message(&messages[..3]), "");
+    }
+
+    #[test]
+    fn long_output_keeps_its_start_and_end() {
+        let long = format!("{}{}", "a".repeat(SHELL_OUTPUT), "b".repeat(100));
+        let cut = cut_output(&long);
+        assert!(cut.starts_with('a') && cut.ends_with('b') && cut.contains("100 characters cut"));
+        assert_eq!(cut_output("short"), "short");
+    }
+
+    #[test]
+    fn rewinding_drops_the_message_and_what_followed() {
+        let store = Store::in_memory().unwrap();
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let null = serde_json::Value::Null;
+        let ids: Vec<i64> = ["one", "two", "three"]
+            .iter()
+            .map(|t| {
+                store
+                    .message_add(&s.id, "user", "text", t, &null, Utc::now())
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        assert_eq!(store.messages_delete_from(&s.id, ids[1]).unwrap(), 2);
+        let left: Vec<_> = store
+            .messages(&s.id)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(left, ["one"]);
     }
 }

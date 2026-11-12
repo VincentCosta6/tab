@@ -119,7 +119,7 @@ export function QueryProvider({ children }: { children: ReactNode }) {
 }
 
 /** Finds the chat query (keyed by item) that holds a session. */
-function chatKeyForSession(qc: QueryClient, sessionId: string) {
+export function chatKeyForSession(qc: QueryClient, sessionId: string) {
   for (const [key, data] of qc.getQueriesData<Chat>({ queryKey: ["chat"] })) {
     if (data?.session?.id === sessionId) return key;
   }

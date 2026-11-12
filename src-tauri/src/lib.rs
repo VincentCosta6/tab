@@ -1740,6 +1740,96 @@ async fn slash_arg_values(cwd: String, kind: String, typed: String) -> Vec<Strin
     .unwrap_or_default()
 }
 
+/// Files and folders in a chat's folder for an `@` mention, best first.
+#[tauri::command]
+async fn chat_mentions(cwd: String, query: String) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        tab_core::agents::slash_args::mentions(std::path::Path::new(&cwd), &query)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Runs a command typed after `!` in the chat's folder and puts its output
+/// in the chat, for the agent to see with the next message. Without an
+/// item (the "New" chat), the command first becomes a tab task.
+#[tauri::command]
+async fn chat_shell(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    command: String,
+    project_id: Option<String>,
+) -> CmdResult<ChatStarted> {
+    let command = command.trim().to_string();
+    if command.is_empty() {
+        return Err("type a command after !".into());
+    }
+    let item = match item_id {
+        Some(id) => state
+            .store
+            .get(&id)
+            .map_err(err)?
+            .ok_or("that item no longer exists")?,
+        None => with_engine!(state, e => e.create_task(NewTask {
+            title: format!("!{}", command.chars().take(79).collect::<String>()),
+            created_by: "user".into(),
+            project_id,
+            auto_title: true,
+            ..Default::default()
+        }).map_err(err))?,
+    };
+    let session = state.hub.session_for_item(&item.id).map_err(err)?;
+    state
+        .hub
+        .run_shell(&session.id, &command)
+        .await
+        .map_err(err)?;
+    Ok(ChatStarted { item, session })
+}
+
+#[derive(Serialize)]
+struct ChatRewound {
+    chat: Chat,
+    #[serde(flatten)]
+    rewound: tab_core::agents::Rewound,
+}
+
+/// Takes a chat back to before one of the person's messages: its
+/// conversation, the files the agent changed since, or both.
+#[tauri::command]
+async fn chat_rewind(
+    state: State<'_, AppState>,
+    session_id: String,
+    message_id: i64,
+    conversation: bool,
+    files: bool,
+) -> CmdResult<ChatRewound> {
+    let rewound = state
+        .hub
+        .rewind(&session_id, message_id, conversation, files)
+        .await
+        .map_err(err)?;
+    let session = state.store.session_get(&session_id).map_err(err)?;
+    Ok(ChatRewound {
+        chat: chat_of(&state, session)?,
+        rewound,
+    })
+}
+
+/// What rewinding the files to before a message would change.
+#[tauri::command]
+async fn chat_rewind_preview(
+    state: State<'_, AppState>,
+    session_id: String,
+    message_id: i64,
+) -> CmdResult<tab_core::agents::RewoundFiles> {
+    state
+        .hub
+        .rewind_preview(&session_id, message_id)
+        .await
+        .map_err(err)
+}
+
 /// The MCP servers a chat's agent reported at its last turn, with status.
 #[tauri::command]
 fn agent_mcp_servers(
@@ -2866,11 +2956,28 @@ async fn set_session_model(
         .map_err(err)
 }
 
-/// Sets the Claude Code permission mode from the chat composer; applies
-/// from the next message.
+/// The permission modes the composer offers.
+const PERMISSION_MODES: &[&str] = &["default", "acceptEdits", "plan", "auto"];
+
+/// Switches one chat's permission mode. Other chats, and the mode new chats
+/// start in, stay as they are.
+#[tauri::command]
+async fn set_session_mode(
+    state: State<'_, AppState>,
+    session_id: String,
+    mode: String,
+) -> CmdResult<Session> {
+    if !PERMISSION_MODES.contains(&mode.as_str()) {
+        return Err(format!("unknown permission mode {mode}"));
+    }
+    state.hub.set_session_mode(&session_id, &mode).map_err(err)
+}
+
+/// Sets the permission mode new chats start in, from the composer before a
+/// chat starts.
 #[tauri::command]
 async fn set_agent_mode(state: State<'_, AppState>, mode: String) -> CmdResult<TabConfig> {
-    if !["default", "acceptEdits", "plan", "auto"].contains(&mode.as_str()) {
+    if !PERMISSION_MODES.contains(&mode.as_str()) {
         return Err(format!("unknown permission mode {mode}"));
     }
     let mut current = state.config.lock().await;
@@ -3410,6 +3517,7 @@ pub fn run() {
             set_agent_model,
             set_session_model,
             set_agent_mode,
+            set_session_mode,
             rate_pressure,
             item_context,
             context_add,
@@ -3433,6 +3541,10 @@ pub fn run() {
             agent_slash_commands,
             agent_subagents,
             slash_arg_values,
+            chat_mentions,
+            chat_shell,
+            chat_rewind,
+            chat_rewind_preview,
             agent_mcp_servers,
             agent_health,
             agent_upgrade,

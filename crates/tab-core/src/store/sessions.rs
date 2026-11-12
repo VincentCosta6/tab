@@ -6,7 +6,7 @@ use rusqlite::{OptionalExtension, Row, params};
 use super::{Store, parse_ts, ts};
 use crate::model::{AgentKind, Session, SessionMessage, SessionStatus};
 
-const COLS: &str = "id, item_id, agent, agent_session_id, title, status, cwd, created_at, updated_at, device, model, opened_at";
+const COLS: &str = "id, item_id, agent, agent_session_id, title, status, cwd, created_at, updated_at, device, model, opened_at, permission_mode";
 
 fn row_to_session(r: &Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
@@ -25,6 +25,7 @@ fn row_to_session(r: &Row<'_>) -> rusqlite::Result<Session> {
             .get::<_, Option<String>>(11)?
             .map(|t| parse_ts(&t))
             .transpose()?,
+        permission_mode: r.get(12)?,
     })
 }
 
@@ -267,6 +268,15 @@ impl Store {
         self.session_get(id)
     }
 
+    /// Sets the permission mode a chat runs in.
+    pub fn session_set_mode(&self, id: &str, mode: &str) -> anyhow::Result<Option<Session>> {
+        self.conn().execute(
+            "UPDATE sessions SET permission_mode = ?2 WHERE id = ?1",
+            params![id, mode.trim()],
+        )?;
+        self.session_get(id)
+    }
+
     pub fn message_add(
         &self,
         session_id: &str,
@@ -357,6 +367,14 @@ impl Store {
             .query_map([session_id], row_to_message)?
             .collect::<Result<_, _>>()?;
         Ok(rows)
+    }
+
+    /// Drops a chat's messages from `id` on (a rewind), and returns how many.
+    pub fn messages_delete_from(&self, session_id: &str, id: i64) -> anyhow::Result<usize> {
+        Ok(self.conn().execute(
+            "DELETE FROM session_messages WHERE session_id = ?1 AND id >= ?2",
+            params![session_id, id],
+        )?)
     }
 
     /// When each attached file was last part of an active chat: the later of

@@ -271,7 +271,8 @@ export function WorkTab() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement)?.isContentEditable;
-      if (e.key === "Escape" && typing) (e.target as HTMLElement).blur();
+      // Unless the box has a use for it (the composer's Esc Esc).
+      if (e.key === "Escape" && typing && !e.defaultPrevented) (e.target as HTMLElement).blur();
       if (typing || e.metaKey || e.ctrlKey) return;
       if (e.key === "j" || e.key === "ArrowDown") (e.preventDefault(), move(1));
       if (e.key === "k" || e.key === "ArrowUp") (e.preventDefault(), move(-1));

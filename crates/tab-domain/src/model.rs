@@ -898,6 +898,10 @@ pub struct Session {
     /// `/resume`. A task shows the chat opened last.
     #[serde(default)]
     pub opened_at: Option<DateTime<Utc>>,
+    /// The permission mode this chat runs in, set when its first message
+    /// is sent; `None` for older chats, which follow tab's default.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

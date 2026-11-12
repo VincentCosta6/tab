@@ -384,12 +384,14 @@ export interface Session {
   model?: string | null;
   /** When it last became its task's chat (created, or picked with /resume). A task shows the chat opened last. */
   opened_at?: string | null;
+  /** The permission mode this chat runs in; missing on older chats, which follow tab's default. */
+  permission_mode?: string | null;
 }
 export interface SessionMessage {
   id: number;
   session_id: string;
   role: "user" | "assistant" | "tool" | "system";
-  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request" | "suggestion" | "note" | "wake" | "compacted";
+  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request" | "suggestion" | "note" | "wake" | "compacted" | "shell";
   content: string;
   meta: any;
   created_at: string;
@@ -399,6 +401,10 @@ export interface Chat { session: Session | null; messages: SessionMessage[]; app
 /** One of a task's chats, for /resume. */
 export interface ChatSummary { session: Session; first: string; messages: number; running: boolean }
 export interface ChatStarted { item: QueueItem; session: Session }
+/** What restoring files to before a message changes (or changed). */
+export interface RewoundFiles { files: string[]; insertions: number; deletions: number }
+/** A rewound chat, and the message it went back to, to edit and send again. */
+export interface ChatRewound { chat: Chat; text: string; attachments: string[]; files: RewoundFiles }
 export interface NewTask { title: string; body?: string | null; priority?: string | null; due_at?: string | null; url?: string | null; created_by: string }
 export interface GhStatus {
   installed: boolean;

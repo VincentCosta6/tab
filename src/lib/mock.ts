@@ -533,6 +533,32 @@ export const mockApi = {
           emit({ type: "session_changed", session });
           return { session, messages: messages.filter((m) => m.session_id === session.id), approvals: [], running: session.status === "working" } satisfies Chat;
         }
+        case "chat_mentions": {
+          const all = ["src/", "src/modules/", "src/modules/work/", "src/modules/work/Chat.tsx", "src/modules/work/SlashPanels.tsx", "src/lib/api.ts", "crates/tab-core/src/agents/claude.rs", "README.md", "package.json"];
+          const q = String(args.query).toLowerCase();
+          const fuzzy = (p: string) => { let i = 0; for (const c of p.toLowerCase()) if (c === q[i]) i++; return i === q.length; };
+          return q ? all.filter(fuzzy) : all.filter((p) => !p.slice(0, -1).includes("/"));
+        }
+        case "chat_shell": {
+          const item = args.itemId ? items.find((i) => i.id === args.itemId)! : createTask(`!${args.command}`, null, args.projectId ?? null);
+          let session = chatsOf(item.id)[0];
+          if (!session) {
+            session = { id: `sess-${Date.now()}`, item_id: item.id, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: item.title, status: "idle", cwd: "~/code", created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+            sessions.push(session);
+          }
+          post(session, "system", "shell", String(args.command), { output: args.command === "git status" ? "On branch main\nnothing to commit, working tree clean" : `ran ${args.command}`, exit_code: 0 });
+          return { item, session };
+        }
+        case "chat_rewind_preview":
+          return { files: ["/Users/you/code/src/app.ts", "/Users/you/code/README.md"], insertions: 12, deletions: 3 };
+        case "chat_rewind": {
+          const session = sessions.find((s) => s.id === args.sessionId)!;
+          const m = messages.find((x) => x.id === args.messageId)!;
+          if (args.conversation) for (let i = messages.length - 1; i >= 0; i--) if (messages[i].session_id === session.id && messages[i].id >= m.id) messages.splice(i, 1);
+          post(session, "system", "note", args.conversation ? `Rewound the conversation to before “${m.content.split("\n")[0]}”.` : `Restored 2 files to before “${m.content.split("\n")[0]}”.`);
+          const chat: Chat = { session, messages: messages.filter((x) => x.session_id === session.id), approvals: [], running: false };
+          return { chat, text: m.content, attachments: m.meta?.attachments ?? [], files: { files: args.files ? ["/Users/you/code/src/app.ts"] : [], insertions: 12, deletions: 3 } };
+        }
         case "chat_send": {
           const item = args.itemId ? items.find((i) => i.id === args.itemId)! : createTask(String(args.text).split("\n")[0].slice(0, 80), null, args.projectId ?? null);
           let session = chatsOf(item.id)[0];
@@ -562,6 +588,12 @@ export const mockApi = {
           return session;
         }
         case "set_agent_mode": config = { ...config, agent: { ...config.agent, permission_mode: args.mode } }; return config;
+        case "set_session_mode": {
+          const session = sessions.find((s) => s.id === args.sessionId)!;
+          session.permission_mode = args.mode;
+          emit({ type: "session_changed", session: { ...session } });
+          return session;
+        }
         case "chat_stop": return null;
         case "chat_interrupt": return null;
         case "approval_resolve": return true;
@@ -1082,7 +1114,7 @@ const withImages = (a: string[]) => (a.length ? { attachments: a } : null);
 function simulateTurn(session: Session, item: QueueItem, text: string, attachments: string[] = []) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (async () => {
-    post(session, "user", "text", text, withImages(attachments));
+    post(session, "user", "text", text, { ...withImages(attachments), agent_uuid: `u-${msgId}` });
     status(session, "working");
     await sleep(500);
     post(session, "assistant", "tool", "tab: tab_search: checkout", { tool: "mcp__tab__tab_search" });
@@ -1209,7 +1241,7 @@ function mockGraph(projectId: string | null, days: number | null): GraphView {
 function simulateCoordinatorTurn(session: Session, project: Project, text: string, attachments: string[] = []) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (async () => {
-    post(session, "user", "text", text, withImages(attachments));
+    post(session, "user", "text", text, { ...withImages(attachments), agent_uuid: `u-${msgId}` });
     status(session, "working");
     await sleep(400);
     post(session, "assistant", "tool", `tab: tab_project: ${project.name}`, { tool: "mcp__tab__tab_project" });
@@ -1232,7 +1264,7 @@ function simulateCoordinatorTurn(session: Session, project: Project, text: strin
 function simulateReviewTurn(session: Session, text: string, attachments: string[] = []) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (async () => {
-    post(session, "user", "text", text, withImages(attachments));
+    post(session, "user", "text", text, { ...withImages(attachments), agent_uuid: `u-${msgId}` });
     status(session, "working");
     await sleep(400);
     const fixes = /fix list/i.test(text);
