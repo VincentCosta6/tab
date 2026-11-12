@@ -3,6 +3,7 @@
 // designed against the real metadata.
 
 import catalog from "./mock-workflows.json";
+import { extraWorkflows, insightRuns, insightsMock } from "./mock-insights";
 import type { ActionInfo, Activity, Chat, Condition, ConnectorInfo, EngineEvent, Issue, KindInfo, QueueItem, Session, StepRun, Workflow, WorkflowRun } from "./types";
 
 export const NOT_HANDLED = Symbol("not handled");
@@ -26,9 +27,9 @@ export function withActions(connectors: ConnectorInfo[]): ConnectorInfo[] {
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 
-let workflows: Workflow[] = cat.templates.slice(0, 3).map((t, i) => ({
+let workflows: Workflow[] = cat.templates.slice(0, 3).map((t, i): Workflow => ({
   ...clone(t), id: `wf-${i}`, enabled: i !== 2, version: i + 1, created_by: i === 1 ? "agent" : "user", updated_at: ago(60 * (i + 2)),
-}));
+})).concat(extraWorkflows(ago));
 
 function lookup(ctx: unknown, path: string): unknown {
   let cur: any = ctx;
@@ -191,7 +192,8 @@ export function workflowMock(cmd: string, args: Record<string, any>, env: { item
       return clone(w);
     }
     case "workflow_delete": workflows = workflows.filter((w) => w.id !== args.id); return null;
-    case "workflow_runs": return runs.filter((r) => !args.workflowId || r.workflow_id === args.workflowId).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, args.limit ?? 50);
+    case "workflow_insights": case "workflow_factory": return insightsMock(cmd, args, workflows);
+    case "workflow_runs": return [...runs, ...insightRuns(workflows)].filter((r) => !args.workflowId || r.workflow_id === args.workflowId).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, args.limit ?? 50);
     case "workflow_run": {
       const item = env.items().find((i) => i.id === args.itemId) ?? null;
       const run = execute(args.workflow, item, args.dryRun, connectors);

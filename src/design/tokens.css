@@ -60,6 +60,15 @@
   --urgency-this_week: var(--tone-info-fg);
   --urgency-whenever: var(--fg-subtle);
 
+  /* Chart fills (outcomes and interventions). Darker than the text tones
+     so marks read on both surfaces; checked for colour-blind separation. */
+  --chart-ok: #15803d;
+  --chart-attended: #4f46e5;
+  --chart-failed: #c2261d;
+  --chart-planned: #0284c7;
+  --chart-unplanned: #d97706;
+  --chart-track: #e8e8ec;
+
   color-scheme: light;
 }
 
@@ -93,6 +102,13 @@
     --tone-warning-bg: #32250c;
     --tone-danger-fg: #fca5a5;
     --tone-danger-bg: #3a1513;
+
+    --chart-ok: #16a34a;
+    --chart-attended: #6366f1;
+    --chart-failed: #ef4444;
+    --chart-planned: #0284c7;
+    --chart-unplanned: #d97706;
+    --chart-track: #26262b;
 
     color-scheme: dark;
   }

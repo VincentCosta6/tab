@@ -26,6 +26,7 @@
 //!   turns them on, and destructive actions (merge, close, move mail) stay
 //!   blocked until the person allows them on that workflow.
 
+pub mod insights;
 pub mod run;
 pub mod stats;
 pub mod template;

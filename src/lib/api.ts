@@ -6,7 +6,7 @@ import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ChatSummary, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceAccess, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem, SlashCommand, Subagent,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
-  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
+  Activity, Issue, Workflow, WorkflowRun, WorkflowFactory, WorkflowInsights, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
   AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
   EmailSignInStatus, MailProvider, Segment, SessionMessage, ChatRewound, RewoundFiles, VaultAudit, VaultEntry, VaultEntryInput, VaultStatus,
 } from "./types";
@@ -288,6 +288,11 @@ export const api = {
   workflowDelete: (id: string) => call<void>("workflow_delete", { id }),
   workflowRuns: (workflowId: string | null, limit = 50) => call<WorkflowRun[]>("workflow_runs", { workflowId, limit }),
   workflowRun: (workflow: Workflow, itemId: string | null, dryRun: boolean) => call<WorkflowRun>("workflow_run", { workflow, itemId, dryRun }),
+  /** One workflow's stats for the last `days` days (7 or 30) and the span before; days break at the local midnight. */
+  workflowInsights: (workflowId: string, days: number) =>
+    call<WorkflowInsights>("workflow_insights", { workflowId, days, utcOffsetMinutes: -new Date().getTimezoneOffset() }),
+  /** Every workflow's stats and health with hub-wide totals, this window and the one before. */
+  workflowFactory: (days: number) => call<WorkflowFactory>("workflow_factory", { days, utcOffsetMinutes: -new Date().getTimezoneOffset() }),
   workflowChatOpen: (workflowId: string | null) => call<Chat>("workflow_chat_open", { workflowId }),
   workflowChatSend: (text: string, open: Workflow | null) => call<Session>("workflow_chat_send", { text, open }),
   browserOpen: (id: string, url: string, bounds: Bounds) => call<void>("browser_open", { id, url, bounds }),

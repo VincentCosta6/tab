@@ -251,6 +251,28 @@ impl Store {
         Ok(out)
     }
 
+    /// Every run that started at or after `from`, oldest first. With no
+    /// workflow, every workflow's. For adding runs up, so not capped.
+    pub fn workflow_runs_from(
+        &self,
+        workflow_id: Option<&str>,
+        from: DateTime<Utc>,
+    ) -> anyhow::Result<Vec<Run>> {
+        let conn = self.conn();
+        let mut st = conn.prepare(
+            "SELECT body FROM workflow_runs WHERE (?1 IS NULL OR workflow_id = ?1)
+               AND started_at >= ?2 ORDER BY started_at",
+        )?;
+        let rows = st.query_map(params![workflow_id, ts(from)], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let Ok(run) = serde_json::from_str::<Run>(&row?) {
+                out.push(run);
+            }
+        }
+        Ok(out)
+    }
+
     /// Runs `runner` left `running` when it last quit never finished. Runs
     /// other runners started are theirs to finish.
     pub fn workflow_runs_abandon(&self, runner: &str, now: DateTime<Utc>) -> anyhow::Result<()> {

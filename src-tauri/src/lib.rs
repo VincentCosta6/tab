@@ -2597,6 +2597,37 @@ async fn workflow_runs(
         .map_err(err)
 }
 
+/// One workflow's stats for the last `days` days (7 or 30) and the span
+/// before it, with days breaking at the caller's midnight.
+#[tauri::command]
+async fn workflow_insights(
+    state: State<'_, AppState>,
+    workflow_id: String,
+    days: u32,
+    utc_offset_minutes: i32,
+) -> CmdResult<workflow::insights::WorkflowInsights> {
+    workflow::insights_store::workflow_insights(
+        &state.store,
+        &workflow_id,
+        days,
+        utc_offset_minutes,
+        Utc::now(),
+    )
+    .map_err(err)
+}
+
+/// Every workflow's stats and health, and hub-wide totals, for the factory
+/// overview.
+#[tauri::command]
+async fn workflow_factory(
+    state: State<'_, AppState>,
+    days: u32,
+    utc_offset_minutes: i32,
+) -> CmdResult<workflow::insights::Factory> {
+    workflow::insights_store::workflow_factory(&state.store, days, utc_offset_minutes, Utc::now())
+        .map_err(err)
+}
+
 #[tauri::command]
 async fn workflow_versions(
     state: State<'_, AppState>,
@@ -3673,6 +3704,8 @@ pub fn run() {
             workflow_set_enabled,
             workflow_delete,
             workflow_runs,
+            workflow_insights,
+            workflow_factory,
             workflow_versions,
             workflow_run,
             item_activity,
