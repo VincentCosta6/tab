@@ -35,6 +35,7 @@ mod cloud_runner;
 mod dev;
 mod remote_mcp;
 mod updates;
+mod vault;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
 /// Shown in place of stored secrets; sending it back means "keep the old value".
@@ -3187,6 +3188,19 @@ pub fn run() {
                     None
                 }
             };
+            // The end-to-end encrypted vault: its key never leaves this
+            // device, and its sealed files go into the hub.
+            {
+                let v = tab_core::e2e::E2e::new(
+                    store.clone(),
+                    &data_dir,
+                    Arc::new(tab_core::e2e::presence::System),
+                );
+                if let Some(h) = &work_hub {
+                    v.set_files(Arc::new(vault::HubFiles(h.clone())));
+                }
+                hub.set_vault(v);
+            }
             // What projects know: indexed here, from the hub's files, the
             // email connection and the web.
             {
@@ -3383,6 +3397,22 @@ pub fn run() {
             project_resource_save,
             project_resource_delete,
             project_file_add,
+            vault::vault_status,
+            vault::vault_create,
+            vault::vault_unlock,
+            vault::vault_lock,
+            vault::vault_ask,
+            vault::vault_recover,
+            vault::vault_approve,
+            vault::vault_deny,
+            vault::vault_remove_device,
+            vault::vault_entries,
+            vault::vault_entry_save,
+            vault::vault_entry_delete,
+            vault::vault_reveal,
+            vault::vault_file_add,
+            vault::vault_file_export,
+            vault::vault_audit,
             project_resource_reindex,
             project_notes,
             project_note_save,

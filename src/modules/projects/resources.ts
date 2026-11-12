@@ -16,7 +16,7 @@ export const kindOrder: ResourceKind[] = ["website", "service", "link", "email",
 export const accessLook: Record<ResourceAccess, { label: string; help: string; tone: Tone; icon?: string }> = {
   all: { label: "All threads", help: "Every chat in this project can read it.", tone: "neutral" },
   coordinator: { label: "Coordinator only", help: "Only the project's coordinator reads it. Other threads ask you first.", tone: "warning" },
-  vault: { label: "Vault", help: "End-to-end encrypted, read only by the coordinator after you unlock it. Coming soon.", tone: "danger", icon: "lock" },
+  vault: { label: "Vault", help: "End-to-end encrypted on your devices. Only the coordinator searches it, after you unlock it; values stay masked until you release them.", tone: "danger", icon: "lock" },
 };
 
 export const statusLook: Record<ProjectResource["status"], { label: string; tone: Tone; help: string }> = {

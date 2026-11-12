@@ -235,6 +235,13 @@ impl Store {
         meta: &serde_json::Value,
         now: DateTime<Utc>,
     ) -> anyhow::Result<SessionMessage> {
+        // Vault values released to an agent are kept masked in what's
+        // stored and synced; only this device's tool output has them.
+        let content: &str = &if kind == "tool_result" {
+            std::borrow::Cow::Borrowed(content)
+        } else {
+            crate::e2e::redact(content)
+        };
         let conn = self.conn();
         conn.execute(
             "INSERT INTO session_messages (session_id, role, kind, content, meta, created_at, uid)

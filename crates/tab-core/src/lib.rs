@@ -28,6 +28,7 @@ pub mod config;
 pub mod connector;
 pub mod connectors;
 pub mod deps;
+pub mod e2e;
 pub mod embed;
 pub mod engine;
 pub mod gateway;
