@@ -58,6 +58,28 @@ struct Core {
     leases: std::sync::Mutex<Option<Arc<dyn tab_core::leases::Leases>>>,
 }
 
+/// Where the project indexer reads files and email from.
+struct KnowledgeSources {
+    hub: Option<Arc<LocalHub>>,
+    core: Arc<Core>,
+}
+
+#[async_trait::async_trait]
+impl tab_core::knowledge::Sources for KnowledgeSources {
+    async fn file(&self, hash: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let Some(hub) = self.hub.clone() else {
+            anyhow::bail!("the hub isn't running");
+        };
+        let hash = hash.to_string();
+        tokio::task::spawn_blocking(move || hub.file_bytes(&hash)).await?
+    }
+
+    async fn email(&self) -> Option<tab_core::config::ConnectorConfig> {
+        let cfg = self.core.config.lock().await;
+        cfg.connectors.get("email").filter(|c| c.enabled).cloned()
+    }
+}
+
 struct AppState {
     core: Arc<Core>,
     /// The hub, running inside the app. None if it couldn't open.
@@ -1470,6 +1492,64 @@ async fn project_resource_save(
         .store
         .resource_save(&project_id, &resource, "user", Utc::now())
         .map_err(err)
+}
+
+/// Adds a file to a project: its bytes go into the hub (so every device
+/// can index it), and a `file` resource names it by hash. The body is the
+/// file; its name and who may read it come in headers.
+#[tauri::command]
+async fn project_file_add(
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> CmdResult<tab_core::model::ProjectResource> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected the file's bytes".into());
+    };
+    if bytes.len() > MAX_ATTACHMENT {
+        return Err("that file is over 50 MB".into());
+    }
+    let header = |k: &str| {
+        request
+            .headers()
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .map(percent_decode)
+            .unwrap_or_default()
+    };
+    let (project_id, name, access) = (header("x-project"), header("x-name"), header("x-access"));
+    let name = safe_file_name(&name);
+    if !tab_core::knowledge::extract::supported(&name) {
+        return Err(format!(
+            "tab can't read {name} yet: add PDF, Word (.docx), Excel (.xlsx), markdown or text files"
+        ));
+    }
+    let hub = state
+        .work_hub
+        .as_ref()
+        .ok_or("the hub isn't running, so files can't be added")?;
+    let meta = hub.file_put(bytes).map_err(err)?;
+    state
+        .store
+        .resource_save(
+            &project_id,
+            &tab_core::store::ResourceInput {
+                kind: "file".into(),
+                title: name.clone(),
+                url: Some(meta.hash),
+                access: (!access.is_empty()).then_some(access),
+                options: Some(serde_json::json!({ "name": name, "size": bytes.len() })),
+                ..Default::default()
+            },
+            "user",
+            Utc::now(),
+        )
+        .map_err(err)
+}
+
+/// Reads a resource again now, rather than on its schedule.
+#[tauri::command]
+async fn project_resource_reindex(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.store.knowledge_refresh(&id).map_err(err)
 }
 
 #[tauri::command]
@@ -2989,6 +3069,18 @@ pub fn run() {
                     None
                 }
             };
+            // What projects know: indexed here, from the hub's files, the
+            // email connection and the web.
+            {
+                let sources = Arc::new(KnowledgeSources {
+                    hub: work_hub.clone(),
+                    core: core.clone(),
+                });
+                let (store, gateway) = (store.clone(), core.gateway.clone());
+                tauri::async_runtime::spawn(async move {
+                    tab_core::knowledge::spawn(store, gateway, sources);
+                });
+            }
             let state = AppState {
                 core: core.clone(),
                 work_hub: work_hub.clone(),
@@ -3162,6 +3254,8 @@ pub fn run() {
             project_resources,
             project_resource_save,
             project_resource_delete,
+            project_file_add,
+            project_resource_reindex,
             project_notes,
             project_note_save,
             project_note_delete,

@@ -2,7 +2,7 @@
 // notes) with who may read each, and its repos. The rail sits beside the
 // coordinator on Home; the Knowledge tab lists everything.
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, TextArea, TextInput, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
@@ -96,6 +96,7 @@ export function KnowledgeView({ project, onAdd, repos }: { project: Project; onA
   const restricted = resources.filter((r) => r.access !== "all").length;
 
   const pin = async (r: ProjectResource) => (await api.projectResourceSave(project.id, { ...r, pinned: !r.pinned }), refresh());
+  const reindex = async (r: ProjectResource) => (await api.projectResourceReindex(r.id), refresh());
   const remove = async (r: ProjectResource) => (await api.projectResourceDelete(project.id, r.id), refresh());
 
   return (
@@ -119,7 +120,7 @@ export function KnowledgeView({ project, onAdd, repos }: { project: Project; onA
       {resources.length ? (
         <div className="pjk-table" role="table">
           <div className="pjk-tr pjk-th" role="row">
-            <span>Resource</span><span>Kind</span><span>Who can read</span><span>Status</span><span />
+            <span>Resource</span><span>Kind</span><span>Who can read</span><span>Status</span><span>Last used</span><span />
           </div>
           {shown.map((r) => {
             const st = statusLook[r.status];
@@ -138,8 +139,10 @@ export function KnowledgeView({ project, onAdd, repos }: { project: Project; onA
                 </span>
                 <span className="subtle">{kindLook[r.kind].label}</span>
                 <span><Badge tone={ac.tone} icon={r.access !== "all" ? "lock" : undefined} title={ac.help}>{ac.label}</Badge></span>
-                <span><Badge tone={st.tone} title={st.help}>{st.label}{r.chunks ? ` · ${r.chunks}` : ""}</Badge></span>
+                <span><Badge tone={st.tone} title={statusHelp(r)}>{st.label}{r.chunks ? ` · ${r.chunks}` : ""}</Badge></span>
+                <span className="subtle" title={r.last_used_at ? "When an agent's search last used it, on this computer" : "No agent has used it yet"}>{r.last_used_at ? timeAgo(r.last_used_at) : "—"}</span>
                 <span className="pjk-actions">
+                  {indexable.includes(r.kind) && <button className="icon-btn" title="Read it again now" onClick={() => reindex(r)}><Icon name="refresh" size={13} /></button>}
                   <button className="icon-btn" title={r.pinned ? "Unpin" : "Pin: always in the coordinator's context"} onClick={() => pin(r)}><Icon name="pin" size={13} /></button>
                   <button className="icon-btn" title="Edit" onClick={() => setEditing(r)}><Icon name="edit" size={13} /></button>
                   <button className="icon-btn" title="Remove" onClick={() => remove(r)}><Icon name="trash" size={13} /></button>
@@ -162,6 +165,16 @@ export function KnowledgeView({ project, onAdd, repos }: { project: Project; onA
   );
 }
 
+/** Kinds tab reads into search. */
+const indexable: ResourceKind[] = ["website", "file", "email", "note"];
+
+/** The status badge's hover: why it failed, or when it was last read. */
+function statusHelp(r: ProjectResource): string {
+  if (r.index_error) return r.index_error;
+  if (r.indexed_at) return `${statusLook[r.status].help} Read ${timeAgo(r.indexed_at)}.`;
+  return statusLook[r.status].help;
+}
+
 function Stat({ value, label }: { value: number; label: string }) {
   return (
     <div className="pjk-stat">
@@ -171,7 +184,9 @@ function Stat({ value, label }: { value: number; label: string }) {
   );
 }
 
-const pickable: ResourceKind[] = ["website", "service", "link", "email", "note"];
+const pickable: ResourceKind[] = ["website", "service", "link", "email", "file", "note"];
+
+const fileTypes = ".pdf,.docx,.xlsx,.md,.mdx,.markdown,.txt,.csv,.tsv,.json,.html,.htm,.rst,.org,.yaml,.yml,.toml,.xml,.log";
 
 /** Paste a link (or a label, or write a note); tab works out what it is. Also edits one. */
 export function AddResource({ project, resource, onClose }: { project: Project; resource?: ProjectResource; onClose: () => void }) {
@@ -185,19 +200,25 @@ export function AddResource({ project, resource, onClose }: { project: Project; 
   const [options, setOptions] = useState<Record<string, unknown>>(resource?.options ?? { depth: 1, schedule: "daily" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [files, setFiles] = useState<File[]>([]);
+  const picker = useRef<HTMLInputElement>(null);
 
   const k: ResourceKind = kind ?? found?.kind ?? "link";
   const t = title ?? found?.title ?? "";
   const repo = !resource && !kind ? found?.repo : undefined;
   const opt = (key: string, v: unknown) => setOptions((o) => ({ ...o, [key]: v }));
-  const canSave = repo || (t.trim() && (k === "note" ? note.trim() : text.trim()));
+  const uploading = k === "file" && !resource;
+  const canSave = uploading ? files.length > 0 : repo || (t.trim() && (k === "note" ? note.trim() : text.trim()));
 
   const save = async () => {
     if (!canSave || busy) return;
     setBusy(true);
     setError(null);
     try {
-      if (repo) {
+      if (uploading) {
+        for (const f of files) await api.projectFileAdd(project.id, f.name, new Uint8Array(await f.arrayBuffer()), access);
+        await qc.invalidateQueries({ queryKey: keys.resources(project.id) });
+      } else if (repo) {
         await api.projectRepoSave(project.id, { repo, note: note || null });
         await qc.invalidateQueries({ queryKey: keys.repos(project.id) });
       } else {
@@ -218,11 +239,20 @@ export function AddResource({ project, resource, onClose }: { project: Project; 
           <h3>{resource ? "Edit resource" : `Add to ${project.name}`}</h3>
           <button className="icon-btn" onClick={onClose} aria-label="Close"><Icon name="x" size={14} /></button>
         </header>
-        {k !== "note" ? (
+        {uploading ? (
+          <>
+            <input ref={picker} type="file" multiple hidden accept={fileTypes} onChange={(e) => (setFiles([...files, ...Array.from(e.target.files ?? [])]), (e.target.value = ""))} />
+            <button className="pjk-drop" onClick={() => picker.current?.click()}
+              onDragOver={(e) => e.preventDefault()} onDrop={(e) => (e.preventDefault(), setFiles([...files, ...Array.from(e.dataTransfer.files)]))}>
+              <Icon name="upload" size={16} />
+              {files.length ? `${files.length} file${files.length > 1 ? "s" : ""}: ${files.map((f) => f.name).join(", ")}` : "Choose or drop files: PDF, Word, Excel, markdown or text"}
+            </button>
+          </>
+        ) : k !== "note" && k !== "file" ? (
           <TextInput autoFocus icon="link" placeholder="Paste a link, or label:billing, or someone@company.com" value={text} onChange={(e) => (setText(e.target.value), setTitle(null))}
             onKeyDown={(e) => e.key === "Enter" && save()} />
         ) : null}
-        {found && (
+        {found && !uploading && (
           <div className="pjk-found">
             <span className="pjk-glyph"><Icon name={repo ? "git-branch" : kindLook[found.kind].icon} size={14} /></span>
             <span className="pjk-row-main">
@@ -239,17 +269,16 @@ export function AddResource({ project, resource, onClose }: { project: Project; 
                 {pickable.map((x) => (
                   <button key={x} className={cx("pjk-chip", k === x && "on")} onClick={() => setKind(x)}><Icon name={kindLook[x].icon} size={12} /> {kindLook[x].label}</button>
                 ))}
-                <button className="pjk-chip" disabled title="Uploading files comes with indexing"><Icon name="upload" size={12} /> Files · soon</button>
               </div>
             </div>
-            <div className="pj-field">
+            {!uploading && <div className="pj-field">
               <span className="label-sm">Name</span>
               <TextInput placeholder={k === "note" ? "Refund policy" : "What to call it"} value={t} onChange={(e) => setTitle(e.target.value)} autoFocus={k === "note"} />
-            </div>
-            <div className="pj-field">
+            </div>}
+            {!uploading && <div className="pj-field">
               <span className="label-sm">{k === "note" ? "Note" : "What it's for (optional)"}</span>
               <TextArea rows={k === "note" ? 5 : 2} placeholder={k === "note" ? "Anything agents should know: a policy, numbers, how something works." : "e.g. where customers pay; deploys of the marketing site"} value={note} onChange={(e) => setNote(e.target.value)} />
-            </div>
+            </div>}
             {k === "website" && (
               <div className="pjk-opts">
                 <label>Follow links <select className="select" value={String(options.depth ?? 1)} onChange={(e) => opt("depth", Number(e.target.value))}>
@@ -284,7 +313,7 @@ export function AddResource({ project, resource, onClose }: { project: Project; 
           <span className="subtle pjk-foot-note">Coordinator-only resources are never offered to other threads.</span>
           <span className="pj-dialog-actions">
             <Button size="sm" variant="ghost" onClick={onClose}>Cancel</Button>
-            <Button size="sm" variant="primary" disabled={!canSave || busy} onClick={save}>{resource ? "Save" : repo ? "Add repo" : "Add resource"}</Button>
+            <Button size="sm" variant="primary" disabled={!canSave || busy} onClick={save}>{resource ? "Save" : repo ? "Add repo" : uploading ? (busy ? "Adding…" : files.length > 1 ? `Add ${files.length} files` : "Add file") : "Add resource"}</Button>
           </span>
         </footer>
       </div>

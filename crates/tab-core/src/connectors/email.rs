@@ -927,6 +927,103 @@ pub fn open_url(
     Some(base)
 }
 
+/// How far back a project's email resource reads, and how many messages.
+const SELECTION_DAYS: i64 = 365;
+
+/// The messages an email resource stands for, as documents for the
+/// project's index: `label:<name>` reads that folder (Gmail labels are
+/// folders over IMAP), `from:<address>` that sender's mail in the folders
+/// the connection reads. Newest first, at most `limit`.
+pub async fn read_selection(
+    cfg: &ConnectorConfig,
+    selector: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<crate::knowledge::chunk::Doc>> {
+    let s = Settings::from_config(cfg)?;
+    let (folders, query) = if let Some(label) = selector.strip_prefix("label:") {
+        let label = label.trim();
+        anyhow::ensure!(!label.is_empty(), "which label?");
+        (vec![label.to_string()], String::new())
+    } else if let Some(from) = selector.strip_prefix("from:") {
+        let from = from.trim();
+        anyhow::ensure!(
+            !from.is_empty() && !from.contains(['"', '\\', '\r', '\n']),
+            "that isn't an email address"
+        );
+        (s.folders.clone(), format!(" FROM \"{from}\""))
+    } else {
+        anyhow::bail!("an email resource is label:<name> or from:<address>, not {selector:?}");
+    };
+    let since = (Utc::now() - chrono::Duration::days(SELECTION_DAYS)).format("%d-%b-%Y");
+    let mut imap = connect(&s).await?;
+    let mut docs = Vec::new();
+    for folder in &folders {
+        if let Err(e) = imap.examine(folder).await {
+            anyhow::bail!("couldn't open {folder}: {e}");
+        }
+        let mut uids: Vec<u32> = imap
+            .uid_search(format!("SINCE {since}{query}"))
+            .await?
+            .into_iter()
+            .collect();
+        uids.sort_unstable();
+        let uids = &uids[uids.len().saturating_sub(limit)..];
+        if uids.is_empty() {
+            continue;
+        }
+        let set = uids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let small: Vec<u32> = imap
+            .uid_fetch(&set, "(UID RFC822.SIZE)")
+            .await?
+            .try_filter_map(|f| async move {
+                Ok(f.uid.filter(|_| f.size.unwrap_or(0) <= MAX_FETCH_BYTES))
+            })
+            .try_collect()
+            .await?;
+        for uid in small.into_iter().rev() {
+            let fetched: Vec<async_imap::types::Fetch> = imap
+                .uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")
+                .await?
+                .try_collect()
+                .await?;
+            let Some(raw) = fetched.iter().find_map(|f| f.body()) else {
+                continue;
+            };
+            let Some(m) = MessageParser::new().parse(raw) else {
+                continue;
+            };
+            let subject = m.subject().unwrap_or("(no subject)").to_string();
+            let sender = m
+                .from()
+                .and_then(|a| a.first())
+                .map(|p| match (p.name(), p.address()) {
+                    (Some(n), Some(e)) => format!("{n} <{e}>"),
+                    (n, e) => n.or(e).unwrap_or_default().to_string(),
+                })
+                .unwrap_or_default();
+            let date = m.date().map(|d| d.to_rfc3339()).unwrap_or_default();
+            let body = m.body_text(0).map(|t| t.into_owned()).unwrap_or_default();
+            let mid = m.message_id().unwrap_or_default().to_string();
+            docs.push(crate::knowledge::chunk::Doc {
+                title: subject.clone(),
+                source: open_url(s.webmail_url.as_deref(), &s.host, folder, uid, &mid)
+                    .or_else(|| (!mid.is_empty()).then(|| format!("mid:{mid}"))),
+                text: format!(
+                    "From: {sender}\nDate: {date}\nSubject: {subject}\n\n{}",
+                    body.trim()
+                ),
+            });
+        }
+    }
+    let _ = imap.logout().await;
+    docs.truncate(limit);
+    Ok(docs)
+}
+
 impl EmailConnector {
     async fn fetch_raw(&self, folder: &str, uid: u64) -> anyhow::Result<Option<Vec<u8>>> {
         let mut imap = connect(&self.settings).await?;

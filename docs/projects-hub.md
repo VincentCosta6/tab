@@ -8,7 +8,12 @@ repos, services), searchable by agents within the access level each resource has
 
 - Projects: `projects` (+ about, rules), `project_notes` (steward-reviewed), `project_repos`, `items.project_id`. All synced.
 - Ask: a keyed session `ask:<project|all>` that answers through tab_search / tab_graph_* / tab_project.
-- Search: Model2Vec embeddings in sqlite-vec (`doc_vec`), items and notes only, no chunking, local cache (not synced).
+- Search: Model2Vec embeddings in sqlite-vec (`doc_vec`), items and notes, local cache (not synced).
+- Resources indexed (phase 2): `crate::knowledge` reads websites (gateway, robots.txt, public hosts only),
+  hub files (PDF/docx/xlsx/text), email by label/sender and repo docs from the checkout into
+  `resource_chunks` (+ FTS5, `doc:res:<id>:<n>` vectors), on each device. `tab_search` returns passages
+  under `resources`, filtered by the reader's level from the session key; `resource_index` keeps
+  schedule, errors and "last used" per device.
 - Sessions: Claude Code per turn with `--resume`; each turn reports `meta.context.used`. No compaction.
 - Sync: plaintext rows to the hub. No end-to-end encryption, no device keys. `vault.rs` is OS keychain/DPAPI, per device.
 
@@ -73,5 +78,6 @@ an existing device (or your recovery key) lets it in; indexing happens only on d
 
 ## Open questions
 
-- Which file types phase 2 parses natively vs. through a converter (PDF text via `pdf-extract`?).
+- Phase 2 parses everything natively: `pdf-extract` for PDFs, zip + quick-xml for docx/xlsx. Scanned
+  PDFs (no text layer) fail with a message; OCR is later.
 - Email resources: by label/sender only (decided), whole inbox later.

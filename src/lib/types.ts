@@ -144,6 +144,12 @@ export interface ProjectResource {
   added_by: string;
   created_at: string;
   updated_at: string;
+  /** When this device last read it into the index. */
+  indexed_at?: string;
+  /** Why the last read failed, on this device. */
+  index_error?: string;
+  /** When an agent's search last returned a piece of it, on this device. */
+  last_used_at?: string;
 }
 
 export interface ResourceInput {
