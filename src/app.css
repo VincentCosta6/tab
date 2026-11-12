@@ -1249,3 +1249,22 @@ label.import-row { cursor: pointer; }
 .composer-input { position: relative; }
 .composer-ghost { position: absolute; inset: 0; pointer-events: none; padding: var(--space-3) var(--space-3) 0; line-height: 1.5; white-space: pre; text-overflow: ellipsis; overflow: hidden; color: var(--fg-subtle); opacity: 0.8; }
 .composer-ghost > span { visibility: hidden; }
+
+/* Rewind, from a message of the person's (Claude Code's checkpoints). */
+.msg-user { position: relative; }
+.msg-rewind { position: absolute; right: 100%; bottom: 2px; margin-right: 6px; display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--bg-raised); color: var(--fg-subtle); font: inherit; font-size: var(--text-xs); white-space: nowrap; cursor: pointer; opacity: 0; transition: opacity 0.12s; }
+.msg-user:hover .msg-rewind, .msg-rewind:focus-visible { opacity: 1; }
+.msg-rewind:hover { color: var(--fg); background: var(--bg-hover); }
+.rewind-files { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; margin-bottom: var(--space-2); }
+
+/* A command run with `!`, and its output. */
+.msg-shell { align-self: flex-end; width: min(80%, 600px); margin-left: auto; margin-right: max(0px, calc((100% - 780px) / 2)); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); overflow: hidden; }
+.msg-shell-cmd { display: flex; align-items: baseline; gap: 6px; padding: 6px 10px; font-size: var(--text-sm); }
+.msg-shell-cmd code { flex: 1; min-width: 0; white-space: pre-wrap; word-break: break-word; background: none; padding: 0; }
+.msg-shell-bang { color: var(--tone-accent-fg); font-weight: 600; font-family: var(--font-mono); }
+.msg-shell pre { margin: 0; padding: 6px 10px; max-height: 240px; overflow: auto; border-top: 1px solid var(--border); font-size: var(--text-xs); white-space: pre-wrap; word-break: break-word; }
+.msg-shell .msg-tool-empty { padding: 4px 10px 6px; }
+.composer-input.shell-mode textarea { font-family: var(--font-mono); }
+.composer:has(.shell-mode) { border-color: color-mix(in srgb, var(--tone-accent-fg) 55%, var(--border-strong)); }
+.slash-menu button > svg { flex: none; align-self: center; color: var(--fg-subtle); }
+.slash-card-actions { flex-wrap: wrap; }

@@ -8,7 +8,7 @@ import type {
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
   AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
-  EmailSignInStatus, MailProvider, Segment, SessionMessage, VaultAudit, VaultEntry, VaultEntryInput, VaultStatus,
+  EmailSignInStatus, MailProvider, Segment, SessionMessage, ChatRewound, RewoundFiles, VaultAudit, VaultEntry, VaultEntryInput, VaultStatus,
 } from "./types";
 import { mockApi } from "./mock";
 import { HubListSchema, HubStatusSchema, RunnerStatusSchema, decode } from "./protocol/cloud";
@@ -73,6 +73,14 @@ export const api = {
   subagents: () => call<Subagent[]>("agent_subagents"),
   /** Values for a slash command argument from a chat's folder: its git branches, or the paths `typed` could go on to. */
   slashArgValues: (cwd: string, kind: "branch" | "path", typed: string) => call<string[]>("slash_arg_values", { cwd, kind, typed }),
+  /** Files and folders in a chat's folder for an `@` mention, best match first. */
+  chatMentions: (cwd: string, query: string) => call<string[]>("chat_mentions", { cwd, query }),
+  /** Runs a `!` command in the chat's folder; its output goes in the chat for the agent's next message. */
+  chatShell: (itemId: string | null, command: string, projectId?: string | null) => call<ChatStarted>("chat_shell", { itemId, command, projectId: projectId ?? null }),
+  /** Takes a chat back to before one of the person's messages: the conversation, the files, or both. */
+  chatRewind: (sessionId: string, messageId: number, conversation: boolean, files: boolean) => call<ChatRewound>("chat_rewind", { sessionId, messageId, conversation, files }),
+  /** What restoring the files to before a message would change. */
+  chatRewindPreview: (sessionId: string, messageId: number) => call<RewoundFiles>("chat_rewind_preview", { sessionId, messageId }),
   /** The MCP servers a chat's agent reported at its last turn. */
   agentMcpServers: (sessionId: string) => call<AgentMcpServer[]>("agent_mcp_servers", { sessionId }),
   graphView: (projectId: string | null, days: number | null, limit?: number) => call<GraphView>("graph_view", { projectId, days, limit: limit ?? null }),
@@ -147,6 +155,8 @@ export const api = {
   setSessionModel: (sessionId: string, model: string | null) => call<Session>("set_session_model", { sessionId, model }),
   setAgentModel: (model: string | null, agent?: AgentKind, forNewChats = false) => call<TabConfig>("set_agent_model", { model, agent: agent ?? null, forNewChats }),
   setAgentMode: (mode: string) => call<TabConfig>("set_agent_mode", { mode }),
+  /** One chat's permission mode; a Claude Code turn under way switches at once. */
+  setSessionMode: (sessionId: string, mode: string) => call<Session>("set_session_mode", { sessionId, mode }),
   connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),
   chatStop: (sessionId: string) => call<void>("chat_stop", { sessionId }),
   /** Stop the tool the turn is waiting on so steering already sent is read now. */

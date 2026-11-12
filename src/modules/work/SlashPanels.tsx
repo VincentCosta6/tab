@@ -8,8 +8,8 @@ import { Badge, Button, StatusDot, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
 import { api, onMcpSignIn, openUrl } from "../../lib/api";
 import { timeAgo } from "../../lib/format";
-import { keys } from "../../lib/query";
-import type { Chat, ChatSummary, McpServerInfo, McpTool, Tone, ToolPolicy } from "../../lib/types";
+import { chatKeyForSession, keys } from "../../lib/query";
+import type { Chat, ChatRewound, ChatSummary, McpServerInfo, McpTool, Session, SessionMessage, Tone, ToolPolicy } from "../../lib/types";
 import { openConnection } from "../connections/ConnectionsTab";
 import { policies, useMcpServers } from "../connections/RemoteMcp";
 import { openSettings } from "../settings/SettingsTab";
@@ -51,7 +51,10 @@ const titles: Record<Panel, string> = {
 };
 
 /** A tab command's card, above the composer box. */
-export function SlashPanel({ panel, chat, onClose }: { panel: Panel; chat: Chat | undefined; onClose: () => void }) {
+/** Where `/rewind` starts (a message picked in the chat) and what the composer does after. */
+export interface RewindTarget { to: number | null; onRewound: (r: ChatRewound, conversation: boolean) => void }
+
+export function SlashPanel({ panel, chat, onClose, rewind }: { panel: Panel; chat: Chat | undefined; onClose: () => void; rewind?: RewindTarget }) {
   const messages = chat?.messages ?? [];
   useEffect(() => {
     const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -71,7 +74,7 @@ export function SlashPanel({ panel, chat, onClose }: { panel: Panel; chat: Chat 
         {panel === "cost" && <CostDetails messages={messages} />}
         {panel === "clear" && <ClearPanel chat={chat} onClose={onClose} />}
         {panel === "resume" && <ResumePanel chat={chat} onClose={onClose} />}
-        {panel === "rewind" && <p>Rewinding to a checkpoint isn't in tab yet.</p>}
+        {panel === "rewind" && <RewindPanel chat={chat} to={rewind?.to ?? null} onRewound={(r, c) => (rewind?.onRewound(r, c), onClose())} />}
       </div>
     </div>
   );
@@ -154,6 +157,91 @@ function ResumePanel({ chat, onClose }: { chat: Chat | undefined; onClose: () =>
         </div>
       )}
       {error && <p className="text-danger">{error}</p>}
+    </>
+  );
+}
+
+/** A message's first line, for a list. */
+const firstLine = (t: string) => t.trim().split("\n")[0];
+
+/**
+ * `/rewind` (or Esc Esc, or "Rewind" on a message): go back to before one
+ * of the person's messages. Like Claude Code's, it can take back the
+ * conversation, the files the agent changed since, or both, from the
+ * checkpoints Claude Code keeps for each message tab sends it.
+ */
+function RewindPanel({ chat, to, onRewound }: { chat: Chat | undefined; to: number | null; onRewound: (r: ChatRewound, conversation: boolean) => void }) {
+  const [picked, setPicked] = useState<number | null>(to);
+  useEffect(() => setPicked(to), [to]);
+  const session = chat?.session;
+  if (!session) return <p>This chat hasn't started yet, so there's nothing to go back to.</p>;
+  if (session.agent !== "claude_code") return <p>Rewind works in Claude Code chats only for now.</p>;
+  const points = (chat.messages ?? []).filter((m) => m.role === "user" && m.kind === "text" && m.meta?.agent_uuid).reverse();
+  if (!points.length) return <p>Nothing to rewind to yet. Each message you send from now on can be gone back to.</p>;
+  const m = points.find((p) => p.id === picked);
+  if (m) return <RewindChoice session={session} m={m} running={chat.running} onBack={() => setPicked(null)} onRewound={onRewound} />;
+  return (
+    <>
+      <p className="subtle">Go back to before which message?</p>
+      <div className="slash-chats">
+        {points.map((p, i) => (
+          <button key={p.id} className="slash-chat" onClick={() => setPicked(p.id)} autoFocus={i === 0}>
+            <span className="slash-chat-first">{firstLine(p.content) || <em className="subtle">Attachments</em>}</span>
+            <span className="slash-chat-meta subtle">{i === 0 ? "Your last message · " : ""}{timeAgo(p.created_at)}</span>
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function RewindChoice({ session, m, running, onBack, onRewound }: { session: Session; m: SessionMessage; running: boolean; onBack: () => void; onRewound: (r: ChatRewound, conversation: boolean) => void }) {
+  const qc = useQueryClient();
+  const preview = useQuery({ queryKey: ["rewind-preview", session.id, m.id], queryFn: () => api.chatRewindPreview(session.id, m.id), staleTime: 0, retry: false, enabled: !running });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const files = preview.data?.files ?? [];
+  const go = async (conversation: boolean, code: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await api.chatRewind(session.id, m.id, conversation, code);
+      const key = chatKeyForSession(qc, session.id) ?? (session.item_id ? keys.chat(session.item_id) : null);
+      if (key) qc.setQueryData(key, r.chat);
+      onRewound(r, conversation);
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  };
+  const name = (p: string) => p.split(/[\\/]/).pop();
+  return (
+    <>
+      <p>
+        Back to before <q>{firstLine(m.content)}</q>. The conversation forgets it and everything after; your message comes back to the box to edit.
+      </p>
+      {running ? (
+        <p className="text-danger">The agent is still working. Stop it first, then rewind.</p>
+      ) : preview.isLoading ? (
+        <p className="subtle">Checking which files the agent changed since…</p>
+      ) : preview.error ? (
+        <p className="subtle">Code can't be restored: {String(preview.error)}</p>
+      ) : files.length ? (
+        <div className="rewind-files subtle">
+          Restoring code puts back {files.length === 1 ? "1 file" : `${files.length} files`} (+{preview.data!.insertions} −{preview.data!.deletions}):{" "}
+          {files.slice(0, 6).map((f) => <code key={f} title={f}>{name(f)}</code>)}
+          {files.length > 6 && ` and ${files.length - 6} more`}
+        </div>
+      ) : (
+        <p className="subtle">The agent hasn't changed any files since.</p>
+      )}
+      {error && <p className="text-danger">{error}</p>}
+      <div className="slash-card-actions">
+        {files.length > 0 && <Button size="sm" variant="primary" disabled={busy || running} onClick={() => go(true, true)} autoFocus>Conversation and code</Button>}
+        <Button size="sm" variant={files.length ? undefined : "primary"} disabled={busy || running} onClick={() => go(true, false)} autoFocus={!files.length}>Conversation only</Button>
+        {files.length > 0 && <Button size="sm" disabled={busy || running} onClick={() => go(false, true)}>Code only</Button>}
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onBack}>Back</Button>
+      </div>
     </>
   );
 }

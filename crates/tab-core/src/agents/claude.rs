@@ -153,6 +153,12 @@ fn steer_line(steer: Steer, tools_running: bool, n: u64) -> Option<Value> {
             "request": { "subtype": "interrupt" },
         })),
         Steer::Interrupt => None,
+        Steer::Mode(mode) if MODES.contains(&mode.as_str()) => Some(json!({
+            "type": "control_request",
+            "request_id": format!("tab-mode-{n}"),
+            "request": { "subtype": "set_permission_mode", "mode": mode },
+        })),
+        Steer::Mode(_) => None,
     }
 }
 
@@ -178,6 +184,7 @@ pub(super) async fn run_turn(
     session: &Session,
     prompt: &str,
     system: &str,
+    uuid: Option<&str>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let cfg = hub.config_for(session);
@@ -186,10 +193,15 @@ pub(super) async fn run_turn(
     let system_file = dir.join("system.md");
     std::fs::write(&system_file, system)?;
 
+    // A rewind (see `AgentHub::rewind`) says where this turn picks up.
+    let rewind = take_rewind(&dir);
+    let resume = match &rewind {
+        Some(Rewind::Fresh) => None,
+        _ => session.agent_session_id.clone(),
+    };
     // Claude Code's own conversation id, chosen here on the first turn so the
     // sandbox can let the chat into its transcript and no other.
-    let agent_id = session
-        .agent_session_id
+    let agent_id = resume
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mut policy = hub.policy(session);
@@ -296,14 +308,22 @@ pub(super) async fn run_turn(
     if let Some(cap) = cfg.budget.per_turn_usd.filter(|c| *c > 0.0) {
         cmd.args(["--max-budget-usd", &format!("{cap:.2}")]);
     }
-    match &session.agent_session_id {
+    match &resume {
         Some(id) => cmd.args(["--resume", id]),
         None => cmd.args(["--session-id", &agent_id]),
     };
+    if let (Some(_), Some(Rewind::At(at))) = (&resume, &rewind) {
+        cmd.args(["--resume-session-at", at]);
+    }
     let mut prepared = crate::sandbox::current()
         .command(&exe, &cmd.0, std::path::Path::new(&session.cwd), &policy)
         .await?;
     hub.add_shims(session, &mut prepared.cmd);
+    // Claude Code backs up each file before editing it, per message, so a
+    // rewind can put the code back too.
+    prepared
+        .cmd
+        .env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "1");
     if strict {
         // claude.ai connectors too, should a version load them despite
         // `--strict-mcp-config`.
@@ -326,7 +346,11 @@ pub(super) async fn run_turn(
     // `initialize` first, as the SDK does: its answer describes the slash
     // commands (what they do, what arguments they take) for the `/` menu.
     let init = json!({ "type": "control_request", "request_id": INIT_REQUEST, "request": { "subtype": "initialize" } });
-    let first = json!({ "type": "user", "message": { "role": "user", "content": prompt } });
+    let mut first = json!({ "type": "user", "message": { "role": "user", "content": prompt } });
+    // tab's id for the message, so a rewind can name it later.
+    if let Some(u) = uuid {
+        first["uuid"] = json!(u);
+    }
     stdin
         .write_all(format!("{init}\n{first}\n").as_bytes())
         .await?;
@@ -480,6 +504,148 @@ struct Parser {
     waits: HashSet<String>,
     /// The chat's folder, where its project's custom commands are.
     cwd: Option<std::path::PathBuf>,
+    /// The id of the agent's latest reply: a rewind to the message after
+    /// this turn resumes the conversation from there.
+    last_reply: Option<String>,
+}
+
+/// Where the next turn of a rewound chat picks up its conversation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Rewind {
+    /// After the agent's reply with this id; what came later is dropped.
+    At(String),
+    /// From nothing: the chat went back to before its first message.
+    Fresh,
+}
+
+const REWIND_FILE: &str = "rewind.json";
+
+/// Leaves word for the chat's next turn to pick up from `rewind`.
+pub(super) fn set_rewind(dir: &std::path::Path, rewind: &Rewind) -> anyhow::Result<()> {
+    std::fs::write(dir.join(REWIND_FILE), serde_json::to_vec(rewind)?)?;
+    Ok(())
+}
+
+/// The rewind left for this turn, if any; it applies once.
+fn take_rewind(dir: &std::path::Path) -> Option<Rewind> {
+    let path = dir.join(REWIND_FILE);
+    let r = serde_json::from_slice(&std::fs::read(&path).ok()?).ok();
+    let _ = std::fs::remove_file(path);
+    r
+}
+
+/// What restoring files to before a message changes (or changed).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RewoundFiles {
+    pub files: Vec<String>,
+    pub insertions: i64,
+    pub deletions: i64,
+}
+
+/// Puts the files the agent edited back as they were before the message
+/// with `uuid`, from Claude Code's own backups (see the checkpointing env in
+/// [`run_turn`]). With `dry_run` it only says what that would change. Runs
+/// Claude Code on its own, under the chat's sandbox, with no prompt.
+pub(super) async fn rewind_files(
+    hub: &Arc<AgentHub>,
+    session: &Session,
+    uuid: &str,
+    dry_run: bool,
+) -> anyhow::Result<RewoundFiles> {
+    let Some(agent_id) = session.agent_session_id.clone() else {
+        anyhow::bail!("This chat hasn't started a conversation yet.");
+    };
+    let cfg = hub.config_for(session);
+    let exe = super::agent_exe(&cfg, AgentKind::ClaudeCode)?;
+    let mut policy = hub.policy(session);
+    own_conversation(&mut policy, std::path::Path::new(&session.cwd), &agent_id);
+    let settings = crate::sandbox::current().claude_settings(&policy);
+    let mut cmd = super::Args::default();
+    cmd.arg("--settings").arg(serde_json::to_string(&settings)?);
+    cmd.args(isolation_args(cfg.strict, policy.trust));
+    cmd.args([
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--resume",
+        &agent_id,
+    ]);
+    let mut prepared = crate::sandbox::current()
+        .command(&exe, &cmd.0, std::path::Path::new(&session.cwd), &policy)
+        .await?;
+    prepared
+        .cmd
+        .env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = prepared
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("starting Claude Code ({}) failed: {e}", exe.display()))?;
+    let mut stdin = child.stdin.take().expect("piped");
+    let req = json!({
+        "type": "control_request",
+        "request_id": "tab-rewind",
+        "request": { "subtype": "rewind_files", "user_message_id": uuid, "dry_run": dry_run },
+    });
+    stdin.write_all(format!("{req}\n").as_bytes()).await?;
+    let mut lines = BufReader::new(child.stdout.take().expect("piped")).lines();
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        while let Some(l) = lines.next_line().await? {
+            let Ok(v) = serde_json::from_str::<Value>(&l) else {
+                continue;
+            };
+            if v["type"] == "control_response" && v["response"]["request_id"] == "tab-rewind" {
+                return anyhow::Ok(Some(v["response"].clone()));
+            }
+        }
+        anyhow::Ok(None)
+    })
+    .await;
+    drop(stdin);
+    child.kill_tree();
+    let r = match answer {
+        Ok(r) => {
+            r?.ok_or_else(|| anyhow::anyhow!("Claude Code exited without answering the rewind."))?
+        }
+        Err(_) => anyhow::bail!("Claude Code didn't answer the rewind within a minute."),
+    };
+    rewound(&r)
+}
+
+/// The answer to a `rewind_files` request.
+fn rewound(r: &Value) -> anyhow::Result<RewoundFiles> {
+    if r["subtype"] == "error" {
+        anyhow::bail!(
+            "{}",
+            r["error"]
+                .as_str()
+                .unwrap_or("Claude Code couldn't rewind the files.")
+        );
+    }
+    let body = &r["response"];
+    if body["canRewind"] == false {
+        anyhow::bail!(
+            "{}",
+            body["error"]
+                .as_str()
+                .unwrap_or("Claude Code has no file backups for that message.")
+        );
+    }
+    Ok(RewoundFiles {
+        files: body["filesChanged"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| f.as_str().map(str::to_string))
+            .collect(),
+        insertions: body["insertions"].as_i64().unwrap_or(0),
+        deletions: body["deletions"].as_i64().unwrap_or(0),
+    })
 }
 
 /// Whether a chat runs strict: when the person chose it, and always for an
@@ -571,6 +737,7 @@ impl Parser {
             allowed_mcp: Vec::new(),
             waits: HashSet::new(),
             cwd: None,
+            last_reply: None,
         }
     }
 
@@ -731,6 +898,9 @@ impl Parser {
                 }
             }
             "assistant" => {
+                if let Some(u) = v["uuid"].as_str() {
+                    self.last_reply = Some(u.to_string());
+                }
                 let msg_id = v["message"]["id"].as_str().unwrap_or_default().to_string();
                 let usage = &v["message"]["usage"];
                 if usage.is_object() && prompt_tokens(usage) > 0 {
@@ -904,6 +1074,8 @@ impl Parser {
                         "turns": v["num_turns"],
                         "stop_reason": v["stop_reason"],
                         "context": self.context(v),
+                        // Where a rewind to the next message resumes.
+                        "agent_uuid": self.last_reply,
                     }),
                 );
                 hub.update(
@@ -1073,6 +1245,65 @@ mod tests {
             }
         }
         assert_eq!(deltas, 1);
+    }
+
+    #[tokio::test]
+    async fn the_result_names_the_last_reply_for_a_rewind() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let mut p = Parser::new(hub, s.id.clone());
+        for line in [
+            r#"{"type":"assistant","uuid":"a1","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"user","uuid":"u2","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"a.txt"}]}}"#,
+            r#"{"type":"assistant","uuid":"a2","message":{"id":"m2","content":[{"type":"text","text":"Done"}]}}"#,
+            r#"{"type":"result","session_id":"abc","is_error":false}"#,
+        ] {
+            p.handle(&serde_json::from_str(line).unwrap());
+        }
+        let msgs = store.messages(&s.id).unwrap();
+        assert_eq!(msgs.last().unwrap().meta["agent_uuid"], "a2");
+    }
+
+    #[test]
+    fn a_rewind_applies_to_one_turn() {
+        let dir = std::env::temp_dir().join(format!("tab-rewind-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(take_rewind(&dir), None);
+        set_rewind(&dir, &Rewind::At("a2".into())).unwrap();
+        assert_eq!(take_rewind(&dir), Some(Rewind::At("a2".into())));
+        assert_eq!(take_rewind(&dir), None);
+        set_rewind(&dir, &Rewind::Fresh).unwrap();
+        assert_eq!(take_rewind(&dir), Some(Rewind::Fresh));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rewind_answers_say_what_changed_or_why_not() {
+        let ok = json!({ "subtype": "success", "response": { "canRewind": true, "filesChanged": ["/r/a.txt"], "insertions": 1, "deletions": 2 } });
+        let r = rewound(&ok).unwrap();
+        assert_eq!(
+            (r.files, r.insertions, r.deletions),
+            (vec!["/r/a.txt".to_string()], 1, 2)
+        );
+        let none = json!({ "subtype": "success", "response": { "canRewind": false, "error": "No file checkpoint found for this message." } });
+        assert_eq!(
+            rewound(&none).unwrap_err().to_string(),
+            "No file checkpoint found for this message."
+        );
+        let err = json!({ "subtype": "error", "error": "File rewinding is not enabled." });
+        assert_eq!(
+            rewound(&err).unwrap_err().to_string(),
+            "File rewinding is not enabled."
+        );
     }
 
     /// A parser and the turn's steering channel, as `run_turn` sets them up.

@@ -88,13 +88,24 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
     }
   };
 
+  const shell = async (command: string) => {
+    setError(null);
+    try {
+      const started = await api.chatShell(item.id, command);
+      qc.setQueryData<Chat>(keys.chat(item.id), (c) => ({ session: started.session, approvals: c?.approvals ?? [], running: c?.running ?? false, messages: c?.messages ?? [] }));
+      qc.invalidateQueries({ queryKey: keys.chat(item.id) });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   return (
     <div className="chat">
       {/* The body stays mounted while hidden, so switching back doesn't reload it. */}
       {body && <div className="chat-body" hidden={!showBody}>{body}</div>}
       {(!body || !showBody) && <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />}
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
-      <Composer chat={chat} onSend={send} placeholder={`Ask about this, or tell the agent what to do…`} />
+      <Composer chat={chat} onSend={send} onShell={shell} placeholder={`Ask about this, or tell the agent what to do…`} />
     </div>
   );
 }
@@ -194,6 +205,8 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
   });
 
   const base = chat?.session?.cwd ?? null;
+  // Claude Code keeps a checkpoint per message; going back needs the turn over.
+  const rewindable = chat?.session?.agent === "claude_code" && !chat.running;
   const folded = useMemo(() => foldedTexts(messages, !!chat?.running), [messages, chat?.running]);
   const turns = useMemo(() => splitTurns(messages, base), [messages, base]);
 
@@ -232,7 +245,7 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
           {groupTools(t.messages, paired, folded).map((g) =>
             Array.isArray(g)
               ? <ToolGroup key={g[0].id} calls={g} results={results} />
-              : <MessageView key={g.id} m={g} result={results.get(g.id)} onSend={onSend} />,
+              : <MessageView key={g.id} m={g} result={results.get(g.id)} onSend={onSend} rewind={rewindable && chat?.session ? chat.session.id : undefined} />,
           )}
           {t.files.length > 0 && <TurnFiles paths={t.files} />}
         </Fragment>
@@ -642,14 +655,25 @@ function ToolRow({ m, result }: { m: SessionMessage; result?: SessionMessage }) 
   );
 }
 
-function MessageView({ m, result, onSend }: { m: SessionMessage; result?: SessionMessage; onSend?: (text: string) => void }) {
+/** Asks the composer to open `/rewind` at one of the person's messages. */
+export function openRewind(sessionId: string, messageId: number) {
+  window.dispatchEvent(new CustomEvent("tab:rewind", { detail: { sessionId, messageId } }));
+}
+
+function MessageView({ m, result, onSend, rewind }: { m: SessionMessage; result?: SessionMessage; onSend?: (text: string) => void; rewind?: string }) {
   if (m.kind === "suggestion") return null;
+  if (m.kind === "shell") return <ShellRun m={m} />;
   if (m.role === "user") {
     const images: string[] = Array.isArray(m.meta?.attachments) ? m.meta.attachments : [];
     return (
       <div className="msg msg-user">
         {images.length > 0 && <Attachments paths={images} size={96} />}
         {/```|\]\(/.test(m.content) ? <Markdown text={m.content} /> : m.content}
+        {rewind && m.meta?.agent_uuid && (
+          <button className="msg-rewind" onClick={() => openRewind(rewind, m.id)} title="Rewind: go back to before this message (the conversation, the code, or both)" aria-label="Rewind to before this message">
+            <Icon name="refresh" size={11} /> Rewind
+          </button>
+        )}
       </div>
     );
   }
@@ -677,6 +701,22 @@ function MessageView({ m, result, onSend }: { m: SessionMessage; result?: Sessio
     return <div className="msg-note">{[secs != null && `${secs}s`, cost != null && `$${Number(cost).toFixed(3)}`].filter(Boolean).join(" · ")}</div>;
   }
   return <div className="msg-note">{m.content}</div>;
+}
+
+/** A command the person ran with `!`, and what it printed. The agent sees both with their next message. */
+function ShellRun({ m }: { m: SessionMessage }) {
+  const output: string = m.meta?.output ?? "";
+  const code: number | null = m.meta?.exit_code ?? null;
+  return (
+    <div className="msg-shell" title="Ran in the chat's folder. The agent sees this with your next message.">
+      <div className="msg-shell-cmd">
+        <span className="msg-shell-bang">!</span>
+        <code>{m.content}</code>
+        {code !== 0 && <span className="msg-tool-flag">{code == null ? "stopped" : `exit ${code}`}</span>}
+      </div>
+      {output ? <pre>{output}</pre> : <div className="msg-tool-empty">No output</div>}
+    </div>
+  );
 }
 
 interface Question { question: string; header?: string; multiSelect?: boolean; options?: { label: string; description?: string }[] }
@@ -1004,17 +1044,34 @@ function ChatModelPicker({ chat, openSignal }: { chat: Chat | undefined; openSig
   );
 }
 
-/** The harness's permission mode (from its metadata), saved at once. Applies from the next message. */
-function ModePicker({ chat, openSignal }: { chat: Chat | undefined; openSignal?: number }) {
+/** The modes the chat's harness offers (from its metadata). */
+function usePermissionModes(chat: Chat | undefined) {
   const { data: config } = useConfig();
   const { data: harnesses } = useHarnesses();
   const qc = useQueryClient();
-  const agent = chat?.session?.agent ?? config?.agent.kind;
+  const session = chat?.session;
+  const agent = session?.agent ?? config?.agent.kind;
   const modes = harnesses?.find((h) => h.id === agent)?.capabilities.permission_modes.map((m) => ({ ...m, help: m.help ?? undefined })) ?? [];
-  if (!config || !modes.length) return null;
-  const current = config.agent.permission_mode || "default";
+  // A started chat has its own; before that, it's what new chats start in.
+  const current = session?.permission_mode || config?.agent.permission_mode || "default";
+  const set = async (v: string) => {
+    if (session) await api.setSessionMode(session.id, v);
+    else qc.setQueryData(keys.config, await api.setAgentMode(v));
+  };
+  return { ready: !!config && modes.length > 0, modes, current, set };
+}
+
+/**
+ * The chat's permission mode. On a started chat it's that chat's own (a
+ * Claude Code turn under way switches at once); before, it sets the mode
+ * new chats start in. Shift+Tab in the box cycles it, as in Claude Code.
+ */
+function ModePicker({ chat, openSignal }: { chat: Chat | undefined; openSignal?: number }) {
+  const { ready, modes, current, set } = usePermissionModes(chat);
+  if (!ready) return null;
   const options = modes.some((m) => m.value === current) ? modes : [...modes, { value: current, label: current }];
-  return <BarPicker value={current} options={options} title="Permission mode" className={cx(current === "auto" && "mode-auto")} openSignal={openSignal} onChange={async (v) => qc.setQueryData(keys.config, await api.setAgentMode(v))} />;
+  const title = chat?.session ? "Permission mode for this chat" : "Permission mode for this chat and new ones";
+  return <BarPicker value={current} options={options} title={title} className={cx(current === "auto" && "mode-auto")} openSignal={openSignal} onChange={(v) => void set(v)} />;
 }
 
 /** What Claude Code's built-in commands do, for an agent that reported only their names. */
@@ -1189,7 +1246,7 @@ function useSlashMenu(text: string, cwd: string | undefined, agent: AgentKind | 
 }
 
 /** The `/` menu's list, with a heading where its group changes. */
-function SlashMenu({ slash, onPick }: { slash: ReturnType<typeof useSlashMenu>; onPick: (row: SlashRow) => void }) {
+function SlashMenu({ slash, onPick }: { slash: { rows: SlashRow[]; index: number; setIndex: (i: number) => void; mode: string }; onPick: (row: SlashRow) => void }) {
   const list = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     list.current?.querySelector(".active")?.scrollIntoView({ block: "nearest" });
@@ -1200,6 +1257,7 @@ function SlashMenu({ slash, onPick }: { slash: ReturnType<typeof useSlashMenu>; 
         <Fragment key={r.value}>
           {r.group && r.group !== slash.rows[i - 1]?.group && <div className="slash-group">{r.group}</div>}
           <button role="option" aria-selected={i === slash.index} className={cx(i === slash.index && "active")} title={r.detail} onMouseDown={(e) => (e.preventDefault(), onPick(r))} onMouseEnter={() => slash.setIndex(i)}>
+            {slash.mode === "mention" && <Icon name={r.value.endsWith("/") ? "folder" : "file"} size={12} />}
             <span className="slash-name">{slash.mode === "command" ? `/${r.label}` : r.label}</span>
             {r.hint && <span className="slash-hint">{r.hint}</span>}
             {r.detail && <span className="slash-desc">{r.detail}</span>}
@@ -1211,9 +1269,92 @@ function SlashMenu({ slash, onPick }: { slash: ReturnType<typeof useSlashMenu>; 
   );
 }
 
-export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat: Chat | undefined; onSend: (text: string, attachments: string[]) => void; placeholder: string; autoFocus?: boolean; extra?: React.ReactNode }) {
+/** An `@` mention as typed, ending at the caret: `@src/Ch`. */
+const MENTION = /(^|\s)@([^\s@"]*)$/;
+
+/**
+ * The `@` menu: files and folders in the chat's folder, best match for
+ * what's typed after `@` first, as in Claude Code. Picking one puts its
+ * path in the message; a folder goes on to its entries.
+ */
+function useMentionMenu(text: string, caret: number, cwd: string | undefined) {
+  const before = text.slice(0, caret);
+  const q = MENTION.exec(before)?.[2] ?? null;
+  const [index, setIndex] = useState(0);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const { data = [] } = useQuery({
+    queryKey: ["mentions", cwd, q],
+    queryFn: () => api.chatMentions(cwd!, q!),
+    enabled: q !== null && !!cwd,
+    staleTime: 10_000,
+    placeholderData: (prev) => prev,
+  });
+  const rows: SlashRow[] = q === null ? [] : data.map((p) => ({ value: p, label: p }));
+  const open = rows.length > 0 && dismissed !== before;
+  useEffect(() => setIndex(0), [q]);
+  /** The text with the picked path in place of what was typed, and where the caret goes. */
+  const fill = (row: SlashRow) => {
+    const start = caret - (q ?? "").length;
+    const path = /\s/.test(row.value) ? `"${row.value}"` : row.value;
+    const add = row.value.endsWith("/") ? path : `${path} `;
+    const after = text.slice(caret).replace(/^\S*/, "");
+    const rest = add.endsWith(" ") ? after.replace(/^ /, "") : after;
+    return { text: text.slice(0, start) + add + rest, caret: start + add.length };
+  };
+  const handleKey = (e: React.KeyboardEvent, pick: (row: SlashRow) => void) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const d = e.key === "ArrowDown" ? 1 : -1;
+      setIndex((i) => (i + d + rows.length) % rows.length);
+      return true;
+    }
+    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing)) {
+      const r = rows[Math.min(index, rows.length - 1)];
+      // Already typed out in full: Enter sends.
+      if (e.key === "Enter" && r.value === q) return false;
+      e.preventDefault();
+      pick(r);
+      return true;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setDismissed(before);
+      return true;
+    }
+    return false;
+  };
+  return { open, mode: "mention", rows, index, setIndex, handleKey, fill };
+}
+
+const HISTORY_KEY = "tab.composerHistory";
+
+/** What the person sent from any chat, newest first, for ↑ in the composer. */
+function sentHistory(): string[] {
+  try {
+    const h = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]");
+    return Array.isArray(h) ? h.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function remember(text: string) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify([text, ...sentHistory().filter((x) => x !== text)].slice(0, 100)));
+  } catch {
+    // History is a convenience; a full or blocked storage just skips it.
+  }
+}
+
+export function Composer({ chat, onSend, onShell, placeholder, autoFocus, extra }: { chat: Chat | undefined; onSend: (text: string, attachments: string[]) => void; onShell?: (command: string) => void; placeholder: string; autoFocus?: boolean; extra?: React.ReactNode }) {
   const { data: config } = useConfig();
   const [text, setText] = useState("");
+  const [caret, setCaret] = useState(0);
+  // Where ↑/↓ is in the history, and what was typed before it started.
+  const [recall, setRecall] = useState<{ i: number; draft: string } | null>(null);
+  // The first Esc of a possible Esc Esc, and leaving the box if none follows.
+  const lastEsc = useRef<{ at: number; leave: number } | null>(null);
+  const mode = usePermissionModes(chat);
   const [images, setImages] = useState<string[]>([]);
   const [uploading, setUploading] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -1223,7 +1364,44 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   const last = chat?.messages[chat.messages.length - 1];
   const suggestion = !running && last?.kind === "suggestion" && config?.agent.suggest_replies !== false ? last.content : "";
   const slash = useSlashMenu(text, chat?.session?.cwd, chat?.session?.agent ?? config?.agent.kind ?? undefined);
+  const shellMode = !!onShell && text.startsWith("!");
+  const mention = useMentionMenu(text, caret, chat?.session?.cwd ?? config?.agent.workdir ?? undefined);
   const [panel, setPanel] = useState<Panel | null>(null);
+  const [rewindTo, setRewindTo] = useState<number | null>(null);
+  // "Rewind" on a message in this chat opens the panel there.
+  useEffect(() => {
+    const open = (e: Event) => {
+      const d = (e as CustomEvent<{ sessionId: string; messageId: number }>).detail;
+      if (d.sessionId !== chat?.session?.id) return;
+      setRewindTo(d.messageId);
+      setPanel("rewind");
+    };
+    window.addEventListener("tab:rewind", open);
+    return () => window.removeEventListener("tab:rewind", open);
+  }, [chat?.session?.id]);
+  const onRewound = (r: { text: string; attachments: string[] }, conversation: boolean) => {
+    setRewindTo(null);
+    if (conversation) {
+      setText(r.text);
+      setImages(r.attachments);
+    }
+    ref.current?.focus();
+  };
+  const pickMention = (row: SlashRow) => {
+    const next = mention.fill(row);
+    setText(next.text);
+    setCaret(next.caret);
+    requestAnimationFrame(() => ref.current?.setSelectionRange(next.caret, next.caret));
+    ref.current?.focus();
+  };
+  /** Past messages for ↑: this chat's newest first, then what was sent elsewhere. */
+  const history = () => {
+    const own = (chat?.messages ?? [])
+      .filter((m) => (m.role === "user" && m.kind === "text") || m.kind === "shell")
+      .map((m) => (m.kind === "shell" ? `!${m.content}` : m.content))
+      .reverse();
+    return [...new Set([...own, ...sentHistory()].filter((t) => t.trim()))];
+  };
   const [picker, setPicker] = useState<{ which: "model" | "mode"; n: number }>({ which: "model", n: 0 });
   // A tab command runs at once; the agent's own get a space for arguments.
   const pickSlash = (row: SlashRow) => {
@@ -1238,7 +1416,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
     if (!c) return false;
     setText("");
     const a = c.action;
-    if ("panel" in a) setPanel(a.panel);
+    if ("panel" in a) (setRewindTo(null), setPanel(a.panel));
     else if ("picker" in a) (setPanel(null), setPicker((p) => ({ which: a.picker, n: p.n + 1 })));
     else (setPanel(null), a.go());
     return true;
@@ -1277,11 +1455,72 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   const submit = () => {
     const t = text.trim();
     if ((!t && !images.length) || uploading) return;
+    setRecall(null);
+    if (shellMode) {
+      const command = t.slice(1).trim();
+      if (!command) return;
+      remember(t);
+      setText("");
+      setError(null);
+      onShell!(command);
+      return;
+    }
     if (!images.length && runCommand(t)) return;
+    if (t) remember(t);
     setText("");
     setImages([]);
     setError(null);
     onSend(t, images);
+  };
+
+  /** ↑ on the first line goes back through what was sent, ↓ on the last comes forward. */
+  const recallKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const el = e.currentTarget;
+    if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey || el.selectionStart !== el.selectionEnd) return false;
+    if (e.key === "ArrowUp" && !text.slice(0, el.selectionStart).includes("\n")) {
+      const past = history();
+      const i = (recall?.i ?? -1) + 1;
+      if (i >= past.length) return false;
+      e.preventDefault();
+      setRecall({ i, draft: recall?.draft ?? text });
+      setText(past[i]);
+      return true;
+    }
+    if (e.key === "ArrowDown" && recall && !text.slice(el.selectionEnd).includes("\n")) {
+      e.preventDefault();
+      const i = recall.i - 1;
+      setText(i < 0 ? recall.draft : history()[i] ?? recall.draft);
+      setRecall(i < 0 ? null : { ...recall, i });
+      return true;
+    }
+    return false;
+  };
+
+  /**
+   * Esc Esc, as in Claude Code: clears what's typed, or with nothing typed,
+   * opens /rewind. A single Esc still leaves the box, a moment later.
+   */
+  const escKey = (e: React.KeyboardEvent) => {
+    if (e.key !== "Escape" || panel || (!text && !chat?.session)) return;
+    e.preventDefault();
+    const first = lastEsc.current;
+    if (!first || Date.now() - first.at > 800) {
+      const leave = window.setTimeout(() => ((lastEsc.current = null), ref.current?.blur()), 800);
+      lastEsc.current = { at: Date.now(), leave };
+      return;
+    }
+    window.clearTimeout(first.leave);
+    lastEsc.current = null;
+    // The panel that opens listens for Esc to close; this one isn't for it.
+    e.stopPropagation();
+    if (text) {
+      remember(text);
+      setText("");
+      setRecall(null);
+    } else if (chat?.session) {
+      setRewindTo(null);
+      setPanel("rewind");
+    }
   };
 
   if (config && !config.agent.kind)
@@ -1296,14 +1535,14 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   return (
     <div ref={drop.ref} className={cx("composer", drop.armed && "drop-armed", drop.targeted && "dragging")}>
       <AgentNotice messages={chat?.messages} starting={!chat?.session && !chat?.running} />
-      {panel && <SlashPanel panel={panel} chat={chat} onClose={() => (setPanel(null), ref.current?.focus())} />}
+      {panel && <SlashPanel panel={panel} chat={chat} rewind={{ to: rewindTo, onRewound }} onClose={() => (setPanel(null), setRewindTo(null), ref.current?.focus())} />}
       {(images.length > 0 || uploading > 0) && (
         <div className="composer-images">
           <Attachments paths={images} size={56} onRemove={(p) => setImages((xs) => xs.filter((x) => x !== p))} />
           {uploading > 0 && <span className="thumb thumb-busy" style={{ width: 56, height: 56 }}><Icon name="refresh" size={14} /></span>}
         </div>
       )}
-      <div className="composer-input">
+      <div className={cx("composer-input", shellMode && "shell-mode")}>
       {slash.ghost && !text.includes("\n") && (
         <div className="composer-ghost" aria-hidden><span>{text}</span>{slash.ghost}</div>
       )}
@@ -1312,7 +1551,8 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
         rows={1}
         value={text}
         placeholder={suggestion || (running ? "Steer the agent while it works…" : placeholder)}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => (setText(e.target.value), setCaret(e.target.selectionStart), setRecall(null))}
+        onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
         onPaste={(e) => {
           const files = [...e.clipboardData.files];
           if (!files.length) return;
@@ -1320,14 +1560,24 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
           void add(files);
         }}
         onKeyDown={(e) => {
+          if (mention.open && mention.handleKey(e, pickMention)) return;
           if (slash.open && slash.handleKey(e, pickSlash)) return;
+          if (!mention.open && !slash.open && recallKey(e)) return;
+          // Shift+Tab cycles the permission mode, as in Claude Code.
+          if (e.key === "Tab" && e.shiftKey && mode.ready) {
+            e.preventDefault();
+            const i = mode.modes.findIndex((m) => m.value === mode.current);
+            return void mode.set(mode.modes[(i + 1) % mode.modes.length].value);
+          }
+          escKey(e);
           // Tab takes the suggested reply; Enter then sends it.
           if (e.key === "Tab" && !e.shiftKey && !text && suggestion) return (e.preventDefault(), setText(suggestion));
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) (e.preventDefault(), submit());
         }}
       />
       </div>
-      {slash.open && <SlashMenu slash={slash} onPick={pickSlash} />}
+      {mention.open ? <SlashMenu slash={mention} onPick={pickMention} /> : slash.open && <SlashMenu slash={slash} onPick={pickSlash} />}
+      {shellMode && <div className="composer-suggest subtle">Shell: runs in the chat's folder. The agent sees the output with your next message.</div>}
       {error && <div className="composer-error">{error}</div>}
       {suggestion && !text && <div className="composer-suggest subtle"><kbd>Tab</kbd> to use the suggested reply, then <kbd>Enter</kbd> to send</div>}
       <div className="composer-foot">
@@ -1342,7 +1592,7 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
         {running && chat?.session && (
           <Button size="sm" icon="stop" className="composer-stop" title="Stop the agent" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
         )}
-        <Button size="sm" variant="primary" icon="arrow-up" disabled={(!text.trim() && !images.length) || uploading > 0} onClick={submit}>{running ? "Steer" : "Send"}</Button>
+        <Button size="sm" variant="primary" icon={shellMode ? "terminal" : "arrow-up"} disabled={(!text.trim() && !images.length) || uploading > 0} onClick={submit}>{shellMode ? "Run" : running ? "Steer" : "Send"}</Button>
       </div>
     </div>
   );
