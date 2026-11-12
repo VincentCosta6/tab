@@ -495,6 +495,8 @@ pub struct AgentHub {
     review_root: RwLock<Option<PathBuf>>,
     /// Remote MCP servers the person connected (Linear, Notion, …).
     remote: Arc<crate::remote_mcp::RemoteMcp>,
+    /// The end-to-end encrypted vault, on a computer (not a cloud runner).
+    vault: std::sync::OnceLock<Arc<crate::e2e::E2e>>,
 }
 
 /// See [`AgentHub::set_file_sink`].
@@ -551,6 +553,7 @@ impl AgentHub {
             approvals: Mutex::new(HashMap::new()),
             opencode: tokio::sync::Mutex::new(HashMap::new()),
             file_sink: std::sync::OnceLock::new(),
+            vault: std::sync::OnceLock::new(),
             review_root: RwLock::new(None),
         })
     }
@@ -653,6 +656,15 @@ impl AgentHub {
     /// branches itself.
     fn brokers(&self) -> bool {
         self.mcp().is_some() && !self.remote.in_cloud()
+    }
+
+    /// Gives chats the vault (`crate::mcp` decides which may use it).
+    pub fn set_vault(&self, vault: Arc<crate::e2e::E2e>) {
+        let _ = self.vault.set(vault);
+    }
+
+    pub fn vault(&self) -> Option<&Arc<crate::e2e::E2e>> {
+        self.vault.get()
     }
 
     /// The remote MCP servers the person connected.

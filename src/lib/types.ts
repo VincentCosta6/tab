@@ -149,8 +149,46 @@ export interface ProjectRepo {
 }
 
 export type ResourceKind = "website" | "file" | "email" | "service" | "link" | "note";
-/** Who may read a resource: every chat in the project, only its coordinator, or (soon) the encrypted vault. */
+/** Who may read a resource: every chat in the project, only its coordinator, or the end-to-end encrypted vault. */
 export type ResourceAccess = "all" | "coordinator" | "vault";
+
+/** Where this device stands with the end-to-end encrypted vault (`tab_core::e2e`). */
+export interface VaultStatus {
+  state: "none" | "no_access" | "asked" | "locked" | "open";
+  open_until: string | null;
+  device: VaultDevice;
+  devices: VaultDevice[];
+  /** How this device confirms it's you: "Touch ID", "Windows Hello", or null. */
+  presence: string | null;
+}
+export interface VaultDevice { id: string; name: string; state: "pending" | "active" | "removed" | "none"; code: string; this: boolean; approved_by: string | null; created_at: string }
+export interface VaultField { label: string; masked: string; value?: string }
+export interface VaultEntry {
+  id: string;
+  project_id: string;
+  kind: "note" | "file";
+  title: string;
+  note: string;
+  fields: VaultField[];
+  file?: { name: string; size: number };
+  created_at: string;
+  updated_at: string;
+}
+/** A field to save; leave `value` out to keep the one it has. */
+export interface VaultFieldInput { label: string; value?: string | null }
+export interface VaultEntryInput { id?: string; title: string; note: string; fields: VaultFieldInput[] }
+export interface VaultAudit {
+  id: string;
+  at: string;
+  device: string;
+  action: string;
+  actor: "person" | "coordinator" | "thread";
+  session_id: string | null;
+  project_id: string | null;
+  resource_id: string | null;
+  /** Opened only while the vault is. */
+  detail: { title?: string; fields?: string[]; why?: string; query?: string; results?: number; device?: string } | null;
+}
 
 /** Something a project knows besides its repos: a site, a document, email, a service. */
 export interface ProjectResource {

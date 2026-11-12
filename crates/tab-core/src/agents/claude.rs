@@ -66,6 +66,57 @@ impl Unanswered {
     }
 }
 
+/// Tool calls after the last step-list update before tab asks the agent
+/// whether its plan has moved on.
+const STALE_STEPS: usize = 8;
+
+/// The agent's step list (`tab_steps`) on this turn, and how long since it
+/// last changed.
+///
+/// The list only moves when the agent sends it again. On a long turn the
+/// model tends to send it at the start and the end and forget the middle,
+/// so the person watches a step "in progress" that finished long ago. After
+/// [`STALE_STEPS`] other calls with steps still unfinished, tab reminds it,
+/// once until it next updates the list.
+#[derive(Default)]
+struct Steps {
+    /// The step under way (or next up), while any is unfinished.
+    current: Option<String>,
+    calls_since: usize,
+    reminded: bool,
+}
+
+impl Steps {
+    /// The agent made a tool call. Returns a reminder when its list has
+    /// gone stale.
+    fn call(&mut self, name: &str, input: &Value) -> Option<String> {
+        if name.ends_with("tab_steps") {
+            let steps: Vec<&Value> = input["steps"].as_array().into_iter().flatten().collect();
+            let title = |t: &&Value| t["title"].as_str().map(str::to_string);
+            self.current = steps
+                .iter()
+                .find(|t| t["status"] == "in_progress")
+                .or_else(|| steps.iter().find(|t| t["status"] == "pending"))
+                .and_then(title);
+            self.calls_since = 0;
+            self.reminded = false;
+            return None;
+        }
+        self.calls_since += 1;
+        let current = self.current.as_ref()?;
+        if self.reminded || self.calls_since < STALE_STEPS {
+            return None;
+        }
+        self.reminded = true;
+        Some(format!(
+            "(From tab, not the person; no need to reply.) Your step list hasn't changed in {} tool \
+             calls and still shows \"{current}\" as the current step. If that step is done or the \
+             plan has changed, call tab_steps now with the whole updated list; otherwise carry on.",
+            self.calls_since
+        ))
+    }
+}
+
 /// What tab tells the agent when it went past the person's messages.
 fn reminder(skipped: &[String]) -> String {
     let quoted: Vec<String> = skipped
@@ -437,6 +488,8 @@ struct Parser {
     /// The person's mid-turn messages, until answered (shared with the
     /// steering task, which notes each one it sends).
     unanswered: Arc<Mutex<Unanswered>>,
+    /// The agent's step list, for reminding it when it goes stale.
+    steps: Steps,
     /// The person pressed "Send now": the next result only closes the
     /// interrupted part, and the turn goes on with their queued message.
     interrupted: bool,
@@ -677,6 +730,7 @@ impl Parser {
             tab_context_tokens: 0,
             open_tools: OpenTools::default(),
             unanswered: Default::default(),
+            steps: Steps::default(),
             interrupted: false,
             strict: false,
             leaked: Vec::new(),
@@ -886,6 +940,9 @@ impl Parser {
                                 }
                                 self.open_tools.lock().unwrap().insert(id.clone());
                                 let name = block["name"].as_str().unwrap_or("tool");
+                                if let Some(r) = self.steps.call(name, &block["input"]) {
+                                    hub.remind(&sid, r);
+                                }
                                 if super::is_wait(name, &block["input"]) {
                                     self.waits.insert(id.clone());
                                     hub.update(&sid, Some(SessionStatus::Monitoring), None);
@@ -1344,6 +1401,69 @@ mod tests {
         let (_store, _sid, mut p, mut steering) = steered_turn();
         p.unanswered.lock().unwrap().sent("what is shot.png?");
         feed(&mut p, &[CALL_1]);
+        assert!(steering.try_recv().is_err());
+    }
+
+    fn steps_call(id: &str, steps: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"id":"{id}","content":[{{"type":"tool_use","id":"{id}","name":"mcp__tab__tab_steps","input":{{"steps":{steps}}}}}]}}}}"#
+        )
+    }
+
+    fn bash_calls(p: &mut Parser, from: usize, n: usize) {
+        for i in from..from + n {
+            feed(
+                p,
+                &[&format!(
+                    r#"{{"type":"assistant","message":{{"id":"b{i}","content":[{{"type":"tool_use","id":"b{i}","name":"Bash","input":{{"command":"ls"}}}}]}}}}"#
+                )],
+            );
+        }
+    }
+
+    const PLAN: &str =
+        r#"[{"title":"Find it","status":"in_progress"},{"title":"Fix it","status":"pending"}]"#;
+
+    #[tokio::test]
+    async fn a_step_list_left_alone_for_long_gets_the_agent_reminded_once() {
+        let (store, sid, mut p, mut steering) = steered_turn();
+        feed(&mut p, &[&steps_call("s1", PLAN)]);
+        bash_calls(&mut p, 0, STALE_STEPS - 1);
+        assert!(steering.try_recv().is_err());
+        bash_calls(&mut p, STALE_STEPS, 1);
+        match steering.try_recv() {
+            Ok(Steer::Reminder(r)) => assert!(r.contains("\"Find it\"") && r.contains("tab_steps")),
+            _ => panic!("expected a reminder"),
+        }
+        // Quietly: nothing in the chat, and not again until the list moves.
+        assert!(
+            !store
+                .messages(&sid)
+                .unwrap()
+                .iter()
+                .any(|m| m.kind == "status")
+        );
+        bash_calls(&mut p, 100, STALE_STEPS * 2);
+        assert!(steering.try_recv().is_err());
+        // An update starts the count over.
+        feed(&mut p, &[&steps_call("s2", PLAN)]);
+        bash_calls(&mut p, 200, STALE_STEPS);
+        assert!(matches!(steering.try_recv(), Ok(Steer::Reminder(_))));
+    }
+
+    #[tokio::test]
+    async fn no_step_reminder_without_a_plan_or_once_it_is_finished() {
+        let (_store, _sid, mut p, mut steering) = steered_turn();
+        bash_calls(&mut p, 0, STALE_STEPS * 2);
+        assert!(steering.try_recv().is_err());
+        feed(
+            &mut p,
+            &[&steps_call(
+                "s1",
+                r#"[{"title":"Find it","status":"completed"},{"title":"Fix it","status":"completed"}]"#,
+            )],
+        );
+        bash_calls(&mut p, 100, STALE_STEPS * 2);
         assert!(steering.try_recv().is_err());
     }
 

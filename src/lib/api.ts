@@ -8,7 +8,7 @@ import type {
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
   AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
-  EmailSignInStatus, MailProvider, Segment, SessionMessage, ChatRewound, RewoundFiles,
+  EmailSignInStatus, MailProvider, Segment, SessionMessage, ChatRewound, RewoundFiles, VaultAudit, VaultEntry, VaultEntryInput, VaultStatus,
 } from "./types";
 import { mockApi } from "./mock";
 import { HubListSchema, HubStatusSchema, RunnerStatusSchema, decode } from "./protocol/cloud";
@@ -122,6 +122,31 @@ export const api = {
     const headers = { "x-project": encodeURIComponent(projectId), "x-name": encodeURIComponent(name), "x-access": access };
     return invoke<ProjectResource>("project_file_add", bytes, { headers });
   },
+  vaultStatus: () => call<VaultStatus>("vault_status"),
+  /** Sets the vault up; returns the recovery key's 24 words, shown once. */
+  vaultCreate: () => call<string>("vault_create"),
+  /** Touch ID / Windows Hello, then open for 10 minutes. */
+  vaultUnlock: () => call<void>("vault_unlock"),
+  vaultLock: () => call<void>("vault_lock"),
+  /** Asks an open device to let this one in; returns the code to compare. */
+  vaultAsk: () => call<string>("vault_ask"),
+  vaultRecover: (words: string) => call<void>("vault_recover", { words }),
+  vaultApprove: (deviceId: string) => call<void>("vault_approve", { deviceId }),
+  vaultDeny: (deviceId: string) => call<void>("vault_deny", { deviceId }),
+  vaultRemoveDevice: (deviceId: string) => call<void>("vault_remove_device", { deviceId }),
+  vaultEntries: (projectId: string) => call<VaultEntry[]>("vault_entries", { projectId }),
+  vaultEntrySave: (projectId: string, entry: VaultEntryInput) => call<VaultEntry>("vault_entry_save", { projectId, entry }),
+  vaultEntryDelete: (projectId: string, id: string) => call<void>("vault_entry_delete", { projectId, id }),
+  vaultReveal: (projectId: string, id: string, label: string) => call<string>("vault_reveal", { projectId, id, label }),
+  /** Seals a file on this device, then puts it in the hub. */
+  vaultFileAdd: async (projectId: string, name: string, bytes: Uint8Array): Promise<VaultEntry> => {
+    if (!inTauri) return mockApi.invoke<VaultEntry>("vault_file_add", { projectId, name, bytes });
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<VaultEntry>("vault_file_add", bytes, { headers: { "x-project": encodeURIComponent(projectId), "x-name": encodeURIComponent(name) } });
+  },
+  /** Saves a decrypted copy in Downloads; returns its path. */
+  vaultFileExport: (projectId: string, id: string) => call<string>("vault_file_export", { projectId, id }),
+  vaultAudit: (projectId: string | null) => call<VaultAudit[]>("vault_audit", { projectId }),
   projectItems: (projectId: string) => call<QueueItem[]>("project_items", { projectId }),
   reviewChatOpen: (repo: string, number: number) => call<Chat>("review_chat_open", { repo, number }),
   reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string, attachments: string[] = []) =>

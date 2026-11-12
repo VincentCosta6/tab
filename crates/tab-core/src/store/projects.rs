@@ -337,8 +337,7 @@ impl Store {
     }
 
     /// Adds a resource to a project, or updates it (by id, or the same kind
-    /// and link). Vault resources aren't stored here: they need the
-    /// end-to-end encrypted vault (docs/projects-hub.md).
+    /// and link). Vault entries go through `crate::e2e` instead.
     pub fn resource_save(
         &self,
         project_id: &str,
@@ -356,10 +355,27 @@ impl Store {
             RESOURCE_ACCESS.contains(&access),
             "unknown access level {access:?}"
         );
+        // Vault entries are sealed on the device (crate::e2e) and written
+        // with `vault_entry_put`; nothing readable is stored as one, and an
+        // entry doesn't move in or out of the vault.
         anyhow::ensure!(
             access != "vault",
-            "the vault isn't available yet: it needs end-to-end encryption, which comes in a later release"
+            "vault entries are added in the project's Vault, where they're encrypted on this device"
         );
+        if let Some(id) = &input.id {
+            let was_vault: Option<String> = self
+                .conn()
+                .query_row(
+                    "SELECT access FROM project_resources WHERE id = ?1 AND project_id = ?2",
+                    params![id, project_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            anyhow::ensure!(
+                was_vault.as_deref() != Some("vault"),
+                "vault entries are edited in the project's Vault"
+            );
+        }
         let title = input.title.trim();
         anyhow::ensure!(!title.is_empty(), "a resource needs a title");
         let url = input

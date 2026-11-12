@@ -361,14 +361,23 @@ function describeTool(m: SessionMessage): string {
 }
 
 /**
+ * Where the running (or last) turn starts: just after the person's last
+ * message that started one. A message sent mid-turn (a steer) joins the
+ * turn already running, so the plan from before it still counts.
+ */
+function turnStart(messages: SessionMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user" && !messages[i].meta?.steer) return i + 1;
+  return 0;
+}
+
+/**
  * The agent's step list, from whichever todo tool it uses: TodoWrite
  * (Claude Code, and opencode's todowrite) sends the whole list each time;
  * TaskCreate/TaskUpdate (newer Claude Code) builds it up one step at a time.
  * Only shown when this turn touched it, so an old list doesn't linger.
  */
 function agentSteps(messages: SessionMessage[], results: Map<number, SessionMessage>): Todo[] {
-  let turn = 0;
-  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { turn = i + 1; break; }
+  const turn = turnStart(messages);
   for (let i = messages.length - 1; i >= turn; i--) {
     const m = messages[i];
     if (m.kind === "tool" && isStepsTool(m.meta?.tool)) {
@@ -418,8 +427,7 @@ function ProgressBar({ messages, results, running, folded, writing }: { messages
   // the last few tool calls with done/doing marks, so there's always something to follow.
   const activity: Todo[] = [];
   if (!plan.length && running) {
-    let turn = 0;
-    for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { turn = i + 1; break; }
+    const turn = turnStart(messages);
     for (const m of messages.slice(turn)) {
       if (m.kind !== "tool" || isStepTool(m.meta?.tool) || m.meta?.tool === "AskUserQuestion") continue;
       activity.push({ content: describeTool(m), status: results.has(m.id) ? "completed" : "in_progress" });
@@ -432,7 +440,7 @@ function ProgressBar({ messages, results, running, folded, writing }: { messages
   let note = "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m.role === "user") break; // only this turn's work
+    if (m.role === "user" && !m.meta?.steer) break; // only this turn's work
     if (!note && folded.has(m.id)) note = m.content.trim().split("\n")[0].replace(/[`*]/g, "");
     if (step || m.kind !== "tool") continue;
     const tool = m.meta?.tool;
@@ -868,7 +876,51 @@ function SecretCard({ m, onSend }: { m: SessionMessage; onSend?: (text: string) 
 
 function ApprovalCard({ approval }: { approval: Approval }) {
   if (approval.tool === "AskUserQuestion") return <QuestionApproval approval={approval} />;
+  if (approval.tool === "tab_vault") return <VaultApproval approval={approval} />;
   return <ToolApproval approval={approval} />;
+}
+
+/** An agent wants something from the vault: unlock it, release fields, or share them with a thread. */
+function VaultApproval({ approval }: { approval: Approval }) {
+  const input = approval.input as { kind: "unlock" | "release" | "request"; why?: string; entry?: string; fields?: (string | { label: string; masked: string })[]; file?: boolean };
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const allow = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      // Approving opens the vault here first (Touch ID / Windows Hello).
+      const st = await api.vaultStatus();
+      if (st.state === "locked") await api.vaultUnlock();
+      else if (st.state !== "open") throw new Error("This device can't open the vault. Answer on the computer running this chat.");
+      await api.approvalResolve(approval.id, "allow");
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  };
+  const deny = async () => (setBusy(true), await api.approvalResolve(approval.id, "deny"));
+  const fields = input.fields ?? [];
+  return (
+    <div className="approval vault-approval">
+      <div className="approval-head"><Icon name="lock" size={14} /> {approval.summary}</div>
+      {fields.length > 0 && (
+        <div className="vault-approval-fields">
+          {fields.map((f) => typeof f === "string"
+            ? <span key={f} className="vault-chip">{f}</span>
+            : <span key={f.label} className="vault-chip">{f.label} <code>{f.masked}</code></span>)}
+          {input.file && <span className="vault-chip">file text</span>}
+        </div>
+      )}
+      {input.why && <p className="vault-approval-why"><span className="subtle">Why:</span> {input.why}</p>}
+      {input.kind !== "unlock" && <p className="subtle vault-approval-note">Only this one answer gets the values; the saved chat shows them masked. Logged in the vault's activity.</p>}
+      {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
+      <div className="toolbar">
+        <Button size="sm" variant="primary" icon="check" disabled={busy} onClick={allow}>{input.kind === "unlock" ? "Unlock" : input.kind === "release" ? "Show to the coordinator" : "Share"}</Button>
+        <Button size="sm" variant="ghost" icon="x" disabled={busy} onClick={deny}>Deny</Button>
+      </div>
+    </div>
+  );
 }
 
 function ToolApproval({ approval }: { approval: Approval }) {

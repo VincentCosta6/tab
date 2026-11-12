@@ -12,13 +12,17 @@ import { useProjectRepos, useProjectResources } from "../../lib/hooks";
 import { keys } from "../../lib/query";
 import type { Project, ProjectResource, ResourceAccess, ResourceKind } from "../../lib/types";
 import { accessLook, detect, kindLook, kindOrder, statusLook } from "./resources";
+import { VaultSection, ensureVaultOpen } from "./Vault";
 
 const isLink = (url: string | null) => !!url && /^https?:\/\//.test(url);
 
 /** Beside the coordinator: the project's rules, then its resources by kind and its repos. */
 export function KnowledgeRail({ project, onAdd, onSeeAll, onEditRules }: { project: Project; onAdd: () => void; onSeeAll: () => void; onEditRules: () => void }) {
-  const { data: resources = [] } = useProjectResources(project.id);
+  const { data: all = [] } = useProjectResources(project.id);
   const { data: repos = [] } = useProjectRepos(project.id);
+  // Vault entries say nothing until opened; they're counted, not listed.
+  const resources = useMemo(() => all.filter((r) => r.access !== "vault"), [all]);
+  const vaulted = all.length - resources.length;
   const groups = useMemo(() => kindOrder.map((k) => [k, resources.filter((r) => r.kind === k)] as const).filter(([, rs]) => rs.length), [resources]);
 
   return (
@@ -47,6 +51,18 @@ export function KnowledgeRail({ project, onAdd, onSeeAll, onEditRules }: { proje
             {rs.map((r) => <RailRow key={r.id} r={r} />)}
           </div>
         ))}
+        {vaulted > 0 && (
+          <div className="pjk-group">
+            <div className="pjk-group-head"><span>Vault</span><span>{vaulted}</span></div>
+            <button className="pjk-row" onClick={onSeeAll}>
+              <span className="pjk-glyph restricted"><Icon name="lock" size={13} /></span>
+              <span className="pjk-row-main">
+                <span className="pjk-row-title">{vaulted} encrypted {vaulted === 1 ? "entry" : "entries"}</span>
+                <span className="pjk-row-sub">Coordinator only, after you unlock</span>
+              </span>
+            </button>
+          </div>
+        )}
         {repos.length > 0 && (
           <div className="pjk-group">
             <div className="pjk-group-head"><span>Repos</span><span>{repos.length}</span></div>
@@ -84,7 +100,8 @@ function RailRow({ r }: { r: ProjectResource }) {
 /** The Knowledge tab: every resource with its access and status, then the repos. */
 export function KnowledgeView({ project, onAdd, repos }: { project: Project; onAdd: () => void; repos: React.ReactNode }) {
   const qc = useQueryClient();
-  const { data: resources = [] } = useProjectResources(project.id);
+  const { data: all = [] } = useProjectResources(project.id);
+  const resources = useMemo(() => all.filter((r) => r.access !== "vault"), [all]);
   const [kind, setKind] = useState<ResourceKind | null>(null);
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<ProjectResource | null>(null);
@@ -159,6 +176,7 @@ export function KnowledgeView({ project, onAdd, repos }: { project: Project; onA
           <span>Websites, a Cloudflare or Stripe link, Google Docs, an email label or sender, notes. Agents read them; the coordinator reads the private ones too.</span>
         </button>
       )}
+      <VaultSection project={project} />
       <section className="pjk-repos">{repos}</section>
       {editing && <AddResource project={project} resource={editing} onClose={() => setEditing(null)} />}
     </div>
@@ -208,14 +226,23 @@ export function AddResource({ project, resource, onClose }: { project: Project; 
   const repo = !resource && !kind ? found?.repo : undefined;
   const opt = (key: string, v: unknown) => setOptions((o) => ({ ...o, [key]: v }));
   const uploading = k === "file" && !resource;
-  const canSave = uploading ? files.length > 0 : repo || (t.trim() && (k === "note" ? note.trim() : text.trim()));
+  // The vault keeps notes and files; editing an entry happens in the Vault.
+  const vaultable = k === "note" || k === "file";
+  const canSave = (access !== "vault" || (vaultable && !resource && !repo)) && (uploading ? files.length > 0 : repo || (t.trim() && (k === "note" ? note.trim() : text.trim())));
 
   const save = async () => {
     if (!canSave || busy) return;
     setBusy(true);
     setError(null);
     try {
-      if (uploading) {
+      if (access === "vault") {
+        // Sealed on this device, so the vault has to be open.
+        await ensureVaultOpen();
+        if (uploading) for (const f of files) await api.vaultFileAdd(project.id, f.name, new Uint8Array(await f.arrayBuffer()));
+        else await api.vaultEntrySave(project.id, { title: t, note, fields: [] });
+        await qc.invalidateQueries({ queryKey: ["vault-entries"] });
+        await qc.invalidateQueries({ queryKey: keys.resources(project.id) });
+      } else if (uploading) {
         for (const f of files) await api.projectFileAdd(project.id, f.name, new Uint8Array(await f.arrayBuffer()), access);
         await qc.invalidateQueries({ queryKey: keys.resources(project.id) });
       } else if (repo) {
@@ -299,7 +326,7 @@ export function AddResource({ project, resource, onClose }: { project: Project; 
               <span className="label-sm">Who can read it</span>
               <div className="pjk-access">
                 {(Object.keys(accessLook) as ResourceAccess[]).map((a) => (
-                  <button key={a} className={cx("pjk-access-opt", access === a && "on")} disabled={a === "vault"} onClick={() => setAccess(a)}>
+                  <button key={a} className={cx("pjk-access-opt", access === a && "on")} disabled={a === "vault" && (!!resource || !vaultable)} title={a === "vault" && !vaultable ? "The vault keeps notes and files" : undefined} onClick={() => setAccess(a)}>
                     <span className="pjk-access-label">{accessLook[a].icon && <Icon name={accessLook[a].icon!} size={12} />}{accessLook[a].label}</span>
                     <span className="pjk-access-help">{accessLook[a].help}</span>
                   </button>
@@ -310,7 +337,7 @@ export function AddResource({ project, resource, onClose }: { project: Project; 
         )}
         {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
         <footer className="pj-dialog-foot">
-          <span className="subtle pjk-foot-note">Coordinator-only resources are never offered to other threads.</span>
+          <span className="subtle pjk-foot-note">{access === "vault" ? "Encrypted on this device; for fields like an EIN, use Add entry in the Vault." : "Coordinator-only resources are never offered to other threads."}</span>
           <span className="pj-dialog-actions">
             <Button size="sm" variant="ghost" onClick={onClose}>Cancel</Button>
             <Button size="sm" variant="primary" disabled={!canSave || busy} onClick={save}>{resource ? "Save" : repo ? "Add repo" : uploading ? (busy ? "Adding…" : files.length > 1 ? `Add ${files.length} files` : "Add file") : "Add resource"}</Button>

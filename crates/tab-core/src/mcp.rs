@@ -27,6 +27,11 @@
 //! * `tab_list_actions`, `tab_list_workflows`, `tab_save_workflow`,
 //!   `tab_test_workflow`: build workflows. Agents draft and dry-run them;
 //!   only the person turns one on.
+//! * `tab_vault_search`, `tab_vault_get` (a project's coordinator) and
+//!   `tab_vault_request` (its other threads): the end-to-end encrypted
+//!   vault ([`crate::e2e`]), listed only to chats the person drives on the
+//!   device holding its key. Values are masked unless the person releases
+//!   them on a card in the chat.
 //! * `approve`: Claude Code's `--permission-prompt-tool`; asks the person.
 //!
 //! It also fronts the remote MCP servers the person connected
@@ -1261,6 +1266,46 @@ pub fn tools() -> Value {
 }
 
 /// Labels of required settings that have no value yet.
+/// The vault's tools: search and read for a project's coordinator, ask
+/// for fields for its other threads (see [`McpServer::vault_role`]).
+fn vault_tools(coordinator: bool) -> Value {
+    if coordinator {
+        json!([
+            {
+                "name": "tab_vault_search",
+                "description": "Search the project's end-to-end encrypted vault (EIN, tax returns, bank details, IDs, contracts). Returns entries with their field names and masked values (•••• 6789) and, for files, the best passage with numbers masked. Only you, the coordinator, can search it. If it's locked, the person is asked to unlock it.",
+                "inputSchema": { "type": "object", "properties": {
+                    "query": { "type": "string", "description": "What you're looking for, e.g. \"EIN\" or \"2024 tax return\". Empty lists every entry." }
+                } }
+            },
+            {
+                "name": "tab_vault_get",
+                "description": "Read one vault entry. Values are masked unless you name them in `reveal`, which asks the person to release them to you (\"file\" releases a file's text). Ask for only what the task needs, and don't repeat released values in your reply unless the person asked for them.",
+                "inputSchema": { "type": "object", "properties": {
+                    "id": { "type": "string", "description": "The entry id from tab_vault_search." },
+                    "reveal": { "type": "array", "items": { "type": "string" }, "description": "Field names to see in full, or \"file\"." },
+                    "why": { "type": "string", "description": "What you need them for, shown to the person." }
+                }, "required": ["id"] }
+            }
+        ])
+    } else {
+        json!([{
+            "name": "tab_vault_request",
+            "description": "Ask the person for fields from the project's encrypted vault (e.g. EIN, bank routing number), with why you need them. They see an approval card; if they approve, the values are in this tool's result only. Don't save them anywhere or repeat them beyond what the task needs.",
+            "inputSchema": { "type": "object", "properties": {
+                "fields": { "type": "array", "items": { "type": "string" }, "description": "Field names, e.g. [\"EIN\", \"State tax ID\"]." },
+                "why": { "type": "string", "description": "What you need them for, shown to the person." }
+            }, "required": ["fields", "why"] }
+        }])
+    }
+}
+
+/// Who in a chat may use the vault, and for which project.
+struct VaultRole {
+    project_id: String,
+    coordinator: bool,
+}
+
 fn missing_required(info: &ConnectorInfo, cfg: &ConnectorConfig) -> Vec<String> {
     info.descriptor
         .settings
@@ -1420,7 +1465,18 @@ impl McpServer {
                 "instructions": "tab is the person's work queue. Search it, read items, file what you find under Found, attach context and create tasks, and set up connections (email, GitHub, ...) for the person. When the person mentions something you don't recognise, call tab_graph_search before asking them. Project notes (tab_project_note) are rare and reviewed: only facts every future chat needs that the repo doesn't already say."
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": with_load_hints(tools()) })),
+            "tools/list" => {
+                let mut list = tools();
+                if let (Some(role), Some(all)) = (self.vault_role(session), list.as_array_mut()) {
+                    all.extend(
+                        vault_tools(role.coordinator)
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                }
+                Ok(json!({ "tools": with_load_hints(list) }))
+            }
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or_default();
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -1437,6 +1493,245 @@ impl McpServer {
             Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": r }),
             Err((code, m)) => rpc_error(id, code, &m),
         })
+    }
+
+    /// Whether a chat may use the vault: a chat the person drives, run on
+    /// this device (which holds the key), in a project. Its coordinator
+    /// searches and reads; other threads ask for fields. Never a cloud job
+    /// or a chat another device runs.
+    fn vault_role(&self, session: Option<&str>) -> Option<VaultRole> {
+        self.hub.vault()?;
+        if self.hub.remote_mcp().in_cloud() {
+            return None;
+        }
+        let s = self.store.session_get(session?).ok()??;
+        if self.hub.policy(&s).trust != crate::sandbox::Trust::Person || !self.hub.runs_here(&s) {
+            return None;
+        }
+        if let Some(p) = self.coordinator_of(Some(&s.id)) {
+            return Some(VaultRole {
+                project_id: p,
+                coordinator: true,
+            });
+        }
+        let project_id = s
+            .item_id
+            .as_deref()
+            .and_then(|i| self.store.get(i).ok().flatten())
+            .and_then(|i| i.project_id)?;
+        Some(VaultRole {
+            project_id,
+            coordinator: false,
+        })
+    }
+
+    /// Asks the person on the card in the chat. `Ok` when they allowed it.
+    async fn vault_ask(&self, session: &str, summary: String, input: Value) -> anyhow::Result<()> {
+        match self
+            .hub
+            .request_approval(session, "tab_vault", summary, input)
+            .await
+        {
+            Decision::Allow | Decision::AllowAlways | Decision::Answer(_) => Ok(()),
+            Decision::Deny(why) => anyhow::bail!(if why.trim().is_empty() {
+                "The person declined. Don't ask again for the same thing in this turn.".to_string()
+            } else {
+                format!("The person declined: {why}")
+            }),
+        }
+    }
+
+    /// The vault, opened: if it's locked, the person is asked to unlock it.
+    async fn vault_open(&self, session: &str, what: &str) -> anyhow::Result<Arc<crate::e2e::E2e>> {
+        let v = self
+            .hub
+            .vault()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the vault isn't available here"))?;
+        if !v.is_open() {
+            self.vault_ask(
+                session,
+                format!("Unlock the vault to {what}"),
+                json!({ "kind": "unlock", "what": what }),
+            )
+            .await?;
+            anyhow::ensure!(
+                v.is_open(),
+                "The vault is still locked (it opens on this device, with Touch ID or Windows Hello). Tell the person you need it unlocked."
+            );
+        }
+        Ok(v)
+    }
+
+    async fn vault_call(
+        &self,
+        session: &str,
+        role: VaultRole,
+        name: &str,
+        args: &Value,
+    ) -> anyhow::Result<Value> {
+        let project = &role.project_id;
+        let list = |k: &str| -> Vec<String> {
+            args[k]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let why = args["why"].as_str().unwrap_or_default().trim().to_string();
+        let who = crate::e2e::Reader {
+            actor: if role.coordinator {
+                "coordinator"
+            } else {
+                "thread"
+            },
+            session_id: Some(session),
+        };
+        match name {
+            "tab_vault_search" if role.coordinator => {
+                let v = self
+                    .vault_open(session, "let the coordinator search it")
+                    .await?;
+                let hits = v.search(project, args["query"].as_str().unwrap_or_default(), &who)?;
+                Ok(text(serde_json::to_string_pretty(&json!({
+                    "entries": hits,
+                    "note": "Values are masked. tab_vault_get with reveal asks the person to release one to you.",
+                }))?))
+            }
+            "tab_vault_get" if role.coordinator => {
+                let id = args["id"].as_str().unwrap_or_default();
+                let reveal = list("reveal");
+                let v = self
+                    .vault_open(session, "let the coordinator read it")
+                    .await?;
+                if !reveal.is_empty() {
+                    let (e, _) = v.get(project, id, &[], &who)?;
+                    let fields: Vec<Value> = e
+                        .fields
+                        .iter()
+                        .filter(|f| reveal.iter().any(|r| r.eq_ignore_ascii_case(&f.label)))
+                        .map(|f| json!({ "label": f.label, "masked": f.masked }))
+                        .collect();
+                    let names: Vec<String> = reveal
+                        .iter()
+                        .map(|r| {
+                            if r == "file" {
+                                "the file's text".into()
+                            } else {
+                                r.clone()
+                            }
+                        })
+                        .collect();
+                    self.vault_ask(
+                        session,
+                        format!("Show {} from {} to the coordinator", names.join(", "), e.title),
+                        json!({ "kind": "release", "entry": e.title, "fields": fields, "file": reveal.iter().any(|r| r == "file"), "why": why }),
+                    )
+                    .await
+                    .inspect_err(|_| {
+                        let _ = v.audit("deny", &who, Some(project), Some(id), Some(json!({ "fields": reveal, "why": why })));
+                    })?;
+                    v.audit(
+                        "approve",
+                        &crate::e2e::Reader {
+                            actor: "person",
+                            session_id: Some(session),
+                        },
+                        Some(project),
+                        Some(id),
+                        Some(json!({ "fields": reveal, "why": why })),
+                    )?;
+                }
+                let (e, file_text) = v.get(project, id, &reveal, &who)?;
+                let mut out = json!({ "entry": e });
+                if let Some(t) = file_text {
+                    out["file_text"] = json!(t);
+                }
+                if !reveal.is_empty() {
+                    out["note"] = json!(
+                        "Released for this task only: don't repeat these values unless the person asked for them. The saved chat shows them masked."
+                    );
+                }
+                Ok(text(serde_json::to_string_pretty(&out)?))
+            }
+            "tab_vault_request" if !role.coordinator => {
+                let fields = list("fields");
+                anyhow::ensure!(!fields.is_empty(), "name the fields you need");
+                anyhow::ensure!(!why.is_empty(), "say why you need them; the person sees it");
+                let v = self
+                    .hub
+                    .vault()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("the vault isn't available here"))?;
+                v.audit(
+                    "request",
+                    &who,
+                    Some(project),
+                    None,
+                    Some(json!({ "fields": fields, "why": why })),
+                )?;
+                self.vault_ask(
+                    session,
+                    format!("Share {} from the vault with this chat", fields.join(", ")),
+                    json!({ "kind": "request", "fields": fields, "why": why }),
+                )
+                .await
+                .inspect_err(|_| {
+                    let _ = v.audit(
+                        "deny",
+                        &who,
+                        Some(project),
+                        None,
+                        Some(json!({ "fields": fields, "why": why })),
+                    );
+                })?;
+                anyhow::ensure!(
+                    v.is_open(),
+                    "The person allowed it, but the vault is still locked on this device, so nothing was shared. Tell them."
+                );
+                v.audit(
+                    "approve",
+                    &crate::e2e::Reader {
+                        actor: "person",
+                        session_id: Some(session),
+                    },
+                    Some(project),
+                    None,
+                    Some(json!({ "fields": fields, "why": why })),
+                )?;
+                let mut shared = Vec::new();
+                for (entry, labels) in v.find_fields(project, &fields)? {
+                    let (e, _) = v.get(project, &entry.id, &labels, &who)?;
+                    for f in e.fields.into_iter().filter(|f| f.value.is_some()) {
+                        shared
+                            .push(json!({ "entry": e.title, "field": f.label, "value": f.value }));
+                    }
+                }
+                let missing: Vec<&String> = fields
+                    .iter()
+                    .filter(|w| {
+                        !shared.iter().any(|s| {
+                            crate::e2e::label_matches(w, s["field"].as_str().unwrap_or_default())
+                                || crate::e2e::label_matches(
+                                    w,
+                                    s["entry"].as_str().unwrap_or_default(),
+                                )
+                        })
+                    })
+                    .collect();
+                Ok(text(serde_json::to_string_pretty(&json!({
+                    "shared": shared,
+                    "not_in_vault": missing,
+                    "note": "For this task only: don't save these anywhere or repeat them beyond what the task needs. The saved chat shows them masked.",
+                }))?))
+            }
+            _ => anyhow::bail!("{name} isn't available in this chat"),
+        }
     }
 
     /// Whether this chat may start agents on new tasks: one the person
@@ -1486,8 +1781,7 @@ impl McpServer {
 
     /// The most a session may read of `project_id`'s resources: its
     /// coordinator reads `coordinator` resources too, every other chat only
-    /// `all`. (Vault resources need the encrypted vault; see
-    /// docs/projects-hub.md.)
+    /// `all`. Vault entries are only read through the vault's own tools.
     fn resource_access(&self, session: Option<&str>, project_id: &str) -> &'static str {
         if self.coordinator_of(session).as_deref() == Some(project_id) {
             "coordinator"
@@ -1653,6 +1947,16 @@ impl McpServer {
                 .filter(|v| !v.trim().is_empty())
                 .map(str::to_string)
         };
+        if name.starts_with("tab_vault_") {
+            let role = self.vault_role(session).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the vault is only for a project's own chats on the computer that holds its key"
+                )
+            })?;
+            return self
+                .vault_call(session.unwrap_or_default(), role, name, &args)
+                .await;
+        }
         match name {
             "tab_steps" => {
                 let steps = args["steps"]
@@ -4410,5 +4714,212 @@ rl.on('line', (l) => {
         .await;
         assert!(v.to_string().contains("task an agent created"), "{v}");
         assert_eq!(tasks(), before);
+    }
+
+    #[tokio::test]
+    async fn only_the_coordinator_searches_the_vault_and_threads_ask() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let dir = std::env::temp_dir().join(format!("tab-mcp-vault-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = crate::e2e::E2e::for_tests(store.clone(), &dir, "laptop");
+        hub.set_vault(vault.clone());
+        let server = McpServer {
+            store: store.clone(),
+            hub: hub.clone(),
+            engine: Arc::new(Connections(Default::default())),
+            events: events.clone(),
+            token: "t".into(),
+        };
+        let now = Utc::now();
+        let p = store
+            .project_save(None, "Shop", "#7c5cff", "store", now)
+            .unwrap();
+        vault.create().await.unwrap();
+        vault
+            .save(
+                &p.id,
+                crate::e2e::EntryInput {
+                    id: None,
+                    title: "Company IDs".into(),
+                    note: String::new(),
+                    fields: vec![crate::e2e::FieldInput {
+                        label: "EIN".into(),
+                        value: Some("12-3456789".into()),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        let cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let coordinator = store
+            .session_create_keyed(
+                &crate::agents::coordinator::key(&p.id),
+                AgentKind::ClaudeCode,
+                "Coordinator",
+                &cwd,
+                now,
+            )
+            .unwrap();
+        let crate::store::Upsert::Inserted(task) = store
+            .upsert(
+                &IncomingEvent {
+                    source: "tab".into(),
+                    external_id: "w9".into(),
+                    kind: "tab.task".into(),
+                    title: "Fill in the W-9".into(),
+                    occurred_at: now,
+                    ..Default::default()
+                },
+                now,
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        store.item_set_project(&task.id, Some(&p.id), now).unwrap();
+        let worker = store
+            .session_create(Some(&task.id), AgentKind::ClaudeCode, "W-9", &cwd, now)
+            .unwrap();
+        let loose = store
+            .session_create(None, AgentKind::ClaudeCode, "Elsewhere", &cwd, now)
+            .unwrap();
+
+        let names = |session: &str| {
+            let server = &server;
+            let session = session.to_string();
+            async move {
+                let r = server
+                    .dispatch(
+                        Some(&session),
+                        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                    )
+                    .await
+                    .unwrap();
+                r["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|t| t["name"].as_str().map(str::to_string))
+                    .filter(|n| n.starts_with("tab_vault"))
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            names(&coordinator.id).await,
+            ["tab_vault_search", "tab_vault_get"]
+        );
+        assert_eq!(names(&worker.id).await, ["tab_vault_request"]);
+        assert!(names(&loose.id).await.is_empty());
+        assert!(
+            server
+                .call(
+                    Some(&worker.id),
+                    "tab_vault_search",
+                    json!({ "query": "ein" })
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            server
+                .call(
+                    Some(&loose.id),
+                    "tab_vault_request",
+                    json!({ "fields": ["EIN"], "why": "x" })
+                )
+                .await
+                .is_err()
+        );
+
+        // The coordinator sees it masked.
+        let found = server
+            .call(
+                Some(&coordinator.id),
+                "tab_vault_search",
+                json!({ "query": "EIN" }),
+            )
+            .await
+            .unwrap()
+            .to_string();
+        assert!(
+            found.contains("•••• 6789") && !found.contains("3456789"),
+            "{found}"
+        );
+
+        // A thread asks; the person approves on the card.
+        let mut rx = events.subscribe();
+        let answer = {
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Ok(EngineEvent::ApprovalRequested { approval }) = rx.recv().await {
+                        assert_eq!(approval.input["kind"], "request");
+                        assert!(!approval.input.to_string().contains("3456789"));
+                        hub.resolve_approval(&approval.id, Decision::Allow);
+                        break;
+                    }
+                }
+            })
+        };
+        let shared = server
+            .call(
+                Some(&worker.id),
+                "tab_vault_request",
+                json!({ "fields": ["ein"], "why": "the W-9" }),
+            )
+            .await
+            .unwrap()
+            .to_string();
+        answer.await.unwrap();
+        assert!(shared.contains("12-3456789"), "{shared}");
+        // What's stored and synced shows it masked.
+        let m = store
+            .message_add(
+                &worker.id,
+                "assistant",
+                "text",
+                "The EIN is 12-3456789.",
+                &Value::Null,
+                now,
+            )
+            .unwrap();
+        assert_eq!(m.content, "The EIN is •••• 6789.");
+
+        // Locked, and the person says no: nothing is shared.
+        vault.lock();
+        let mut rx = events.subscribe();
+        let answer = {
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Ok(EngineEvent::ApprovalRequested { approval }) = rx.recv().await {
+                        hub.resolve_approval(&approval.id, Decision::Deny(String::new()));
+                        break;
+                    }
+                }
+            })
+        };
+        let err = server
+            .call(
+                Some(&coordinator.id),
+                "tab_vault_search",
+                json!({ "query": "EIN" }),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        answer.await.unwrap();
+        assert!(err.contains("declined"), "{err}");
+        let log = vault.audit_log(None, 50).unwrap();
+        for a in ["search", "request", "approve", "reveal"] {
+            assert!(log.iter().any(|x| x.action == a), "no {a}");
+        }
     }
 }

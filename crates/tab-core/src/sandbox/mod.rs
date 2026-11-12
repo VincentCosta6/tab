@@ -602,6 +602,9 @@ const DATA_SECRETS: &[&str] = &[
     "hub-tls",
     // Remote MCP sign-ins: OAuth access and refresh tokens.
     "mcp-sign-ins",
+    // The vault's device key (off macOS) and its sealed index.
+    crate::e2e::DIR,
+    "vault-index.sealed",
 ];
 
 /// Hidden files that tools (or tab itself) may create while a process runs.
@@ -612,7 +615,12 @@ const MADE_BEFORE_HIDING: &[&str] = &[".git-credentials", ".netrc", "account.jso
 
 /// Hidden folders made (empty, this user only) before a process starts, for
 /// the same reason.
-const DIRS_MADE_BEFORE_HIDING: &[&str] = &["hub-tls", "mcp-sign-ins", crate::secrets::DIR];
+const DIRS_MADE_BEFORE_HIDING: &[&str] = &[
+    "hub-tls",
+    "mcp-sign-ins",
+    crate::secrets::DIR,
+    crate::e2e::DIR,
+];
 
 /// Credentials a person's own chat may use (to push and open PRs), but code
 /// nobody here wrote may not.

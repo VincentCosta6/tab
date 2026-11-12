@@ -356,7 +356,8 @@ async fn summarize_and_close(
         .first()
         .map(|m| m.created_at)
         .unwrap_or_else(Utc::now);
-    let mut text = transcript(&stretch);
+    // Vault values never go into a summary.
+    let mut text = crate::e2e::redact(&transcript(&stretch)).into_owned();
     if text.len() > MAX_TRANSCRIPT {
         let mut cut = text.len() - MAX_TRANSCRIPT;
         while !text.is_char_boundary(cut) {
@@ -401,7 +402,7 @@ async fn summarize_and_close(
         .filter(|n| n.updated_at >= started)
         .map(|n| n.topic)
         .collect();
-    let summary = summary_text(&reply, &notes);
+    let summary = crate::e2e::redact(&summary_text(&reply, &notes)).into_owned();
     let segment = hub.store.segment_close(
         session_id,
         Some(&project.id),
