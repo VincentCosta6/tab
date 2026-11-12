@@ -148,8 +148,10 @@ mod tests {
     fn followups_and_blockers_show_on_items() {
         let s = Store::in_memory().unwrap();
         let (hub, p2, p3, p4) = (add(&s, "hub"), add(&s, "p2"), add(&s, "p3"), add(&s, "p4"));
-        for p in [&p2, &p3, &p4] {
-            s.link_add(p, &hub, LinkKind::Followup, Utc::now()).unwrap();
+        // Distinct times: follow-ups list in the order they were made.
+        for (n, p) in [&p2, &p3, &p4].into_iter().enumerate() {
+            let at = Utc::now() + chrono::Duration::milliseconds(n as i64);
+            s.link_add(p, &hub, LinkKind::Followup, at).unwrap();
         }
         s.link_add(&p2, &p3, LinkKind::Blocks, Utc::now()).unwrap();
         s.link_add(&p3, &p4, LinkKind::Blocks, Utc::now()).unwrap();
