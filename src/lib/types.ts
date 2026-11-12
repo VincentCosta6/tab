@@ -305,6 +305,8 @@ export type StepKind =
   | {
       /** Hands work to an agent on a runner (one of the person's computers, or tab cloud) and waits for it. */
       type: "agent"; prompt: string; repo: string; harness: string; model: string;
+      /** A model family to run on, used when harness and model are empty. */
+      family?: string;
       placement: Placement; deadline_minutes: number;
     };
 export type Step = { id: string; label: string; when: Condition[]; continue_on_error: boolean } & StepKind;
@@ -335,6 +337,11 @@ export type Placement =
   | { type: "computers" }
   | { type: "cloud" }
   | { type: "prefer_computer"; minutes: number };
+/** One harness and model a family may run on; an empty model is the harness's default. */
+export interface FamilyCandidate { harness: string; model: string }
+/** A named, ordered list of models an agent step can ask for. Tried in order. */
+export interface ModelFamily { id: string; name: string; candidates: FamilyCandidate[] }
+
 export interface Runner {
   id: string; name: string; kind: "computer" | "cloud";
   harnesses: string[]; repos: string[]; connections: string[];
@@ -478,6 +485,8 @@ export interface Harness {
   model_hint: string;
   /** What background helpers use when no model is set; null is the harness's own default. */
   small_model: string | null;
+  /** Its model in each built-in model family. */
+  families?: Record<string, string>;
   install: { npm: string | null; unix: string | null; windows: string | null };
   /** How to run it over the Agent Client Protocol, when its chats can go through it. */
   acp?: { command: string | null; preview?: boolean; adapter: { npm: string | null; repo: string; license: string } | null } | null;

@@ -13,7 +13,7 @@ import { api, onEngineEvent } from "../../lib/api";
 import { timeAgo } from "../../lib/format";
 import { useConnectors, useItems } from "../../lib/hooks";
 import type {
-  ActionField, ActionInfo, Change, Chat, Condition, ConnectorInfo, Effect, Issue, Op, Placement, Runner, Step, StepRun, StepStatus, Tone, Trigger, Workflow, WorkflowRun, RunStatus,
+  ActionField, ActionInfo, AgentKind, Change, Chat, Condition, ConnectorInfo, Effect, Issue, ModelFamily, Op, Placement, Runner, Step, StepRun, StepStatus, Tone, Trigger, Workflow, WorkflowRun, RunStatus,
 } from "../../lib/types";
 import harnessData from "../../../crates/tab-core/src/agents/harnesses.json";
 
@@ -21,6 +21,7 @@ import harnessData from "../../../crates/tab-core/src/agents/harnesses.json";
 const harnesses = (harnessData as { id: string; name: string }[]).map(({ id, name }) => ({ id, name }));
 import { CloudGaps } from "../connections/CloudGaps";
 import { AgentStatus, Composer, Transcript, openItem } from "../work/Chat";
+import { ModelMenu } from "../work/ModelMenu";
 import "./workflows.css";
 
 // ---------------------------------------------------------------------------
@@ -447,7 +448,7 @@ function insertStep(w: Workflow, at: number, kind: NewStep, connectors: Connecto
     step = { ...base, id: uniqueId(w, kind.action.split(".").pop() ?? "step"), type: "action", connector: kind.connector, action: kind.action, input };
   } else if (kind.type === "filter") step = { ...base, id: uniqueId(w, "only_if"), type: "filter", conditions: [{ field: "item.title", op: "contains", value: "" }] };
   else if (kind.type === "set") step = { ...base, id: uniqueId(w, "values"), type: "set", values: { name: "" } };
-  else if (kind.type === "agent") step = { ...base, id: uniqueId(w, "agent"), type: "agent", prompt: "", repo: "", harness: "", model: "", placement: { type: "computers" }, deadline_minutes: 0 };
+  else if (kind.type === "agent") step = { ...base, id: uniqueId(w, "agent"), type: "agent", prompt: "", repo: "", harness: "", model: "", family: "balanced", placement: { type: "computers" }, deadline_minutes: 0 };
   else if (kind.type === "command") step = { ...base, id: uniqueId(w, "run"), type: "command", program: "", args: [], folder: "", network: [], env: {}, image: "", timeout_secs: 0 };
   else step = { ...base, id: uniqueId(w, "signal"), type: "emit", signal: "", payload: {} };
   w.steps.splice(at, 0, step);
@@ -804,13 +805,14 @@ function AgentFields({ step, vars, set }: { step: AgentStep; vars: { path: strin
         <Field label="Repo" help="owner/name. A computer uses its checkout; tab cloud clones it.">
           <VarInput mono value={step.repo} vars={vars} placeholder="{{item.metadata.repo}}" onChange={(v) => ag((s) => (s.repo = v))} />
         </Field>
-        <Field label="Harness" help="Empty uses the runner's default.">
-          <select className="wf-select" value={step.harness} onChange={(e) => ag((s) => (s.harness = e.target.value))}>
-            <option value="">The runner's default</option>
-            {harnesses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
-          </select>
-        </Field>
+        <ModelChoice step={step} ag={ag} />
       </div>
+      {!!(step.harness || step.model) && (
+        <Field label="Harness and model" help="Empty model uses the harness's default.">
+          <ModelMenu variant="field" value={step.harness ? { agent: step.harness as AgentKind, model: step.model || null } : null} onChange={(p) => ag((s) => { s.harness = p.agent; s.model = p.model ?? ""; })} />
+        </Field>
+      )}
+      {!step.harness && !step.model && step.family && <FamilyNote id={step.family} />}
       <Field label="Where it may run" help={cloud ? undefined : "tab cloud runs agents on paid plans once your hub is in tab cloud."}>
         <select className="wf-select" value={place} onChange={(e) => ag((s) => {
           const t = e.target.value as Placement["type"];
@@ -840,6 +842,42 @@ function AgentFields({ step, vars, set }: { step: AgentStep; vars: { path: strin
       </p>
     </>
   );
+}
+
+function useFamilies(): ModelFamily[] {
+  return useQuery({ queryKey: ["model-families"], queryFn: api.modelFamilies }).data ?? [];
+}
+
+/** The model an agent step runs on: a family, one harness and model, or the runner's default. */
+function ModelChoice({ step, ag }: { step: AgentStep; ag: (f: (s: AgentStep) => void) => void }) {
+  const families = useFamilies();
+  const pinned = !!(step.harness || step.model);
+  const value = pinned ? "pin" : step.family ? `family:${step.family}` : "";
+  const missing = !pinned && step.family && !families.some((f) => f.id === step.family);
+  return (
+    <Field label="Model" help="A family tries its models in order on the runner.">
+      <select className="wf-select" value={value} onChange={(e) => ag((s) => {
+        const v = e.target.value;
+        if (v === "pin") { s.family = ""; s.harness = harnesses[0]?.id ?? "claude_code"; s.model = ""; }
+        else { s.harness = ""; s.model = ""; s.family = v.startsWith("family:") ? v.slice(7) : ""; }
+      })}>
+        <option value="">The runner's default</option>
+        <optgroup label="Families">
+          {families.map((f) => <option key={f.id} value={`family:${f.id}`}>{f.name || f.id}</option>)}
+          {missing && <option value={`family:${step.family}`}>{step.family} (missing)</option>}
+        </optgroup>
+        <option value="pin">A specific harness and model</option>
+      </select>
+    </Field>
+  );
+}
+
+/** What a family will try, in order. */
+function FamilyNote({ id }: { id: string }) {
+  const f = useFamilies().find((x) => x.id === id);
+  if (!f) return null;
+  const list = f.candidates.map((c) => `${harnessName(c.harness)}${c.model ? ` ${c.model}` : ""}`).join(", then ");
+  return <p className="subtle">Tries {list}. A runner skips harnesses it doesn't have, and moves on when a model is unavailable, rate limited or out of plan. Edit families in Settings → Agents.</p>;
 }
 
 /** Who could take this step's job right now. */

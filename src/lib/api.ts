@@ -6,7 +6,7 @@ import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ChatSummary, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceAccess, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem, SlashCommand, Subagent,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
-  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
+  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, ModelFamily, Runner, RunsOn,
   AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
   EmailSignInStatus, MailProvider, Segment, SessionMessage, ChatRewound, RewoundFiles, VaultAudit, VaultEntry, VaultEntryInput, VaultStatus,
 } from "./types";
@@ -281,6 +281,10 @@ export const api = {
   depsTypes: (repo: string, number: number) => call<[string, string][]>("deps_types", { repo, number }),
   workflowsList: () => call<Workflow[]>("workflows_list"),
   workflowTemplates: () => call<Workflow[]>("workflow_templates"),
+  modelFamilies: () => call<ModelFamily[]>("model_families_list"),
+  modelFamilySave: (family: ModelFamily) => call<ModelFamily[]>("model_family_save", { family }),
+  /** Deletes the person's family, or resets a built-in one. */
+  modelFamilyDelete: (id: string) => call<ModelFamily[]>("model_family_delete", { id }),
   workflowValidate: (workflow: Workflow) => call<Issue[]>("workflow_validate", { workflow }),
   workflowSave: (workflow: Workflow) => call<{ workflow: Workflow; issues: Issue[] }>("workflow_save", { workflow }),
   workflowSetEnabled: (id: string, enabled: boolean, allowDestructive?: boolean, allowCommands?: boolean) =>
