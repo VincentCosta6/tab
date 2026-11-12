@@ -790,6 +790,16 @@ function TriggerEditor({ workflow: w, connectors, edit, issues, onAllowDestructi
           <input className="wf-input" type="number" min={0} value={w.limits.cooldown_minutes} onChange={(e) => edit((x) => (x.limits.cooldown_minutes = Math.max(0, Number(e.target.value))))} />
         </Field>
       </div>
+      <div className="wf-row2">
+        <Field label="API spend a month ($)" help="Billed through API keys, per UTC month. New runs wait once it's reached. 0 is no cap.">
+          <input className="wf-input" type="number" min={0} step={1} value={w.limits.monthly_cap_usd ?? 0} aria-label="Monthly API spend cap in dollars"
+            onChange={(e) => edit((x) => (x.limits.monthly_cap_usd = Math.max(0, Number(e.target.value) || 0)))} />
+        </Field>
+        <Field label="Plan tokens a month" help="Subscription usage, never priced. Same rule. 0 is no cap.">
+          <input className="wf-input" type="number" min={0} step={100000} value={w.limits.monthly_cap_plan_tokens ?? 0} aria-label="Monthly subscription token cap"
+            onChange={(e) => edit((x) => (x.limits.monthly_cap_plan_tokens = Math.max(0, Math.round(Number(e.target.value) || 0))))} />
+        </Field>
+      </div>
       <div className={cx("wf-safety", w.allow_destructive && "on")}>
         <div>
           <strong>Allow destructive steps</strong>

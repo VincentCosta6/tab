@@ -7,7 +7,7 @@ import { onEngineEvent } from "../../../lib/api";
 import type { DayStats, RunCounts, WorkflowHealth } from "../../../lib/types";
 import { Ring, type Series } from "./charts";
 import { healthIcon, healthLabel, healthTone, MIN_RUNS, pct, plural, rate } from "./format";
-import { setWindowDays, useWindowDays } from "./useInsights";
+import { setWindowDays, useWindowDays, WINDOW_DAYS } from "./useInsights";
 
 export const outcomeSeries: Series[] = [
   { key: "unattended", label: "Succeeded on its own", color: "var(--chart-ok)" },
@@ -24,9 +24,10 @@ export function WindowPicker() {
   const days = useWindowDays();
   return (
     <div className="wf-seg ins-seg" role="radiogroup" aria-label="Window">
-      {([7, 30] as const).map((d) => (
-        <button key={d} role="radio" aria-checked={days === d} className={cx(days === d && "active")} onClick={() => setWindowDays(d)}>
-          {d} days
+      {WINDOW_DAYS.map((d) => (
+        <button key={d} role="radio" aria-checked={days === d} className={cx(days === d && "active")} onClick={() => setWindowDays(d)}
+          title={d > 30 ? "Older days come from daily totals: counts and spend are exact, step times close" : undefined}>
+          {d === 365 ? "1 year" : `${d} days`}
         </button>
       ))}
     </div>

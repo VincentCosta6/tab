@@ -1,0 +1,15 @@
+/* Long windows and monthly caps on Insights. Tokens only. */
+
+.ins-cap { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); }
+.ins-cap-head { display: flex; align-items: center; gap: 6px; font-size: var(--text-sm); flex-wrap: wrap; }
+.ins-cap-head svg { color: var(--fg-subtle); }
+.ins-cap.reached .ins-cap-head svg { color: var(--tone-danger-fg); }
+.ins-cap-head .subtle { font-size: var(--text-xs); }
+.ins-cap-row { display: grid; grid-template-columns: 84px minmax(60px, 1fr) auto; align-items: center; gap: var(--space-3); font-size: var(--text-sm); }
+.ins-cap-label { color: var(--fg-muted); }
+.ins-cap-track { position: relative; height: 8px; border-radius: var(--radius-pill); background: var(--chart-track); overflow: hidden; }
+.ins-cap-fill { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--chart-attended); }
+.ins-cap-fill.tone-warning { background: var(--chart-unplanned); }
+.ins-cap-fill.tone-danger { background: var(--chart-failed); }
+.ins-cap-num { font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 550; }
+.ins-cap-reached { display: flex; gap: 6px; align-items: center; margin: 0; font-size: var(--text-xs); }

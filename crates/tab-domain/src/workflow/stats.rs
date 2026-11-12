@@ -81,7 +81,7 @@ pub struct Spend {
 }
 
 impl Spend {
-    fn add(&mut self, sr: &StepRun) {
+    pub(super) fn add(&mut self, sr: &StepRun) {
         let Some(m) = &sr.metrics else { return };
         self.input_tokens += m.input_tokens;
         self.output_tokens += m.output_tokens;
@@ -290,7 +290,7 @@ pub fn health(runs: &[Run]) -> Health {
     }
 }
 
-fn did_work(run: &Run) -> bool {
+pub(super) fn did_work(run: &Run) -> bool {
     !run.dry_run
         && matches!(
             run.status,
@@ -321,14 +321,14 @@ fn attendance(run: &Run) -> Option<bool> {
     (!kinds.is_empty()).then(|| kinds.iter().all(|k| k.planned()))
 }
 
-fn duration_ms(run: &Run) -> Option<u64> {
+pub(super) fn duration_ms(run: &Run) -> Option<u64> {
     let ms = (run.finished_at? - run.started_at).num_milliseconds();
     Some(ms.max(0) as u64)
 }
 
 /// A step's whole time: for an agent step that reported, queue plus work
 /// (its own `ms` only covers handing the job over).
-fn step_ms(sr: &StepRun) -> u64 {
+pub(super) fn step_ms(sr: &StepRun) -> u64 {
     match &sr.metrics {
         Some(m) if m.queue_ms + m.work_ms > 0 => m.queue_ms + m.work_ms,
         _ => sr.ms,

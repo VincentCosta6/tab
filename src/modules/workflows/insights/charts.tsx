@@ -82,10 +82,12 @@ function useWidth<T extends HTMLElement>(): [React.RefObject<T | null>, number] 
 /**
  * One bar per day, its parts stacked from the baseline in `series` order.
  * Hovering a day shows its numbers. `compact` drops the axis (for cards).
+ * `days` may be other slots (weeks, keyed by their first day): `slotLabel`
+ * then names them on the axis and in the readout.
  */
-export function StackedBars({ days, values, series, height = 120, compact, markers = [], label, format = (n) => String(n), extra }: {
+export function StackedBars({ days, values, series, height = 120, compact, markers = [], label, format = (n) => String(n), extra, slotLabel = dayLabel }: {
   days: string[]; values: Record<string, number[]>; series: Series[]; height?: number; compact?: boolean; markers?: Marker[]; label: string;
-  format?: (n: number) => string; extra?: (day: string) => ReactNode;
+  format?: (n: number) => string; extra?: (day: string) => ReactNode; slotLabel?: (day: string, long?: boolean) => string;
 }) {
   const [ref, width] = useWidth<HTMLDivElement>();
   const [hover, setHover] = useState<number | null>(null);
@@ -114,7 +116,7 @@ export function StackedBars({ days, values, series, height = 120, compact, marke
           {!compact && max > 0 && (
             <>
               <line x1={0} x2={width} y1={top + 0.5} y2={top + 0.5} stroke="var(--border)" strokeDasharray="2 4" />
-              <text x={width} y={top - 4} textAnchor="end" className="ins-axis">{format(max)}</text>
+              <text x={markers.length ? 0 : width} y={top - 4} textAnchor={markers.length ? "start" : "end"} className="ins-axis">{format(max)}</text>
             </>
           )}
           {hover != null && <rect x={hover * band} y={top - 2} width={band} height={plotH + 2} rx={3} fill="var(--bg-hover)" />}
@@ -125,7 +127,7 @@ export function StackedBars({ days, values, series, height = 120, compact, marke
             return (
               <g key={m.day + m.label}>
                 <line x1={x} x2={x} y1={top - (compact ? 0 : 2)} y2={top + plotH} stroke="var(--fg-subtle)" strokeDasharray="2 3" />
-                {!compact && <text x={x + 3} y={top - 5} className="ins-axis ins-marker">{m.label}</text>}
+                {!compact && <text x={x > width - 44 ? x - 3 : x + 3} y={top - 5} textAnchor={x > width - 44 ? "end" : "start"} className="ins-axis ins-marker">{m.label}</text>}
               </g>
             );
           })}
@@ -148,13 +150,13 @@ export function StackedBars({ days, values, series, height = 120, compact, marke
           })}
           {ticks.map((i) => (
             <text key={i} x={Math.min(width - 2, Math.max(2, i * band + band / 2))} y={height - 4} className="ins-axis"
-              textAnchor={ticks.length === 3 && i === 0 ? "start" : ticks.length === 3 && i === days.length - 1 ? "end" : "middle"}>{dayLabel(days[i])}</text>
+              textAnchor={ticks.length === 3 && i === 0 ? "start" : ticks.length === 3 && i === days.length - 1 ? "end" : "middle"}>{slotLabel(days[i])}</text>
           ))}
         </svg>
       )}
       {h != null && hover != null && (
         <div className={cx("ins-tip", hover > days.length / 2 && "left")} style={hover > days.length / 2 ? { right: width - hover * band + 6 } : { left: (hover + 1) * band + 6 }}>
-          <strong>{dayLabel(h, true)}</strong>
+          <strong>{slotLabel(h, true)}</strong>
           {series.map((s, k) => (
             <span key={s.key} className="ins-tip-row"><i style={{ background: s.color }} />{s.label}<b>{format((values[h] ?? [])[k] ?? 0)}</b></span>
           ))}

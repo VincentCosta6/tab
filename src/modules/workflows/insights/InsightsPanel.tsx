@@ -11,10 +11,12 @@ import type { ModelStats, StepStats, VersionStats, Workflow, WorkflowInsights, W
 import { Delta, Legend, Ring, SplitBar, StackedBars, toneColor, type Series } from "./charts";
 import {
   dayLabel, duration, hasApi, hasPlan, interventionRate, localDay, MIN_RUNS, pct, planShare, planTokens, plural, rate, rateTone, spendLong, spendShort,
-  successRate, tokens, unattendedRate, usd, windowDays,
+  successRate, tokens, unattendedRate, usd,
 } from "./format";
 import { HealthBadge, outcomeSeries, outcomeValues, RateRings, useInsightsLive, WindowPicker } from "./parts";
 import { useWorkflowInsights } from "./useInsights";
+import { CapMeter, DetailNote } from "./CapMeter";
+import { bucket, slotsFor, windowName, type Slots } from "./periods";
 import "./insights.css";
 
 export function InsightsPanel({ workflow, onOpenRun }: { workflow: Workflow; onOpenRun: (runId: string) => void }) {
@@ -25,12 +27,13 @@ export function InsightsPanel({ workflow, onOpenRun }: { workflow: Workflow; onO
     <div className="ins-panel">
       <div className="ins-panel-bar">
         {data && <HealthBadge health={data.health} />}
-        <span className="subtle">Last {data?.days ?? "…"} days</span>
+        <span className="subtle">Last {data ? windowName(data.days) : "…"}</span>
         <span className="wf-bar-spacer" />
         <WindowPicker />
       </div>
       {error && <p className="wf-error"><Icon name="alert" size={13} /> {String(error)}</p>}
       {isLoading && !data && <p className="subtle wf-pad">Adding up runs…</p>}
+      {data?.cap && <CapMeter cap={data.cap} />}
       {data && <Body data={data} workflow={workflow} onOpenRun={onOpenRun} />}
     </div>
   );
@@ -43,10 +46,10 @@ function Body({ data, workflow, onOpenRun }: { data: WorkflowInsights; workflow:
     return (
       <div className="ins-empty">
         <Icon name="gauge" size={26} />
-        <h4>No finished runs in the last {data.days} days</h4>
+        <h4>No finished runs in the last {windowName(data.days)}</h4>
         <p className="subtle">
           {s.in_progress ? `${plural(s.in_progress, "run")} still going. ` : ""}
-          {p.runs ? `It ran ${plural(p.runs, "time")} in the ${data.days} days before. ` : ""}
+          {p.runs ? `It ran ${plural(p.runs, "time")} in the ${windowName(data.days)} before. ` : ""}
           {workflow.enabled ? "Rates, the assembly line and costs show here once it has run." : "It's turned off. Turn it on and its runs add up here."}
         </p>
       </div>
@@ -54,6 +57,7 @@ function Body({ data, workflow, onOpenRun }: { data: WorkflowInsights; workflow:
   }
   const thin = s.runs < MIN_RUNS;
   const enough = p.runs >= MIN_RUNS && !thin;
+  const slots = slotsFor(data.from, data.days);
   return (
     <>
       {thin && (
@@ -77,14 +81,16 @@ function Body({ data, workflow, onOpenRun }: { data: WorkflowInsights; workflow:
       </section>
 
       <section className="ins-sec">
-        <h4 className="ins-h">Every day</h4>
-        <StackedBars days={windowDays(data.from, data.days)} values={outcomeValues(s.days)} series={outcomeSeries} height={140}
-          markers={versionMarkers(s.versions, data.from)} format={(n) => String(n)}
+        <h4 className="ins-h">{slots.unit === "week" ? "Every week" : "Every day"}</h4>
+        <StackedBars days={slots.keys} values={bucket(slots, outcomeValues(s.days))} series={outcomeSeries} height={140} slotLabel={slots.label}
+          markers={versionMarkers(s.versions, data.from, slots)} format={(n) => String(n)}
           label={`Daily runs: ${s.unattended} succeeded on their own, ${s.succeeded - s.unattended} with help, ${s.failed} failed`} />
         <Legend series={[...outcomeSeries, { key: "v", label: "New version first ran", color: "transparent" }]} />
       </section>
 
       {(hasApi(s.spend) || hasPlan(s.spend)) && <SpendTrend data={data} />}
+
+      {data.detail_from && <DetailNote since={data.detail_from} />}
 
       <section className="ins-sec">
         <h4 className="ins-h">Assembly line <span className="subtle">median time per step, and where it goes</span></h4>
@@ -93,7 +99,7 @@ function Body({ data, workflow, onOpenRun }: { data: WorkflowInsights; workflow:
 
       {s.models.length > 0 && <Models stats={s} label={label} />}
       {s.versions.length > 1 && <Versions versions={s.versions} />}
-      <Failures stats={s} label={label} onOpenRun={onOpenRun} />
+      <Failures stats={s} label={label} onOpenRun={onOpenRun} since={data.detail_from} />
     </>
   );
 }
@@ -110,12 +116,27 @@ function MiniStat({ label, value, hint, title, children }: { label: string; valu
 }
 
 /** Where each version first ran inside the window (the oldest one is left out when it was already running before). */
-function versionMarkers(versions: VersionStats[], from: string) {
+function versionMarkers(versions: VersionStats[], from: string, slots: Slots) {
   const start = localDay(from);
+  // Long windows count UTC days.
+  const dayOf = (iso: string) => (slots.unit === "week" ? iso.slice(0, 10) : localDay(iso));
   return versions
     .filter((v) => v.first_run && versions.some((o) => o.version < v.version))
-    .map((v) => ({ day: localDay(v.first_run!), label: `v${v.version}`, title: `v${v.version} first ran ${new Date(v.first_run!).toLocaleString()}` }))
-    .filter((m) => m.day >= start);
+    .map((v) => ({ day: slots.of(dayOf(v.first_run!)) ?? "", label: `v${v.version}`, title: `v${v.version} first ran ${new Date(v.first_run!).toLocaleString()}` }))
+    .filter((m) => m.day && (slots.unit === "week" || m.day >= start))
+    // Versions that first ran in the same or a neighbouring slot share one
+    // marker (newest first in `versions`), so their labels don't collide.
+    .reduce<{ day: string; label: string; title: string; v: number[] }[]>((kept, m) => {
+      const at = slots.keys.indexOf(m.day);
+      const near = kept.find((k) => Math.abs(slots.keys.indexOf(k.day) - at) <= (slots.unit === "week" ? 2 : 0));
+      const v = Number(m.label.slice(1));
+      if (!near) return [...kept, { ...m, v: [v] }];
+      near.v.push(v);
+      near.label = `v${Math.min(...near.v)}–${Math.max(...near.v)}`;
+      near.title = `${m.title}; ${near.title}`;
+      return kept;
+    }, [])
+    .map(({ day, label, title }) => ({ day, label, title }));
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +145,8 @@ function versionMarkers(versions: VersionStats[], from: string) {
 
 function SpendTrend({ data }: { data: WorkflowInsights }) {
   const s = data.stats;
-  const days = windowDays(data.from, data.days);
+  const slots = slotsFor(data.from, data.days);
+  const days = slots.keys;
   const api: Series[] = [{ key: "usd", label: "API keys", color: "var(--chart-attended)" }];
   const plan: Series[] = [{ key: "tok", label: "Plan tokens", color: "var(--chart-planned)" }];
   return (
@@ -134,15 +156,15 @@ function SpendTrend({ data }: { data: WorkflowInsights }) {
         {hasApi(s.spend) && (
           <div>
             <div className="ins-spend-head"><span className="ins-swatch" style={{ background: "var(--chart-attended)" }} /><span>Billed through API keys</span><span><strong>{usd(s.spend.cost_usd)}</strong> <span className="subtle">· {usd(s.spend.cost_usd / Math.max(1, s.runs))} a run</span></span></div>
-            <StackedBars days={days} height={70} series={api} format={usd}
-              values={Object.fromEntries(s.days.map((d) => [d.day, [d.spend.cost_usd]]))} label={`Daily API spend, ${usd(s.spend.cost_usd)} in all`} />
+            <StackedBars days={days} height={70} series={api} format={usd} slotLabel={slots.label}
+              values={bucket(slots, Object.fromEntries(s.days.map((d) => [d.day, [d.spend.cost_usd]])))} label={`Daily API spend, ${usd(s.spend.cost_usd)} in all`} />
           </div>
         )}
         {hasPlan(s.spend) && (
           <div>
             <div className="ins-spend-head"><span className="ins-swatch" style={{ background: "var(--chart-planned)" }} /><span>On a subscription</span><span><strong>{tokens(planTokens(s.spend))} tokens</strong> <span className="subtle">· {planShare(s.spend.plan_share)}</span></span></div>
-            <StackedBars days={days} height={70} series={plan} format={tokens}
-              values={Object.fromEntries(s.days.map((d) => [d.day, [planTokens(d.spend)]]))} label={`Daily subscription tokens, ${tokens(planTokens(s.spend))} in all`} />
+            <StackedBars days={days} height={70} series={plan} format={tokens} slotLabel={slots.label}
+              values={bucket(slots, Object.fromEntries(s.days.map((d) => [d.day, [planTokens(d.spend)]])))} label={`Daily subscription tokens, ${tokens(planTokens(s.spend))} in all`} />
           </div>
         )}
       </div>
@@ -353,11 +375,11 @@ function Versions({ versions }: { versions: VersionStats[] }) {
 
 const ago = (iso: string) => { const t = timeAgo(iso); return /^\d+[mhd]$/.test(t) ? `${t} ago` : t; };
 
-function Failures({ stats, label, onOpenRun }: { stats: WorkflowStats; label: (id: string, f?: string) => string; onOpenRun: (id: string) => void }) {
+function Failures({ stats, label, onOpenRun, since }: { stats: WorkflowStats; label: (id: string, f?: string) => string; onOpenRun: (id: string) => void; since?: string | null }) {
   return (
     <section className="ins-sec">
       <h4 className="ins-h">What fails <span className="subtle">{stats.failures.length ? "most often first" : ""}</span></h4>
-      {!stats.failures.length && <p className="subtle ins-ok"><Icon name="check" size={13} /> Nothing failed in this window.</p>}
+      {!stats.failures.length && <p className="subtle ins-ok"><Icon name="check" size={13} /> Nothing failed in {since ? "the last 30 days" : "this window"}.</p>}
       <div className="ins-failures">
         {stats.failures.map((f) => (
           <div key={f.step_id + f.error} className="ins-failure">

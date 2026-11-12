@@ -1011,12 +1011,11 @@ impl Engine {
                     if let Err(e) = timer.store.prune(Utc::now(), chrono::Duration::days(30)) {
                         tracing::error!(error = %e, "pruning failed");
                     }
-                    if let Err(e) = timer
-                        .store
-                        .workflow_runs_prune(Utc::now() - chrono::Duration::days(30))
+                    // Rolls up the run log's complete days before pruning it.
+                    if let Err(e) = crate::workflow::rollups::maintain(&timer.store, Utc::now())
                         .and_then(|_| timer.store.activity_prune())
                     {
-                        tracing::error!(error = %e, "pruning workflow runs failed");
+                        tracing::error!(error = %e, "rolling up and pruning workflow runs failed");
                     }
                 }
                 n += 1;

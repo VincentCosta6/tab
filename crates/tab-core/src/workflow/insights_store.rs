@@ -2,13 +2,33 @@
 //! them up with [`tab_domain::workflow::insights`]. The Tauri commands are
 //! thin wrappers over these.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 
 use super::insights::{self as pure, Factory, WorkflowInsights};
+use super::rollup::{self, Rollup};
 use crate::store::Store;
 
-/// One workflow's stats for the last `days` days (in the person's time)
-/// and the same span before it.
+/// Rollups a window starting at `from` reads: the days before the run log.
+fn rollups_for(
+    store: &Store,
+    workflow_id: Option<&str>,
+    from: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Vec<Rollup>> {
+    let split = rollup::run_log_start(now);
+    if from >= split {
+        return Ok(Vec::new());
+    }
+    store.workflow_rollups(
+        workflow_id,
+        from.date_naive() - Duration::days(1),
+        split.date_naive(),
+    )
+}
+
+/// One workflow's stats for the last `days` days (in the person's time;
+/// UTC for windows past 30 days) and the same span before it, with its
+/// spend against its monthly caps.
 pub fn workflow_insights(
     store: &Store,
     workflow_id: &str,
@@ -18,13 +38,13 @@ pub fn workflow_insights(
 ) -> anyhow::Result<WorkflowInsights> {
     let (_, previous) = pure::windows(now, days, utc_offset_minutes);
     let runs = store.workflow_runs_from(Some(workflow_id), previous.from)?;
-    Ok(pure::workflow_insights(
-        workflow_id,
-        &runs,
-        now,
-        days,
-        utc_offset_minutes,
-    ))
+    let rollups = rollups_for(store, Some(workflow_id), previous.from, now)?;
+    let mut out =
+        pure::workflow_insights_with(workflow_id, &runs, &rollups, now, days, utc_offset_minutes);
+    if let Some(w) = store.workflow_get(workflow_id)? {
+        out.cap = super::rollups::cap_usage(store, workflow_id, &w.limits, now)?;
+    }
+    Ok(out)
 }
 
 /// Every workflow's stats and health, with hub-wide totals.
@@ -37,9 +57,11 @@ pub fn workflow_factory(
     let (_, previous) = pure::windows(now, days, utc_offset_minutes);
     let workflows = store.workflows()?;
     let runs = store.workflow_runs_from(None, previous.from)?;
-    Ok(pure::factory(
+    let rollups = rollups_for(store, None, previous.from, now)?;
+    Ok(pure::factory_with(
         &workflows,
         &runs,
+        &rollups,
         now,
         days,
         utc_offset_minutes,
@@ -171,5 +193,57 @@ mod tests {
         // Too few runs to judge the other one.
         assert_eq!(f.workflows[0].id, w.id);
         assert_eq!(f.workflows[1].health, Health::Unknown);
+        assert_eq!(
+            (f.detail_from, i.detail_from, i.cap.clone()),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn a_year_reads_rollups_past_the_run_log_and_shows_the_cap() {
+        let s = Store::in_memory().unwrap();
+        let now = Utc::now();
+        let mut def = templates()[0].clone();
+        def.limits.monthly_cap_usd = 40.0;
+        let w = s.workflow_save(&def, "user", now).unwrap();
+        let day = Duration::days(1);
+        for n in 0..200 {
+            let status = if n % 5 == 0 {
+                RunStatus::Failed
+            } else {
+                RunStatus::Succeeded
+            };
+            s.workflow_run_insert(&run(
+                &format!("r{n}"),
+                &w.id,
+                status,
+                now - day * n,
+                Billing::Api,
+            ))
+            .unwrap();
+        }
+        // The hourly pass rolls up and prunes the log to 30 days.
+        super::super::rollups::maintain(&s, now).unwrap();
+        assert!(s.workflow_runs_from(None, now - day * 400).unwrap().len() <= 31);
+
+        let y = workflow_insights(&s, &w.id, 365, -300, now).unwrap();
+        assert_eq!((y.stats.counts.runs, y.stats.counts.failed), (200, 40));
+        assert!((y.stats.spend.cost_usd - 100.0).abs() < 1e-6);
+        assert_eq!(y.stats.days.len(), 200);
+        assert_eq!(y.detail_from, Some(rollup::run_log_start(now)));
+        assert!(y.stats.failures[0].count <= 7);
+        assert_eq!(y.stats.steps[0].work_ms.n, 200);
+        let cap = y.cap.unwrap();
+        assert_eq!(cap.cap_usd, 40.0);
+        assert!(cap.spend.cost_usd > 0.0);
+
+        let q = workflow_insights(&s, &w.id, 90, 0, now).unwrap();
+        assert_eq!(q.stats.counts.runs, 90);
+        assert_eq!(q.previous.counts.runs, 90);
+        let f = workflow_factory(&s, 90, 0, now).unwrap();
+        assert_eq!(
+            (f.totals.counts.runs, f.previous_totals.counts.runs),
+            (90, 90)
+        );
     }
 }

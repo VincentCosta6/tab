@@ -313,8 +313,16 @@ export type Step = { id: string; label: string; when: Condition[]; continue_on_e
 
 export interface Workflow {
   id: string; name: string; description: string; enabled: boolean; allow_destructive: boolean; allow_commands?: boolean;
-  trigger: Trigger; steps: Step[]; limits: { max_runs_per_hour: number; cooldown_minutes: number };
+  trigger: Trigger; steps: Step[]; limits: WorkflowLimits;
   created_by: string; version: number; updated_at: string | null;
+}
+/** Mirrors `tab_domain::workflow::Limits`. The monthly caps are per UTC calendar month; 0 (or missing, from older apps) means no cap. */
+export interface WorkflowLimits {
+  max_runs_per_hour: number; cooldown_minutes: number;
+  /** API-key spend, in dollars. */
+  monthly_cap_usd?: number;
+  /** Subscription tokens (input and output), never priced. */
+  monthly_cap_plan_tokens?: number;
 }
 export interface Issue { at: string | null; error: boolean; message: string }
 
@@ -388,10 +396,20 @@ export interface WorkflowStats extends RunCounts {
   steps: StepStats[]; models: ModelStats[]; versions: VersionStats[]; failures: FailureGroup[]; days: DayStats[];
 }
 export type WorkflowHealth = "unknown" | "healthy" | "degraded" | "failing";
-export interface WorkflowInsights { workflow_id: string; days: number; from: string; to: string; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats }
+/** This UTC month's spend against a workflow's caps (`tab_domain::workflow::cap::CapUsage`); a cap of 0 means none. */
+export interface CapUsage { month: string | null; spend: Spend; cap_usd: number; cap_plan_tokens: number }
+/**
+ * Windows past 30 days (90, 365) break at UTC midnight and read days before the run log from daily rollups:
+ * counts, spend and days are exact, step timing approximate. `detail_from`, when set, is where failure groups
+ * and models start (they only come from the run log).
+ */
+export interface WorkflowInsights {
+  workflow_id: string; days: number; from: string; to: string; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats;
+  detail_from?: string | null; cap?: CapUsage | null;
+}
 export interface FactoryWorkflow { id: string; name: string; enabled: boolean; version: number; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats }
 /** `totals` are run-level only: their steps, models, versions and failures are empty. */
-export interface WorkflowFactory { days: number; from: string; to: string; totals: WorkflowStats; previous_totals: WorkflowStats; workflows: FactoryWorkflow[] }
+export interface WorkflowFactory { days: number; from: string; to: string; totals: WorkflowStats; previous_totals: WorkflowStats; workflows: FactoryWorkflow[]; detail_from?: string | null }
 
 // --- Runners and jobs (mirror tab_domain::runner) ---
 

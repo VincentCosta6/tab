@@ -19,15 +19,17 @@
 //! * **Dedup.** The same trigger (change, item, item version) runs a
 //!   workflow once.
 //! * **Rate.** Each workflow has runs-per-hour and per-item cool-down
-//!   limits, there is a global cap, and connector actions run at background
+//!   limits and optional monthly spend caps ([`cap`]), there is a global cap, and connector actions run at background
 //!   priority, so the gateway defers them before they eat into the budget
 //!   interactive use needs.
 //! * **Consent.** Agents can draft and dry-run workflows but only the person
 //!   turns them on, and destructive actions (merge, close, move mail) stay
 //!   blocked until the person allows them on that workflow.
 
+pub mod cap;
 pub mod insights;
 pub mod item_status;
+pub mod rollup;
 pub mod run;
 pub mod stats;
 pub mod template;
@@ -136,6 +138,14 @@ pub struct Limits {
     /// Minimum time between runs for the same item. 0 means none.
     #[serde(default)]
     pub cooldown_minutes: u32,
+    /// The most this workflow may bill through API keys in a UTC calendar
+    /// month, in dollars. 0 means no cap. See [`cap`].
+    #[serde(default)]
+    pub monthly_cap_usd: f64,
+    /// The most subscription tokens (input and output) it may use in a UTC
+    /// calendar month. 0 means no cap. Never converted to dollars.
+    #[serde(default)]
+    pub monthly_cap_plan_tokens: u64,
 }
 
 fn default_runs_per_hour() -> u32 {
@@ -147,6 +157,8 @@ impl Default for Limits {
         Self {
             max_runs_per_hour: default_runs_per_hour(),
             cooldown_minutes: 0,
+            monthly_cap_usd: 0.0,
+            monthly_cap_plan_tokens: 0,
         }
     }
 }
@@ -509,6 +521,7 @@ pub fn validate(
     if w.limits.max_runs_per_hour == 0 {
         out.push(Issue::err(None, "Allow at least one run per hour."));
     }
+    out.extend(cap::check(&w.limits));
 
     let mut seen: HashSet<&str> = HashSet::new();
     for step in &w.steps {

@@ -676,6 +676,10 @@ impl Runtime {
                     "Hit its limit of {} runs an hour; later triggers are skipped until the hour rolls over.",
                     w.limits.max_runs_per_hour));
             }
+            // A run already going is never stopped; this only holds new ones.
+            if let Some(why) = super::rollups::cap_refusal(store, &w.id, &w.limits, now)? {
+                return self.refuse(w, &s, RunStatus::Throttled, why);
+            }
             if w.limits.cooldown_minutes > 0
                 && let Some(item) = &s.item_id
                 && let Some(last) = store.workflow_last_run_for_item(&w.id, item)?
@@ -1261,6 +1265,64 @@ mod tests {
         assert_eq!(plain, "Fix Triage");
         assert!(trusted_path("steps.fix.summary") && !trusted_path("item.repo"));
         assert!(!trusted_path("trigger.payload") && !trusted_path("signal.x"));
+    }
+
+    #[tokio::test]
+    async fn a_reached_monthly_cap_holds_new_runs_back_but_not_dry_runs() {
+        let (rt, host) = runtime(Store::in_memory().unwrap(), "laptop");
+        let mut values = serde_json::Map::new();
+        values.insert("x".into(), json!(1));
+        let mut w = Workflow {
+            name: "Capped".into(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            steps: vec![step("set", StepKind::Set { values })],
+            ..Default::default()
+        };
+        w.limits.monthly_cap_usd = 5.0;
+        let w = host.store.workflow_save(&w, "user", Utc::now()).unwrap();
+        assert_eq!(
+            rt.run_now(w.clone(), None, false).await.unwrap().status,
+            RunStatus::Succeeded
+        );
+        // An earlier run this month billed $5 through an API key.
+        let mut spent = rt.run_now(w.clone(), None, false).await.unwrap();
+        spent.id = "spent".into();
+        spent.steps[0].metrics = Some(tab_domain::workflow::StepMetrics {
+            billing: tab_domain::workflow::Billing::Api,
+            cost_usd: 5.0,
+            ..Default::default()
+        });
+        host.store.workflow_run_insert(&spent).unwrap();
+
+        let held = rt.run_now(w.clone(), None, false).await.unwrap();
+        assert_eq!(held.status, RunStatus::Throttled);
+        assert_eq!(
+            held.error.as_deref(),
+            Some("This month's $5.00 spend cap is reached; runs start again on the 1st (UTC).")
+        );
+        // Recorded once an hour, like the hourly limit.
+        rt.run_now(w.clone(), None, false).await.unwrap();
+        let throttled = host
+            .store
+            .workflow_runs(Some(&w.id), 50)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.status == RunStatus::Throttled)
+            .count();
+        assert_eq!(throttled, 1);
+        // A dry run still runs.
+        assert_eq!(
+            rt.run_now(w.clone(), None, true).await.unwrap().status,
+            RunStatus::Succeeded
+        );
+        // Raising the cap lets runs start again.
+        let mut raised = w.clone();
+        raised.limits.monthly_cap_usd = 10.0;
+        assert_eq!(
+            rt.run_now(raised, None, false).await.unwrap().status,
+            RunStatus::Succeeded
+        );
     }
 
     #[tokio::test]
