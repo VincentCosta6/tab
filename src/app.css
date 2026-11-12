@@ -574,8 +574,6 @@ body.resizing iframe { pointer-events: none; }
 .reader-body { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--space-6) var(--space-5); display: grid; gap: var(--space-3); align-content: start; }
 .reader-body .block-text { white-space: pre-wrap; }
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 2px; background: var(--bg-sunken); }
-.seg-btn { border: 0; background: transparent; padding: 2px 10px; border-radius: var(--radius-pill); font-size: var(--text-xs); color: var(--fg-subtle); cursor: pointer; }
-.seg-btn.active { background: var(--bg-raised); color: var(--fg); box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); }
 
 /* One toolbar under the item header: view tabs left, context and view options right */
 .pane-toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-3); padding: 0 var(--space-6); border-bottom: 1px solid var(--border); min-height: 38px; }
@@ -737,52 +735,6 @@ body.resizing iframe { pointer-events: none; }
 .nav-badge.update:hover { filter: brightness(1.15); }
 .nav-badge.working { min-width: 8px; width: 8px; height: 8px; padding: 0; top: -2px; right: -4px; background: var(--tone-info-fg); animation: agent-pulse 1.4s ease-in-out infinite; }
 
-/* Ask: the knowledge graph with a chat underneath. */
-.ask { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg); }
-.ask-bar { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border); background: var(--bg-raised); }
-.ask-bar .pj-trigger { height: 28px; }
-.ask-search { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); color: var(--fg-subtle); }
-.ask-search input { border: 0; outline: 0; background: transparent; color: var(--fg); font: inherit; font-size: var(--text-sm); width: 150px; }
-.ask-kinds { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
-.kind-chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg); color: var(--fg-muted); font: inherit; font-size: var(--text-xs); cursor: pointer; max-width: 220px; }
-.kind-chip:hover:not(:disabled) { color: var(--fg); border-color: var(--border-strong); }
-.kind-chip.off { opacity: 0.45; }
-.kind-chip:disabled { cursor: default; opacity: 0.6; }
-.kind-chip .count { color: var(--fg-subtle); }
-.kind-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.kind-dot.big { width: 14px; height: 14px; }
-.ask-main { flex: 1; min-height: 0; display: flex; position: relative; }
-.ask-graph { flex: 1; min-width: 0; position: relative; }
-.graph-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
-.ask-empty { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 4px; color: var(--fg-subtle); text-align: center; }
-.ask-empty p { margin: 0; }
-.ask-node { width: 300px; flex: none; overflow-y: auto; border-left: 1px solid var(--border); background: var(--bg-raised); padding: var(--space-4); display: grid; align-content: start; gap: var(--space-4); }
-.ask-node header { display: flex; align-items: center; gap: var(--space-2); }
-.ask-node-title { flex: 1; min-width: 0; display: grid; }
-.ask-node-title strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ask-node-title .subtle { font-size: var(--text-xs); text-transform: capitalize; }
-.ask-node section { display: grid; gap: 6px; }
-.ask-node .label-sm { margin: 0; }
-.ask-node .ask-remove { grid-auto-flow: row; justify-items: start; }
-.ask-lead { display: grid; gap: var(--space-2); }
-.ask-lead .reader-body { max-height: 320px; overflow-y: auto; }
-.ask-note { margin: 0; font-size: var(--text-sm); line-height: 1.45; }
-.ask-note strong { text-transform: uppercase; font-size: var(--text-xs); letter-spacing: 0.04em; color: var(--fg-muted); margin-right: 4px; }
-.ask-connected { display: flex; flex-wrap: wrap; gap: 6px; }
-.ask-items { display: grid; gap: 2px; }
-.ask-item { display: grid; gap: 1px; text-align: left; padding: 6px 8px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg); font: inherit; cursor: pointer; }
-.ask-item:hover { background: var(--bg-hover); }
-.ask-item-title { font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ask-item .subtle { font-size: var(--text-xs); }
-.ask-chat { display: flex; flex-direction: column; border-top: 1px solid var(--border); background: var(--bg); max-height: 45%; min-height: 0; padding-top: var(--space-2); }
-.ask-chat-toggle { align-self: center; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--fg-subtle); font: inherit; font-size: var(--text-xs); cursor: pointer; padding: 2px 8px; border-radius: var(--radius-md); }
-.ask-chat-toggle:hover { background: var(--bg-hover); color: var(--fg); }
-.ask-chat:not(.open) .ask-chat-chevron { transform: rotate(180deg); }
-.ask-transcript { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
-.ask-transcript .transcript { padding-top: var(--space-2); }
-.ask-focus { align-self: center; max-width: 780px; width: calc(100% - 2 * var(--space-6)); font-size: var(--text-xs); color: var(--fg-subtle); padding: 0 0 6px; display: flex; align-items: center; gap: 4px; }
-.ask-suggestions { padding: 0 var(--space-6) var(--space-2); }
-.ask .composer { margin-top: 0; }
 
 /* GitHub's colours on the review Actions menu. */
 .rv-menu-item.gh-merge svg { color: #2da44e; }
@@ -918,6 +870,28 @@ body.resizing iframe { pointer-events: none; }
 .slash-menu button.active { background: var(--bg-hover); }
 .slash-name { font-family: var(--font-mono, ui-monospace, monospace); flex: none; }
 .slash-desc { color: var(--fg-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.slash-menu button:has(.slash-tab) .slash-desc { flex: 1; }
+.slash-menu button { min-width: 0; }
+.slash-tab { margin-left: auto; flex: none; padding: 0 6px; border-radius: 999px; font-size: var(--text-xs); color: var(--tone-accent-fg); background: var(--tone-accent-bg); }
+
+/* What tab shows for an interactive command (/mcp, /context…), above the box. */
+.slash-card { margin: 8px 8px 0; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); font-size: var(--text-sm); max-height: min(420px, 50vh); display: flex; flex-direction: column; }
+.slash-card-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-bottom: 1px solid var(--border); }
+.slash-card-head strong { font-family: var(--font-mono, ui-monospace, monospace); font-weight: 500; }
+.slash-card-close { margin-left: auto; }
+.slash-card-body { padding: 10px; display: grid; gap: 10px; overflow-y: auto; }
+.slash-card-body p { margin: 0; }
+.slash-card-body > p.subtle { font-size: var(--text-xs); }
+.slash-card-actions { display: flex; gap: 8px; }
+.slash-mcp { display: grid; gap: 2px; }
+.slash-mcp-line { display: flex; align-items: center; gap: 8px; min-height: 30px; }
+.slash-mcp-name { display: flex; align-items: baseline; gap: 6px; flex: 1; min-width: 0; padding: 0; border: 0; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.slash-mcp-name:disabled { cursor: default; padding-left: 18px; }
+.slash-mcp-name > svg { align-self: center; flex: none; }
+.slash-mcp-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slash-mcp-status { display: inline-flex; align-items: center; gap: 6px; flex: none; color: var(--fg-muted); font-size: var(--text-xs); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slash-mcp-tools { margin: 2px 0 6px 18px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.slash-mcp-tools > .subtle { padding: 8px; }
 
 /* Above the composer: sign the agent back in, or update it. */
 .agent-notice { display: flex; align-items: flex-start; gap: 8px; margin: 8px 8px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg); font-size: var(--text-sm); color: var(--fg-muted); }

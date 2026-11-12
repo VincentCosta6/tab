@@ -126,6 +126,41 @@ export interface ProjectRepo {
   updated_at: string;
 }
 
+export type ResourceKind = "website" | "file" | "email" | "service" | "link" | "note";
+/** Who may read a resource: every chat in the project, only its coordinator, or (soon) the encrypted vault. */
+export type ResourceAccess = "all" | "coordinator" | "vault";
+
+/** Something a project knows besides its repos: a site, a document, email, a service. */
+export interface ProjectResource {
+  id: string;
+  project_id: string;
+  kind: ResourceKind;
+  title: string;
+  /** The link; for email the label or sender; for a file its hub hash. */
+  url: string | null;
+  /** What it's for; for a note, its text. */
+  note: string;
+  access: ResourceAccess;
+  options: Record<string, unknown>;
+  status: "pending" | "indexed" | "live" | "failed" | "needs_sign_in";
+  chunks: number;
+  pinned: boolean;
+  added_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResourceInput {
+  id?: string;
+  kind: ResourceKind;
+  title: string;
+  url: string | null;
+  note?: string;
+  access?: ResourceAccess;
+  options?: Record<string, unknown>;
+  pinned?: boolean;
+}
+
 /** A durable fact about a project, from an agent or the person. One per topic. */
 export interface ProjectNote {
   id: string;
@@ -537,6 +572,13 @@ export type HubMode = "cloud" | "local";
 
 /** Allowed runs without asking, ask waits for the person in the chat, off hides the tool. */
 export type ToolPolicy = "allow" | "ask" | "off";
+
+/** An MCP server as the chat's agent saw it. Mirrors tab_core::agents::AgentMcpServer. */
+export interface AgentMcpServer {
+  name: string;
+  /** `connected`, `failed`, `needs-auth`, `pending`; absent from older agents. */
+  status: string | null;
+}
 
 export interface McpServerConfig {
   name: string;

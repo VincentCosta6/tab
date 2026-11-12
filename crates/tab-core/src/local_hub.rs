@@ -582,7 +582,7 @@ impl LocalHub {
                         .and_then(|v| v.as_str().map(str::to_string))
                         .unwrap_or_default(),
                 ),
-                "project_notes" | "project_repos" => Some(
+                "project_notes" | "project_repos" | "project_resources" => Some(
                     store
                         .hub_row(table, key)
                         .ok()

@@ -4,10 +4,10 @@
 
 import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
+  AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
-  McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
+  AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
   EmailSignInStatus, MailProvider,
 } from "./types";
 import { mockApi } from "./mock";
@@ -66,11 +66,13 @@ export const api = {
   agentActivity: () => call<AgentActivity[]>("agent_activity"),
   contextStatus: (ids: string[]) => call<Record<string, ContextStatus[]>>("context_status", { ids }),
   slashCommands: () => call<string[]>("agent_slash_commands"),
+  /** The MCP servers a chat's agent reported at its last turn. */
+  agentMcpServers: (sessionId: string) => call<AgentMcpServer[]>("agent_mcp_servers", { sessionId }),
   graphView: (projectId: string | null, days: number | null, limit?: number) => call<GraphView>("graph_view", { projectId, days, limit: limit ?? null }),
   graphNode: (id: number) => call<GraphNode>("graph_node", { id }),
   graphDelete: (id: number, withExclusive: boolean) => call<number>("graph_delete", { id, withExclusive }),
-  askChatOpen: (projectId: string | null) => call<Chat>("ask_chat_open", { projectId }),
-  askChatSend: (projectId: string | null, text: string, focus: string[], attachments: string[] = []) => call<Session>("ask_chat_send", { projectId, text, focus, attachments }),
+  coordinatorChatOpen: (projectId: string) => call<Chat>("coordinator_chat_open", { projectId }),
+  coordinatorChatSend: (projectId: string, text: string, attachments: string[] = []) => call<Session>("coordinator_chat_send", { projectId, text, attachments }),
   searchIndexStatus: () => call<IndexStatus>("search_index_status"),
   projectsList: () => call<Project[]>("projects_list"),
   projectSave: (p: { id?: string; name: string; color: string; icon: string }) =>
@@ -87,6 +89,9 @@ export const api = {
   projectRepoSave: (projectId: string, r: { repo: string; path?: string | null; note?: string | null }) =>
     call<ProjectRepo>("project_repo_save", { projectId, repo: r.repo, path: r.path ?? null, note: r.note ?? null }),
   projectRepoDelete: (projectId: string, id: string) => call<void>("project_repo_delete", { projectId, id }),
+  projectResources: (projectId: string) => call<ProjectResource[]>("project_resources", { projectId }),
+  projectResourceSave: (projectId: string, resource: ResourceInput) => call<ProjectResource>("project_resource_save", { projectId, resource }),
+  projectResourceDelete: (projectId: string, id: string) => call<boolean>("project_resource_delete", { projectId, id }),
   projectItems: (projectId: string) => call<QueueItem[]>("project_items", { projectId }),
   reviewChatOpen: (repo: string, number: number) => call<Chat>("review_chat_open", { repo, number }),
   reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string, attachments: string[] = []) =>

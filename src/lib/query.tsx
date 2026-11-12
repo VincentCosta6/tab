@@ -85,6 +85,8 @@ export const keys = {
   contextStatus: (ids: string[]) => ["context-status", ids] as const,
   notes: (projectId: string) => ["notes", projectId] as const,
   repos: (projectId: string) => ["project-repos", projectId] as const,
+  resources: (projectId: string) => ["project-resources", projectId] as const,
+  coordinator: (projectId: string) => ["chat", `coordinator:${projectId}`] as const,
   projectItems: (projectId: string) => ["project-items", projectId] as const,
   pressure: ["pressure"] as const,
   pull: (repo: string, n: number) => ["pull", repo, n] as const,
@@ -163,6 +165,7 @@ function LiveEvents() {
           // refresh every project's.
           qc.invalidateQueries({ queryKey: e.project_id ? keys.notes(e.project_id) : ["notes"] });
           qc.invalidateQueries({ queryKey: e.project_id ? keys.repos(e.project_id) : ["project-repos"] });
+          qc.invalidateQueries({ queryKey: e.project_id ? keys.resources(e.project_id) : ["project-resources"] });
           qc.invalidateQueries({ queryKey: e.project_id ? keys.projectItems(e.project_id) : ["project-items"] });
           qc.invalidateQueries({ queryKey: keys.projects });
           break;

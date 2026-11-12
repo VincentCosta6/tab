@@ -119,6 +119,10 @@ export function useProjectRepos(projectId: string | null | undefined) {
   return useQuery({ queryKey: keys.repos(projectId ?? ""), queryFn: () => api.projectRepos(projectId!), enabled: !!projectId, staleTime: 0 });
 }
 
+export function useProjectResources(projectId: string | null | undefined) {
+  return useQuery({ queryKey: keys.resources(projectId ?? ""), queryFn: () => api.projectResources(projectId!), enabled: !!projectId, staleTime: 0 });
+}
+
 export function useProjectItems(projectId: string | null | undefined) {
   return useQuery({ queryKey: keys.projectItems(projectId ?? ""), queryFn: () => api.projectItems(projectId!), enabled: !!projectId, staleTime: 0 });
 }

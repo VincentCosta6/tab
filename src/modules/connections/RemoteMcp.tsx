@@ -301,7 +301,7 @@ export function AddByUrl({ onAdd }: { onAdd: (a: { id: string; name: string; url
   );
 }
 
-const policies: { value: ToolPolicy; label: string }[] = [
+export const policies: { value: ToolPolicy; label: string }[] = [
   { value: "allow", label: "Allowed" },
   { value: "ask", label: "Ask" },
   { value: "off", label: "Off" },

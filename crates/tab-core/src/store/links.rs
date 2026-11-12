@@ -238,7 +238,7 @@ mod tests {
         };
         both_ways(&parent, &child);
         both_ways(&parent, &mine);
-        let sql = include_str!("migrations/019_item_links.sql");
+        let sql = include_str!("migrations/020_item_links.sql");
         let backfill = &sql[sql.find("INSERT").unwrap()..];
         s.conn().execute_batch(backfill).unwrap();
         assert_eq!(

@@ -51,7 +51,7 @@ use crate::engine::EngineEvent;
 use crate::model::Session;
 use crate::model::{
     Change, ConnectorInfo, ContextSection, Entity, ItemState, LinkKind, NewContext, NewTask,
-    Preview, Project, ProjectNote, ProjectRepo, QueueItem, SettingKind,
+    Preview, Project, ProjectNote, ProjectRepo, ProjectResource, QueueItem, SettingKind,
 };
 use crate::sandbox::broker;
 use crate::store::{AuditEntry, Store};
@@ -998,6 +998,10 @@ fn note_json(n: &ProjectNote) -> Value {
     })
 }
 
+fn resource_json(r: &ProjectResource) -> Value {
+    json!({ "kind": r.kind, "title": r.title, "url": r.url, "note": r.note, "access": r.access, "pinned": r.pinned })
+}
+
 fn repo_json(r: &ProjectRepo) -> Value {
     json!({ "repo": r.repo, "path": r.path, "note": r.note, "by": r.added_by })
 }
@@ -1463,6 +1467,26 @@ impl McpServer {
             .ok_or_else(|| anyhow::anyhow!("pass item_id: this session is not tied to a task"))
     }
 
+    /// The project whose coordinator this session is, from the session's own
+    /// key (`coordinator:<project id>`), which agents can't set.
+    fn coordinator_of(&self, session: Option<&str>) -> Option<String> {
+        let key = self.store.session_key(session?).ok().flatten()?;
+        key.strip_prefix(crate::agents::COORDINATOR_KEY_PREFIX)
+            .map(str::to_string)
+    }
+
+    /// The most a session may read of `project_id`'s resources: its
+    /// coordinator reads `coordinator` resources too, every other chat only
+    /// `all`. (Vault resources need the encrypted vault; see
+    /// docs/projects-hub.md.)
+    fn resource_access(&self, session: Option<&str>, project_id: &str) -> &'static str {
+        if self.coordinator_of(session).as_deref() == Some(project_id) {
+            "coordinator"
+        } else {
+            "all"
+        }
+    }
+
     /// The project named in `project`, else the session's task's project.
     fn project_arg(&self, session: Option<&str>, args: &Value) -> anyhow::Result<Option<Project>> {
         if let Some(name) = args["project"].as_str().filter(|v| !v.trim().is_empty()) {
@@ -1476,7 +1500,8 @@ impl McpServer {
             .session_item(session, &json!({}))
             .ok()
             .and_then(|id| self.store.get(&id).ok().flatten())
-            .and_then(|i| i.project_id);
+            .and_then(|i| i.project_id)
+            .or_else(|| self.coordinator_of(session));
         Ok(match pid {
             Some(p) => self.store.project_find(&p)?,
             None => None,
@@ -2033,6 +2058,8 @@ impl McpServer {
                     "about": p.about,
                     "rules": p.rules,
                     "repos": self.store.project_repos(&p.id)?.iter().map(repo_json).collect::<Vec<_>>(),
+                    "resources": self.store.project_resources(&p.id, self.resource_access(session, &p.id))?
+                        .iter().map(resource_json).collect::<Vec<_>>(),
                     "notes": self.store.project_notes(&p.id)?.iter().map(note_json).collect::<Vec<_>>(),
                     "items_are_about": self.store.project_entities(&p.id, since, 15)?.iter()
                         .map(|(e, n)| json!({ "entity_id": e.id, "kind": e.kind, "label": e.label, "items_in_project": n }))
@@ -2815,6 +2842,113 @@ mod tests {
             )
             .await);
         assert!(bad.is_err());
+    }
+
+    /// Coordinator-only resources reach the project's coordinator, and no
+    /// other chat: not one in the project, not one naming the project.
+    #[tokio::test]
+    async fn only_the_coordinator_reads_coordinator_resources() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let server = McpServer {
+            store: store.clone(),
+            hub,
+            engine: Arc::new(Connections(Default::default())),
+            events,
+            token: "t".into(),
+        };
+        let now = Utc::now();
+        let p = store
+            .project_save(None, "Shop", "#7c5cff", "store", now)
+            .unwrap();
+        for (title, access) in [("Public site", "all"), ("Billing inbox", "coordinator")] {
+            store
+                .resource_save(
+                    &p.id,
+                    &crate::store::ResourceInput {
+                        kind: "link".into(),
+                        title: title.into(),
+                        url: Some(format!("https://x/{access}")),
+                        access: Some(access.into()),
+                        ..Default::default()
+                    },
+                    "user",
+                    now,
+                )
+                .unwrap();
+        }
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let coordinator = store
+            .session_create_keyed(
+                &crate::agents::coordinator::key(&p.id),
+                AgentKind::ClaudeCode,
+                "Coordinator",
+                &dir,
+                now,
+            )
+            .unwrap();
+        let crate::store::Upsert::Inserted(task) = store
+            .upsert(
+                &crate::model::IncomingEvent {
+                    source: "tab".into(),
+                    external_id: "reply".into(),
+                    kind: "tab.task".into(),
+                    title: "Reply".into(),
+                    occurred_at: now,
+                    ..Default::default()
+                },
+                now,
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        store.item_set_project(&task.id, Some(&p.id), now).unwrap();
+        let worker = store
+            .session_create(Some(&task.id), AgentKind::ClaudeCode, "Reply", &dir, now)
+            .unwrap();
+        let other = store
+            .session_create_keyed(
+                "coordinator:someone-else",
+                AgentKind::ClaudeCode,
+                "Other",
+                &dir,
+                now,
+            )
+            .unwrap();
+
+        let seen = |text: String| (text.contains("Public site"), text.contains("Billing inbox"));
+        let call = |id: String, args: Value| {
+            let server = &server;
+            async move {
+                server.call(Some(&id), "tab_project", args).await.unwrap()["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            }
+        };
+        assert_eq!(
+            seen(call(coordinator.id.clone(), json!({})).await),
+            (true, true)
+        );
+        assert_eq!(
+            seen(call(worker.id.clone(), json!({})).await),
+            (true, false)
+        );
+        assert_eq!(
+            seen(call(worker.id.clone(), json!({"project":"Shop"})).await),
+            (true, false)
+        );
+        assert_eq!(
+            seen(call(other.id.clone(), json!({"project":"Shop"})).await),
+            (true, false)
+        );
     }
 
     #[tokio::test]
