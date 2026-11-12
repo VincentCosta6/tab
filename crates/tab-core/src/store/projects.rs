@@ -7,7 +7,10 @@ use rusqlite::{OptionalExtension, params};
 
 use super::items::get_item;
 use super::{Store, parse_ts, ts};
-use crate::model::{Entity, Project, ProjectNote, ProjectRepo, QueueItem};
+use crate::model::{
+    Entity, Project, ProjectNote, ProjectRepo, ProjectResource, QueueItem, RESOURCE_ACCESS,
+    RESOURCE_KINDS,
+};
 
 const PROJECT_COLS: &str = "id, name, color, icon, about, rules, created_at";
 const REPO_COLS: &str = "id, project_id, repo, path, note, added_by, created_at, updated_at";
@@ -23,6 +26,46 @@ fn repo_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRepo> {
         created_at: parse_ts(&r.get::<_, String>("created_at")?)?,
         updated_at: parse_ts(&r.get::<_, String>("updated_at")?)?,
     })
+}
+
+const RESOURCE_COLS: &str = "id, project_id, kind, title, url, note, access, options, status, chunks, pinned, added_by, created_at, updated_at";
+
+fn resource_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectResource> {
+    Ok(ProjectResource {
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        kind: r.get("kind")?,
+        title: r.get("title")?,
+        url: r.get("url")?,
+        note: r.get("note")?,
+        access: r.get("access")?,
+        options: serde_json::from_str(&r.get::<_, String>("options")?).unwrap_or_default(),
+        status: r.get("status")?,
+        chunks: r.get("chunks")?,
+        pinned: r.get("pinned")?,
+        added_by: r.get("added_by")?,
+        created_at: parse_ts(&r.get::<_, String>("created_at")?)?,
+        updated_at: parse_ts(&r.get::<_, String>("updated_at")?)?,
+    })
+}
+
+/// What a resource is saved from: the person's dialog or an agent.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ResourceInput {
+    /// Set to update that resource; otherwise one is added (or the same
+    /// kind and link in this project is updated).
+    pub id: Option<String>,
+    pub kind: String,
+    pub title: String,
+    pub url: Option<String>,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub access: Option<String>,
+    #[serde(default)]
+    pub options: Option<serde_json::Value>,
+    #[serde(default)]
+    pub pinned: Option<bool>,
 }
 
 /// `owner/name` for a GitHub URL or `git@github.com:` remote, so the same
@@ -199,6 +242,131 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// A project's resources, the ones `max_access` may read: pinned first,
+    /// then by kind and title.
+    pub fn project_resources(
+        &self,
+        project_id: &str,
+        max_access: &str,
+    ) -> anyhow::Result<Vec<ProjectResource>> {
+        let allowed: Vec<&str> = RESOURCE_ACCESS
+            .iter()
+            .take(
+                RESOURCE_ACCESS
+                    .iter()
+                    .position(|a| *a == max_access)
+                    .map_or(1, |i| i + 1),
+            )
+            .copied()
+            .collect();
+        let conn = self.conn();
+        let out = conn
+            .prepare(&format!(
+                "SELECT {RESOURCE_COLS} FROM project_resources WHERE project_id = ?1
+                 ORDER BY pinned DESC, kind, title COLLATE NOCASE"
+            ))?
+            .query_map([project_id], resource_row)?
+            .filter(|r| {
+                r.as_ref()
+                    .map_or(true, |r| allowed.contains(&r.access.as_str()))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(out)
+    }
+
+    /// Adds a resource to a project, or updates it (by id, or the same kind
+    /// and link). Vault resources aren't stored here: they need the
+    /// end-to-end encrypted vault (docs/projects-hub.md).
+    pub fn resource_save(
+        &self,
+        project_id: &str,
+        input: &ResourceInput,
+        added_by: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<ProjectResource> {
+        let kind = input.kind.trim();
+        anyhow::ensure!(
+            RESOURCE_KINDS.contains(&kind),
+            "unknown resource kind {kind:?}"
+        );
+        let access = input.access.as_deref().unwrap_or("all");
+        anyhow::ensure!(
+            RESOURCE_ACCESS.contains(&access),
+            "unknown access level {access:?}"
+        );
+        anyhow::ensure!(
+            access != "vault",
+            "the vault isn't available yet: it needs end-to-end encryption, which comes in a later release"
+        );
+        let title = input.title.trim();
+        anyhow::ensure!(!title.is_empty(), "a resource needs a title");
+        let url = input
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty());
+        anyhow::ensure!(url.is_some() || kind == "note", "a {kind} needs a link");
+        let options = input.options.as_ref().map(|o| o.to_string());
+        let conn = self.conn();
+        if let Some(id) = &input.id {
+            return conn
+                .query_row(
+                    &format!(
+                        "UPDATE project_resources SET title = ?3, url = ?4, note = ?5, access = ?6,
+                             options = COALESCE(?7, options), pinned = COALESCE(?8, pinned), updated_at = ?9
+                         WHERE id = ?1 AND project_id = ?2 RETURNING {RESOURCE_COLS}"
+                    ),
+                    params![id, project_id, title, url, input.note.trim(), access, options, input.pinned, ts(now)],
+                    resource_row,
+                )
+                .optional()?
+                .ok_or_else(|| anyhow::anyhow!("no resource {id} in this project"));
+        }
+        // Websites, links and services are live or indexed later; a note is
+        // already all there is to it.
+        let status = match kind {
+            "note" => "indexed",
+            "service" => "live",
+            _ => "pending",
+        };
+        Ok(conn.query_row(
+            &format!(
+                "INSERT INTO project_resources (id, project_id, kind, title, url, note, access, options, status,
+                     pinned, added_by, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE(?8, '{{}}'), ?9, COALESCE(?10, 0), ?11, ?12, ?12)
+                 ON CONFLICT (project_id, kind, url) DO UPDATE SET title = excluded.title, note = excluded.note,
+                     access = excluded.access, options = excluded.options, pinned = excluded.pinned,
+                     updated_at = excluded.updated_at
+                 RETURNING {RESOURCE_COLS}"
+            ),
+            params![
+                uuid::Uuid::new_v4().to_string(),
+                project_id,
+                kind,
+                title,
+                url,
+                input.note.trim(),
+                access,
+                options,
+                status,
+                input.pinned,
+                added_by,
+                ts(now)
+            ],
+            resource_row,
+        )?)
+    }
+
+    /// Removes a resource from a project. Returns whether one was removed.
+    pub fn resource_delete(&self, project_id: &str, id: &str) -> anyhow::Result<bool> {
+        let conn = self.conn();
+        let n = conn.execute(
+            "DELETE FROM project_resources WHERE project_id = ?1 AND id = ?2",
+            params![project_id, id],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Deletes a project. Its items stay, without a project.
     pub fn project_delete(&self, id: &str) -> anyhow::Result<()> {
         let mut conn = self.conn();
@@ -218,6 +386,7 @@ impl Store {
         )?;
         tx.execute("DELETE FROM project_notes WHERE project_id = ?1", [id])?;
         tx.execute("DELETE FROM project_repos WHERE project_id = ?1", [id])?;
+        tx.execute("DELETE FROM project_resources WHERE project_id = ?1", [id])?;
         tx.execute("DELETE FROM projects WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(())
@@ -599,5 +768,82 @@ mod tests {
         assert!(s.projects().unwrap().is_empty());
         assert!(s.project_notes(&p.id).unwrap().is_empty());
         assert!(s.project_repos(&p.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resources_save_update_and_filter_by_access() {
+        let s = Store::in_memory().unwrap();
+        let now = Utc::now();
+        let p = s
+            .project_save(None, "Shop", "#7c5cff", "store", now)
+            .unwrap();
+        let site = |access: &str| ResourceInput {
+            kind: "website".into(),
+            title: "shop.dev".into(),
+            url: Some("https://shop.dev".into()),
+            access: Some(access.into()),
+            ..Default::default()
+        };
+        let r = s.resource_save(&p.id, &site("all"), "user", now).unwrap();
+        assert_eq!((r.status.as_str(), r.access.as_str()), ("pending", "all"));
+        // The same link again updates it rather than adding a second.
+        let again = s.resource_save(&p.id, &site("all"), "user", now).unwrap();
+        assert_eq!(again.id, r.id);
+        let billing = ResourceInput {
+            kind: "email".into(),
+            title: "Billing".into(),
+            url: Some("label:billing".into()),
+            access: Some("coordinator".into()),
+            ..Default::default()
+        };
+        s.resource_save(&p.id, &billing, "user", now).unwrap();
+        assert_eq!(s.project_resources(&p.id, "all").unwrap().len(), 1);
+        assert_eq!(s.project_resources(&p.id, "coordinator").unwrap().len(), 2);
+        // An unknown level reads as the lowest.
+        assert_eq!(s.project_resources(&p.id, "nope").unwrap().len(), 1);
+
+        // Vault, unknown kinds and links missing are refused.
+        assert!(s.resource_save(&p.id, &site("vault"), "user", now).is_err());
+        let bad = ResourceInput {
+            kind: "fax".into(),
+            ..site("all")
+        };
+        assert!(s.resource_save(&p.id, &bad, "user", now).is_err());
+        let no_link = ResourceInput {
+            url: None,
+            ..site("all")
+        };
+        assert!(s.resource_save(&p.id, &no_link, "user", now).is_err());
+        let note = ResourceInput {
+            kind: "note".into(),
+            url: None,
+            note: "Refunds within 30 days.".into(),
+            ..site("all")
+        };
+        assert_eq!(
+            s.resource_save(&p.id, &note, "user", now).unwrap().status,
+            "indexed"
+        );
+
+        let edit = ResourceInput {
+            id: Some(r.id.clone()),
+            title: "Shop site".into(),
+            pinned: Some(true),
+            ..site("all")
+        };
+        let edited = s.resource_save(&p.id, &edit, "user", now).unwrap();
+        assert!(edited.pinned);
+        assert_eq!(
+            s.project_resources(&p.id, "all").unwrap()[0].title,
+            "Shop site"
+        );
+
+        assert!(s.resource_delete(&p.id, &r.id).unwrap());
+        s.project_delete(&p.id).unwrap();
+        assert!(
+            s.project_resources(&p.id, "coordinator")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

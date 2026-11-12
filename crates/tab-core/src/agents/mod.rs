@@ -14,8 +14,10 @@
 //!   search the queue, attach context, file what they find and create tasks.
 
 pub mod catalog;
+pub use coordinator::COORDINATOR_KEY_PREFIX;
 mod claude;
 mod codex;
+pub mod coordinator;
 mod opencode;
 mod per_turn;
 mod pi;

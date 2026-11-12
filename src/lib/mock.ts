@@ -12,7 +12,7 @@ import type {
   EmailSignInStatus, MailProvider,
   Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
-  Entity, GraphView, Project, ProjectNote, ProjectRepo, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
+  Entity, GraphView, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceInput, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
 } from "./types";
 
 const harnesses = harnessData as unknown as Harness[];
@@ -232,19 +232,40 @@ export const mockApi = {
           const hits = items.filter((i) => (entity.kind === "project" ? `project:${i.project_id}` === entity.key : i.entities.some((x) => x.key === entity.key)));
           return { entity, exclusive: entity.kind === "project" ? [] : exclusiveOf(entity, new Set(hits.map((i) => i.id))), connected: connected.slice(0, 12), items: hits.slice(0, 12), notes: notes.filter((n) => `project:${n.project_id}` === entity.key) };
         }
-        case "ask_chat_open": {
-          const session = sessions.find((s) => s.cwd === `ask:${args.projectId ?? "all"}`) ?? null;
+        case "coordinator_chat_open": {
+          const session = sessions.find((s) => s.cwd === `coordinator:${args.projectId}`) ?? null;
           return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: false } satisfies Chat;
         }
-        case "ask_chat_send": {
-          const key = `ask:${args.projectId ?? "all"}`;
+        case "coordinator_chat_send": {
+          const key = `coordinator:${args.projectId}`;
+          const project = projects.find((p) => p.id === args.projectId);
+          if (!project) throw new Error("That project was deleted.");
           let session = sessions.find((s) => s.cwd === key);
           if (!session) {
-            session = { id: `sess-${Date.now()}`, item_id: null, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: "Ask", status: "working", cwd: key, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+            session = { id: `sess-${Date.now()}`, item_id: null, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: `Coordinator · ${project.name}`, status: "working", cwd: key, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
             sessions.push(session);
           }
-          simulateAskTurn(session, String(args.text), args.focus ?? [], args.attachments ?? []);
+          simulateCoordinatorTurn(session, project, String(args.text), args.attachments ?? []);
           return session;
+        }
+        case "project_resources": return resources.filter((r) => r.project_id === args.projectId).sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.kind.localeCompare(b.kind) || a.title.localeCompare(b.title));
+        case "project_resource_save": {
+          const now = new Date().toISOString();
+          const r = args.resource as ResourceInput;
+          if (r.access === "vault") throw new Error("the vault isn't available yet: it needs end-to-end encryption, which comes in a later release");
+          if (!r.title.trim()) throw new Error("a resource needs a title");
+          if (!r.url && r.kind !== "note") throw new Error(`a ${r.kind} needs a link`);
+          const old = resources.find((x) => x.project_id === args.projectId && (r.id ? x.id === r.id : x.kind === r.kind && x.url === r.url));
+          const fields = { kind: r.kind, title: r.title.trim(), url: r.url, note: r.note ?? "", access: r.access ?? "all", options: r.options ?? old?.options ?? {}, pinned: r.pinned ?? old?.pinned ?? false, updated_at: now };
+          if (old) return Object.assign(old, fields);
+          const fresh: ProjectResource = { id: `res-${Date.now()}`, project_id: args.projectId, status: r.kind === "note" ? "indexed" : r.kind === "service" ? "live" : "pending", chunks: 0, added_by: "user", created_at: now, ...fields };
+          resources.push(fresh);
+          return fresh;
+        }
+        case "project_resource_delete": {
+          const n = resources.length;
+          resources = resources.filter((r) => !(r.project_id === args.projectId && r.id === args.id));
+          return resources.length < n;
         }
         case "search_index_status": {
           const on = !!config.connectors.tab?.settings?.semantic_search;
@@ -896,6 +917,14 @@ let repos: ProjectRepo[] = [
   { id: "r1", project_id: "p-pay", repo: "acme/payments", path: "~/src/payments", note: "Checkout API and ledger service", added_by: "agent", created_at: ago(3000), updated_at: ago(3000) },
   { id: "r2", project_id: "p-pay", repo: "acme/web", path: null, note: "Checkout UI", added_by: "user", created_at: ago(900), updated_at: ago(900) },
 ];
+let resources: ProjectResource[] = [
+  { id: "res1", project_id: "p-pay", kind: "website", title: "acme.com/pricing", url: "https://acme.com/pricing", note: "Public pricing and plans", access: "all", options: { depth: 1, schedule: "daily" }, status: "indexed", chunks: 42, pinned: false, added_by: "user", created_at: ago(2000), updated_at: ago(60) },
+  { id: "res2", project_id: "p-pay", kind: "service", title: "Stripe dashboard", url: "https://dashboard.stripe.com", note: "Charges, refunds, disputes", access: "coordinator", options: {}, status: "live", chunks: 0, pinned: false, added_by: "user", created_at: ago(2000), updated_at: ago(2000) },
+  { id: "res3", project_id: "p-pay", kind: "service", title: "Cloudflare · checkout-edge", url: "https://dash.cloudflare.com/acme/workers/services/view/checkout-edge", note: "Edge worker in front of checkout", access: "all", options: { watch_deploys: true }, status: "live", chunks: 0, pinned: false, added_by: "user", created_at: ago(1500), updated_at: ago(1500) },
+  { id: "res4", project_id: "p-pay", kind: "email", title: "Billing inbox", url: "label:billing", note: "Customer billing questions", access: "coordinator", options: {}, status: "indexed", chunks: 118, pinned: false, added_by: "user", created_at: ago(1500), updated_at: ago(30) },
+  { id: "res5", project_id: "p-pay", kind: "note", title: "Refund policy", url: null, note: "Full refunds within 30 days of a charge. Over $500 needs Priya.", access: "all", options: {}, status: "indexed", chunks: 1, pinned: true, added_by: "user", created_at: ago(900), updated_at: ago(900) },
+  { id: "res6", project_id: "p-pay", kind: "link", title: "Runbook: checkout incidents", url: "https://docs.google.com/document/d/1abc", note: "", access: "all", options: {}, status: "needs_sign_in", chunks: 0, pinned: false, added_by: "agent", created_at: ago(400), updated_at: ago(400) },
+];
 let notes: ProjectNote[] = [
   { id: "n1", project_id: "p-pay", topic: "deploys", text: "Payments deploys go through the staging branch; prod is cut on Tuesdays and Thursdays.", added_by: "agent", session_id: null, sources: [], created_at: ago(3000), updated_at: ago(3000) },
   { id: "n2", project_id: "p-pay", topic: "owners", text: "Dana owns checkout; Priya owns the ledger service.", added_by: "user", session_id: null, sources: [], created_at: ago(900), updated_at: ago(900) },
@@ -1060,21 +1089,24 @@ function mockGraph(projectId: string | null, days: number | null): GraphView {
   };
 }
 
-function simulateAskTurn(session: Session, text: string, focus: string[], attachments: string[] = []) {
+function simulateCoordinatorTurn(session: Session, project: Project, text: string, attachments: string[] = []) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (async () => {
-    post(session, "user", "text", focus.length ? `(Selected in the graph: ${focus.join(", ")})\n\n${text}` : text, withImages(attachments));
+    post(session, "user", "text", text, withImages(attachments));
     status(session, "working");
     await sleep(400);
-    post(session, "assistant", "tool", `tab: tab_graph_search: ${focus[0] ?? "payments"}`, { tool: "mcp__tab__tab_graph_search" });
-    post(session, "tool", "tool_result", "3 matches");
-    const reply = `**${focus[0] ?? "acme/payments"}** sits at the center of the Payments work: Dana reviews most of its PRs, and the checkout incident and the idempotency-keys PR both touch it.\n\n- Open now: the p99 latency on /checkout and Dana's review request.\n- The project note says deploys go through staging on Tuesdays and Thursdays.`;
+    post(session, "assistant", "tool", `tab: tab_project: ${project.name}`, { tool: "mcp__tab__tab_project" });
+    post(session, "tool", "tool_result", "about, rules, 6 resources, 3 notes");
+    post(session, "assistant", "tool", `tab: tab_search: ${text.slice(0, 40)}`, { tool: "mcp__tab__tab_search" });
+    post(session, "tool", "tool_result", "5 matches");
+    const open = items.filter((i) => i.project_id === project.id && i.state !== "done");
+    const reply = `Here's where **${project.name}** stands.\n\n- **${open.length} open** in the queue${open[0] ? `, most urgent: ${open[0].title}` : ""}.\n- The billing inbox had 3 refund questions this week; all are inside the 30-day policy (Refund policy note).\n- Stripe shows no new disputes since Monday.\n\nWant me to start a task for any of these?`;
     for (let i = 0; i < reply.length; i += 14) {
       emit({ type: "session_delta", session_id: session.id, text: reply.slice(i, i + 14) });
       await sleep(25);
     }
     post(session, "assistant", "text", reply);
-    post(session, "system", "result", "", { cost_usd: 0.009, duration_ms: 4100 });
+    post(session, "system", "result", "", { cost_usd: 0.011, duration_ms: 4800, context: { model: "claude-opus-5-5", window: 200000, used: 31200 + messages.filter((m) => m.session_id === session.id).length * 900, first_call: 24000, tab_context: 3000 } });
     status(session, "idle");
   })();
 }

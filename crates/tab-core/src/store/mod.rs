@@ -18,6 +18,7 @@ mod usage;
 mod vectors;
 mod workflows;
 pub use jobs::CloudConnection;
+pub use projects::ResourceInput;
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -61,6 +62,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/016_runners_jobs.sql"),
     include_str!("migrations/017_session_model.sql"),
     include_str!("migrations/018_item_state_at.sql"),
+    include_str!("migrations/019_project_resources.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {
