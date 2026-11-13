@@ -28,6 +28,7 @@ pub mod projects;
 pub mod settings;
 pub mod storage;
 mod vault;
+pub mod workflows;
 
 pub use paths::Paths;
 

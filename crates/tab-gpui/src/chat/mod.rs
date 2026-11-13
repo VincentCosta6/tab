@@ -528,7 +528,7 @@ impl Render for ChatView {
                             el.child(
                                 Button::new("stop")
                                     .kind(ButtonKind::Ghost)
-                                    .icon("x-circle")
+                                    .icon("stop")
                                     .label("Stop")
                                     .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
                             )

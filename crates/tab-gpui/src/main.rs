@@ -17,6 +17,7 @@ mod settings;
 mod shell;
 mod theme;
 mod work;
+mod workflows;
 
 use gpui::{App, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_component::Root;

@@ -113,6 +113,7 @@ pub struct Shell {
     settings: Option<Entity<crate::settings::SettingsTab>>,
     connections: Option<Entity<crate::connections::ConnectionsTab>>,
     projects: Option<Entity<crate::projects::ProjectsTab>>,
+    workflows: Option<Entity<crate::workflows::WorkflowsTab>>,
 }
 
 impl Shell {
@@ -124,6 +125,7 @@ impl Shell {
             settings: None,
             connections: None,
             projects: None,
+            workflows: None,
         }
     }
 
@@ -131,6 +133,9 @@ impl Shell {
         self.tab = tab;
         if tab == Tab::Settings && self.settings.is_none() {
             self.settings = Some(cx.new(|cx| crate::settings::SettingsTab::new(window, cx)));
+        }
+        if tab == Tab::Workflows && self.workflows.is_none() {
+            self.workflows = Some(cx.new(|cx| crate::workflows::WorkflowsTab::new(window, cx)));
         }
         if tab == Tab::Projects && self.projects.is_none() {
             self.projects = Some(cx.new(|cx| crate::projects::ProjectsTab::new(window, cx)));
@@ -148,6 +153,7 @@ impl Shell {
     fn view(&self, cx: &mut Context<Self>) -> AnyView {
         match self.tab {
             Tab::Work => self.work.clone().into(),
+            Tab::Workflows if self.workflows.is_some() => self.workflows.clone().unwrap().into(),
             Tab::Projects if self.projects.is_some() => self.projects.clone().unwrap().into(),
             Tab::Connections if self.connections.is_some() => {
                 self.connections.clone().unwrap().into()
