@@ -1,0 +1,21 @@
+# Its own workspace while the port runs alongside the Tauri app (see the root
+# Cargo.toml). Once src-tauri is gone this joins the root workspace.
+[workspace]
+
+[package]
+name = "tab-gpui"
+description = "tab's desktop app on GPUI"
+edition = "2024"
+version = "0.1.0"
+license = "FSL-1.1-MIT"
+
+[[bin]]
+name = "tab-gpui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+env_logger = "0.11"
+gpui = { git = "https://github.com/zed-industries/zed", rev = "69239eb54067293f1b646a7dd7f83fc4f62af728", default-features = false }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "69239eb54067293f1b646a7dd7f83fc4f62af728", features = ["x11", "wayland"] }
+tab-core = { path = "../tab-core" }
