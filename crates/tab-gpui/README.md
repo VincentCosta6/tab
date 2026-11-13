@@ -13,8 +13,9 @@ cargo run --manifest-path crates/tab-gpui/Cargo.toml --features sample-data
 `dev.tab.gpui`, so the GPUI app never opens the installed app's data.
 `TAB_APPEARANCE=light|dark` overrides the system appearance.
 
-On Linux it needs `libxcb1-dev`, `libxkbcommon-dev` and
-`libxkbcommon-x11-dev` to build, and Vulkan drivers to run.
+On Linux it needs `libxcb1-dev`, `libxkbcommon-dev`, `libxkbcommon-x11-dev`,
+`libfontconfig-dev`, `libfreetype-dev`, `libwayland-dev`, `libx11-dev` and
+`libegl-dev` to build, and Vulkan drivers to run.
 
 ## What's here
 

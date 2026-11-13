@@ -76,7 +76,9 @@ jobs:
       - name: System dependencies for GPUI
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev bubblewrap
+          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libfontconfig-dev libfreetype-dev libwayland-dev libx11-dev libegl-dev bubblewrap
+      - name: Let bubblewrap start
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
