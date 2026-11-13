@@ -43,7 +43,7 @@ impl Backend {
         self.chat_of(session)
     }
 
-    fn chat_of(&self, session: Option<Session>) -> Result<Chat> {
+    pub(crate) fn chat_of(&self, session: Option<Session>) -> Result<Chat> {
         let (messages, approvals, running) = match &session {
             // Since it was last compacted, with the last few lines before.
             Some(s) => (

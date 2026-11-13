@@ -24,6 +24,7 @@ use tokio::sync::{Mutex, RwLock, broadcast};
 pub mod chat;
 pub mod logging;
 pub mod paths;
+pub mod projects;
 pub mod settings;
 pub mod storage;
 mod vault;

@@ -14,15 +14,24 @@ use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use gpui_component::text::TextView;
 use tab_app::chat::Chat;
 use tab_core::EngineEvent;
-use tab_core::model::{Approval, QueueItem};
+use tab_core::model::{Approval, Project, QueueItem};
 
 use self::model::{Row, rows, status_label, suggestions};
 use crate::backend::backend;
 use crate::components::{Button, ButtonKind, icon};
 use crate::theme::{FONT_MONO, size, theme};
 
+/// Whose chat this is.
+#[derive(Clone)]
+pub enum Target {
+    /// A task's chat.
+    Item(QueueItem),
+    /// A project's coordinator.
+    Coordinator(Project),
+}
+
 pub struct ChatView {
-    item: QueueItem,
+    target: Target,
     chat: Option<Chat>,
     /// The agent's reply so far, before it's stored as a message.
     streaming: String,
@@ -36,11 +45,19 @@ pub struct ChatView {
 
 impl ChatView {
     pub fn new(item: QueueItem, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::of(Target::Item(item), window, cx)
+    }
+
+    pub fn of(target: Target, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let placeholder = match &target {
+            Target::Item(_) => "Ask about this, or tell the agent what to do…",
+            Target::Coordinator(_) => "Ask about the project, or tell the coordinator what to do…",
+        };
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 10)
                 .submit_on_enter(true)
-                .placeholder("Ask about this, or tell the agent what to do…")
+                .placeholder(placeholder)
         });
         let sent = cx.subscribe_in(
             &composer,
@@ -60,7 +77,7 @@ impl ChatView {
             this.on_event(ev, cx)
         });
         let mut v = ChatView {
-            item,
+            target,
             chat: None,
             streaming: String::new(),
             error: None,
@@ -73,8 +90,15 @@ impl ChatView {
         v
     }
 
-    pub fn item_id(&self) -> &str {
-        &self.item.id
+    fn suggestions(&self) -> Vec<String> {
+        match &self.target {
+            Target::Item(item) => suggestions(item).into_iter().map(String::from).collect(),
+            Target::Coordinator(p) => vec![
+                "What needs me in this project?".into(),
+                "What changed this week?".into(),
+                format!("Summarize where {} stands", p.name),
+            ],
+        }
     }
 
     fn session_id(&self) -> Option<&str> {
@@ -82,8 +106,13 @@ impl ChatView {
     }
 
     fn load(&mut self, cx: &mut Context<Self>) {
-        let (b, id) = (backend(cx), self.item.id.clone());
-        let task = crate::runtime::spawn(async move { b.chat_open(&id) });
+        let (b, target) = (backend(cx), self.target.clone());
+        let task = crate::runtime::spawn(async move {
+            match target {
+                Target::Item(i) => b.chat_open(&i.id),
+                Target::Coordinator(p) => b.coordinator_open(&p.id),
+            }
+        });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
@@ -124,7 +153,10 @@ impl ChatView {
                 cx.notify();
             }
             EngineEvent::SessionChanged { session }
-                if session.item_id.as_deref() == Some(&self.item.id) =>
+                if match &self.target {
+                    Target::Item(i) => session.item_id.as_deref() == Some(&i.id),
+                    Target::Coordinator(_) => mine(&session.id),
+                } =>
             {
                 // A new session (first message, /clear, /resume) reloads.
                 if self.session_id() != Some(&session.id) {
@@ -174,19 +206,24 @@ impl ChatView {
         }
         self.scroll.scroll_to_bottom();
         cx.notify();
-        let (b, id) = (backend(cx), self.item.id.clone());
-        let task =
-            crate::runtime::spawn(
-                async move { b.chat_send(Some(id), &text, None, Vec::new()).await },
-            );
+        let (b, target) = (backend(cx), self.target.clone());
+        let task = crate::runtime::spawn(async move {
+            match target {
+                Target::Item(i) => b
+                    .chat_send(Some(i.id), &text, None, Vec::new())
+                    .await
+                    .map(|s| s.session),
+                Target::Coordinator(p) => b.coordinator_send(&p.id, &text, &[]),
+            }
+        });
         cx.spawn(async move |this, cx| {
             let res = task.await;
             this.update(cx, |this, cx| {
                 match res {
-                    Ok(Ok(started)) => {
-                        let new = this.session_id() != Some(&started.session.id);
+                    Ok(Ok(session)) => {
+                        let new = this.session_id() != Some(&session.id);
                         if let Some(chat) = &mut this.chat {
-                            chat.session = Some(started.session);
+                            chat.session = Some(session);
                         }
                         if new {
                             this.load(cx);
@@ -420,30 +457,34 @@ impl Render for ChatView {
                     .justify_center()
                     .gap(px(8.))
                     .pt(px(24.))
-                    .children(suggestions(&self.item).into_iter().enumerate().map(
-                        move |(i, s)| {
-                            let this = this.clone();
-                            div()
-                                .id(("suggest", i))
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .px(px(12.))
-                                .py(px(6.))
-                                .rounded_full()
-                                .border_1()
-                                .border_color(t.border_strong)
-                                .text_size(px(size::TEXT_MD))
-                                .text_color(t.fg_muted)
-                                .cursor_pointer()
-                                .hover(|st| st.bg(t.bg_hover).text_color(t.fg))
-                                .on_click(move |_, _, cx| {
-                                    this.update(cx, |v, cx| v.send(s.to_string(), cx)).ok();
-                                })
-                                .child(icon("sparkles", 13., t.fg_subtle))
-                                .child(s)
-                        },
-                    )),
+                    .children(
+                        self.suggestions()
+                            .into_iter()
+                            .enumerate()
+                            .map(move |(i, s)| {
+                                let this = this.clone();
+                                let label = s.clone();
+                                div()
+                                    .id(("suggest", i))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .px(px(12.))
+                                    .py(px(6.))
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(t.border_strong)
+                                    .text_size(px(size::TEXT_MD))
+                                    .text_color(t.fg_muted)
+                                    .cursor_pointer()
+                                    .hover(|st| st.bg(t.bg_hover).text_color(t.fg))
+                                    .on_click(move |_, _, cx| {
+                                        this.update(cx, |v, cx| v.send(s.to_string(), cx)).ok();
+                                    })
+                                    .child(icon("sparkles", 13., t.fg_subtle))
+                                    .child(label)
+                            }),
+                    ),
             );
         }
         for (i, row) in transcript.iter().enumerate() {

@@ -11,6 +11,7 @@ mod chat;
 mod components;
 mod connections;
 mod events;
+mod projects;
 mod runtime;
 mod settings;
 mod shell;

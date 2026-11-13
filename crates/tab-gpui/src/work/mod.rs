@@ -1,6 +1,6 @@
 //! The Work tab: the ranked queue on the left, the open item on the right.
 
-mod item;
+pub mod item;
 pub mod model;
 mod queue;
 
