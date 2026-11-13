@@ -21,6 +21,7 @@ use tab_core::workspace::Workspaces;
 use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tokio::sync::{Mutex, RwLock, broadcast};
 
+pub mod chat;
 pub mod logging;
 pub mod paths;
 mod vault;

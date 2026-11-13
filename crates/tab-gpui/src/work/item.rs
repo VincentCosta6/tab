@@ -13,13 +13,25 @@ use gpui_component::menu::{DropdownMenu, PopupMenuItem};
 use super::model::{Kinds, byline, snooze_options, urgency_heading};
 use crate::backend::backend;
 use crate::blocks::blocks;
+use crate::chat::ChatView;
 use crate::components::{Button, ButtonKind, ago, badge, icon};
 use crate::theme::{size, theme};
+use gpui::Entity;
 
 pub struct ItemPane {
     item: Option<QueueItem>,
     preview: Option<Preview>,
     kinds: Kinds,
+    pane: Pane,
+    chat: Option<Entity<ChatView>>,
+}
+
+/// Which side of the item is showing. Chat is the default, except for email,
+/// which opens on the message itself (as the React app does).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pane {
+    Details,
+    Chat,
 }
 
 impl ItemPane {
@@ -41,6 +53,8 @@ impl ItemPane {
             item: None,
             preview: None,
             kinds: Kinds::default(),
+            pane: Pane::Chat,
+            chat: None,
         }
     }
 
@@ -48,6 +62,11 @@ impl ItemPane {
         let same = item.as_ref().map(|i| &i.id) == self.item.as_ref().map(|i| &i.id);
         self.item = item;
         if !same {
+            self.chat = None;
+            self.pane = match &self.item {
+                Some(i) if i.event.kind.starts_with("email.") => Pane::Details,
+                _ => Pane::Chat,
+            };
             self.preview = None;
             self.load_preview(cx);
         }
@@ -107,7 +126,72 @@ enum Act {
 }
 
 impl Render for ItemPane {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(item) = self.item.clone() else {
+            return self.details(cx);
+        };
+        let t = theme(cx).clone();
+        if self.pane == Pane::Chat && self.chat.is_none() {
+            self.chat = Some(cx.new(|cx| ChatView::new(item.clone(), window, cx)));
+        }
+        let body = match (self.pane, self.chat.clone()) {
+            (Pane::Chat, Some(chat)) => chat.into_any_element(),
+            _ => self.details(cx),
+        };
+        let details = if item.event.kind.starts_with("email.") {
+            "Email"
+        } else {
+            "Details"
+        };
+        let mut tabs = div()
+            .flex()
+            .gap(px(16.))
+            .px(px(32.))
+            .border_b_1()
+            .border_color(t.border);
+        for (id, label, pane) in [
+            ("pane-chat", "Chat", Pane::Chat),
+            ("pane-details", details, Pane::Details),
+        ] {
+            let active = self.pane == pane;
+            tabs = tabs.child(
+                div()
+                    .id(id)
+                    .py(px(10.))
+                    .text_size(px(size::TEXT_MD))
+                    .cursor_pointer()
+                    .border_b_2()
+                    .border_color(if active {
+                        t.accent.fg
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .text_color(if active { t.fg } else { t.fg_muted })
+                    .font_weight(if active {
+                        gpui::FontWeight::MEDIUM
+                    } else {
+                        gpui::FontWeight::NORMAL
+                    })
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.pane = pane;
+                        cx.notify();
+                    })),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(t.bg)
+            .child(tabs)
+            .child(div().flex_1().min_h_0().child(body))
+            .into_any_element()
+    }
+}
+
+impl ItemPane {
+    fn details(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme(cx).clone();
         let Some(item) = self.item.clone() else {
             return div()

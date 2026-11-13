@@ -7,6 +7,7 @@
 mod assets;
 mod backend;
 mod blocks;
+mod chat;
 mod components;
 mod events;
 mod runtime;
