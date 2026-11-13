@@ -89,9 +89,6 @@ jobs:
       - run: cargo clippy --manifest-path crates/tab-gpui/Cargo.toml --all-targets --features sample-data -- -D clippy::correctness -D clippy::suspicious
       - run: cargo test --manifest-path crates/tab-gpui/Cargo.toml --features sample-data
       - run: cargo test -p tab-app
+      - uses: taiki-e/install-action@cargo-deny
       - name: Licenses and sources of everything the GPUI app ships
-        uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          manifest-path: crates/tab-gpui/Cargo.toml
-          command: check
-          command-arguments: --config deny.toml licenses bans sources
+        run: cargo deny --manifest-path crates/tab-gpui/Cargo.toml --all-features --config deny.toml check licenses bans sources
