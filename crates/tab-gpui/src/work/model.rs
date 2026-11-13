@@ -93,6 +93,31 @@ pub fn grouped(items: &[QueueItem]) -> Vec<(Urgency, Vec<&QueueItem>)> {
         .collect()
 }
 
+/// Snooze choices, as `SnoozeMenu.tsx` has them: label, key, minutes from
+/// `now` (local time).
+pub fn snooze_options(
+    now: chrono::DateTime<chrono::Local>,
+) -> [(&'static str, &'static str, i64); 4] {
+    [
+        ("1 hour", "1", 60),
+        ("4 hours", "2", 240),
+        ("Tomorrow morning", "3", minutes_until_hour(now, 9, 1)),
+        ("Next week", "4", minutes_until_hour(now, 9, 7)),
+    ]
+}
+
+/// Minutes from `now` to `hour`:00 local time, `days` days on.
+fn minutes_until_hour(now: chrono::DateTime<chrono::Local>, hour: u32, days: i64) -> i64 {
+    use chrono::TimeZone;
+    let day = now.date_naive() + chrono::Duration::days(days);
+    let at = day.and_hms_opt(hour, 0, 0).expect("valid hour");
+    let at = chrono::Local
+        .from_local_datetime(&at)
+        .earliest()
+        .unwrap_or(now);
+    (at - now).num_minutes().max(1)
+}
+
 /// Kind labels, icons and tones, from the connectors.
 #[derive(Default, Clone)]
 pub struct Kinds(HashMap<String, KindInfo>);
@@ -221,6 +246,19 @@ mod tests {
         assert_eq!(k.label, "review requested");
         assert_eq!(k.icon, "github");
         assert_eq!(Kinds::default().get("weird").icon, "dot");
+    }
+
+    #[test]
+    fn snooze_until_tomorrow_morning() {
+        use chrono::TimeZone;
+        let now = chrono::Local
+            .with_ymd_and_hms(2026, 11, 13, 16, 30, 0)
+            .unwrap();
+        let o = snooze_options(now);
+        assert_eq!(o[0].2, 60);
+        // 16:30 to 09:00 the next day.
+        assert_eq!(o[2].2, 16 * 60 + 30);
+        assert_eq!(o[3].2, 16 * 60 + 30 + 6 * 24 * 60);
     }
 
     #[test]

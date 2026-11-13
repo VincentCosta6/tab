@@ -4,21 +4,31 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    KeyBinding, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
-    Styled, Subscription, Window, actions, div, prelude::*, px,
+    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyBinding, ParentElement, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Window, actions, div, prelude::*, px,
 };
 use tab_core::EngineEvent;
 use tab_core::model::{ItemState, QueueItem};
 
 use super::model::{self, APPS, Kinds};
+use gpui_component::input::{Input, InputEvent, InputState};
+
 use crate::backend::backend;
 use crate::components::{ago, icon, segmented, tab_mark};
 use crate::theme::{size, theme};
 
 actions!(
     queue,
-    [SelectNext, SelectPrev, MarkDone, SnoozeHour, Reopen]
+    [
+        SelectNext,
+        SelectPrev,
+        MarkDone,
+        SnoozeHour,
+        Reopen,
+        FocusSearch,
+        LeaveSearch
+    ]
 );
 
 pub fn bind_keys(cx: &mut App) {
@@ -30,6 +40,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("e", MarkDone, Some("Queue")),
         KeyBinding::new("s", SnoozeHour, Some("Queue")),
         KeyBinding::new("u", Reopen, Some("Queue")),
+        KeyBinding::new("/", FocusSearch, Some("Queue")),
+        KeyBinding::new("escape", LeaveSearch, Some("QueueSearch")),
+        KeyBinding::new("down", SelectNext, Some("QueueSearch")),
+        KeyBinding::new("up", SelectPrev, Some("QueueSearch")),
     ]);
 }
 
@@ -46,7 +60,11 @@ pub struct Queue {
     error: Option<String>,
     focus: FocusHandle,
     scroll: ScrollHandle,
-    _events: Subscription,
+    search: Entity<InputState>,
+    /// What's typed in search, and what it found (None until it answers).
+    query: String,
+    found: Option<Vec<QueueItem>>,
+    _subs: Vec<Subscription>,
 }
 
 impl EventEmitter<Selected> for Queue {}
@@ -75,6 +93,13 @@ impl Queue {
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search everything  /"));
+        let typed = cx.subscribe(&search, |this, input, ev: &InputEvent, cx| {
+            if let InputEvent::Change = ev {
+                this.query = input.read(cx).value().trim().to_string();
+                this.search(cx);
+            }
+        });
         let mut q = Queue {
             view: ItemState::Open,
             items: Vec::new(),
@@ -85,7 +110,10 @@ impl Queue {
             error: None,
             focus,
             scroll: ScrollHandle::new(),
-            _events: sub,
+            search,
+            query: String::new(),
+            found: None,
+            _subs: vec![sub, typed],
         };
         q.reload(cx);
         q.load_kinds(cx);
@@ -108,6 +136,9 @@ impl Queue {
                     Err(e) => this.error = Some(e),
                 }
                 this.loaded = true;
+                if !this.query.is_empty() {
+                    this.search(cx);
+                }
                 // The open item left this view (done, snoozed): select the next.
                 if this
                     .selected
@@ -121,6 +152,65 @@ impl Queue {
             .ok();
         })
         .detach();
+    }
+
+    /// Keyword matches first, then things that mean the same once the
+    /// embedding model is ready (as the Tauri app's `search_items`).
+    fn search(&mut self, cx: &mut Context<Self>) {
+        if self.query.is_empty() {
+            self.found = None;
+            cx.notify();
+            return;
+        }
+        let (b, query, states) = (backend(cx), self.query.clone(), vec![self.view]);
+        let task = crate::runtime::spawn(async move {
+            let qv = b.store.embed_query(&query);
+            b.store
+                .search_hybrid(&query, qv.as_deref(), &states, &Default::default(), 200)
+        });
+        let asked = self.query.clone();
+        cx.spawn(async move |this, cx| {
+            let res = task.await;
+            this.update(cx, |this, cx| {
+                // Only the answer to what's typed now.
+                if this.query != asked {
+                    return;
+                }
+                match res {
+                    Ok(Ok(items)) => this.found = Some(items),
+                    Ok(Err(e)) => this.error = Some(e.to_string()),
+                    Err(e) => this.error = Some(e),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    fn leave_search(&mut self, _: &LeaveSearch, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.update(cx, |s, cx| s.set_value("", window, cx));
+        self.query.clear();
+        self.found = None;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// The items shown: search results while searching, else the view.
+    fn current(&self) -> &[QueueItem] {
+        match &self.found {
+            Some(f) if !self.query.is_empty() => f,
+            _ => &self.items,
+        }
+    }
+
+    /// Grouped by urgency in the queue; flat for search and the other views.
+    fn grouping(&self) -> bool {
+        self.view == ItemState::Open && self.query.is_empty()
     }
 
     fn load_kinds(&mut self, cx: &mut Context<Self>) {
@@ -151,7 +241,7 @@ impl Queue {
     /// The rows as drawn, top to bottom.
     fn rows(&self) -> Vec<&QueueItem> {
         let visible: Vec<QueueItem> = self.filtered().cloned().collect();
-        let ids: Vec<String> = if self.view == ItemState::Open {
+        let ids: Vec<String> = if self.grouping() {
             model::grouped(&visible)
                 .into_iter()
                 .flat_map(|(_, r)| r.into_iter().map(|i| i.id.clone()))
@@ -160,12 +250,12 @@ impl Queue {
             visible.iter().map(|i| i.id.clone()).collect()
         };
         ids.iter()
-            .filter_map(|id| self.items.iter().find(|i| &i.id == id))
+            .filter_map(|id| self.current().iter().find(|i| &i.id == id))
             .collect()
     }
 
     fn filtered(&self) -> impl Iterator<Item = &QueueItem> {
-        self.items.iter().filter(|i| {
+        self.current().iter().filter(|i| {
             self.app
                 .as_deref()
                 .is_none_or(|a| model::app_of(&i.event.kind) == a)
@@ -174,7 +264,7 @@ impl Queue {
 
     pub fn select(&mut self, id: Option<String>, cx: &mut Context<Self>) {
         self.selected = id.clone();
-        let item = id.and_then(|id| self.items.iter().find(|i| i.id == id).cloned());
+        let item = id.and_then(|id| self.current().iter().find(|i| i.id == id).cloned());
         cx.emit(Selected(item));
         cx.notify();
     }
@@ -193,7 +283,25 @@ impl Queue {
             Some(i) => (i as isize + by).clamp(0, rows.len() as isize - 1) as usize,
         };
         self.select(Some(rows[next].clone()), cx);
-        self.scroll.scroll_to_item(next);
+        // The list's children are rows with a heading before each group.
+        let index = if self.grouping() {
+            let visible: Vec<QueueItem> = self.filtered().cloned().collect();
+            let mut i = 0;
+            let mut found = next;
+            for (_, group) in model::grouped(&visible) {
+                i += 1;
+                if found < group.len() {
+                    i += found;
+                    break;
+                }
+                found -= group.len();
+                i += group.len();
+            }
+            i
+        } else {
+            next
+        };
+        self.scroll.scroll_to_item(index);
     }
 
     fn select_next(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
@@ -212,6 +320,9 @@ impl Queue {
         let rows: Vec<String> = self.rows().iter().map(|i| i.id.clone()).collect();
         let at = rows.iter().position(|r| *r == id).unwrap_or(0);
         self.items.retain(|i| i.id != id);
+        if let Some(f) = &mut self.found {
+            f.retain(|i| i.id != id);
+        }
         let next = self
             .rows()
             .get(at.min(rows.len().saturating_sub(2)))
@@ -257,7 +368,7 @@ impl Queue {
 
     fn render_chips(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
-        let counts = model::counts(&self.items);
+        let counts = model::counts(self.current());
         let chip = |id: SharedString,
                     label: SharedString,
                     glyph: Option<&'static str>,
@@ -316,7 +427,7 @@ impl Queue {
                 "".into(),
                 "All".into(),
                 None,
-                self.items.len(),
+                self.current().len(),
                 self.app.is_none(),
                 cx,
             )
@@ -450,6 +561,27 @@ impl Queue {
 
     fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
+        if !self.query.is_empty() {
+            return div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(6.))
+                .py(px(48.))
+                .child(icon("search", 22., t.fg_subtle))
+                .child(
+                    div()
+                        .text_size(px(size::TEXT_LG))
+                        .text_color(t.fg)
+                        .child("No matches"),
+                )
+                .child(
+                    div()
+                        .text_size(px(size::TEXT_MD))
+                        .text_color(t.fg_muted)
+                        .child("Search covers titles, bodies, people and places."),
+                );
+        }
         let (title, body) = match self.view {
             ItemState::Open => (
                 "Queue is clear",
@@ -491,15 +623,14 @@ impl Render for Queue {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx).clone();
         let visible: Vec<QueueItem> = self.filtered().cloned().collect();
-        let groups: Vec<(Option<tab_core::model::Urgency>, Vec<QueueItem>)> =
-            if self.view == ItemState::Open {
-                model::grouped(&visible)
-                    .into_iter()
-                    .map(|(u, r)| (Some(u), r.into_iter().cloned().collect()))
-                    .collect()
-            } else {
-                vec![(None, visible.clone())]
-            };
+        let groups: Vec<(Option<tab_core::model::Urgency>, Vec<QueueItem>)> = if self.grouping() {
+            model::grouped(&visible)
+                .into_iter()
+                .map(|(u, r)| (Some(u), r.into_iter().cloned().collect()))
+                .collect()
+        } else {
+            vec![(None, visible.clone())]
+        };
         let mut list = div()
             .id("queue-list")
             .flex_1()
@@ -535,6 +666,8 @@ impl Render for Queue {
             .on_action(cx.listener(Self::mark_done))
             .on_action(cx.listener(Self::snooze_hour))
             .on_action(cx.listener(Self::reopen))
+            .on_action(cx.listener(Self::focus_search))
+            .on_action(cx.listener(Self::leave_search))
             .flex()
             .flex_col()
             .size_full()
@@ -574,6 +707,11 @@ impl Render for Queue {
                                     }
                                 },
                             )),
+                    )
+                    .child(
+                        div().key_context("QueueSearch").child(
+                            Input::new(&self.search).prefix(icon("search", 14., t.fg_subtle)),
+                        ),
                     )
                     .child(self.render_chips(cx))
                     .when_some(self.error.clone(), |el, e| {

@@ -6,7 +6,11 @@ use gpui::{
 };
 use tab_core::model::{Block, ItemState, Preview, QueueItem};
 
-use super::model::{Kinds, byline, urgency_heading};
+use gpui_component::Sizable;
+use gpui_component::button::Button as MenuButton;
+use gpui_component::menu::{DropdownMenu, PopupMenuItem};
+
+use super::model::{Kinds, byline, snooze_options, urgency_heading};
 use crate::backend::backend;
 use crate::blocks::blocks;
 use crate::components::{Button, ButtonKind, ago, badge, icon};
@@ -73,7 +77,7 @@ impl ItemPane {
         .detach();
     }
 
-    fn act(&mut self, act: &'static str, cx: &mut Context<Self>) {
+    fn act(&mut self, act: Act, cx: &mut Context<Self>) {
         let Some(id) = self.item.as_ref().map(|i| i.id.clone()) else {
             return;
         };
@@ -81,18 +85,25 @@ impl ItemPane {
         let _ = crate::runtime::spawn(async move {
             let r = b
                 .with_engine(async |e| match act {
-                    "done" => e.mark_done(&id).await.map(|_| ()),
-                    "reopen" => e.reopen(&id).map(|_| ()),
-                    _ => e
-                        .snooze(&id, chrono::Utc::now() + chrono::Duration::hours(1))
+                    Act::Done => e.mark_done(&id).await.map(|_| ()),
+                    Act::Reopen => e.reopen(&id).map(|_| ()),
+                    Act::Snooze(m) => e
+                        .snooze(&id, chrono::Utc::now() + chrono::Duration::minutes(m))
                         .map(|_| ()),
                 })
                 .await;
             if let Err(e) = r {
-                tracing::warn!(error = %e, act, "item action failed");
+                tracing::warn!(error = %e, "item action failed");
             }
         });
     }
+}
+
+#[derive(Clone, Copy)]
+enum Act {
+    Done,
+    Snooze(i64),
+    Reopen,
 }
 
 impl Render for ItemPane {
@@ -215,18 +226,37 @@ impl Render for ItemPane {
                                         .label("Done")
                                         .key("E")
                                         .on_click(
-                                            cx.listener(|this, _, _, cx| this.act("done", cx)),
+                                            cx.listener(|this, _, _, cx| this.act(Act::Done, cx)),
                                         ),
                                 )
-                                .child(
-                                    Button::new("snooze")
-                                        .icon("clock")
+                                .child({
+                                    let pane = cx.entity().downgrade();
+                                    MenuButton::new("snooze")
+                                        .outline()
+                                        .small()
+                                        .icon(
+                                            gpui_component::Icon::default()
+                                                .path(crate::assets::icon_path("clock")),
+                                        )
                                         .label("Snooze")
-                                        .key("S")
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.act("snooze", cx)),
-                                        ),
-                                )
+                                        .dropdown_menu(move |mut menu, _, _| {
+                                            for (label, _key, minutes) in
+                                                snooze_options(chrono::Local::now())
+                                            {
+                                                let pane = pane.clone();
+                                                menu =
+                                                    menu.item(PopupMenuItem::new(label).on_click(
+                                                        move |_, _, cx| {
+                                                            pane.update(cx, |p, cx| {
+                                                                p.act(Act::Snooze(minutes), cx)
+                                                            })
+                                                            .ok();
+                                                        },
+                                                    ));
+                                            }
+                                            menu
+                                        })
+                                })
                             })
                             .when(open, |el| {
                                 el.child(
@@ -235,7 +265,7 @@ impl Render for ItemPane {
                                         .label("Reopen")
                                         .key("U")
                                         .on_click(
-                                            cx.listener(|this, _, _, cx| this.act("reopen", cx)),
+                                            cx.listener(|this, _, _, cx| this.act(Act::Reopen, cx)),
                                         ),
                                 )
                             })
@@ -277,6 +307,8 @@ impl Render for ItemPane {
                                         )
                                         .child(
                                             div()
+                                                .flex_1()
+                                                .min_w_0()
                                                 .text_size(px(size::TEXT_MD))
                                                 .text_color(t.fg)
                                                 .child(r.reason.clone()),

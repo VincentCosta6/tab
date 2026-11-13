@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
-            cx.set_global(theme::Theme::for_appearance(cx.window_appearance()));
+            theme::apply(theme::appearance(cx.window_appearance()), cx);
             cx.set_global(backend::Backend(backend.clone()));
             events::start(&backend.events, cx);
             shell::bind_keys(cx);
@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
                     // Follow the system's light or dark appearance.
                     window
                         .observe_window_appearance(|window, cx| {
-                            cx.set_global(theme::Theme::for_appearance(window.appearance()));
+                            theme::apply(theme::appearance(window.appearance()), cx);
                             cx.refresh_windows();
                         })
                         .detach();

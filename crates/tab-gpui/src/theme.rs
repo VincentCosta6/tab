@@ -147,3 +147,61 @@ impl Global for Theme {}
 pub fn theme(cx: &App) -> &Theme {
     cx.global::<Theme>()
 }
+
+/// Sets tab's theme for this appearance, and dresses gpui-component's
+/// controls (inputs, menus, popovers, lists) in the same tokens.
+pub fn apply(appearance: WindowAppearance, cx: &mut App) {
+    let t = Theme::for_appearance(appearance);
+    gpui_component::Theme::change(appearance, None, cx);
+    let tc = t.clone();
+    gpui_component::Theme::update(cx, move |c| {
+        let t = tc;
+        let k = &mut c.colors;
+        k.background = t.bg;
+        k.foreground = t.fg;
+        k.border = t.border;
+        k.input = t.border_strong;
+        k.ring = t.focus;
+        k.caret = t.fg;
+        k.selection = t.focus.opacity(0.25);
+        k.muted = t.bg_sunken;
+        k.muted_foreground = t.fg_muted;
+        k.accent = t.bg_hover;
+        k.accent_foreground = t.fg;
+        k.primary = t.fg;
+        k.primary_hover = t.fg.opacity(0.85);
+        k.primary_active = t.fg.opacity(0.75);
+        k.primary_foreground = t.bg_raised;
+        k.secondary = t.bg_raised;
+        k.secondary_hover = t.bg_hover;
+        k.secondary_active = t.bg_sunken;
+        k.secondary_foreground = t.fg;
+        k.popover = t.bg_raised;
+        k.popover_foreground = t.fg;
+        k.list = t.bg_raised;
+        k.list_hover = t.bg_hover;
+        k.list_active = t.bg_selected;
+        k.list_active_border = t.focus;
+        k.link = t.accent.fg;
+        k.danger = t.danger.fg;
+        k.success = t.success.fg;
+        k.warning = t.warning.fg;
+        k.info = t.info.fg;
+        c.font_family = FONT_SANS.into();
+        c.mono_font_family = FONT_MONO.into();
+        c.font_size = gpui::px(size::TEXT_MD);
+        c.radius = gpui::px(size::RADIUS_MD);
+        c.radius_lg = gpui::px(size::RADIUS_LG);
+    });
+    cx.set_global(t);
+}
+
+/// The system's appearance, unless `TAB_APPEARANCE` (`light` or `dark`)
+/// pins one, as screenshots do.
+pub fn appearance(system: WindowAppearance) -> WindowAppearance {
+    match std::env::var("TAB_APPEARANCE").as_deref() {
+        Ok("dark") => WindowAppearance::Dark,
+        Ok("light") => WindowAppearance::Light,
+        _ => system,
+    }
+}
