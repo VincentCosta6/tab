@@ -35,6 +35,14 @@ impl WorkTab {
     pub fn queue(&self) -> &Entity<Queue> {
         &self.queue
     }
+
+    /// Opens an item by id, such as one a workflow run worked on.
+    pub fn open_item(&mut self, id: &str, cx: &mut Context<Self>) {
+        let item = crate::backend::backend(cx).store.get(id).ok().flatten();
+        if item.is_some() {
+            self.item.update(cx, |pane, cx| pane.show(item, cx));
+        }
+    }
 }
 
 impl Render for WorkTab {

@@ -3,6 +3,13 @@
 
 use chrono::Utc;
 use tab_core::EngineEvent;
+use tab_core::families::ModelFamily;
+use tab_core::model::Session;
+
+use crate::chat::Chat;
+use tab_core::runner::RunnerCaps;
+use tab_core::workflow::insights::{Factory, WorkflowInsights};
+use tab_core::workflow::items::RunView;
 use tab_core::workflow::{self, Issue, Run, SavedBy, Workflow};
 
 use crate::{Backend, err};
@@ -47,9 +54,16 @@ impl Backend {
         Ok((w, issues))
     }
 
-    /// Turns a workflow on or off. Turning on refuses one with errors.
-    pub async fn workflow_set_enabled(&self, id: &str, enabled: bool) -> Result<Workflow> {
-        let w = self
+    /// Turns a workflow on or off, or allows its destructive steps or
+    /// commands. Turning on refuses one with errors.
+    pub async fn workflow_set_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+        allow_destructive: Option<bool>,
+        allow_commands: Option<bool>,
+    ) -> Result<Workflow> {
+        let mut w = self
             .store
             .workflow_get(id)
             .map_err(err)?
@@ -66,13 +80,117 @@ impl Backend {
                 return Err(i.message);
             }
         }
-        let w = self
-            .store
-            .workflow_set_enabled(id, enabled)
-            .map_err(err)?
-            .ok_or("no such workflow")?;
+        let allowances = allow_destructive.is_some_and(|a| a != w.allow_destructive)
+            || allow_commands.is_some_and(|a| a != w.allow_commands);
+        w.enabled = enabled;
+        if let Some(a) = allow_destructive {
+            w.allow_destructive = a;
+        }
+        if let Some(a) = allow_commands {
+            w.allow_commands = a;
+        }
+        let w = if allowances {
+            self.store
+                .workflow_save(&w, "user", Utc::now())
+                .map_err(err)?
+        } else {
+            self.store
+                .workflow_set_enabled(id, enabled)
+                .map_err(err)?
+                .ok_or("no such workflow")?
+        };
         self.workflows_changed(&w.id);
         Ok(w)
+    }
+
+    /// Model families agent steps can run on.
+    pub fn model_families(&self) -> Result<Vec<ModelFamily>> {
+        self.store.model_families().map_err(err)
+    }
+
+    /// Every runner the hub knows, whether each is awake, and whether it's
+    /// this app.
+    pub fn runners(&self) -> Result<Vec<(RunnerCaps, bool, bool)>> {
+        let me = self.store.device_id().map_err(err)?;
+        let now = Utc::now();
+        Ok(self
+            .store
+            .runners()
+            .map_err(err)?
+            .into_iter()
+            .map(|c| {
+                let (awake, this_app) = (c.awake(now), c.id == me);
+                (c, awake, this_app)
+            })
+            .collect())
+    }
+
+    /// One workflow's stats for the last `days` days and the span before.
+    pub fn workflow_insights(
+        &self,
+        id: &str,
+        days: u32,
+        utc_offset_minutes: i32,
+    ) -> Result<WorkflowInsights> {
+        workflow::insights_store::workflow_insights(
+            &self.store,
+            id,
+            days,
+            utc_offset_minutes,
+            Utc::now(),
+        )
+        .map_err(err)
+    }
+
+    /// Every workflow's stats and health, with hub-wide totals.
+    pub fn workflow_factory(&self, days: u32, utc_offset_minutes: i32) -> Result<Factory> {
+        workflow::insights_store::workflow_factory(
+            &self.store,
+            days,
+            utc_offset_minutes,
+            Utc::now(),
+        )
+        .map_err(err)
+    }
+
+    /// One run with what it links to.
+    pub fn workflow_run_view(&self, run_id: &str) -> Result<Option<RunView>> {
+        let agents = self.agents.clone();
+        let pending = move |id: &str| !agents.pending_approvals(id).is_empty();
+        workflow::items::run_view(&self.store, run_id, &pending, Utc::now()).map_err(err)
+    }
+
+    /// The builder assistant's chat for one workflow ("" for a new draft).
+    pub fn workflow_chat_open(&self, workflow_id: &str) -> Result<Chat> {
+        let session = self
+            .store
+            .session_for_key(&workflow::chat_key(workflow_id))
+            .map_err(err)?;
+        self.chat_of(session)
+    }
+
+    /// A message to the builder's assistant, with the workflow that's open.
+    pub fn workflow_chat_send(&self, text: &str, open: Option<&Workflow>) -> Result<Session> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("message is empty".into());
+        }
+        if self.agents.config().kind.is_none() {
+            return Err("Set up an agent first (Settings → Agent).".into());
+        }
+        let (title, brief) = workflow::chat_brief(open).map_err(err)?;
+        let cwd = self.agents.workdir();
+        let session = self
+            .agents
+            .session_for_key(
+                &workflow::chat_key(open.map_or("", |w| w.id.as_str())),
+                &title,
+                &cwd,
+                &brief,
+            )
+            .map_err(err)?;
+        self.agents.send_with(&session.id, text, &[]).map_err(err)?;
+        Ok(session)
     }
 
     pub fn workflow_delete(&self, id: &str) -> Result<()> {

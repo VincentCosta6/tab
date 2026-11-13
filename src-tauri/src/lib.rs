@@ -2843,39 +2843,7 @@ async fn workflow_chat_send(
     if state.hub.config().kind.is_none() {
         return Err("Set up an agent first (Settings → Agent).".into());
     }
-    // The open workflow goes in the brief (refreshed every turn), not in the
-    // person's message, so the transcript shows only what they typed.
-    let open_now = match &open {
-        Some(w) => format!(
-            "\n\nOpen in the builder now ({}):\n```json\n{}\n```",
-            if w.id.is_empty() {
-                "a new draft, not saved yet; leave id out when you save it"
-            } else {
-                "saved; pass its id to change it"
-            },
-            serde_json::to_string_pretty(w).map_err(err)?
-        ),
-        None => "\n\nNothing is open yet: this is a new workflow.".into(),
-    };
-    let brief = "This chat is the assistant in tab's workflow builder. The person describes what they want \
-        automated and you build it as a tab workflow: a trigger and ordered steps that call connection actions. \
-        Start with tab_list_actions to see what each connection can start on and do; never invent actions or \
-        inputs. Save with tab_save_workflow (pass the open workflow's id to change it, leave id out for a new one); \
-        the builder shows what you save right away. Then dry-run it with tab_test_workflow on a real item from \
-        tab_search when one fits, and say in a sentence or two what it does and what the dry run showed. \
-        Prefer deterministic steps: filters and conditions on fields over anything vague. Keep triggers narrow \
-        (a connection and kinds) so workflows can't feed each other. You can't turn workflows on or allow \
-        destructive steps (merge, close, move mail); the person does that in the builder, so tell them when it's needed. \
-        This chat is about the one workflow open below; work on others only if the person asks.";
-    let brief = format!("{brief}{open_now}");
-    let title = match open
-        .as_ref()
-        .map(|w| w.name.trim())
-        .filter(|n| !n.is_empty())
-    {
-        Some(n) => format!("Workflow builder: {n}"),
-        None => "Workflow builder".into(),
-    };
+    let (title, brief) = tab_core::workflow::chat_brief(open.as_ref()).map_err(err)?;
     let cwd = state.hub.workdir();
     let session = state
         .hub

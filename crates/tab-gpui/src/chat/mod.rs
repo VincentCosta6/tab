@@ -28,6 +28,9 @@ pub enum Target {
     Item(QueueItem),
     /// A project's coordinator.
     Coordinator(Project),
+    /// The workflow builder's assistant, with the workflow as it's open
+    /// (unsaved edits included).
+    Workflow(Box<tab_core::workflow::Workflow>),
 }
 
 pub struct ChatView {
@@ -52,6 +55,8 @@ impl ChatView {
         let placeholder = match &target {
             Target::Item(_) => "Ask about this, or tell the agent what to do…",
             Target::Coordinator(_) => "Ask about the project, or tell the coordinator what to do…",
+            Target::Workflow(w) if !w.steps.is_empty() => "Ask for a change to this workflow…",
+            Target::Workflow(_) => "Describe a workflow…",
         };
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -98,7 +103,23 @@ impl ChatView {
                 "What changed this week?".into(),
                 format!("Summarize where {} stands", p.name),
             ],
+            Target::Workflow(w) if !w.steps.is_empty() => vec![
+                "Dry-run this on a real item and tell me what it would do".into(),
+                "Make this only run for PRs in repos I own".into(),
+                "Add a step that labels the PR too".into(),
+            ],
+            Target::Workflow(_) => vec![
+                "When my review is requested on a small PR, add an urgent task".into(),
+                "Snooze Dependabot PRs until Friday morning".into(),
+                "When CI fails on my PR, comment with the failing job and make a task".into(),
+            ],
         }
+    }
+
+    /// Points the chat at a newer copy of what it's about, such as the
+    /// workflow with the person's latest edits, without reloading it.
+    pub fn retarget(&mut self, target: Target) {
+        self.target = target;
     }
 
     fn session_id(&self) -> Option<&str> {
@@ -111,6 +132,7 @@ impl ChatView {
             match target {
                 Target::Item(i) => b.chat_open(&i.id),
                 Target::Coordinator(p) => b.coordinator_open(&p.id),
+                Target::Workflow(w) => b.workflow_chat_open(&w.id),
             }
         });
         cx.spawn(async move |this, cx| {
@@ -155,7 +177,7 @@ impl ChatView {
             EngineEvent::SessionChanged { session }
                 if match &self.target {
                     Target::Item(i) => session.item_id.as_deref() == Some(&i.id),
-                    Target::Coordinator(_) => mine(&session.id),
+                    Target::Coordinator(_) | Target::Workflow(_) => mine(&session.id),
                 } =>
             {
                 // A new session (first message, /clear, /resume) reloads.
@@ -214,6 +236,10 @@ impl ChatView {
                     .await
                     .map(|s| s.session),
                 Target::Coordinator(p) => b.coordinator_send(&p.id, &text, &[]),
+                Target::Workflow(w) => {
+                    let open = (!w.steps.is_empty() || !w.id.is_empty()).then_some(&*w);
+                    b.workflow_chat_send(&text, open)
+                }
             }
         });
         cx.spawn(async move |this, cx| {

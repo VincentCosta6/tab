@@ -154,7 +154,18 @@ impl Shell {
             self.settings = Some(cx.new(|cx| crate::settings::SettingsTab::new(window, cx)));
         }
         if tab == Tab::Workflows && self.workflows.is_none() {
-            self.workflows = Some(cx.new(|cx| crate::workflows::WorkflowsTab::new(window, cx)));
+            let w = cx.new(|cx| crate::workflows::WorkflowsTab::new(window, cx));
+            // A run's "Open the item" goes to Work.
+            cx.subscribe_in(
+                &w,
+                window,
+                |this: &mut Self, _, ev: &crate::workflows::OpenItem, window, cx| {
+                    this.work.update(cx, |w, cx| w.open_item(&ev.0, cx));
+                    this.show(Tab::Work, window, cx);
+                },
+            )
+            .detach();
+            self.workflows = Some(w);
         }
         if tab == Tab::Projects && self.projects.is_none() {
             self.projects = Some(cx.new(|cx| crate::projects::ProjectsTab::new(window, cx)));

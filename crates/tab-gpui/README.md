@@ -23,7 +23,7 @@ On Linux it needs `libxcb1-dev`, `libxkbcommon-dev`, `libxkbcommon-x11-dev`,
 | --- | --- | --- |
 | Work | Queue, search, filters, keyboard, item, done / snooze / reopen, item chat with streaming replies and approvals | New chat, slash commands, attachments, context drawer, PR review |
 | Projects | Coordinator chat, threads, notes, repos, about and instructions | Resources and knowledge, vault, compaction history, coordinator settings |
-| Workflows | List, on / off, flow, JSON definition checked as you type, dry run and run, runs, approve a blocked step | The step builder, insights, factory view, model families |
+| Workflows | Factory overview, the builder (node graph, add-step menu, trigger and step forms from connector metadata, variables, conditions, agent model families and placement, commands), test item, dry run on the canvas, run now, runs and All runs with approvals, Insights (rings, daily bars, spend, assembly line, models, versions, failures), Ask AI assistant | A run's cloud gaps card and the agent job chat |
 | Connections | Installed, marketplace, a connector's settings, kinds and rate budget | Remote MCP servers, GitHub and email sign-in cards, API usage, running in tab cloud |
 | Settings | Account, agents, sandbox, chat titles, spend limits, ranking, storage, MCP server | Moving the hub to tab cloud, tab account sign-in, updates |
 | Onboarding | Welcome, agent, work folder | Hub step, installing an agent |
