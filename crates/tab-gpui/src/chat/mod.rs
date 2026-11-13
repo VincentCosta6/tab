@@ -246,7 +246,9 @@ impl ChatView {
             return;
         };
         let b = backend(cx);
-        let _ = crate::runtime::spawn(async move { b.chat_stop(&sid).await });
+        drop(crate::runtime::spawn(
+            async move { b.chat_stop(&sid).await },
+        ));
     }
 
     fn answer(&mut self, approval: &Approval, decision: &'static str, cx: &mut Context<Self>) {

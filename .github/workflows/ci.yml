@@ -66,3 +66,30 @@ jobs:
       - run: pnpm proto:lint
       - name: Generated TypeScript matches hub.proto
         run: pnpm proto && git diff --exit-code src/lib/protocol
+
+  # The GPUI app is its own workspace (see the root Cargo.toml), so the
+  # check job above doesn't build it.
+  gpui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies for GPUI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev bubblewrap
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/tab-gpui
+      - run: cargo fmt --manifest-path crates/tab-gpui/Cargo.toml --check
+      - run: cargo clippy --manifest-path crates/tab-gpui/Cargo.toml --all-targets --features sample-data -- -D clippy::correctness -D clippy::suspicious
+      - run: cargo test --manifest-path crates/tab-gpui/Cargo.toml --features sample-data
+      - run: cargo test -p tab-app
+      - name: Licenses and sources of everything the GPUI app ships
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: crates/tab-gpui/Cargo.toml
+          command: check
+          command-arguments: --config deny.toml licenses bans sources

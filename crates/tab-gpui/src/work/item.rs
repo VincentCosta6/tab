@@ -101,7 +101,8 @@ impl ItemPane {
             return;
         };
         let b = backend(cx);
-        let _ = crate::runtime::spawn(async move {
+        // Runs on its own; the queue hears the result as an engine event.
+        drop(crate::runtime::spawn(async move {
             let r = b
                 .with_engine(async |e| match act {
                     Act::Done => e.mark_done(&id).await.map(|_| ()),
@@ -114,7 +115,7 @@ impl ItemPane {
             if let Err(e) = r {
                 tracing::warn!(error = %e, "item action failed");
             }
-        });
+        }));
     }
 }
 

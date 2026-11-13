@@ -47,6 +47,12 @@ crates/tab-core/        The desktop engine. No Tauri dependency, fully unit test
   workflow/runtime.rs   Runs workflows off the engine's event stream
   config.rs             TabConfig (profile, ranking, connectors map)
 src-tauri/              Desktop shell: Tauri commands + event forwarding
+crates/tab-app/         The desktop backend without a UI toolkit: boots the engine, agents, hub and
+                        MCP server, and the chat, project, workflow, settings and storage calls.
+                        The GPUI app uses it; src-tauri still has its own copy for now.
+crates/tab-gpui/        The desktop app on GPUI (gpui-component), replacing src-tauri + src/ over time.
+                        Its own Cargo workspace and lockfile until src-tauri is gone. Icons come from
+                        src/design/icons.tsx at build time.
 src/                    React UI
   design/               Design system: tokens.css, components, icons, blocks, markdown
   modules/              registry.ts + built-in modules (work, connections, settings)
