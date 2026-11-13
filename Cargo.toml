@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tab-domain", "crates/tab-protocol", "crates/tab-store", "crates/tab-hub", "crates/tab-core", "crates/tab-runner", "src-tauri"]
+members = ["crates/tab-domain", "crates/tab-protocol", "crates/tab-store", "crates/tab-hub", "crates/tab-core", "crates/tab-runner", "src-tauri", "crates/tab-app"]
 # The GPUI app has its own lockfile while it is ported: Tauri's gtk 0.18 pins
 # toml_datetime 0.6.3, which GPUI's build dependencies can't share.
 exclude = ["crates/tab-gpui"]

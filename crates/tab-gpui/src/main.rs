@@ -1,18 +1,61 @@
-use gpui::{App, Bounds, Context, Window, WindowBounds, WindowOptions, div, prelude::*, px, size};
+//! tab's desktop app on GPUI.
+//!
+//! Boots the backend (`tab-app`) on a tokio runtime, then opens the window.
+//! `TAB_IDENTIFIER` picks the data folder and ports; it defaults to the
+//! GPUI dev build's own, so this never opens the installed app's data.
 
-struct Root;
+mod assets;
+mod backend;
+mod blocks;
+mod components;
+mod events;
+mod runtime;
+mod shell;
+mod theme;
+mod work;
 
-impl Render for Root {
-    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().size_full().flex().items_center().justify_center().bg(gpui::white()).text_color(gpui::black()).text_xl().font_family("Inter").child("tab")
-    }
-}
+use gpui::{App, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
+use gpui_component::Root;
 
-fn main() {
-    env_logger::init();
-    gpui_platform::application().run(|cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
-        cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() }, |_, cx| cx.new(|_| Root))
-            .unwrap();
-    });
+fn main() -> anyhow::Result<()> {
+    tab_app::logging::init();
+    let identifier =
+        std::env::var("TAB_IDENTIFIER").unwrap_or_else(|_| tab_app::paths::GPUI_DEV.into());
+    let paths = tab_app::Paths::for_identifier(&identifier)?;
+    let rt = runtime::init();
+    let backend = rt.block_on(tab_app::Backend::boot(paths))?;
+
+    gpui_platform::application()
+        .with_assets(assets::Assets)
+        .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            cx.set_global(theme::Theme::for_appearance(cx.window_appearance()));
+            cx.set_global(backend::Backend(backend.clone()));
+            events::start(&backend.events, cx);
+            shell::bind_keys(cx);
+            work::bind_keys(cx);
+
+            let bounds = Bounds::centered(None, size(px(1360.), px(860.)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    app_id: Some(identifier.clone()),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    // Follow the system's light or dark appearance.
+                    window
+                        .observe_window_appearance(|window, cx| {
+                            cx.set_global(theme::Theme::for_appearance(window.appearance()));
+                            cx.refresh_windows();
+                        })
+                        .detach();
+                    let shell = cx.new(|cx| shell::Shell::new(window, cx));
+                    cx.new(|cx| Root::new(shell, window, cx))
+                },
+            )
+            .expect("open the window");
+            cx.activate(true);
+        });
+    Ok(())
 }

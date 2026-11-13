@@ -5636,6 +5636,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tab-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tab-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tab-core"
 version = "0.1.0"
 dependencies = [

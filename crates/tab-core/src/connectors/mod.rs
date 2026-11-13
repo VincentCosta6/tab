@@ -1,6 +1,6 @@
 //! Built-in connectors. Each file is one integration; [`registry`] lists them all.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "sample-data"))]
 mod demo;
 pub mod email;
 mod github;
@@ -9,7 +9,7 @@ pub mod tab;
 
 use std::sync::Arc;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "sample-data"))]
 pub use demo::{DemoConnector, DemoFactory};
 pub use email::{EmailConnector, EmailFactory};
 pub use github::{GithubConnector, GithubFactory};
@@ -27,8 +27,9 @@ pub fn registry() -> Vec<Box<dyn ConnectorFactory>> {
         Box::new(GithubFactory),
         Box::new(EmailFactory),
     ];
-    // Sample data only feeds the engine's tests.
-    #[cfg(test)]
+    // Sample data only feeds the engine's tests, and dev builds that turn
+    // on `sample-data` to have something to look at.
+    #[cfg(any(test, feature = "sample-data"))]
     v.push(Box::new(DemoFactory));
     v
 }

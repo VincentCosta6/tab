@@ -32,7 +32,9 @@ confidence-threshold = 0.9
 # is here to check.
 exceptions = [
   { crate = "tab", allow = ["FSL-1.1-MIT"] },
+  { crate = "tab-app", allow = ["FSL-1.1-MIT"] },
   { crate = "tab-core", allow = ["FSL-1.1-MIT"] },
+  { crate = "tab-gpui", allow = ["FSL-1.1-MIT"] },
   { crate = "tab-domain", allow = ["FSL-1.1-MIT"] },
   { crate = "tab-hub", allow = ["FSL-1.1-MIT"] },
   { crate = "tab-protocol", allow = ["FSL-1.1-MIT"] },

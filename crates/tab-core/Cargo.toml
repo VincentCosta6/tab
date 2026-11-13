@@ -5,6 +5,11 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
+[features]
+# The "Sample data" connector (`connectors::demo`), for dev builds and
+# screenshots. Never on in a release.
+sample-data = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
