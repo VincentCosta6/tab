@@ -563,7 +563,7 @@ impl Render for ChatView {
     }
 }
 
-fn agent_name(kind: tab_core::model::AgentKind) -> &'static str {
+pub fn agent_name(kind: tab_core::model::AgentKind) -> &'static str {
     use tab_core::model::AgentKind::*;
     match kind {
         ClaudeCode => "Claude Code",

@@ -114,12 +114,31 @@ pub struct Shell {
     connections: Option<Entity<crate::connections::ConnectionsTab>>,
     projects: Option<Entity<crate::projects::ProjectsTab>>,
     workflows: Option<Entity<crate::workflows::WorkflowsTab>>,
+    onboarding: Option<Entity<crate::onboarding::Onboarding>>,
+    _onboarded: Option<gpui::Subscription>,
 }
 
 impl Shell {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let work = cx.new(|cx| WorkTab::new(window, cx));
+        let cfg = crate::runtime::handle().block_on(crate::backend::backend(cx).config_masked());
+        let (onboarding, _onboarded) = if crate::onboarding::needed(&cfg) {
+            let o = cx.new(|cx| crate::onboarding::Onboarding::new(window, cx));
+            let sub = cx.subscribe_in(
+                &o,
+                window,
+                |this: &mut Self, _, _: &crate::onboarding::Finished, window, cx| {
+                    this.onboarding = None;
+                    this.show(Tab::Work, window, cx);
+                },
+            );
+            (Some(o), Some(sub))
+        } else {
+            (None, None)
+        };
         Shell {
+            onboarding,
+            _onboarded,
             tab: Tab::Work,
             work,
             settings: None,
@@ -193,6 +212,9 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(o) = &self.onboarding {
+            return div().size_full().child(o.clone()).into_any_element();
+        }
         let t = theme(cx).clone();
         let mut top = Vec::new();
         let mut bottom = Vec::new();
@@ -237,6 +259,7 @@ impl Render for Shell {
                     .child(div().flex().flex_col().gap(px(4.)).children(bottom)),
             )
             .child(div().flex_1().min_w_0().h_full().child(view))
+            .into_any_element()
     }
 }
 
