@@ -11,6 +11,7 @@ mod chat;
 mod components;
 mod events;
 mod runtime;
+mod settings;
 mod shell;
 mod theme;
 mod work;

@@ -24,6 +24,8 @@ use tokio::sync::{Mutex, RwLock, broadcast};
 pub mod chat;
 pub mod logging;
 pub mod paths;
+pub mod settings;
+pub mod storage;
 mod vault;
 
 pub use paths::Paths;
@@ -209,6 +211,7 @@ impl Backend {
             }
             Err(e) => tracing::error!(error = %e, "MCP server failed to start"),
         }
+        storage::spawn_sweeps(Arc::downgrade(&backend));
         Ok(backend)
     }
 

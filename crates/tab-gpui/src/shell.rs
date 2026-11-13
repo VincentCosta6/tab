@@ -110,6 +110,7 @@ pub fn bind_keys(cx: &mut App) {
 pub struct Shell {
     tab: Tab,
     work: Entity<WorkTab>,
+    settings: Option<Entity<crate::settings::SettingsTab>>,
 }
 
 impl Shell {
@@ -118,11 +119,15 @@ impl Shell {
         Shell {
             tab: Tab::Work,
             work,
+            settings: None,
         }
     }
 
     fn show(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
         self.tab = tab;
+        if tab == Tab::Settings && self.settings.is_none() {
+            self.settings = Some(cx.new(|cx| crate::settings::SettingsTab::new(window, cx)));
+        }
         if tab == Tab::Work {
             let q = self.work.read(cx).queue().clone();
             window.focus(&q.read(cx).focus_handle_of(), cx);
@@ -133,6 +138,7 @@ impl Shell {
     fn view(&self, cx: &mut Context<Self>) -> AnyView {
         match self.tab {
             Tab::Work => self.work.clone().into(),
+            Tab::Settings if self.settings.is_some() => self.settings.clone().unwrap().into(),
             other => cx.new(|_| NotPorted(other)).into(),
         }
     }
