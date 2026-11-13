@@ -9,6 +9,7 @@ mod backend;
 mod blocks;
 mod chat;
 mod components;
+mod connections;
 mod events;
 mod runtime;
 mod settings;

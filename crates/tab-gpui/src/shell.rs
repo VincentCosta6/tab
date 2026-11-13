@@ -111,6 +111,7 @@ pub struct Shell {
     tab: Tab,
     work: Entity<WorkTab>,
     settings: Option<Entity<crate::settings::SettingsTab>>,
+    connections: Option<Entity<crate::connections::ConnectionsTab>>,
 }
 
 impl Shell {
@@ -120,6 +121,7 @@ impl Shell {
             tab: Tab::Work,
             work,
             settings: None,
+            connections: None,
         }
     }
 
@@ -127,6 +129,9 @@ impl Shell {
         self.tab = tab;
         if tab == Tab::Settings && self.settings.is_none() {
             self.settings = Some(cx.new(|cx| crate::settings::SettingsTab::new(window, cx)));
+        }
+        if tab == Tab::Connections && self.connections.is_none() {
+            self.connections = Some(cx.new(crate::connections::ConnectionsTab::new));
         }
         if tab == Tab::Work {
             let q = self.work.read(cx).queue().clone();
@@ -138,6 +143,9 @@ impl Shell {
     fn view(&self, cx: &mut Context<Self>) -> AnyView {
         match self.tab {
             Tab::Work => self.work.clone().into(),
+            Tab::Connections if self.connections.is_some() => {
+                self.connections.clone().unwrap().into()
+            }
             Tab::Settings if self.settings.is_some() => self.settings.clone().unwrap().into(),
             other => cx.new(|_| NotPorted(other)).into(),
         }

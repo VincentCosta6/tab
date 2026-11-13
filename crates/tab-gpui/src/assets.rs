@@ -45,3 +45,8 @@ impl AssetSource for Assets {
         })
     }
 }
+
+/// Whether the design system has an icon by this name.
+pub fn has_icon(name: &str) -> bool {
+    ICONS.iter().any(|(n, _)| *n == name)
+}

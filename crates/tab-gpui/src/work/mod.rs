@@ -1,7 +1,7 @@
 //! The Work tab: the ranked queue on the left, the open item on the right.
 
 mod item;
-mod model;
+pub mod model;
 mod queue;
 
 use gpui::{

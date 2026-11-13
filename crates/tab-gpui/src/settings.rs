@@ -5,7 +5,6 @@ use gpui::{
     AppContext, ClipboardItem, Context, Entity, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::*, px,
 };
-use gpui_component::Sizable;
 use gpui_component::button::Button as MenuButton;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::menu::{DropdownMenu, PopupMenuItem};
@@ -1028,10 +1027,10 @@ impl SettingsTab {
                     let which = (co.repo.clone(), co.number);
                     c = c.child(row_owned(
                         format!("{} #{}", co.repo, co.number),
-                        format!(
-                            "Opened {} ago",
-                            crate::components::ago(co.last_used, chrono::Utc::now())
-                        ),
+                        match crate::components::ago(co.last_used, chrono::Utc::now()) {
+                            a if a == "now" => "Opened just now".into(),
+                            a => format!("Opened {a} ago"),
+                        },
                         div()
                             .flex()
                             .items_center()
