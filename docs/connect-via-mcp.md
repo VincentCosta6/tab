@@ -35,6 +35,8 @@ What phase 3 leaves out, on purpose:
 - Recipes are a Rust trait (`sync::Recipe`), not the declarative struct
   sketched in §3: Sentry has to look up your organizations before it can
   search, and that needs more than one call per look.
+  `docs/recipe-manifests.md` is the plan to make them data (manifests)
+  so connectors can be added without a release.
 - Notion has no "assigned to me", so its recipe runs a search the person
   picks (default "tasks assigned to me").
 - Sync only runs on this computer; cloud polling comes with phase 4.

@@ -982,6 +982,8 @@ export interface McpCatalogEntry {
   queue_query?: string;
   /** For recipes that offer a short list of what comes in; the first is the default. */
   queue_choices?: McpQueueChoice[];
+  /** What comes into the queue and when it's marked done, from its recipe. */
+  queue_description?: string;
 }
 
 /** One option for what a connection brings into the queue. */

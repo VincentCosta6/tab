@@ -56,6 +56,10 @@ pub trait Recipe: Send + Sync {
     /// The kinds of work it brings, for the queue's labels and icons.
     fn kinds(&self) -> Vec<KindInfo>;
 
+    /// What comes into the queue and when it's marked done, for the
+    /// connection's "Fills your queue" section.
+    fn description(&self) -> &'static str;
+
     /// How often to look.
     fn interval(&self) -> Duration {
         Duration::from_secs(5 * 60)
@@ -544,6 +548,10 @@ impl Linear {
 
 #[async_trait]
 impl Recipe for Linear {
+    fn description(&self) -> &'static str {
+        "Issues assigned to you come into your queue. Issues that are done or cancelled in Linear are marked done here."
+    }
+
     fn kinds(&self) -> Vec<KindInfo> {
         vec![KindInfo::new(
             "linear.issue",
@@ -908,6 +916,10 @@ fn looks_like_short_id(s: &str) -> bool {
 
 #[async_trait]
 impl Recipe for Sentry {
+    fn description(&self) -> &'static str {
+        "Unresolved issues come into your queue, from every organization you're in: yours and unassigned ones, unless you pick otherwise. Resolved or ignored issues are marked done here."
+    }
+
     fn kinds(&self) -> Vec<KindInfo> {
         vec![KindInfo::new(
             "sentry.issue",
@@ -1071,6 +1083,10 @@ impl Notion {
 
 #[async_trait]
 impl Recipe for Notion {
+    fn description(&self) -> &'static str {
+        "Pages matching a search come into your queue. Notion has no list of what's assigned to you, so tab runs a search you pick."
+    }
+
     fn kinds(&self) -> Vec<KindInfo> {
         vec![
             KindInfo::new("notion.page", "Notion page", "notion", Tone::Neutral),

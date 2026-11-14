@@ -348,6 +348,10 @@ pub struct CatalogEntry {
     /// [`sync::Recipe::queue_choices`]). The first is the default.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub queue_choices: &'static [sync::QueueChoice],
+    /// What comes into the queue, from its recipe
+    /// ([`sync::Recipe::description`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_description: Option<&'static str>,
 }
 
 /// Services whose servers let tab register itself (no app to set up).
@@ -364,6 +368,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             kinds: Vec::new(),
             queue_query: None,
             queue_choices: &[],
+            queue_description: None,
         },
         CatalogEntry {
             id: "notion",
@@ -376,6 +381,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             kinds: Vec::new(),
             queue_query: None,
             queue_choices: &[],
+            queue_description: None,
         },
         CatalogEntry {
             id: "atlassian",
@@ -388,6 +394,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             kinds: Vec::new(),
             queue_query: None,
             queue_choices: &[],
+            queue_description: None,
         },
         CatalogEntry {
             id: "sentry",
@@ -400,6 +407,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             kinds: Vec::new(),
             queue_query: None,
             queue_choices: &[],
+            queue_description: None,
         },
         CatalogEntry {
             id: "vercel",
@@ -412,6 +420,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             kinds: Vec::new(),
             queue_query: None,
             queue_choices: &[],
+            queue_description: None,
         },
         CatalogEntry {
             id: "stripe",
@@ -424,6 +433,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             kinds: Vec::new(),
             queue_query: None,
             queue_choices: &[],
+            queue_description: None,
         },
     ];
     for e in &mut all {
@@ -432,6 +442,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             e.kinds = r.kinds();
             e.queue_query = r.query_hint();
             e.queue_choices = r.queue_choices();
+            e.queue_description = Some(r.description());
         }
     }
     all

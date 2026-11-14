@@ -488,6 +488,7 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
           q={s.queue_sync}
           hint={catalogEntry?.queue_query}
           choices={catalogEntry?.queue_choices}
+          description={catalogEntry?.queue_description}
           busy={busy}
           onChange={(on, query) => void run(() => api.mcpSetQueue(id, on, query))}
         />
@@ -546,14 +547,9 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
 }
 
 /** "Fills your queue" on a connection's page: on or off, how the last look went, and what it watches. */
-function QueueSection({ s, q, hint, choices, busy, onChange }: { s: McpServerInfo; q: McpQueueState; hint?: string; choices?: McpQueueChoice[]; busy: boolean; onChange: (on: boolean, query: string | null) => void }) {
+function QueueSection({ s, q, hint, choices, description, busy, onChange }: { s: McpServerInfo; q: McpQueueState; hint?: string; choices?: McpQueueChoice[]; description?: string; busy: boolean; onChange: (on: boolean, query: string | null) => void }) {
   const [query, setQuery] = useState(s.queue_query ?? "");
   useEffect(() => setQuery(s.queue_query ?? ""), [s.queue_query]);
-  const what: Record<string, string> = {
-    linear: "Issues assigned to you come into your queue. Issues that are done or cancelled in Linear are marked done here.",
-    sentry: "Unresolved issues come into your queue, from every organization you're in: yours and unassigned ones, unless you pick otherwise. Resolved or ignored issues are marked done here.",
-    notion: "Pages matching a search come into your queue. Notion has no list of what's assigned to you, so tab runs a search you pick.",
-  };
   const status = !q.on
     ? "Off"
     : q.error
@@ -567,7 +563,7 @@ function QueueSection({ s, q, hint, choices, busy, onChange }: { s: McpServerInf
   const picked = choices?.find((c) => c.value === s.queue_query)?.value ?? choices?.[0]?.value;
   const tone: Tone = !q.on ? "neutral" : q.error ? "danger" : q.last_sync ? "success" : "warning";
   return (
-    <Section title="Fills your queue" description={(s.catalog && what[s.catalog]) ?? "Work from it comes into your queue."}>
+    <Section title="Fills your queue" description={description ?? "Work from it comes into your queue."}>
       <Card>
         <div className="mcp-queue">
           <div className="mcp-queue-row">
