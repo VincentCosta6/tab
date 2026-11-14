@@ -324,6 +324,12 @@ pub(super) async fn run_turn(
     prepared
         .cmd
         .env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "1");
+    // Claude Code otherwise gives up on the approval call (and with it an
+    // open question card) before tab stops waiting for the person.
+    prepared.cmd.env(
+        "MCP_TOOL_TIMEOUT",
+        super::APPROVAL_TIMEOUT.as_millis().to_string(),
+    );
     if strict {
         // claude.ai connectors too, should a version load them despite
         // `--strict-mcp-config`.
@@ -517,6 +523,8 @@ struct Parser {
     seen: HashSet<String>,
     /// Ids of calls that create something linkable, so their output can be attached as Context.
     create_calls: HashSet<String>,
+    /// Ids of AskUserQuestion calls, whose card closes when they end.
+    question_calls: HashSet<String>,
     finished: bool,
     /// The last result was an error.
     failed: bool,
@@ -764,6 +772,7 @@ impl Parser {
             session_id,
             seen: HashSet::new(),
             create_calls: HashSet::new(),
+            question_calls: HashSet::new(),
             finished: false,
             failed: false,
             billing: "unknown",
@@ -992,6 +1001,9 @@ impl Parser {
                                 if crate::links::is_creator(name, &block["input"]) {
                                     self.create_calls.insert(id.clone());
                                 }
+                                if name == "AskUserQuestion" {
+                                    self.question_calls.insert(id.clone());
+                                }
                                 hub.post(
                                     &sid,
                                     "assistant",
@@ -1031,6 +1043,14 @@ impl Parser {
                                 .join("\n"),
                             _ => String::new(),
                         };
+                        // A question that timed out shows as the call's own
+                        // card; the approval card for it would be a copy.
+                        if block["tool_use_id"]
+                            .as_str()
+                            .is_some_and(|i| self.question_calls.remove(i))
+                        {
+                            hub.drop_tool_approvals(&sid, "AskUserQuestion");
+                        }
                         if block["tool_use_id"]
                             .as_str()
                             .is_some_and(|i| self.create_calls.remove(i))
@@ -1669,6 +1689,44 @@ mod tests {
         );
         assert!(p.finished);
         assert!(!hub.can_steer(&s.id));
+    }
+
+    #[tokio::test]
+    async fn a_question_that_times_out_closes_its_card() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let mut p = Parser::new(hub.clone(), s.id.clone());
+        let feed = |p: &mut Parser, line: &str| p.handle(&serde_json::from_str(line).unwrap());
+        feed(
+            &mut p,
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"questions":[{"question":"A?"},{"question":"B?"}]}}]}}"#,
+        );
+        let waiting = tokio::spawn({
+            let (hub, sid) = (hub.clone(), s.id.clone());
+            async move {
+                hub.request_approval(&sid, "AskUserQuestion", "q".into(), json!({}))
+                    .await
+            }
+        });
+        while hub.pending_approvals(&s.id).is_empty() {
+            tokio::task::yield_now().await;
+        }
+        // Claude Code gave up on the approval call.
+        feed(
+            &mut p,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"q1","content":"The operation timed out.","is_error":true}]}}"#,
+        );
+        assert!(hub.pending_approvals(&s.id).is_empty());
+        waiting.abort();
     }
 
     #[test]
