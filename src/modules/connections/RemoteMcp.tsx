@@ -13,7 +13,7 @@ import { Icon } from "../../design/icons";
 import { api, onMcpSignIn, openUrl } from "../../lib/api";
 import { timeAgo } from "../../lib/format";
 import { keys } from "../../lib/query";
-import type { McpCatalogEntry, McpCloudState, McpProbe, McpQueueState, McpServerInfo, McpTool, Tone, ToolPolicy } from "../../lib/types";
+import type { McpCatalogEntry, McpCloudState, McpProbe, McpQueueChoice, McpQueueState, McpServerInfo, McpTool, Tone, ToolPolicy } from "../../lib/types";
 import { WhereItRuns } from "./ClaudeImport";
 
 export function useMcpServers() {
@@ -487,6 +487,7 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
           s={s}
           q={s.queue_sync}
           hint={catalogEntry?.queue_query}
+          choices={catalogEntry?.queue_choices}
           busy={busy}
           onChange={(on, query) => void run(() => api.mcpSetQueue(id, on, query))}
         />
@@ -545,12 +546,12 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
 }
 
 /** "Fills your queue" on a connection's page: on or off, how the last look went, and what it watches. */
-function QueueSection({ s, q, hint, busy, onChange }: { s: McpServerInfo; q: McpQueueState; hint?: string; busy: boolean; onChange: (on: boolean, query: string | null) => void }) {
+function QueueSection({ s, q, hint, choices, busy, onChange }: { s: McpServerInfo; q: McpQueueState; hint?: string; choices?: McpQueueChoice[]; busy: boolean; onChange: (on: boolean, query: string | null) => void }) {
   const [query, setQuery] = useState(s.queue_query ?? "");
   useEffect(() => setQuery(s.queue_query ?? ""), [s.queue_query]);
   const what: Record<string, string> = {
     linear: "Issues assigned to you come into your queue. Issues that are done or cancelled in Linear are marked done here.",
-    sentry: "Unresolved issues assigned to you come into your queue, from every organization you're in. Resolved or ignored issues are marked done here.",
+    sentry: "Unresolved issues come into your queue, from every organization you're in: yours and unassigned ones, unless you pick otherwise. Resolved or ignored issues are marked done here.",
     notion: "Pages matching a search come into your queue. Notion has no list of what's assigned to you, so tab runs a search you pick.",
   };
   const status = !q.on
@@ -562,6 +563,8 @@ function QueueSection({ s, q, hint, busy, onChange }: { s: McpServerInfo; q: Mcp
         : q.last_sync
           ? `Looked ${timeAgo(q.last_sync)} · ${q.found ?? 0} open`
           : "Looking…";
+  // Nothing saved, or a choice that's gone, means the first (the default).
+  const picked = choices?.find((c) => c.value === s.queue_query)?.value ?? choices?.[0]?.value;
   const tone: Tone = !q.on ? "neutral" : q.error ? "danger" : q.last_sync ? "success" : "warning";
   return (
     <Section title="Fills your queue" description={(s.catalog && what[s.catalog]) ?? "Work from it comes into your queue."}>
@@ -572,6 +575,15 @@ function QueueSection({ s, q, hint, busy, onChange }: { s: McpServerInfo; q: Mcp
             <span>Bring its work into your queue</span>
             <div className="connector-status"><StatusDot tone={tone} /> <span>{status}</span></div>
           </div>
+          {choices?.length && q.on ? (
+            <div className="seg" role="radiogroup" aria-label="Which issues come in">
+              {choices.map((c, i) => (
+                <button key={c.value} role="radio" aria-checked={c.value === picked} className={cx(c.value === picked && "on")} disabled={busy} onClick={() => onChange(true, i === 0 ? null : c.value)}>
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
           {hint && q.on && (
             <form
               className="mcp-queue-query"

@@ -66,7 +66,8 @@ pub struct RemoteMcpConfig {
     /// recipe for it ([`sync`]). `None` means yes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<bool>,
-    /// What the queue watches, for recipes that ask (Notion: a search).
+    /// What the queue watches, for recipes that ask (Notion: a search;
+    /// Sentry: one of its [`sync::Recipe::queue_choices`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_query: Option<String>,
     /// The person allowed it in tab cloud jobs ("Allow in cloud"). It runs
@@ -343,6 +344,10 @@ pub struct CatalogEntry {
     /// [`RemoteMcpConfig::queue_query`]): the placeholder to show.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_query: Option<&'static str>,
+    /// What the queue brings in, for recipes that offer a short list (see
+    /// [`sync::Recipe::queue_choices`]). The first is the default.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub queue_choices: &'static [sync::QueueChoice],
 }
 
 /// Services whose servers let tab register itself (no app to set up).
@@ -358,6 +363,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             fills_queue: false,
             kinds: Vec::new(),
             queue_query: None,
+            queue_choices: &[],
         },
         CatalogEntry {
             id: "notion",
@@ -369,6 +375,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             fills_queue: false,
             kinds: Vec::new(),
             queue_query: None,
+            queue_choices: &[],
         },
         CatalogEntry {
             id: "atlassian",
@@ -380,6 +387,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             fills_queue: false,
             kinds: Vec::new(),
             queue_query: None,
+            queue_choices: &[],
         },
         CatalogEntry {
             id: "sentry",
@@ -391,6 +399,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             fills_queue: false,
             kinds: Vec::new(),
             queue_query: None,
+            queue_choices: &[],
         },
         CatalogEntry {
             id: "vercel",
@@ -402,6 +411,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             fills_queue: false,
             kinds: Vec::new(),
             queue_query: None,
+            queue_choices: &[],
         },
         CatalogEntry {
             id: "stripe",
@@ -413,6 +423,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             fills_queue: false,
             kinds: Vec::new(),
             queue_query: None,
+            queue_choices: &[],
         },
     ];
     for e in &mut all {
@@ -420,6 +431,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             e.fills_queue = true;
             e.kinds = r.kinds();
             e.queue_query = r.query_hint();
+            e.queue_choices = r.queue_choices();
         }
     }
     all

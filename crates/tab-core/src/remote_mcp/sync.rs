@@ -42,6 +42,14 @@ pub struct Found {
     pub resolved: bool,
 }
 
+/// One option for what a connection brings into the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct QueueChoice {
+    /// What's saved in [`RemoteMcpConfig::queue_query`].
+    pub value: &'static str,
+    pub label: &'static str,
+}
+
 /// How tab reads one kind of server. See the module docs.
 #[async_trait]
 pub trait Recipe: Send + Sync {
@@ -63,6 +71,13 @@ pub trait Recipe: Send + Sync {
     /// in the empty field.
     fn query_hint(&self) -> Option<&'static str> {
         None
+    }
+
+    /// For recipes where the person picks what comes in from a short list:
+    /// the choices, kept in [`RemoteMcpConfig::queue_query`]. The first is
+    /// the default.
+    fn queue_choices(&self) -> &'static [QueueChoice] {
+        &[]
     }
 
     /// Looks for work. `since` is when the last look started (`None` on
@@ -598,13 +613,38 @@ impl Recipe for Linear {
 // Sentry
 // ---------------------------------------------------------------------------
 
-/// Unresolved issues assigned to you, in every organization you're in.
+/// Unresolved issues assigned to you (and by default, to nobody), in every
+/// organization you're in.
 struct Sentry;
 
-/// The query Sentry runs for the queue.
-const SENTRY_QUERY: &str = "is:unresolved assigned:me";
+/// Which issues come into the queue. Unassigned ones are in by default:
+/// on a small team nobody assigns issues, so "mine" alone finds nothing.
+const SENTRY_CHOICES: &[QueueChoice] = &[
+    QueueChoice {
+        value: "mine_unassigned",
+        label: "Mine + unassigned",
+    },
+    QueueChoice {
+        value: "mine",
+        label: "Only mine",
+    },
+    QueueChoice {
+        value: "all",
+        label: "All unresolved",
+    },
+];
 
 impl Sentry {
+    /// The searches to run for the person's choice. Sentry's search has no
+    /// OR across fields, so "mine + unassigned" is two searches.
+    fn queries(choice: Option<&str>) -> &'static [&'static str] {
+        match choice {
+            Some("mine") => &["is:unresolved assigned:me"],
+            Some("all") => &["is:unresolved"],
+            _ => &["is:unresolved assigned:me", "is:unresolved is:unassigned"],
+        }
+    }
+
     /// Organization slugs from `find_organizations`: JSON when the server
     /// sends it, otherwise its markdown (`## **slug**` or `- slug`).
     fn orgs(v: &Value) -> Vec<(String, Option<String>)> {
@@ -877,6 +917,10 @@ impl Recipe for Sentry {
         )]
     }
 
+    fn queue_choices(&self) -> &'static [QueueChoice] {
+        SENTRY_CHOICES
+    }
+
     async fn poll(
         &self,
         s: &Session<'_>,
@@ -899,25 +943,27 @@ impl Recipe for Sentry {
         );
         let mut out = Vec::new();
         for (org, region) in orgs.iter().take(5) {
-            // Sentry search syntax runs as written, with no AI in between.
-            let mut args = json!({
-                "organizationSlug": org, "query": SENTRY_QUERY, "sort": "date", "limit": 100,
-            });
-            if let Some(r) = region {
-                args["regionUrl"] = json!(r);
+            for query in Sentry::queries(s.query) {
+                // Sentry search syntax runs as written, with no AI in between.
+                let mut args = json!({
+                    "organizationSlug": org, "query": query, "sort": "date", "limit": 100,
+                });
+                if let Some(r) = region {
+                    args["regionUrl"] = json!(r);
+                }
+                let v = s.call(list_tool, args).await?;
+                out.extend(
+                    Sentry::issues(&v, org)
+                        .into_iter()
+                        .filter(|f| !f.resolved)
+                        .map(|mut f| {
+                            if let Some(r) = region {
+                                f.event.metadata["region_url"] = json!(r);
+                            }
+                            f
+                        }),
+                );
             }
-            let v = s.call(list_tool, args).await?;
-            out.extend(
-                Sentry::issues(&v, org)
-                    .into_iter()
-                    .filter(|f| !f.resolved)
-                    .map(|mut f| {
-                        if let Some(r) = region {
-                            f.event.metadata["region_url"] = json!(r);
-                        }
-                        f
-                    }),
-            );
         }
         Ok(out)
     }
@@ -1180,6 +1226,21 @@ mod tests {
     }
 
     #[test]
+    fn sentry_searches_for_the_persons_choice() {
+        let mine = "is:unresolved assigned:me";
+        let unassigned = "is:unresolved is:unassigned";
+        assert_eq!(Sentry::queries(None), [mine, unassigned]);
+        assert_eq!(Sentry::queries(Some("mine_unassigned")), [mine, unassigned]);
+        assert_eq!(Sentry::queries(Some("mine")), [mine]);
+        assert_eq!(Sentry::queries(Some("all")), ["is:unresolved"]);
+        assert_eq!(Sentry::queries(Some("whatever")), [mine, unassigned]);
+        assert_eq!(Sentry.queue_choices()[0].value, "mine_unassigned");
+        for c in Sentry.queue_choices() {
+            assert!(!Sentry::queries(Some(c.value)).is_empty());
+        }
+    }
+
+    #[test]
     fn notion_maps_search_results() {
         let v = json!({ "results": [
             { "id": "1f2e", "title": "Launch plan", "url": "https://www.notion.so/Launch-1f2e", "type": "page",
@@ -1227,8 +1288,16 @@ mod tests {
                         "find_organizations" => {
                             json!({ "organizations": [{ "slug": "acme", "regionUrl": "https://us.sentry.io" }] })
                         }
+                        "search_issues" if args["query"] == "is:unresolved is:unassigned" => {
+                            // Unassigned, by default: one new, one also mine
+                            // (counted once).
+                            json!({ "issues": [
+                                { "shortId": "WEB-1", "title": "Boom", "status": "unresolved" },
+                                { "shortId": "WEB-3", "title": "Nobody's", "status": "unresolved" },
+                            ] })
+                        }
                         "search_issues" => {
-                            assert_eq!(args["query"], SENTRY_QUERY);
+                            assert_eq!(args["query"], "is:unresolved assigned:me");
                             assert_eq!(args["regionUrl"], "https://us.sentry.io");
                             let n = looks.fetch_add(1, Ordering::SeqCst);
                             let mut issues = vec![
@@ -1295,7 +1364,7 @@ mod tests {
         let run = m.clone();
         let task = tokio::spawn(async move { run.run(ctx).await });
         let mut lines = Vec::new();
-        while lines.len() < 3 {
+        while lines.len() < 4 {
             lines.push(rx.recv().await.unwrap());
         }
         cancel.cancel();
@@ -1308,24 +1377,29 @@ mod tests {
             lines[1].starts_with("event sentry.issue | acme/WEB-2"),
             "{lines:?}"
         );
-        assert!(lines[2].starts_with("status sentry: Running"), "{lines:?}");
+        assert!(
+            lines[2].starts_with("event sentry.issue | acme/WEB-3 | WEB-3 Nobody's"),
+            "{lines:?}"
+        );
+        assert!(lines[3].starts_with("status sentry: Running"), "{lines:?}");
         let q = remote.infos()[0].queue_sync.clone().unwrap();
         assert!(q.on);
-        assert_eq!(q.found, Some(2));
+        assert_eq!(q.found, Some(3));
         assert!(q.last_sync.is_some() && q.error.is_none());
 
         // The second look: WEB-2 dropped out of the list, so tab asks
         // about it, and it resolved.
         let (ctx, mut rx, _c) = crate::connector::test_context("sentry");
-        assert_eq!(m.look(&ctx).await.unwrap(), 1);
+        assert_eq!(m.look(&ctx).await.unwrap(), 2);
         drop(ctx);
         let mut rest = Vec::new();
         while let Some(l) = rx.recv().await {
             rest.push(l);
         }
-        assert_eq!(rest.len(), 2, "{rest:?}");
+        assert_eq!(rest.len(), 3, "{rest:?}");
         assert!(rest[0].starts_with("event sentry.issue | acme/WEB-1"));
-        assert_eq!(rest[1], "resolved acme/WEB-2");
+        assert!(rest[1].starts_with("event sentry.issue | acme/WEB-3"));
+        assert_eq!(rest[2], "resolved acme/WEB-2");
 
         // Every tool call went through the gateway's log.
         let audit = store

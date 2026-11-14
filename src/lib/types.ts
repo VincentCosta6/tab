@@ -980,6 +980,14 @@ export interface McpCatalogEntry {
   kinds: KindInfo[];
   /** For recipes that watch a search the person picks: the placeholder. */
   queue_query?: string;
+  /** For recipes that offer a short list of what comes in; the first is the default. */
+  queue_choices?: McpQueueChoice[];
+}
+
+/** One option for what a connection brings into the queue. */
+export interface McpQueueChoice {
+  value: string;
+  label: string;
 }
 
 export interface McpProbe {
