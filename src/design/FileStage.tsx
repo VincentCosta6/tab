@@ -7,7 +7,8 @@ import { StageContext, useStage, type Stage, type StageFile } from "../lib/stage
 import type { ThreadFile } from "../lib/threadFiles";
 import { Button, cx } from "./components";
 import { Icon } from "./icons";
-import { Markdown, MarkdownFiles } from "./markdown";
+import { MarkdownFiles } from "./markdown";
+import { RichMarkdown } from "./richMarkdown";
 
 const WIDTH_KEY = "tab.stage.chatWidth";
 const clampChat = (w: number) => Math.max(320, Math.min(w, Math.round(window.innerWidth * 0.6)));
@@ -403,7 +404,7 @@ function ReadContent({ path, kind }: { path: string; kind: Exclude<Kind, "image"
     return (
       <div className="stage-doc">
         <MarkdownFiles.Provider value={{ base: dirOf(path) }}>
-          <Markdown text={text ?? ""} />
+          <RichMarkdown text={text ?? ""} />
         </MarkdownFiles.Provider>
       </div>
     );
