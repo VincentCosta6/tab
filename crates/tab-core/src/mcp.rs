@@ -27,6 +27,12 @@
 //! * `tab_list_actions`, `tab_list_workflows`, `tab_save_workflow`,
 //!   `tab_test_workflow`: build workflows. Agents draft and dry-run them;
 //!   only the person turns one on.
+//! * `tab_run_workflow`, `tab_get_workflow_run`: start a workflow the
+//!   person turned on, and follow the run. Every guardrail applies; a
+//!   blocked step waits for the person, never for an agent.
+//! * `tab_workflow_stats`, `tab_workflow_failures`: how a workflow is
+//!   doing (rates, time, spend, models, what fails) and what's suggested,
+//!   so the builder's assistant and coordinators can improve it.
 //! * `tab_vault_search`, `tab_vault_get` (a project's coordinator) and
 //!   `tab_vault_request` (its other threads): the end-to-end encrypted
 //!   vault ([`crate::e2e`]), listed only to chats the person drives on the
@@ -119,6 +125,15 @@ pub trait EngineAccess: Send + Sync + 'static {
         _item_id: Option<String>,
     ) -> anyhow::Result<Run> {
         anyhow::bail!("workflows can't be tested from here")
+    }
+    /// Starts an enabled workflow for real, for the agent chat `session`.
+    async fn run_workflow_for_agent(
+        &self,
+        _workflow_id: String,
+        _item_id: Option<String>,
+        _session: Option<String>,
+    ) -> anyhow::Result<workflow::runtime::AgentRun> {
+        anyhow::bail!("workflows can't be run from here")
     }
 }
 
@@ -960,6 +975,40 @@ fn text(t: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": t.into() }] })
 }
 
+/// A run as an agent sees it: where it stands, each step's result, and
+/// what happens next in words.
+fn agent_run_json(run: &Run, repeat: bool) -> Value {
+    use workflow::RunStatus;
+    let next = match run.status {
+        RunStatus::Blocked => {
+            "A step needs the person's OK. Tell them; they approve or decline it on the item or in the Workflows tab. You can't approve it."
+        }
+        RunStatus::Waiting => {
+            "Waiting on an agent step; check again later with tab_get_workflow_run."
+        }
+        RunStatus::Running => "Still running; check again with tab_get_workflow_run.",
+        RunStatus::Throttled => "Held back by a rate limit; it didn't run.",
+        RunStatus::LoopStopped => {
+            "Refused: it would have looped, or the chain of workflows got too long."
+        }
+        _ => "",
+    };
+    json!({
+        "run_id": run.id,
+        "workflow": run.workflow_name,
+        "status": run.status,
+        "already_started": repeat.then_some(true),
+        "item_id": run.item_id,
+        "error": run.error,
+        "next": (!next.is_empty()).then_some(next),
+        "steps": run.steps.iter().map(|s| json!({
+            "id": s.id, "status": s.status, "error": s.error, "output": s.output,
+        })).collect::<Vec<_>>(),
+        "started": run.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        "finished": run.finished_at.map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+    })
+}
+
 /// A list of ids, from a JSON array or a single string.
 fn ids(v: &Value) -> Vec<String> {
     match v {
@@ -1239,7 +1288,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_save_workflow",
-            "description": "Create or update a workflow from its JSON definition. Pass id to update one. It is checked first (actions exist, required inputs are set, templates only read earlier steps, it can't loop with other workflows) and not saved if anything is wrong; fix what it says and try again. It's always saved turned off: the person reviews it in the Workflows tab and turns it on. Missing inputs get the action's defaults.\n\nShape: {\"name\", \"description\", \"trigger\": {\"type\":\"item\",\"changes\":[\"ingested\"],\"sources\":[\"github\"],\"kinds\":[\"github.review_requested\"],\"when\":[conditions]} | {\"type\":\"signal\",\"name\"} | {\"type\":\"schedule\",\"every_minutes\"} | {\"type\":\"manual\"}, \"steps\": [{\"id\":\"pr\",\"type\":\"action\",\"connector\":\"github\",\"action\":\"pr.get\",\"input\":{...},\"when\":[conditions]}, {\"id\":\"small\",\"type\":\"filter\",\"conditions\":[...]}, {\"id\":\"vals\",\"type\":\"set\",\"values\":{...}}, {\"id\":\"tell\",\"type\":\"emit\",\"signal\":\"name\",\"payload\":{...}}, {\"id\":\"test\",\"type\":\"command\",\"program\":\"cargo\",\"args\":[\"test\"],\"folder\":\"\",\"network\":[\"crates.io\",\"*.crates.io\"],\"env\":{},\"image\":\"\",\"timeout_secs\":600}], \"limits\": {\"max_runs_per_hour\":30,\"cooldown_minutes\":0}}. A condition is {\"field\":\"item.kind\",\"op\":\"equals|not_equals|contains|not_contains|starts_with|matches|in|gt|lt|exists|missing\",\"value\":...}. Changes: ingested, updated, ranked, snoozed, woke, done, reopened. Templates: {{item.title}}, {{item.metadata.repo}}, {{item.score}}, {{steps.<id>.<output>}}, {{signal.<key>}}, {{now}}.",
+            "description": "Create or update a workflow from its JSON definition. Pass id to update one. It is checked first (actions exist, required inputs are set, templates only read earlier steps, it can't loop with other workflows) and not saved if anything is wrong; fix what it says and try again. It's always saved turned off: the person reviews it in the Workflows tab and turns it on. Missing inputs get the action's defaults.\n\nShape: {\"name\", \"description\", \"trigger\": {\"type\":\"item\",\"changes\":[\"ingested\"],\"sources\":[\"github\"],\"kinds\":[\"github.review_requested\"],\"when\":[conditions]} | {\"type\":\"signal\",\"name\"} | {\"type\":\"schedule\",\"every_minutes\"} | {\"type\":\"manual\"}, \"steps\": [{\"id\":\"pr\",\"type\":\"action\",\"connector\":\"github\",\"action\":\"pr.get\",\"input\":{...},\"when\":[conditions]}, {\"id\":\"small\",\"type\":\"filter\",\"conditions\":[...]}, {\"id\":\"vals\",\"type\":\"set\",\"values\":{...}}, {\"id\":\"tell\",\"type\":\"emit\",\"signal\":\"name\",\"payload\":{...}}, {\"id\":\"test\",\"type\":\"command\",\"program\":\"cargo\",\"args\":[\"test\"],\"folder\":\"\",\"network\":[\"crates.io\",\"*.crates.io\"],\"env\":{},\"image\":\"\",\"timeout_secs\":600}, {\"id\":\"fix\",\"type\":\"agent\",\"prompt\":\"...\",\"repo\":\"owner/name\",\"family\":\"balanced\"}], \"limits\": {\"max_runs_per_hour\":30,\"cooldown_minutes\":0,\"monthly_cap_usd\":0,\"monthly_cap_plan_tokens\":0}}. The monthly caps hold new runs back once the workflow's spend this UTC calendar month reaches them: monthly_cap_usd is dollars billed through API keys, monthly_cap_plan_tokens is subscription tokens (input plus output; never converted to dollars); 0 means no cap and neither may be negative. You may set or lower a cap in a draft. A condition is {\"field\":\"item.kind\",\"op\":\"equals|not_equals|contains|not_contains|starts_with|matches|in|gt|lt|exists|missing\",\"value\":...}. Changes: ingested, updated, ranked, snoozed, woke, done, reopened. Templates: {{item.title}}, {{item.metadata.repo}}, {{item.score}}, {{steps.<id>.<output>}}, {{signal.<key>}}, {{now}}. An agent step runs on a model family from tab_list_actions (family), or on one harness and model (harness, model), which win when set.",
             "inputSchema": { "type": "object", "properties": {
                 "workflow": { "type": "object", "description": "The workflow definition. Include id to update." }
             }, "required": ["workflow"] }
@@ -1252,6 +1301,37 @@ pub fn tools() -> Value {
                 "workflow": { "type": "object", "description": "A draft definition, instead of workflow_id." },
                 "item_id": { "type": "string", "description": "The item to run it on, from tab_search. Optional for schedule and signal triggers." }
             } }
+        },
+        {
+            "name": "tab_run_workflow",
+            "description": "Run one of the person's workflows for real, now, on a queue item if given, and wait for it. Only workflows the person turned on can run (tab_list_workflows says which). Every guardrail applies: hourly limits, loops (a workflow can't start itself again through you), and destructive or command steps stay blocked unless the person allowed them on that workflow. A blocked step waits for the person's OK in tab; you can't give it. Asking again for the same workflow and item within 10 minutes returns the run already started. Use tab_test_workflow first if you only want to see what it would do.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow_id": { "type": "string" },
+                "item_id": { "type": "string", "description": "The item to run it on, from tab_search. Optional." }
+            }, "required": ["workflow_id"] }
+        },
+        {
+            "name": "tab_get_workflow_run",
+            "description": "A workflow run's status and each step's result, by run id (from tab_run_workflow or tab_list_workflows). Statuses: running, waiting (on an agent step), succeeded, stopped (a filter ended it, or the person declined a step), failed, blocked (a step waits for the person's OK), throttled, loop_stopped.",
+            "inputSchema": { "type": "object", "properties": {
+                "run_id": { "type": "string" }
+            }, "required": ["run_id"] }
+        },
+        {
+            "name": "tab_workflow_stats",
+            "description": "How a workflow is doing over the last days: runs and rates (0 to 1, over runs that did work; runs the person declined at an approval and runs held back by limits are counted apart), each step's time (p50/p95 ms; agent steps split into queue, work and waiting on the person), failures, interventions and spend (API keys in dollars; subscriptions as tokens and plan share, never dollars), agent models compared per step, versions, and deterministic suggestions (a cheaper or stronger model family, more time, a higher hourly limit, a placement, approvals always granted). Use it before proposing a change to a workflow.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow_id": { "type": "string" },
+                "days": { "type": "integer", "description": "1 to 30, default 7." }
+            }, "required": ["workflow_id"] }
+        },
+        {
+            "name": "tab_workflow_failures",
+            "description": "What fails in a workflow over the last days: failures grouped by step and error (numbers and ids taken out), most frequent first, each with its count, first and last time, and the latest run it happened in (read that run with tab_get_workflow_run to see the step's input, output and error). Also the run counts and suggestions.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow_id": { "type": "string" },
+                "days": { "type": "integer", "description": "1 to 30, default 7." }
+            }, "required": ["workflow_id"] }
         },
         {
             "name": "approve",
@@ -2823,9 +2903,16 @@ impl McpServer {
                         })
                     })
                     .collect();
+                let families: Vec<Value> = self
+                    .store
+                    .model_families()?
+                    .into_iter()
+                    .map(|f| json!({ "id": f.id, "name": f.name, "candidates": f.candidates }))
+                    .collect();
                 Ok(text(serde_json::to_string_pretty(&json!({
                     "item_changes": changes,
                     "connections": connections,
+                    "model_families": families,
                     "templates": {
                         "item": "The item that started the run: item.id, item.title, item.body, item.kind, item.source, item.actor, item.context, item.url, item.score, item.urgency, item.state, item.metadata.<key> (GitHub: repo, number, reason, subject_type; email: folder, uid).",
                         "steps": "steps.<step id>.<output key> for an earlier step's output.",
@@ -2868,7 +2955,9 @@ impl McpServer {
                     anyhow::bail!("no workflow {}; leave id out to create one", w.id);
                 }
                 let catalog = self.catalog().await;
-                let (w, issues) = workflow::prepare_save(w, SavedBy::Agent, &catalog, &saved);
+                let families = self.store.model_family_ids()?;
+                let (w, issues) =
+                    workflow::prepare_save(w, SavedBy::Agent, &catalog, &saved, &families);
                 let errors: Vec<_> = issues.iter().filter(|i| i.error).collect();
                 if !errors.is_empty() {
                     let list: Vec<String> = errors
@@ -2932,6 +3021,42 @@ impl McpServer {
                     "error": run.error,
                     "steps": run.steps,
                 }))?))
+            }
+            "tab_run_workflow" => {
+                let id = s("workflow_id").ok_or_else(|| anyhow::anyhow!("pass workflow_id"))?;
+                let started = self
+                    .engine
+                    .run_workflow_for_agent(
+                        id,
+                        s("item_id"),
+                        session.filter(|s| !s.is_empty()).map(str::to_string),
+                    )
+                    .await?;
+                Ok(text(serde_json::to_string_pretty(&agent_run_json(
+                    &started.run,
+                    started.repeat,
+                ))?))
+            }
+            "tab_get_workflow_run" => {
+                let id = s("run_id").ok_or_else(|| anyhow::anyhow!("pass run_id"))?;
+                let run = self
+                    .store
+                    .workflow_run_get(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("no run {id}"))?;
+                Ok(text(serde_json::to_string_pretty(&agent_run_json(
+                    &run, false,
+                ))?))
+            }
+            "tab_workflow_stats" | "tab_workflow_failures" => {
+                let id = s("workflow_id").ok_or_else(|| anyhow::anyhow!("pass workflow_id"))?;
+                let days = args["days"].as_u64().unwrap_or(7).clamp(1, 30) as u32;
+                let r = workflow::suggest_store::report(&self.store, &id, days, 0, Utc::now())?;
+                let out = if name == "tab_workflow_stats" {
+                    workflow::suggest_store::stats_json(&r)
+                } else {
+                    workflow::suggest_store::failures_json(&r)
+                };
+                Ok(text(serde_json::to_string(&out)?))
             }
             _ => anyhow::bail!("unknown tool {name}"),
         }
@@ -3027,7 +3152,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 24);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 28);
         let always: Vec<&str> = list["result"]["tools"]
             .as_array()
             .unwrap()
@@ -4921,5 +5046,198 @@ rl.on('line', (l) => {
         for a in ["search", "request", "approve", "reveal"] {
             assert!(log.iter().any(|x| x.action == a), "no {a}");
         }
+    }
+
+    /// What `tab_run_workflow` asked for: workflow, item, chat.
+    type Asked = (String, Option<String>, Option<String>);
+
+    /// Records what `tab_run_workflow` asked for; starts nothing.
+    struct Starts(Arc<Store>, std::sync::Mutex<Vec<Asked>>);
+
+    #[async_trait]
+    impl EngineAccess for Starts {
+        async fn create_task(&self, _t: NewTask) -> anyhow::Result<QueueItem> {
+            anyhow::bail!("not in this test")
+        }
+        async fn preview(&self, _id: &str) -> anyhow::Result<Preview> {
+            anyhow::bail!("not in this test")
+        }
+        async fn run_workflow_for_agent(
+            &self,
+            workflow_id: String,
+            item_id: Option<String>,
+            session: Option<String>,
+        ) -> anyhow::Result<workflow::runtime::AgentRun> {
+            self.1
+                .lock()
+                .unwrap()
+                .push((workflow_id.clone(), item_id.clone(), session.clone()));
+            let run: Run = serde_json::from_value(json!({
+                "id": "run-1", "workflow_id": workflow_id, "workflow_name": "Merge when green",
+                "version": 1, "status": "blocked", "dry_run": false, "trigger": "by an agent",
+                "trigger_key": null, "item_id": item_id, "chain": [], "steps": [],
+                "error": "Merge a pull request is destructive.", "started_at": Utc::now(),
+                "finished_at": Utc::now(), "started_by": session,
+                "resume": { "job": "", "step": 0, "ctx": {} },
+            }))?;
+            self.0.workflow_run_insert(&run)?;
+            Ok(workflow::runtime::AgentRun { run, repeat: false })
+        }
+    }
+
+    #[tokio::test]
+    async fn agents_start_workflows_as_their_chat_but_cant_approve_a_blocked_step() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let engine = Arc::new(Starts(store.clone(), Default::default()));
+        let server = McpServer {
+            store: store.clone(),
+            hub,
+            engine: engine.clone(),
+            events,
+            token: "t".into(),
+        };
+        let out = server
+            .call(
+                Some("chat-1"),
+                "tab_run_workflow",
+                json!({ "workflow_id": "w1", "item_id": "i1" }),
+            )
+            .await
+            .unwrap();
+        let said = out["content"][0]["text"].as_str().unwrap();
+        assert!(said.contains("\"status\": \"blocked\""), "{said}");
+        assert!(said.contains("You can't approve it"), "{said}");
+        assert_eq!(
+            engine.1.lock().unwrap().clone(),
+            [(
+                "w1".to_string(),
+                Some("i1".to_string()),
+                Some("chat-1".to_string())
+            )]
+        );
+        let got = server
+            .call(None, "tab_get_workflow_run", json!({ "run_id": "run-1" }))
+            .await
+            .unwrap();
+        assert!(
+            got["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("blocked")
+        );
+
+        // No tool answers a blocked run: that's a button in the app.
+        let names: Vec<String> = tools()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(names.contains(&"tab_run_workflow".to_string()));
+        assert!(names.contains(&"tab_get_workflow_run".to_string()));
+        for n in &names {
+            assert!(
+                !(n.contains("workflow")
+                    && (n.contains("approve") || n.contains("answer") || n.contains("allow"))),
+                "{n} could give a workflow the person's OK"
+            );
+        }
+        // Saving the workflow as an agent can't allow it either.
+        let _ = server
+            .call(
+                Some("chat-1"),
+                "tab_save_workflow",
+                json!({ "workflow": { "id": "w1", "allow_destructive": true } }),
+            )
+            .await;
+        let run = store.workflow_run_get("run-1").unwrap().unwrap();
+        assert!(run.awaiting_approval().is_some() && run.approved.is_empty());
+        assert!(
+            server
+                .call(None, "tab_get_workflow_run", json!({}))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn agents_read_how_a_workflow_is_doing_and_what_fails() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let server = McpServer {
+            store: store.clone(),
+            hub,
+            engine: Arc::new(Starts(store.clone(), Default::default())),
+            events,
+            token: "t".into(),
+        };
+        let w = store
+            .workflow_save(&workflow::templates()[0], "user", Utc::now())
+            .unwrap();
+        for (n, ok) in [(0, true), (1, false), (2, true)] {
+            let at = Utc::now() - chrono::Duration::minutes(n * 5 + 1);
+            let run: workflow::Run = serde_json::from_value(json!({
+                "id": format!("r{n}"), "workflow_id": w.id, "workflow_name": w.name, "version": 1,
+                "status": if ok { "succeeded" } else { "failed" }, "dry_run": false, "trigger": "t",
+                "trigger_key": null, "item_id": null, "chain": [], "error": null,
+                "steps": [{ "id": "snooze", "label": "Snooze", "status": if ok { "ok" } else { "failed" },
+                    "error": if ok { None } else { Some("Item 4411 is gone") }, "ms": 30 }],
+                "started_at": at, "finished_at": at,
+            }))
+            .unwrap();
+            store.workflow_run_insert(&run).unwrap();
+        }
+        let read = |v: Value| -> Value {
+            serde_json::from_str(v["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+        let stats = read(
+            server
+                .call(
+                    None,
+                    "tab_workflow_stats",
+                    json!({ "workflow_id": w.id, "days": 7 }),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(stats["runs"]["did_work"], 3);
+        assert_eq!(stats["rates"]["success"], 0.667);
+        assert_eq!(stats["steps"][0]["failed"], 1);
+        assert!(
+            stats["suggestions"].as_array().unwrap().is_empty(),
+            "too little to go on"
+        );
+        let failures = read(
+            server
+                .call(
+                    None,
+                    "tab_workflow_failures",
+                    json!({ "workflow_id": w.id }),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(failures["days"], 7);
+        assert_eq!(failures["failure_groups"][0]["error"], "Item # is gone");
+        assert_eq!(failures["failure_groups"][0]["sample_run_id"], "r1");
+        assert!(
+            server
+                .call(None, "tab_workflow_stats", json!({ "workflow_id": "nope" }))
+                .await
+                .is_err()
+        );
     }
 }

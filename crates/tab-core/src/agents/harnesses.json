@@ -49,6 +49,11 @@
       ],
       "format": "claude_initialize"
     },
+    "families": {
+      "fast": "haiku",
+      "balanced": "sonnet",
+      "deep": "opus"
+    },
     "install": {
       "npm": "@anthropic-ai/claude-code",
       "unix": "curl -fsSL https://claude.ai/install.sh | bash",
@@ -85,6 +90,11 @@
         "models"
       ],
       "format": "provider_slash_model_lines"
+    },
+    "families": {
+      "fast": "anthropic/claude-haiku-5-5",
+      "balanced": "anthropic/claude-sonnet-5-5",
+      "deep": "anthropic/claude-opus-5-5"
     },
     "install": {
       "npm": "opencode-ai",
@@ -143,6 +153,11 @@
       ],
       "format": "codex_model_list"
     },
+    "families": {
+      "fast": "gpt-6-luna",
+      "balanced": "gpt-6-sol",
+      "deep": "gpt-6.1-sol"
+    },
     "install": {
       "npm": "@openai/codex",
       "unix": null,
@@ -180,6 +195,11 @@
         "--list-models"
       ],
       "format": "provider_model_table"
+    },
+    "families": {
+      "fast": "anthropic/claude-haiku-5-5",
+      "balanced": "anthropic/claude-sonnet-5-5",
+      "deep": "anthropic/claude-opus-5-5"
     },
     "install": {
       "npm": "@earendil-works/pi-coding-agent",

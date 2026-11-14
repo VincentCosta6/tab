@@ -11,6 +11,7 @@ use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint, coordinator}
 use tab_core::config::ConnectorConfig;
 use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
 use tab_core::connectors::registry;
+use tab_core::families::ModelFamily;
 use tab_core::gateway::{Call, RateLimitState};
 use tab_core::live::SteerCommand;
 use tab_core::local_hub::{HubStatusView, LocalHub};
@@ -214,6 +215,19 @@ impl EngineAccess for LiveEngine {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
             .run_workflow(w, item_id.as_deref(), true)
+            .await
+    }
+    async fn run_workflow_for_agent(
+        &self,
+        workflow_id: String,
+        item_id: Option<String>,
+        session: Option<String>,
+    ) -> anyhow::Result<workflow::runtime::AgentRun> {
+        let guard = self.0.engine.read().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
+            .run_workflow_for_agent(&workflow_id, item_id.as_deref(), session.as_deref())
             .await
     }
 }
@@ -2491,7 +2505,37 @@ async fn workflow_validate(
 ) -> CmdResult<Vec<Issue>> {
     let catalog = with_engine!(state, e => e.connectors());
     let saved = state.store.workflows().map_err(err)?;
-    Ok(workflow::validate(&workflow, &catalog, &saved))
+    let families = state.store.model_family_ids().map_err(err)?;
+    Ok(workflow::validate(&workflow, &catalog, &saved, &families))
+}
+
+/// Model families agent steps can run on: the built-in ones (or the
+/// person's edits of them), then the person's own.
+#[tauri::command]
+async fn model_families_list(state: State<'_, AppState>) -> CmdResult<Vec<ModelFamily>> {
+    state.store.model_families().map_err(err)
+}
+
+#[tauri::command]
+async fn model_family_save(
+    state: State<'_, AppState>,
+    family: ModelFamily,
+) -> CmdResult<Vec<ModelFamily>> {
+    state
+        .store
+        .model_family_save(&family, Utc::now())
+        .map_err(err)?;
+    state.store.model_families().map_err(err)
+}
+
+/// Deletes the person's family, or resets a built-in one.
+#[tauri::command]
+async fn model_family_delete(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<ModelFamily>> {
+    state.store.model_family_delete(&id).map_err(err)?;
+    state.store.model_families().map_err(err)
 }
 
 #[derive(Serialize)]
@@ -2505,7 +2549,9 @@ struct SavedWorkflow {
 async fn workflow_save(state: State<'_, AppState>, workflow: Workflow) -> CmdResult<SavedWorkflow> {
     let catalog = with_engine!(state, e => e.connectors());
     let saved = state.store.workflows().map_err(err)?;
-    let (w, issues) = workflow::prepare_save(workflow, SavedBy::Person, &catalog, &saved);
+    let families = state.store.model_family_ids().map_err(err)?;
+    let (w, issues) =
+        workflow::prepare_save(workflow, SavedBy::Person, &catalog, &saved, &families);
     let w = state
         .store
         .workflow_save(&w, "user", Utc::now())
@@ -2538,9 +2584,10 @@ async fn workflow_set_enabled(
     if enabled {
         let catalog = with_engine!(state, e => e.connectors());
         let saved = state.store.workflows().map_err(err)?;
+        let families = state.store.model_family_ids().map_err(err)?;
         let mut check = w.clone();
         check.enabled = true;
-        if let Some(i) = workflow::validate(&check, &catalog, &saved)
+        if let Some(i) = workflow::validate(&check, &catalog, &saved, &families)
             .into_iter()
             .find(|i| i.error)
         {
@@ -2597,6 +2644,37 @@ async fn workflow_runs(
         .map_err(err)
 }
 
+/// One workflow's stats for the last `days` days (7 or 30) and the span
+/// before it, with days breaking at the caller's midnight.
+#[tauri::command]
+async fn workflow_insights(
+    state: State<'_, AppState>,
+    workflow_id: String,
+    days: u32,
+    utc_offset_minutes: i32,
+) -> CmdResult<workflow::insights::WorkflowInsights> {
+    workflow::insights_store::workflow_insights(
+        &state.store,
+        &workflow_id,
+        days,
+        utc_offset_minutes,
+        Utc::now(),
+    )
+    .map_err(err)
+}
+
+/// Every workflow's stats and health, and hub-wide totals, for the factory
+/// overview.
+#[tauri::command]
+async fn workflow_factory(
+    state: State<'_, AppState>,
+    days: u32,
+    utc_offset_minutes: i32,
+) -> CmdResult<workflow::insights::Factory> {
+    workflow::insights_store::workflow_factory(&state.store, days, utc_offset_minutes, Utc::now())
+        .map_err(err)
+}
+
 #[tauri::command]
 async fn workflow_versions(
     state: State<'_, AppState>,
@@ -2624,6 +2702,127 @@ async fn workflow_run(
     e.run_workflow(workflow, item_id.as_deref(), dry_run)
         .await
         .map_err(err)
+}
+
+/// Each item's workflow status (running, waiting for you, …) for the queue
+/// rows, in one read. Items with nothing to show are left out.
+#[tauri::command]
+async fn workflow_activity(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<workflow::item_status::ItemWorkflowStatus>> {
+    let hub = state.hub.clone();
+    let pending = move |id: &str| !hub.pending_approvals(id).is_empty();
+    workflow::items::statuses(&state.store, &pending, Utc::now()).map_err(err)
+}
+
+/// An item's workflow runs, newest first, with what each links to.
+#[tauri::command]
+async fn item_workflow_runs(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> CmdResult<Vec<workflow::items::RunView>> {
+    let hub = state.hub.clone();
+    let pending = move |id: &str| !hub.pending_approvals(id).is_empty();
+    workflow::items::item_runs(&state.store, &item_id, 20, &pending, Utc::now()).map_err(err)
+}
+
+/// One run with what it links to, for the Runs panel.
+#[tauri::command]
+async fn workflow_run_view(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> CmdResult<Option<workflow::items::RunView>> {
+    let hub = state.hub.clone();
+    let pending = move |id: &str| !hub.pending_approvals(id).is_empty();
+    workflow::items::run_view(&state.store, &run_id, &pending, Utc::now()).map_err(err)
+}
+
+/// The person's answer to a run blocked on a step: approve that one step
+/// for that one run (it carries on from there), or decline and end it.
+/// Only the app's buttons call this; no agent or MCP tool can.
+#[tauri::command]
+async fn workflow_run_answer(
+    state: State<'_, AppState>,
+    run_id: String,
+    approve: bool,
+) -> CmdResult<Run> {
+    let guard = state.engine.read().await;
+    let e = guard.as_ref().ok_or("engine is not running")?;
+    e.answer_workflow_run(&run_id, approve).await.map_err(err)
+}
+
+/// Runs a failed run again, as the person asked from the Runs panel or a
+/// failure group. The new run notes the one it re-runs (`rerun_of`).
+#[tauri::command]
+async fn workflow_rerun(state: State<'_, AppState>, run_id: String) -> CmdResult<Run> {
+    let guard = state.engine.read().await;
+    let e = guard.as_ref().ok_or("engine is not running")?;
+    e.rerun_workflow(&run_id).await.map_err(err)
+}
+
+/// What could make a workflow cheaper or steadier, from its runs over the
+/// last `days` days: deterministic rules, each with its evidence and,
+/// where there is one, the changed workflow to load as a draft.
+#[tauri::command]
+async fn workflow_suggestions(
+    state: State<'_, AppState>,
+    workflow_id: String,
+    days: u32,
+    utc_offset_minutes: i32,
+) -> CmdResult<Vec<workflow::suggest::Suggestion>> {
+    workflow::suggest_store::workflow_suggestions(
+        &state.store,
+        &workflow_id,
+        days,
+        utc_offset_minutes,
+        Utc::now(),
+    )
+    .map_err(err)
+}
+
+/// The chat of a workflow job's agent.
+#[tauri::command]
+async fn job_chat_open(state: State<'_, AppState>, job_id: String) -> CmdResult<Chat> {
+    let session = state
+        .store
+        .session_for_key(&format!("job:{job_id}"))
+        .map_err(err)?;
+    let (messages, approvals, running) = match &session {
+        Some(s) => (
+            state.store.messages_current(&s.id, 3).map_err(err)?,
+            state.hub.pending_approvals(&s.id),
+            state.hub.is_running(&s.id),
+        ),
+        None => (Vec::new(), Vec::new(), false),
+    };
+    Ok(Chat {
+        session,
+        messages,
+        approvals,
+        running,
+    })
+}
+
+/// A message (an answer, usually) to a workflow job's agent.
+#[tauri::command]
+async fn job_chat_send(
+    state: State<'_, AppState>,
+    job_id: String,
+    text: String,
+) -> CmdResult<Session> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("message is empty".into());
+    }
+    let session = state
+        .store
+        .session_for_key(&format!("job:{job_id}"))
+        .map_err(err)?
+        .ok_or("that agent's chat isn't on this device")?;
+    if !state.hub.steer(&session.id, &text).map_err(err)? {
+        state.hub.send(&session.id, &text).map_err(err)?;
+    }
+    Ok(session)
 }
 
 #[tauri::command]
@@ -3670,11 +3869,24 @@ pub fn run() {
             workflow_templates,
             workflow_validate,
             workflow_save,
+            model_families_list,
+            model_family_save,
+            model_family_delete,
             workflow_set_enabled,
             workflow_delete,
             workflow_runs,
+            workflow_insights,
+            workflow_factory,
             workflow_versions,
             workflow_run,
+            workflow_activity,
+            item_workflow_runs,
+            workflow_run_view,
+            workflow_run_answer,
+            workflow_rerun,
+            workflow_suggestions,
+            job_chat_open,
+            job_chat_send,
             item_activity,
             workflow_chat_open,
             workflow_chat_send,

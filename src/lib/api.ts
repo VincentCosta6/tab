@@ -6,7 +6,7 @@ import type {
   AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ChatSummary, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceAccess, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem, SlashCommand, Subagent,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
-  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, Runner, RunsOn,
+  Activity, Issue, Suggestion, Workflow, WorkflowRun, ItemWorkflowStatus, RunView, WorkflowFactory, WorkflowInsights, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, ModelFamily, Runner, RunsOn,
   AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
   EmailSignInStatus, MailProvider, Segment, SessionMessage, ChatRewound, RewoundFiles, VaultAudit, VaultEntry, VaultEntryInput, VaultStatus,
 } from "./types";
@@ -281,6 +281,10 @@ export const api = {
   depsTypes: (repo: string, number: number) => call<[string, string][]>("deps_types", { repo, number }),
   workflowsList: () => call<Workflow[]>("workflows_list"),
   workflowTemplates: () => call<Workflow[]>("workflow_templates"),
+  modelFamilies: () => call<ModelFamily[]>("model_families_list"),
+  modelFamilySave: (family: ModelFamily) => call<ModelFamily[]>("model_family_save", { family }),
+  /** Deletes the person's family, or resets a built-in one. */
+  modelFamilyDelete: (id: string) => call<ModelFamily[]>("model_family_delete", { id }),
   workflowValidate: (workflow: Workflow) => call<Issue[]>("workflow_validate", { workflow }),
   workflowSave: (workflow: Workflow) => call<{ workflow: Workflow; issues: Issue[] }>("workflow_save", { workflow }),
   workflowSetEnabled: (id: string, enabled: boolean, allowDestructive?: boolean, allowCommands?: boolean) =>
@@ -288,6 +292,26 @@ export const api = {
   workflowDelete: (id: string) => call<void>("workflow_delete", { id }),
   workflowRuns: (workflowId: string | null, limit = 50) => call<WorkflowRun[]>("workflow_runs", { workflowId, limit }),
   workflowRun: (workflow: Workflow, itemId: string | null, dryRun: boolean) => call<WorkflowRun>("workflow_run", { workflow, itemId, dryRun }),
+  /** One workflow's stats for the last `days` days (7 or 30) and the span before; days break at the local midnight. */
+  workflowInsights: (workflowId: string, days: number) =>
+    call<WorkflowInsights>("workflow_insights", { workflowId, days, utcOffsetMinutes: -new Date().getTimezoneOffset() }),
+  /** Every workflow's stats and health with hub-wide totals, this window and the one before. */
+  workflowFactory: (days: number) => call<WorkflowFactory>("workflow_factory", { days, utcOffsetMinutes: -new Date().getTimezoneOffset() }),
+  /** Each item's workflow status, for the queue rows. */
+  workflowActivity: () => call<ItemWorkflowStatus[]>("workflow_activity"),
+  /** An item's workflow runs, newest first, with what each links to. */
+  itemWorkflowRuns: (itemId: string) => call<RunView[]>("item_workflow_runs", { itemId }),
+  workflowRunView: (runId: string) => call<RunView | null>("workflow_run_view", { runId }),
+  /** Your answer to a run blocked on a step: approve that step for this run only, or decline and end it. */
+  workflowRunAnswer: (runId: string, approve: boolean) => call<WorkflowRun>("workflow_run_answer", { runId, approve }),
+  /** Runs a failed run again; the new run's `rerun_of` names this one. */
+  workflowRerun: (runId: string) => call<WorkflowRun>("workflow_rerun", { runId }),
+  /** What could make a workflow cheaper or steadier, from its runs over the last `days` days. */
+  workflowSuggestions: (workflowId: string, days: number) =>
+    call<Suggestion[]>("workflow_suggestions", { workflowId, days, utcOffsetMinutes: -new Date().getTimezoneOffset() }),
+  /** The chat of a workflow job's agent. */
+  jobChatOpen: (jobId: string) => call<Chat>("job_chat_open", { jobId }),
+  jobChatSend: (jobId: string, text: string) => call<Session>("job_chat_send", { jobId, text }),
   workflowChatOpen: (workflowId: string | null) => call<Chat>("workflow_chat_open", { workflowId }),
   workflowChatSend: (text: string, open: Workflow | null) => call<Session>("workflow_chat_send", { text, open }),
   browserOpen: (id: string, url: string, bounds: Bounds) => call<void>("browser_open", { id, url, bounds }),

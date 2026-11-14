@@ -693,7 +693,13 @@ impl Timeline {
             EngineEvent::WorkflowRun { run } if run.finished_at.is_some() && !run.dry_run => {
                 use crate::workflow::RunStatus;
                 let Some(item) = &run.item_id else { return };
+                let declined = run.status == RunStatus::Stopped
+                    && run
+                        .steps
+                        .last()
+                        .is_some_and(|s| s.status == crate::workflow::StepStatus::Blocked);
                 let outcome = match run.status {
+                    _ if declined => "was declined",
                     RunStatus::Succeeded => "ran",
                     RunStatus::Stopped => "stopped at a filter",
                     RunStatus::Failed => "failed",
@@ -703,7 +709,7 @@ impl Timeline {
                     RunStatus::Running | RunStatus::Waiting => return,
                 };
                 // A filter that didn't match on the first step is noise.
-                if run.status == RunStatus::Stopped && run.steps.len() <= 1 {
+                if run.status == RunStatus::Stopped && run.steps.len() <= 1 && !declined {
                     return;
                 }
                 self.core.note(
@@ -1005,12 +1011,11 @@ impl Engine {
                     if let Err(e) = timer.store.prune(Utc::now(), chrono::Duration::days(30)) {
                         tracing::error!(error = %e, "pruning failed");
                     }
-                    if let Err(e) = timer
-                        .store
-                        .workflow_runs_prune(Utc::now() - chrono::Duration::days(30))
+                    // Rolls up the run log's complete days before pruning it.
+                    if let Err(e) = crate::workflow::rollups::maintain(&timer.store, Utc::now())
                         .and_then(|_| timer.store.activity_prune())
                     {
-                        tracing::error!(error = %e, "pruning workflow runs failed");
+                        tracing::error!(error = %e, "rolling up and pruning workflow runs failed");
                     }
                 }
                 n += 1;
@@ -1179,6 +1184,41 @@ impl EngineHandle {
             None => None,
         };
         self.workflows.run_now(w, item, dry_run).await
+    }
+
+    /// Runs a failed run again, as the person asked; the new run notes
+    /// which one it re-runs.
+    pub async fn rerun_workflow(&self, run_id: &str) -> anyhow::Result<Run> {
+        self.workflows.rerun(run_id).await
+    }
+
+    /// Starts an enabled workflow for an agent (see
+    /// [`Runtime::run_for_agent`]), on an item if given.
+    pub async fn run_workflow_for_agent(
+        &self,
+        workflow_id: &str,
+        item_id: Option<&str>,
+        session: Option<&str>,
+    ) -> anyhow::Result<crate::workflow::runtime::AgentRun> {
+        let item = match item_id.filter(|i| !i.is_empty()) {
+            Some(id) => Some(
+                self.core
+                    .store
+                    .get(id)?
+                    .ok_or_else(|| anyhow::anyhow!("no item {id}"))?,
+            ),
+            None => None,
+        };
+        self.workflows
+            .run_for_agent(workflow_id, item, session, Utc::now())
+            .await
+    }
+
+    /// The person's answer to a run blocked on a step: approve that step on
+    /// that run and carry on, or decline and end it. Only for a person's
+    /// action in the app, never an agent's.
+    pub async fn answer_workflow_run(&self, run_id: &str, approve: bool) -> anyhow::Result<Run> {
+        self.workflows.answer_blocked(run_id, approve).await
     }
 
     /// Rich content for an item. Cached content is returned immediately,
