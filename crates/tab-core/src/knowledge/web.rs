@@ -137,6 +137,27 @@ fn page_link(base: &Url, start: &Url, href: &str) -> Option<Url> {
     .then_some(u)
 }
 
+/// A site with nothing to read without the person: it needs a sign-in, is
+/// drawn in the browser, or has no text. Its link is still worth knowing.
+#[derive(Debug)]
+pub struct Unreadable(pub String);
+
+impl std::fmt::Display for Unreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unreadable {}
+
+/// A page with a password box: a sign-in page, not the site's content.
+fn asks_password(html: &str) -> bool {
+    let html = html.to_ascii_lowercase();
+    ["type=\"password\"", "type='password'", "type=password"]
+        .iter()
+        .any(|p| html.contains(p))
+}
+
 async fn get(gw: &Gateway, u: &Url) -> anyhow::Result<crate::gateway::Response> {
     check_public(u).await?;
     let call = Call::get("web", "knowledge", "read a project's website", u.as_str()).no_redirects();
@@ -148,6 +169,17 @@ async fn get(gw: &Gateway, u: &Url) -> anyhow::Result<crate::gateway::Response> 
 pub async fn crawl(gw: &Gateway, start: &str, depth: u32) -> anyhow::Result<Vec<Doc>> {
     let start = Url::parse(start).or_else(|_| Url::parse(&format!("https://{start}")))?;
     check_public(&start).await?;
+    // `#/businesses/…` never reaches the server: the page is drawn by
+    // script in the browser, and all there is to fetch is the app's shell.
+    if start
+        .fragment()
+        .is_some_and(|f| f.starts_with('/') || f.starts_with('!'))
+    {
+        return Err(Unreadable(format!(
+            "{start} is drawn in the browser, so there's no page for tab to read"
+        ))
+        .into());
+    }
     let robots = match start.join("/robots.txt") {
         Ok(r) => match get(gw, &r).await {
             Ok(res) if res.status == 200 => disallowed(&res.body),
@@ -203,6 +235,18 @@ pub async fn crawl(gw: &Gateway, start: &str, depth: u32) -> anyhow::Result<Vec<
             .and_then(|v| v.to_str().ok())
             .unwrap_or("text/html")
             .to_ascii_lowercase();
+        if matches!(res.status, 401 | 403) || (kind.contains("html") && asks_password(&res.body)) {
+            // The start page (or where it redirects) wants a sign-in: there's
+            // nothing else to read. Elsewhere, skip just that page.
+            if d == 0 {
+                return Err(Unreadable(format!("{start} needs a sign-in")).into());
+            }
+            continue;
+        }
+        if res.status >= 400 {
+            first_error.get_or_insert(anyhow::anyhow!("{u} answered {}", res.status));
+            continue;
+        }
         let page = if kind.contains("html") {
             extract::html(&res.body)
         } else if kind.starts_with("text/") {
@@ -233,7 +277,7 @@ pub async fn crawl(gw: &Gateway, start: &str, depth: u32) -> anyhow::Result<Vec<
     }
     match (docs.is_empty(), first_error) {
         (true, Some(e)) => Err(e),
-        (true, None) => anyhow::bail!("found no text on {start}"),
+        (true, None) => Err(Unreadable(format!("found no text on {start}")).into()),
         _ => Ok(docs),
     }
 }
@@ -241,6 +285,14 @@ pub async fn crawl(gw: &Gateway, start: &str, depth: u32) -> anyhow::Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knows_a_sign_in_page() {
+        assert!(asks_password(
+            r#"<form><input name=p TYPE="password"></form>"#
+        ));
+        assert!(!asks_password("<p>Forgot your password?</p>"));
+    }
 
     #[tokio::test]
     async fn refuses_this_computer_and_its_network() {

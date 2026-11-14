@@ -41,6 +41,9 @@ const MAX_EMAILS: usize = 200;
 enum Failure {
     /// Needs the person: connect email, sign in.
     SignIn(String),
+    /// A website with nothing to read (a sign-in, drawn in the browser, no
+    /// text): only its name, link and note are searchable.
+    LinkOnly(String),
     Failed(anyhow::Error),
 }
 
@@ -66,6 +69,21 @@ fn next_look(t: &IndexTarget, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     Some(now + chrono::Duration::hours(hours))
 }
 
+/// What's known about a website without reading it: its name, link and
+/// note. Indexed with its pages, so search finds the link either way.
+fn link_doc(t: &IndexTarget) -> Doc {
+    let url = t.url.as_deref().unwrap_or_default();
+    Doc {
+        title: t.title.clone(),
+        source: t.url.clone(),
+        text: [t.title.as_str(), url, t.note.as_str()]
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 /// Reads a resource's documents.
 async fn read(gw: &Gateway, sources: &dyn Sources, t: &IndexTarget) -> Result<Vec<Doc>, Failure> {
     let url = t.url.as_deref().unwrap_or_default();
@@ -77,7 +95,15 @@ async fn read(gw: &Gateway, sources: &dyn Sources, t: &IndexTarget) -> Result<Ve
         }],
         "website" => {
             let depth = t.options["depth"].as_u64().unwrap_or(1).min(2) as u32;
-            web::crawl(gw, url, depth).await?
+            match web::crawl(gw, url, depth).await {
+                Ok(pages) => std::iter::once(link_doc(t)).chain(pages).collect(),
+                Err(e) => {
+                    return Err(match e.downcast::<web::Unreadable>() {
+                        Ok(u) => Failure::LinkOnly(u.0),
+                        Err(e) => Failure::Failed(e),
+                    });
+                }
+            }
         }
         "file" => {
             let name = t.options["name"].as_str().unwrap_or(&t.title).to_string();
@@ -165,8 +191,19 @@ pub async fn index_one(
                 now + chrono::Duration::minutes(30),
             )?;
         }
+        Err(Failure::LinkOnly(why)) => {
+            // Nothing a retry fixes: look again on the site's own schedule.
+            let docs = [link_doc(t)];
+            store.knowledge_put(t, &fingerprint(&docs), &chunk::chunk(&docs), next, now)?;
+            store.knowledge_failed(t, "link_only", &why, next.unwrap_or(now))?;
+        }
         Err(Failure::Failed(e)) => {
             tracing::warn!(resource = %t.id, kind = %t.kind, error = %e, "couldn't index");
+            // A website never read still has a link worth finding.
+            if t.kind == "website" && store.knowledge_pieces(&t.id)? == 0 {
+                let docs = [link_doc(t)];
+                store.knowledge_put(t, &fingerprint(&docs), &chunk::chunk(&docs), next, now)?;
+            }
             let retry = next
                 .unwrap_or(now + chrono::Duration::hours(6))
                 .min(now + chrono::Duration::hours(6));
@@ -285,6 +322,46 @@ mod tests {
         assert_eq!(hits[0].resource, "Onboarding.md");
         assert!(hits[0].text.starts_with("# Onboarding"));
         // Nothing due again until it changes.
+        assert!(store.knowledge_due(now, 10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_website_tab_cant_read_is_still_a_link_worth_finding() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let gw = Gateway::new(store.clone());
+        let now = Utc::now();
+        let p = store.project_save(None, "Acme", "", "", now).unwrap();
+        let portal = store
+            .resource_save(
+                &p.id,
+                &ResourceInput {
+                    kind: "website".into(),
+                    title: "Company portal".into(),
+                    url: Some("https://93.184.216.34/#/businesses/40bbbd09".into()),
+                    note: "Registered agent filings and annual reports".into(),
+                    ..Default::default()
+                },
+                "user",
+                now,
+            )
+            .unwrap();
+        for t in store.knowledge_due(now, 10).unwrap() {
+            index_one(&store, &gw, &NoSources, &t).await.unwrap();
+        }
+        let rs = store.project_resources(&p.id, "coordinator").unwrap();
+        let r = rs.iter().find(|r| r.id == portal.id).unwrap();
+        assert_eq!((r.status.as_str(), r.chunks), ("link_only", 1));
+        assert!(
+            r.index_error
+                .as_deref()
+                .unwrap()
+                .contains("drawn in the browser")
+        );
+        let hits = store
+            .chunks_search("annual reports", None, &Reader::default(), 5)
+            .unwrap();
+        assert_eq!(hits[0].resource, "Company portal");
+        // Not retried before the site's daily look.
         assert!(store.knowledge_due(now, 10).unwrap().is_empty());
     }
 }

@@ -23,6 +23,7 @@ export const statusLook: Record<ProjectResource["status"], { label: string; tone
   pending: { label: "Not indexed yet", tone: "neutral", help: "Waiting to be read. Agents can open the link meanwhile." },
   indexed: { label: "Indexed", tone: "success", help: "Its contents are searchable." },
   live: { label: "Live", tone: "success", help: "Agents read it live through its connection." },
+  link_only: { label: "Link only", tone: "neutral", help: "tab can't read this page (it needs a sign-in or is drawn in the browser), so only its name, link and note are searchable." },
   failed: { label: "Failed", tone: "danger", help: "The last read failed; what was indexed before is still searchable." },
   needs_sign_in: { label: "Needs sign-in", tone: "warning", help: "Connect the service so agents can read it." },
 };

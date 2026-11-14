@@ -385,7 +385,7 @@ pub struct ProjectResource {
     pub access: String,
     /// Kind-specific choices (crawl depth, schedule, what agents may do).
     pub options: serde_json::Value,
-    /// `pending`, `indexed`, `live`, `failed` or `needs_sign_in`.
+    /// `pending`, `indexed`, `live`, `link_only`, `failed` or `needs_sign_in`.
     pub status: String,
     pub chunks: i64,
     pub pinned: bool,

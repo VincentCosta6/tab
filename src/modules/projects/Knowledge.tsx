@@ -188,6 +188,7 @@ const indexable: ResourceKind[] = ["website", "file", "email", "note"];
 
 /** The status badge's hover: why it failed, or when it was last read. */
 function statusHelp(r: ProjectResource): string {
+  if (r.status === "link_only") return `${r.index_error ? `${r.index_error}. ` : ""}Its name, link and note are searchable.`;
   if (r.index_error) return r.index_error;
   if (r.indexed_at) return `${statusLook[r.status].help} Read ${timeAgo(r.indexed_at)}.`;
   return statusLook[r.status].help;
