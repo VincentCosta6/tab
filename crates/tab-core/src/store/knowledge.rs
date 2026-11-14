@@ -293,8 +293,17 @@ impl Store {
         Ok(())
     }
 
-    /// Reading failed: `status` is `failed` or `needs_sign_in`. What was
-    /// indexed before stays searchable. Tries again at `retry_at`.
+    /// How many pieces of a resource are indexed here.
+    pub fn knowledge_pieces(&self, id: &str) -> anyhow::Result<i64> {
+        Ok(self.conn().query_row(
+            "SELECT COUNT(*) FROM resource_chunks WHERE resource_id = ?1",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Reading failed: `status` is `failed`, `needs_sign_in` or `link_only`.
+    /// What was indexed before stays searchable. Tries again at `retry_at`.
     pub fn knowledge_failed(
         &self,
         t: &IndexTarget,

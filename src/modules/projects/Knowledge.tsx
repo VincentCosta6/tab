@@ -84,7 +84,7 @@ export function KnowledgeRail({ project, onAdd, onSeeAll, onEditRules }: { proje
 }
 
 function RailRow({ r }: { r: ProjectResource }) {
-  const st = statusLook[r.status];
+  const st = statusOf(r);
   return (
     <button className="pjk-row" onClick={() => isLink(r.url) && openUrl(r.url!)} title={r.note || r.url || r.title}>
       <span className={cx("pjk-glyph", r.access !== "all" && "restricted")}><Icon name={r.access === "all" ? kindLook[r.kind].icon : "lock"} size={13} /></span>
@@ -140,7 +140,7 @@ export function KnowledgeView({ project, onAdd, repos }: { project: Project; onA
             <span>Resource</span><span>Kind</span><span>Who can read</span><span>Status</span><span>Last used</span><span />
           </div>
           {shown.map((r) => {
-            const st = statusLook[r.status];
+            const st = statusOf(r);
             const ac = accessLook[r.access];
             return (
               <div key={r.id} className="pjk-tr" role="row">
@@ -186,11 +186,15 @@ export function KnowledgeView({ project, onAdd, repos }: { project: Project; onA
 /** Kinds tab reads into search. */
 const indexable: ResourceKind[] = ["website", "file", "email", "note"];
 
+/** A resource's status look; one from a newer app reads as not indexed yet. */
+const statusOf = (r: ProjectResource) => statusLook[r.status] ?? statusLook.pending;
+
 /** The status badge's hover: why it failed, or when it was last read. */
 function statusHelp(r: ProjectResource): string {
+  if (r.status === "link_only") return `${r.index_error ? `${r.index_error}. ` : ""}Its name, link and note are searchable.`;
   if (r.index_error) return r.index_error;
-  if (r.indexed_at) return `${statusLook[r.status].help} Read ${timeAgo(r.indexed_at)}.`;
-  return statusLook[r.status].help;
+  if (r.indexed_at) return `${statusOf(r).help} Read ${timeAgo(r.indexed_at)}.`;
+  return statusOf(r).help;
 }
 
 function Stat({ value, label }: { value: number; label: string }) {

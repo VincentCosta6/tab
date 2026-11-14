@@ -202,7 +202,7 @@ export interface ProjectResource {
   note: string;
   access: ResourceAccess;
   options: Record<string, unknown>;
-  status: "pending" | "indexed" | "live" | "failed" | "needs_sign_in";
+  status: "pending" | "indexed" | "live" | "link_only" | "failed" | "needs_sign_in";
   chunks: number;
   pinned: boolean;
   added_by: string;
