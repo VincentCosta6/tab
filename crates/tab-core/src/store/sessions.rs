@@ -376,6 +376,16 @@ impl Store {
         Ok(rows)
     }
 
+    /// Replaces a message's `meta` (the agent's own id for it, learnt after
+    /// it was stored).
+    pub fn message_set_meta(&self, id: i64, meta: &serde_json::Value) -> anyhow::Result<()> {
+        self.conn().execute(
+            "UPDATE session_messages SET meta = ?1 WHERE id = ?2",
+            params![serde_json::to_string(meta)?, id],
+        )?;
+        Ok(())
+    }
+
     /// Drops a chat's messages from `id` on (a rewind), and returns how many.
     pub fn messages_delete_from(&self, session_id: &str, id: i64) -> anyhow::Result<usize> {
         Ok(self.conn().execute(

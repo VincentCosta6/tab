@@ -60,10 +60,11 @@ pub(super) async fn run_turn(
     system: &str,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    // ACP has no input mid-turn: what's sent from here on waits for the next turn.
+    // Messages sent mid-turn: agents that take them (`acp.steering`) get
+    // them now; the rest, and anything left over, run as the next turn.
     hub.steering_close(&session.id);
     let mut queued = hub.steering_open(&session.id);
-    let result = run(hub, session, prompt, system, cancel).await;
+    let result = run(hub, session, prompt, system, &mut queued, cancel).await;
     let mut later = Vec::new();
     while let Ok(s) = queued.try_recv() {
         if let Steer::Message(m) = s {
@@ -86,6 +87,7 @@ async fn run(
     session: &Session,
     prompt: &str,
     system: &str,
+    steering: &mut mpsc::UnboundedReceiver<Steer>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let kind = session.agent;
@@ -95,8 +97,20 @@ async fn run(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("{} has no ACP entry", harness.name))?;
     let cfg = hub.config_for(session);
-    let policy = hub.policy(session);
+    let mut policy = hub.policy(session);
     let strict = cfg.strict || policy.trust != Trust::Person;
+    // Claude Code keeps tab's own setup (see `claude::acp_setup`), and
+    // narrows the sandbox to its conversation before anything starts.
+    let mut claude = match kind {
+        AgentKind::ClaudeCode => Some(super::claude::acp_setup(
+            hub,
+            session,
+            &cfg,
+            &mut policy,
+            system,
+        )?),
+        _ => None,
+    };
     let exe = match &spec.command {
         Some(c) => super::resolve(c).map_err(|e| {
             anyhow::anyhow!(
@@ -136,16 +150,12 @@ async fn run(
     }
     // Servers the person set up that strict mode turned off; a tool from
     // one of them stops the turn.
-    let mut foreign = Vec::new();
-    if strict && kind == AgentKind::OpenCode {
-        foreign = super::opencode::own_mcp_servers(cwd, policy.trust);
-        let off: serde_json::Map<_, _> = foreign
-            .iter()
-            .map(|n| (n.clone(), json!({ "enabled": false })))
-            .collect();
-        prepared
-            .cmd
-            .env("OPENCODE_CONFIG_CONTENT", json!({ "mcp": off }).to_string());
+    let (mut env, foreign) = launch(kind, strict, cwd, policy.trust, Use::Chat)?;
+    if let Some(c) = &claude {
+        env.extend(c.env.iter().cloned());
+    }
+    for (k, v) in env {
+        prepared.cmd.env(k, v);
     }
     prepared
         .cmd
@@ -153,6 +163,7 @@ async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     tracing::debug!(session = %session.id, harness = harness.name, resume = ?session.agent_session_id, sandboxed = prepared.enforced, "starting ACP turn");
+    let sandboxed = prepared.enforced;
     let mut child = prepared.spawn().map_err(|e| {
         anyhow::anyhow!("starting {} ({}) failed: {e}", harness.name, exe.display())
     })?;
@@ -180,6 +191,11 @@ async fn run(
     events.mcp_tool_name = spec.mcp_tool_name.clone();
     events.foreign = foreign;
     events.allowed = vec!["tab".to_string()];
+    let session_meta = claude.as_ref().map(|c| c.meta.clone());
+    let claude_resume = claude.as_ref().map(|c| c.resume.clone());
+    let claude_mode = claude.as_ref().map(|c| c.mode.clone());
+    // Claude Code's chat comes from its own messages (`_claude/sdkMessage`).
+    events.raw = claude.take().map(|c| c.parser);
 
     let outcome: anyhow::Result<Option<Result<Value, RpcError>>> = async {
         // Start: initialize, then the chat's session. Updates that replay an
@@ -190,16 +206,13 @@ async fn run(
             &mut incoming,
             &mut events,
             &cancel,
-            conn.request(
-                "initialize",
-                acp::InitializeRequest::new(ProtocolVersion::V1)
-                    .client_capabilities(acp::ClientCapabilities::default())
-                    .client_info(acp::Implementation::new("tab", env!("CARGO_PKG_VERSION"))),
-            ),
+            conn.request_value("initialize", initialize_params()),
         )
         .await?;
         let Some(init) = init else { return Ok(None) };
-        let init: acp::InitializeResponse = serde_json::from_value(init?)?;
+        let init = init?;
+        let steers = init["_meta"]["steering"]["supported"] == true;
+        let init: acp::InitializeResponse = serde_json::from_value(init)?;
         let caps = &init.agent_capabilities;
 
         let mut servers = Vec::new();
@@ -229,10 +242,16 @@ async fn run(
             .is_some()
             .then(|| acp::SystemPrompt::new(vec![text_block(system)]));
 
-        let resume = session
-            .agent_session_id
-            .clone()
+        // A rewound Claude Code chat may start over (see `claude::Rewind`).
+        let resume = claude_resume
+            .unwrap_or_else(|| session.agent_session_id.clone())
             .filter(|_| caps.load_session);
+        let with_meta = |mut v: Value| {
+            if let (Some(m), Some(o)) = (&session_meta, v.as_object_mut()) {
+                o.insert("_meta".into(), m.clone());
+            }
+            v
+        };
         let acp_session = match resume {
             Some(id) => {
                 let load = acp::LoadSessionRequest::new(id.clone(), session.cwd.clone())
@@ -243,13 +262,19 @@ async fn run(
                     &mut incoming,
                     &mut events,
                     &cancel,
-                    conn.request("session/load", load),
+                    conn.request_value(
+                        "session/load",
+                        with_meta(serde_json::to_value(load).unwrap_or_default()),
+                    ),
                 )
                 .await?
                 else {
                     return Ok(None);
                 };
                 let mut r = r?;
+                if events.raw.is_some() {
+                    save_subagents(hub, &r);
+                }
                 // The chat's model can change between turns.
                 if let Some(model) = cfg.model_for(kind) {
                     if let Some(o) = r.as_object_mut() {
@@ -268,13 +293,19 @@ async fn run(
                     &mut incoming,
                     &mut events,
                     &cancel,
-                    conn.request("session/new", new),
+                    conn.request_value(
+                        "session/new",
+                        with_meta(serde_json::to_value(new).unwrap_or_default()),
+                    ),
                 )
                 .await?
                 else {
                     return Ok(None);
                 };
                 let r = r?;
+                if events.raw.is_some() {
+                    save_subagents(hub, &r);
+                }
                 let id = serde_json::from_value::<acp::NewSessionResponse>(r.clone())?
                     .session_id
                     .0
@@ -285,7 +316,14 @@ async fn run(
                 id
             }
         };
-        hub.update(&session.id, None, Some(&acp_session));
+        if let Some(mode) = &claude_mode {
+            set_mode(&conn, &acp_session, mode).await;
+        }
+        // Claude Code's conversation is the one tab named, which its own
+        // messages report (the adapter's id for a new one differs).
+        if events.raw.is_none() {
+            hub.update(&session.id, None, Some(&acp_session));
+        }
         events.replaying = false;
 
         // An agent that can't take a system prompt gets tab's instructions
@@ -297,14 +335,48 @@ async fn run(
             prompt.to_string()
         };
         let request = acp::PromptRequest::new(acp_session.clone(), vec![text_block(&text)]);
-        let r = drive(
+        let r = prompt_turn(
             &conn,
             &mut incoming,
             &mut events,
             &cancel,
             conn.request("session/prompt", request),
+            match spec.steering {
+                // An agent that says it takes `_session/steering` gets it.
+                catalog::Steering::Extension if steers => Some((&mut *steering, true)),
+                catalog::Steering::Prompt => Some((&mut *steering, false)),
+                _ => None,
+            },
+            &acp_session,
         )
         .await?;
+        // Background work Claude Code started (a command, a subagent, a
+        // watcher) runs on after the reply, and may start a turn of its own
+        // when it ends: the chat shows Monitoring until it's all done.
+        if r.as_ref().is_some_and(|r| r.is_ok())
+            && events
+                .raw
+                .as_ref()
+                .is_some_and(|p| !p.background.is_empty())
+        {
+            hub.update(&session.id, Some(SessionStatus::Monitoring), None);
+            loop {
+                let busy = events
+                    .raw
+                    .as_ref()
+                    .is_some_and(|p| !p.background.is_empty() || !p.finished());
+                if !busy {
+                    break;
+                }
+                tokio::select! {
+                    m = incoming.recv() => if !handle(&conn, &mut events, m)? { break },
+                    _ = cancel.cancelled() => break,
+                }
+            }
+            if !cancel.is_cancelled() {
+                hub.update(&session.id, Some(SessionStatus::Idle), None);
+            }
+        }
         match r {
             Some(r) => Ok(Some(r)),
             None => {
@@ -362,11 +434,74 @@ async fn run(
     }
     finish.map_err(|e| {
         anyhow::anyhow!(
-            "{} stopped before finishing: {e}{}",
+            "{} stopped before finishing: {e}{}{}",
             harness.name,
-            super::per_turn::tail(&stderr)
+            super::per_turn::tail(&stderr),
+            match kind {
+                AgentKind::ClaudeCode => super::claude::startup_hint(&stderr, sandboxed),
+                _ => "",
+            }
         )
     })
+}
+
+/// A harness's environment, and the person's MCP servers strict mode
+/// turned off.
+type Launch = (Vec<(String, String)>, Vec<String>);
+
+/// What a turn is for, where it changes how the agent starts.
+#[derive(Clone, Copy, PartialEq)]
+enum Use {
+    Chat,
+    /// A background helper's answer: it may read, never act.
+    OneShot,
+}
+
+/// What each harness needs in its environment that its `harnesses.json`
+/// entry can't say, and the person's own MCP servers that strict mode
+/// turned off (a tool from one stops the turn).
+fn launch(
+    kind: AgentKind,
+    strict: bool,
+    cwd: &std::path::Path,
+    trust: Trust,
+    purpose: Use,
+) -> anyhow::Result<Launch> {
+    let mut env = Vec::new();
+    let mut foreign = Vec::new();
+    match kind {
+        AgentKind::OpenCode if strict => {
+            foreign = super::opencode::own_mcp_servers(cwd, trust);
+            let off: serde_json::Map<_, _> = foreign
+                .iter()
+                .map(|n| (n.clone(), json!({ "enabled": false })))
+                .collect();
+            env.push((
+                "OPENCODE_CONFIG_CONTENT".into(),
+                json!({ "mcp": off }).to_string(),
+            ));
+        }
+        AgentKind::Codex => {
+            // Codex's sandbox can't run inside tab's, so where tab's is
+            // enforced it bounds the agent and Codex never asks (as before);
+            // elsewhere Codex keeps edits to the folder and asks the person
+            // for the rest.
+            let mode = match purpose {
+                Use::OneShot => "read-only",
+                Use::Chat if crate::sandbox::current().enforced() => "agent-full-access",
+                Use::Chat => "workspace-write",
+            };
+            env.push(("INITIAL_AGENT_MODE".into(), mode.into()));
+            if strict {
+                // Codex's own config folder without the person's config,
+                // instructions, rules, plugins, skills or memories.
+                let home = super::codex::strict_home()?;
+                env.push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
+            }
+        }
+        _ => {}
+    }
+    Ok((env, foreign))
 }
 
 /// One answer for background helpers (titles, suggested replies): a
@@ -400,14 +535,8 @@ pub(super) async fn complete(
         for (k, v) in spec.env_for(true) {
             prepared.cmd.env(k, v);
         }
-        if kind == AgentKind::OpenCode {
-            let off: serde_json::Map<_, _> = super::opencode::own_mcp_servers(&dir, Trust::Person)
-                .into_iter()
-                .map(|n| (n, json!({ "enabled": false })))
-                .collect();
-            prepared
-                .cmd
-                .env("OPENCODE_CONFIG_CONTENT", json!({ "mcp": off }).to_string());
+        for (k, v) in launch(kind, true, &dir, Trust::Person, Use::OneShot)?.0 {
+            prepared.cmd.env(k, v);
         }
         prepared
             .cmd
@@ -500,7 +629,48 @@ fn empty_turn(events: &Translator, stop: &acp::StopReason) -> bool {
         .as_ref()
         .and_then(|u| u["outputTokens"].as_i64())
         .unwrap_or(0);
-    *stop == acp::StopReason::EndTurn && !events.said_anything && out == 0
+    events.raw.is_none() && *stop == acp::StopReason::EndTurn && !events.said_anything && out == 0
+}
+
+/// Claude Code's own agents (the person's and the project's), for the `@`
+/// menu: claude-agent-acp offers them as the session's `agent` option.
+fn save_subagents(hub: &AgentHub, r: &Value) {
+    let Some(agent) = r["configOptions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|o| o["id"] == "agent")
+    else {
+        return;
+    };
+    let agents: Vec<super::Subagent> = agent["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|o| o["value"] != "default")
+        .filter_map(|o| {
+            Some(super::Subagent {
+                name: o["value"].as_str()?.to_string(),
+                description: o["description"].as_str().unwrap_or_default().to_string(),
+            })
+        })
+        .collect();
+    hub.save_subagents(&agents);
+}
+
+/// tab's `initialize`: no file system or terminal of its own (agents use
+/// theirs, under the sandbox), and forms, which Claude Code's
+/// AskUserQuestion arrives as.
+fn initialize_params() -> Value {
+    json!({
+        "protocolVersion": 1,
+        "clientCapabilities": {
+            "fs": { "readTextFile": false, "writeTextFile": false },
+            "terminal": false,
+            "elicitation": { "form": {} },
+        },
+        "clientInfo": { "name": "tab", "version": env!("CARGO_PKG_VERSION") },
+    })
 }
 
 /// Picks the chat's model: through the session's `model` option, or the
@@ -512,24 +682,19 @@ async fn set_model(conn: &Conn, r: &Value, model: &str) {
         .into_iter()
         .flatten()
         .find(|o| o["category"] == "model");
+    // The session's `model` option: tried even when the model isn't listed
+    // as is, since agents resolve their own aliases (Claude Code takes
+    // "haiku" or a full id).
     if let Some(o) = option {
-        let offered = o["options"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .flat_map(|o| match o["options"].as_array() {
-                Some(group) => group.clone(),
-                None => vec![o.clone()],
-            })
-            .any(|o| o["value"] == model);
-        if offered {
-            let _ = conn
-                .request_value(
-                    "session/set_config_option",
-                    json!({ "sessionId": session, "configId": o["id"], "value": model }),
-                )
-                .await;
-            return;
+        let set = conn
+            .request_value(
+                "session/set_config_option",
+                json!({ "sessionId": session, "configId": o["id"], "value": model }),
+            )
+            .await;
+        match set {
+            Ok(_) => return,
+            Err(e) => tracing::debug!(model, error = %e, "the agent didn't take this model"),
         }
     }
     let listed = r["models"]["availableModels"]
@@ -544,9 +709,21 @@ async fn set_model(conn: &Conn, r: &Value, model: &str) {
                 json!({ "sessionId": session, "modelId": model }),
             )
             .await;
-        return;
     }
-    tracing::debug!(model, "the ACP agent doesn't offer this model");
+}
+
+/// Starts the session in the chat's permission mode, which a loaded Claude
+/// Code conversation would otherwise take from its transcript.
+async fn set_mode(conn: &Conn, session: &str, mode: &str) {
+    if let Err(e) = conn
+        .request_value(
+            "session/set_mode",
+            json!({ "sessionId": session, "modeId": mode }),
+        )
+        .await
+    {
+        tracing::warn!(mode, error = %e, "the agent didn't take this permission mode");
+    }
 }
 
 fn text_block(text: &str) -> acp::ContentBlock {
@@ -573,28 +750,16 @@ where
     F: std::future::Future<Output = Result<Value, RpcError>>,
 {
     tokio::pin!(fut);
+    let mut open_in = true;
     let deadline = tokio::time::sleep(START_TIMEOUT);
     tokio::pin!(deadline);
     loop {
         tokio::select! {
-            r = &mut fut => return Ok(Some(r)),
-            m = incoming.recv() => match m {
-                Some(Incoming::Notification { method, params }) => {
-                    if method == "session/update" {
-                        match serde_json::from_value::<acp::SessionNotification>(params) {
-                            Ok(n) => events.update(&n.update),
-                            Err(e) => tracing::debug!(error = %e, "unreadable session/update"),
-                        }
-                    }
-                    if events.leaked.is_some() {
-                        anyhow::bail!("strict");
-                    }
-                }
-                Some(Incoming::Request { id, method, params }) => {
-                    on_request(conn, events, id, &method, params);
-                }
-                None => anyhow::bail!("it closed the connection"),
-            },
+            r = &mut fut => {
+                drain(conn, events, incoming)?;
+                return Ok(Some(r));
+            }
+            m = incoming.recv(), if open_in => open_in = handle(conn, events, m)?,
             _ = cancel.cancelled() => return Ok(None),
             // Only the start has a deadline; a turn runs as long as it needs.
             _ = &mut deadline, if events.replaying => anyhow::bail!("it didn't answer in time"),
@@ -602,9 +767,191 @@ where
     }
 }
 
+/// Handles what the agent sent before an answer. Answers and the rest
+/// arrive on separate channels, so an answer can be picked first while
+/// what came before it (Claude Code's result) still waits; one reader keeps
+/// them in order, so it's all queued by then.
+fn drain(
+    conn: &Conn,
+    events: &mut Translator,
+    incoming: &mut mpsc::UnboundedReceiver<Incoming>,
+) -> anyhow::Result<()> {
+    while let Ok(m) = incoming.try_recv() {
+        handle(conn, events, Some(m))?;
+    }
+    Ok(())
+}
+
+/// One message from the agent: an update for the chat, or a request.
+/// `false` once the agent closed its side; answers that came before it are
+/// with their requests already, and the rest fail as "the agent exited".
+fn handle(conn: &Conn, events: &mut Translator, m: Option<Incoming>) -> anyhow::Result<bool> {
+    match m {
+        Some(Incoming::Notification { method, params }) => {
+            if method == "_claude/sdkMessage"
+                && let Some(p) = &mut events.raw
+            {
+                p.read(&params["message"]);
+                if !p.leaked().is_empty() && events.leaked.is_none() {
+                    events.leaked = Some(p.leaked().join(", "));
+                }
+            }
+            if method == "session/update" {
+                match serde_json::from_value::<acp::SessionNotification>(params) {
+                    Ok(n) => events.update(&n.update),
+                    Err(e) => tracing::debug!(error = %e, "unreadable session/update"),
+                }
+            }
+            anyhow::ensure!(events.leaked.is_none(), "strict");
+        }
+        Some(Incoming::Request { id, method, params }) => {
+            on_request(conn, events, id, &method, params);
+        }
+        None => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// The turn itself: waits for the prompt's answer while handling what the
+/// agent sends. With `steering`, a message the person sends meanwhile goes
+/// to the running turn: through `_session/steering` (`true`), or as another
+/// `session/prompt` on the same session, which an agent that steers that way
+/// (OpenCode) reads at its next step. The turn ends once every message has
+/// its answer, so nothing sent is left unanswered; one the agent couldn't
+/// take runs as the next turn.
+async fn prompt_turn<F>(
+    conn: &Conn,
+    incoming: &mut mpsc::UnboundedReceiver<Incoming>,
+    events: &mut Translator,
+    cancel: &CancellationToken,
+    fut: F,
+    steering: Option<(&mut mpsc::UnboundedReceiver<Steer>, bool)>,
+    session: &str,
+) -> anyhow::Result<Option<Result<Value, RpcError>>>
+where
+    F: std::future::Future<Output = Result<Value, RpcError>>,
+{
+    use futures_util::StreamExt;
+    use futures_util::stream::FuturesUnordered;
+    type Steered = std::pin::Pin<
+        Box<dyn std::future::Future<Output = (String, Result<Value, RpcError>)> + Send>,
+    >;
+    let (mut steering, extension) = match steering {
+        Some((rx, ext)) => (Some(rx), ext),
+        None => (None, false),
+    };
+    tokio::pin!(fut);
+    let mut steered: FuturesUnordered<Steered> = FuturesUnordered::new();
+    let mut open_in = true;
+    let mut answer: Option<Result<Value, RpcError>> = None;
+    loop {
+        if answer.is_some() && steered.is_empty() {
+            drain(conn, events, incoming)?;
+            return Ok(answer);
+        }
+        let open = answer.is_none() && steering.is_some();
+        tokio::select! {
+            r = &mut fut, if answer.is_none() => answer = Some(r),
+            Some((text, r)) = steered.next(), if !steered.is_empty() => match r {
+                Ok(Value::Object(o)) if extension => {
+                    // `injected` joined the turn; anything else wasn't taken.
+                    if o.get("outcome").and_then(Value::as_str) != Some("injected") {
+                        events.later(text);
+                    }
+                }
+                Ok(Value::Object(o)) => {
+                    if let Some(u) = o.get("usage") {
+                        events.more_usage.push(u.clone());
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "steering failed; the message runs next");
+                    events.later(text);
+                }
+            },
+            s = async { steering.as_mut().expect("open").recv().await }, if open => match s {
+                // Claude Code's modes but `bypassPermissions`: approvals
+                // belong to the person.
+                Some(Steer::Mode(mode))
+                    if events.kind == AgentKind::ClaudeCode
+                        && !super::claude::MODES.contains(&mode.as_str()) => {}
+                Some(Steer::Mode(mode)) => {
+                    // Switches at once, as Shift+Tab does in Claude Code.
+                    let set = conn.request_value(
+                        "session/set_mode",
+                        json!({ "sessionId": session, "modeId": mode }),
+                    );
+                    tokio::spawn(async move {
+                        if let Err(e) = set.await {
+                            tracing::warn!(error = %e, "switching the permission mode failed");
+                        }
+                    });
+                }
+                Some(steer @ (Steer::Message(_) | Steer::Reminder(_))) => {
+                    let (Steer::Message(text) | Steer::Reminder(text)) = &steer else {
+                        unreachable!()
+                    };
+                    let text = text.clone();
+                    // The person's message is owed an answer; tab's reminders aren't.
+                    if let (Some(p), Steer::Message(_)) = (&events.raw, &steer) {
+                        p.steered(&text);
+                    }
+                    let blocks = vec![text_block(&text)];
+                    let r = if extension {
+                        conn.request_value(
+                            "_session/steering",
+                            json!({
+                                "sessionId": session,
+                                "prompt": blocks,
+                                // No turn to join: hand it back, and it runs next.
+                                "_meta": { "steering": { "idleBehavior": "promptRequired" } },
+                            }),
+                        )
+                    } else {
+                        conn.request_value(
+                            "session/prompt",
+                            serde_json::to_value(acp::PromptRequest::new(session.to_string(), blocks))
+                                .unwrap_or_default(),
+                        )
+                    };
+                    steered.push(Box::pin(async move { (text, r.await) }));
+                }
+                // Nothing in ACP stops one tool and keeps the turn; a steer
+                // during one moves it to the background (claude-agent-acp).
+                Some(Steer::Interrupt) => {}
+                None => steering = None,
+            },
+            m = incoming.recv(), if open_in => open_in = handle(conn, events, m)?,
+            _ = cancel.cancelled() => return Ok(None),
+        }
+    }
+}
+
 /// A request from the agent. Permissions go to the person; tab offers no
 /// file system or terminal (the agent uses its own, under the sandbox).
 fn on_request(conn: &Conn, events: &Translator, id: Value, method: &str, params: Value) {
+    if method == "elicitation/create" {
+        let (hub, sid, conn) = (events.hub.clone(), events.session_id.clone(), conn.clone());
+        tokio::spawn(async move {
+            let answer = match ask_user_question(&params) {
+                Some(input) => {
+                    let summary = params["message"]
+                        .as_str()
+                        .unwrap_or("A question")
+                        .to_string();
+                    let d = hub
+                        .request_approval(&sid, "AskUserQuestion", summary, input.clone())
+                        .await;
+                    form_answer(&input, &d)
+                }
+                // Forms tab can't show (an MCP server's own) are declined.
+                None => json!({ "action": "decline" }),
+            };
+            conn.respond(id, Ok(answer));
+        });
+        return;
+    }
     if method != "session/request_permission" {
         conn.respond(
             id,
@@ -655,6 +1002,82 @@ fn on_request(conn: &Conn, events: &Translator, id: Value, method: &str, params:
         let d = hub.request_approval(&sid, &name, summary, input).await;
         conn.respond(id, Ok(permission_answer(&req.options, &d)));
     });
+}
+
+/// Claude Code's AskUserQuestion, from the form claude-agent-acp turns it
+/// into (`question_<n>` with its options, `question_<n>_custom` for one's
+/// own answer): back to the tool's input, which tab's question card shows.
+fn ask_user_question(params: &Value) -> Option<Value> {
+    let props = params["requestedSchema"]["properties"].as_object()?;
+    let single = !props.contains_key("question_1");
+    let mut questions = Vec::new();
+    for n in 0.. {
+        let Some(q) = props.get(&format!("question_{n}")) else {
+            break;
+        };
+        let multi = q["type"] == "array";
+        let opts = if multi {
+            &q["items"]["anyOf"]
+        } else {
+            &q["oneOf"]
+        };
+        let options: Vec<Value> = opts
+            .as_array()?
+            .iter()
+            .map(|o| json!({ "label": o["const"], "description": o["description"] }))
+            .collect();
+        let text = if single {
+            params["message"].clone()
+        } else {
+            q["description"].clone()
+        };
+        questions.push(json!({
+            "question": text,
+            "header": q["title"],
+            "options": options,
+            "multiSelect": multi,
+        }));
+    }
+    (!questions.is_empty()).then(|| json!({ "questions": questions }))
+}
+
+/// The person's answers (by question text, as tab's card gives them) as
+/// the form's content: a pick goes in its field, anything else in the
+/// question's own-answer field.
+fn form_answer(input: &Value, d: &Decision) -> Value {
+    let Decision::Answer(answers) = d else {
+        return json!({ "action": "decline" });
+    };
+    let mut content = serde_json::Map::new();
+    for (n, q) in input["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let Some(a) = q["question"].as_str().and_then(|t| answers[t].as_str()) else {
+            continue;
+        };
+        let labels: Vec<&str> = q["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|o| o["label"].as_str())
+            .collect();
+        if q["multiSelect"] == true {
+            let (picked, own): (Vec<&str>, Vec<&str>) =
+                a.split(", ").partition(|p| labels.contains(p));
+            content.insert(format!("question_{n}"), json!(picked));
+            if !own.is_empty() {
+                content.insert(format!("question_{n}_custom"), json!(own.join(", ")));
+            }
+        } else if labels.contains(&a) {
+            content.insert(format!("question_{n}"), json!(a));
+        } else {
+            content.insert(format!("question_{n}_custom"), json!(a));
+        }
+    }
+    json!({ "action": "accept", "content": content })
 }
 
 /// The option that matches the person's decision.
@@ -834,6 +1257,9 @@ struct Tool {
     title: String,
     input: Value,
     creates: bool,
+    /// A command's output, as it streamed (codex-acp's
+    /// `_meta.terminal_output_delta`).
+    output: String,
 }
 
 /// Turns `session/update` into the chat: deltas while the agent writes, a
@@ -853,6 +1279,8 @@ struct Translator {
     cost_file: Option<std::path::PathBuf>,
     /// The turn's tokens, if the agent reports them (`PromptResponse.usage`).
     usage: Option<Value>,
+    /// Tokens of the prompts sent mid-turn.
+    more_usage: Vec<Value>,
     model: Option<String>,
     /// Updates that replay a loaded session's history.
     replaying: bool,
@@ -868,6 +1296,9 @@ struct Translator {
     /// The person's servers strict mode turned off.
     foreign: Vec<String>,
     leaked: Option<String>,
+    /// Claude Code: its own messages, which tab reads the chat from (with
+    /// everything tab's Claude Code reader does), instead of the updates.
+    raw: Option<super::claude::Parser>,
 }
 
 impl Translator {
@@ -882,6 +1313,7 @@ impl Translator {
             cost_before: 0.0,
             cost_file: None,
             usage: None,
+            more_usage: Vec::new(),
             model: None,
             replaying: false,
             said_anything: false,
@@ -891,6 +1323,7 @@ impl Translator {
             allowed: Vec::new(),
             foreign: Vec::new(),
             leaked: None,
+            raw: None,
         }
     }
 
@@ -910,7 +1343,7 @@ impl Translator {
             }
             return;
         }
-        if self.replaying {
+        if self.replaying || self.raw.is_some() {
             return;
         }
         let sid = self.session_id.clone();
@@ -934,6 +1367,7 @@ impl Translator {
                 self.check_strict(&name, &tc.title);
                 let tool = Tool {
                     creates: crate::links::is_creator(&name, &input),
+                    output: String::new(),
                     title: tc.title.clone(),
                     name,
                     input,
@@ -962,6 +1396,13 @@ impl Translator {
                 let id = tu.tool_call_id.0.to_string();
                 let f = &tu.fields;
                 if let Some(t) = self.tools.get_mut(&id) {
+                    if let Some(m) = &tu.meta {
+                        for k in ["terminal_output_delta", "terminal_output"] {
+                            if let Some(d) = m.get(k).and_then(|o| o["data"].as_str()) {
+                                t.output.push_str(d);
+                            }
+                        }
+                    }
                     if let Some(input) = &f.raw_input {
                         t.input = input.clone();
                     }
@@ -1007,6 +1448,9 @@ impl Translator {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        if text.is_empty() {
+            text = tool.output.clone();
+        }
         if text.is_empty()
             && let Some(o) = raw_output
         {
@@ -1059,7 +1503,11 @@ impl Translator {
                     _ => String::new(),
                 },
                 aliases: Vec::new(),
-                kind: SlashKind::Command,
+                kind: match &self.raw {
+                    _ if c.name.starts_with("mcp:") => SlashKind::Mcp,
+                    Some(p) => p.command_kind(&c.name, &c.description),
+                    None => SlashKind::Command,
+                },
             })
             .collect();
         self.hub.save_slash_commands(self.kind, &cmds);
@@ -1071,6 +1519,17 @@ impl Translator {
             self.hub
                 .post(&self.session_id, "assistant", "text", &text, Value::Null);
         }
+    }
+
+    /// A message the agent couldn't take mid-turn: it runs as the next turn.
+    fn later(&self, text: String) {
+        self.hub
+            .followups
+            .lock()
+            .unwrap()
+            .entry(self.session_id.clone())
+            .or_default()
+            .push(text);
     }
 
     /// What this turn cost: the change in the session's total.
@@ -1086,7 +1545,13 @@ impl Translator {
         if let (Some(total), Some(f)) = (self.cost, &self.cost_file) {
             let _ = std::fs::write(f, total.to_string());
         }
-        let n = |k: &str| self.usage.as_ref().and_then(|u| u[k].as_i64()).unwrap_or(0);
+        let n = |k: &str| {
+            self.usage
+                .iter()
+                .chain(&self.more_usage)
+                .filter_map(|u| u[k].as_i64())
+                .sum::<i64>()
+        };
         if self.cost.is_none() && self.usage.is_none() {
             return;
         }
@@ -1107,6 +1572,18 @@ impl Translator {
 
     fn finish(&mut self, stop: Result<acp::StopReason, String>) {
         if std::mem::replace(&mut self.finished, true) {
+            return;
+        }
+        // Claude Code's own result said how the turn went, with its usage.
+        if let Some(p) = &self.raw {
+            if !p.finished()
+                && let Err(e) = &stop
+            {
+                self.hub
+                    .post(&self.session_id, "system", "error", e, Value::Null);
+                self.hub
+                    .update(&self.session_id, Some(SessionStatus::Failed), None);
+            }
             return;
         }
         self.record_usage();
@@ -1175,6 +1652,12 @@ fn foreign_server(
     .or_else(|| name.strip_prefix("mcp__").map(|r| (r, "__")));
     if let Some((rest, sep)) = named {
         let server = rest.split(sep).next().unwrap_or(rest);
+        return (!allowed.iter().any(|a| a == server)).then(|| server.to_string());
+    }
+    if format == Some("mcp.{server}.{tool}")
+        && let Some(rest) = name.strip_prefix("mcp.")
+        && let Some((server, _)) = rest.split_once('.')
+    {
         return (!allowed.iter().any(|a| a == server)).then(|| server.to_string());
     }
     if format == Some("{server}_{tool}") {
@@ -1258,6 +1741,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_commands_streamed_output_is_its_result() {
+        let (hub, store, s) = hub_and_session("tab-acp-test-output");
+        let mut t = Translator::new(hub, s.id.clone(), AgentKind::Codex);
+        update(
+            &mut t,
+            json!({ "sessionUpdate": "tool_call", "toolCallId": "c1", "title": "cat notes.txt", "kind": "execute", "status": "in_progress" }),
+        );
+        for chunk in ["the code ", "word is pelican\n"] {
+            update(
+                &mut t,
+                json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "_meta": { "terminal_output_delta": { "data": chunk, "terminal_id": "c1" } } }),
+            );
+        }
+        update(
+            &mut t,
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed", "rawOutput": { "exit_code": 0 } }),
+        );
+        let m = store.messages(&s.id).unwrap();
+        assert_eq!(m.last().unwrap().content, "the code word is pelican\n");
+    }
+
+    #[tokio::test]
     async fn a_loaded_sessions_history_isnt_posted_again() {
         let (hub, store, s) = hub_and_session("tab-acp-test-2");
         let mut t = Translator::new(hub, s.id.clone(), AgentKind::OpenCode);
@@ -1300,21 +1805,24 @@ mod tests {
         let _ = std::fs::remove_file(file);
     }
 
-    /// Against a real `opencode acp` with a signed-in provider:
-    /// `TAB_ACP_LIVE_MODEL=google/gemini-flash-latest cargo test -p tab-core live_opencode -- --ignored`
+    /// Against a real agent with a signed-in provider, e.g.
+    /// `TAB_ACP_LIVE=codex TAB_ACP_LIVE_MODEL=gpt-5.2 cargo test -p tab-core live_acp -- --ignored --nocapture`
+    /// (`TAB_ACP_LIVE` is a harness id; the model is optional).
     #[tokio::test]
     #[ignore]
-    async fn live_opencode() {
-        let Ok(model) = std::env::var("TAB_ACP_LIVE_MODEL") else {
+    async fn live_acp() {
+        let Ok(kind) = std::env::var("TAB_ACP_LIVE") else {
             return;
         };
+        let kind = AgentKind::parse(&kind);
+        let model = std::env::var("TAB_ACP_LIVE_MODEL").ok();
         let (hub, store, s) = hub_and_session("tab-acp-live");
         let answer = complete(
             &hub,
-            AgentKind::OpenCode,
+            kind,
             "Answer in one word.",
             "What colour is a clear daytime sky?",
-            Some(&model),
+            model.as_deref(),
         )
         .await
         .unwrap();
@@ -1322,24 +1830,42 @@ mod tests {
         assert!(answer.to_lowercase().contains("blue"), "{answer}");
 
         let mut cfg = AgentConfig::default();
-        cfg.set_model(AgentKind::OpenCode, Some(model));
+        cfg.set_model(kind, model);
+        // `TAB_ACP_LIVE_STRICT=1` runs the chat strict.
+        cfg.strict = std::env::var("TAB_ACP_LIVE_STRICT").is_ok();
         hub.set_config(cfg).await;
         let dir = std::env::temp_dir().join(format!("tab-acp-live-{}", s.id));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("notes.txt"), "the code word is pelican\n").unwrap();
         let s = store
-            .session_create(
-                None,
-                AgentKind::OpenCode,
-                "t",
-                &dir.to_string_lossy(),
-                Utc::now(),
-            )
+            .session_create(None, kind, "t", &dir.to_string_lossy(), Utc::now())
             .unwrap();
+        // Nobody is at the keyboard: allow whatever the agent asks, and say what it was.
+        let approver = {
+            let (hub, sid) = (hub.clone(), s.id.clone());
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    for a in hub.pending_approvals(&sid) {
+                        println!("approval: {} · {}", a.tool, a.summary);
+                        hub.resolve_approval(&a.id, Decision::Allow);
+                    }
+                }
+            })
+        };
+        // Where the agent can't keep its conversation between processes (a
+        // sandboxed test run), `TAB_ACP_LIVE_TURNS=1` stops after one.
+        let turns: usize = std::env::var("TAB_ACP_LIVE_TURNS")
+            .ok()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(2);
         for prompt in [
             "Read notes.txt and tell me the code word.",
             "What was the code word again? Answer from memory.",
-        ] {
+        ]
+        .into_iter()
+        .take(turns)
+        {
             let s = store.session_get(&s.id).unwrap().unwrap();
             run_turn(
                 &hub,
@@ -1352,7 +1878,17 @@ mod tests {
             .unwrap();
         }
         let m = store.messages(&s.id).unwrap();
+        println!(
+            "agent session: {:?}",
+            store.session_get(&s.id).unwrap().unwrap().agent_session_id
+        );
         for x in &m {
+            if !x.meta.is_null() {
+                println!(
+                    "  meta: {}",
+                    x.meta.to_string().chars().take(200).collect::<String>()
+                );
+            }
             println!(
                 "{}/{}: {}",
                 x.role,
@@ -1361,13 +1897,105 @@ mod tests {
             );
         }
         let texts: Vec<_> = m.iter().filter(|m| m.kind == "text").collect();
-        assert!(texts.len() >= 2, "two replies");
+        assert!(texts.len() >= turns, "a reply per question");
+        // The answer to each question, after any preamble.
+        let answers: Vec<_> = m
+            .iter()
+            .filter(|m| m.kind == "result")
+            .map(|r| m.iter().rfind(|t| t.kind == "text" && t.id < r.id).unwrap())
+            .collect();
+        assert_eq!(answers.len(), turns);
         assert!(
-            texts
+            answers
                 .iter()
                 .all(|t| t.content.to_lowercase().contains("pelican"))
         );
         assert!(m.iter().any(|m| m.kind == "tool"), "it read the file");
+        approver.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// tab's rewind with a real Claude Code: two turns, back to before the
+    /// second, and the agent remembers only the first. Run from a terminal
+    /// (it keeps transcripts in `~/.claude`), with `claude-agent-acp` on PATH:
+    /// `TAB_ACP_LIVE_REWIND=1 cargo test -p tab-core live_claude_rewind -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_claude_rewind() {
+        if std::env::var("TAB_ACP_LIVE_REWIND").is_err() {
+            return;
+        }
+        let (hub, store, _) = hub_and_session("tab-acp-live-rewind");
+        let mut cfg = AgentConfig::default();
+        cfg.set_model(AgentKind::ClaudeCode, Some("haiku".into()));
+        hub.set_config(cfg).await;
+        let dir = std::env::temp_dir().join(format!("tab-acp-rewind-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = store
+            .session_create(
+                None,
+                AgentKind::ClaudeCode,
+                "t",
+                &dir.to_string_lossy(),
+                Utc::now(),
+            )
+            .unwrap();
+        let turn = |prompt: &'static str| {
+            let (hub, store, sid) = (hub.clone(), store.clone(), s.id.clone());
+            async move {
+                hub.post(&sid, "user", "text", prompt, Value::Null);
+                let s = store.session_get(&sid).unwrap().unwrap();
+                run_turn(
+                    &hub,
+                    &s,
+                    prompt,
+                    "You are being tested.",
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+                let m = store.messages(&sid).unwrap();
+                let reply = m
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == "assistant" && m.kind == "text");
+                reply.map(|m| m.content.clone()).unwrap_or_default()
+            }
+        };
+        println!(
+            "1: {}",
+            turn("Remember the word APPLE. Reply with only OK.").await
+        );
+        let id = store.session_get(&s.id).unwrap().unwrap().agent_session_id;
+        println!(
+            "2: {}",
+            turn("Remember the word BANANA. Reply with only OK.").await
+        );
+        assert_eq!(
+            store.session_get(&s.id).unwrap().unwrap().agent_session_id,
+            id,
+            "one conversation"
+        );
+        let second = store
+            .messages(&s.id)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.role == "user" && m.kind == "text")
+            .nth(1)
+            .unwrap();
+        println!("meta: {}", second.meta);
+        hub.rewind(&s.id, second.id, true, false).await.unwrap();
+        let ask = "List every word I asked you to remember, comma separated, nothing else.";
+        let after = turn(ask).await;
+        println!("3: {after}");
+        assert!(
+            after.contains("APPLE") && !after.contains("BANANA"),
+            "{after}"
+        );
+        // And it stays rewound.
+        let again = turn(ask).await;
+        println!("4: {again}");
+        assert!(!again.contains("BANANA"), "{again}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1385,24 +2013,78 @@ mod tests {
         assert!(!empty_turn(&t, &acp::StopReason::EndTurn));
     }
 
-    #[test]
-    fn opencode_always_runs_over_acp() {
-        let cfg = AgentConfig::default();
-        assert!(enabled(&cfg, AgentKind::OpenCode, false));
-        assert!(enabled(&cfg, AgentKind::OpenCode, true));
-        assert!(!enabled(&cfg, AgentKind::Codex, false));
+    /// The person sends a message mid-turn: it reaches the agent as a second
+    /// `session/prompt`, and the turn ends only once both are answered.
+    #[tokio::test]
+    async fn a_message_mid_turn_steers_the_running_turn() {
+        let (hub, store, s) = hub_and_session("tab-acp-test-steer");
+        let (client_io, agent_io) = tokio::io::duplex(1 << 16);
+        let (cr, cw) = tokio::io::split(client_io);
+        let (conn, mut incoming) = Conn::start(cw, cr);
+        let (ar, mut aw) = tokio::io::split(agent_io);
+        let (steer_tx, mut steer_rx) = mpsc::unbounded_channel();
+        let agent = tokio::spawn(async move {
+            let mut lines = BufReader::new(ar).lines();
+            let mut next = async || -> Value {
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap()
+            };
+            let first = next().await;
+            assert_eq!(first["params"]["prompt"][0]["text"], "fix the bug");
+            // Working on it; the person steers now.
+            let chunk = json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "sessionId": "s1", "update": { "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Looking." } } } });
+            aw.write_all(format!("{chunk}\n").as_bytes()).await.unwrap();
+            steer_tx
+                .send(Steer::Message("use the other file".into()))
+                .unwrap();
+            let second = next().await;
+            assert_eq!(second["method"], "session/prompt");
+            assert_eq!(second["params"]["sessionId"], "s1");
+            assert_eq!(second["params"]["prompt"][0]["text"], "use the other file");
+            // Both end with the loop, the steered one last.
+            for (id, out) in [(&first["id"], 5), (&second["id"], 7)] {
+                let r = json!({ "jsonrpc": "2.0", "id": id, "result": { "stopReason": "end_turn", "usage": { "totalTokens": out, "inputTokens": 0, "outputTokens": out } } });
+                aw.write_all(format!("{r}\n").as_bytes()).await.unwrap();
+            }
+        });
+        let mut t = Translator::new(hub, s.id.clone(), AgentKind::OpenCode);
+        let r = prompt_turn(
+            &conn,
+            &mut incoming,
+            &mut t,
+            &CancellationToken::new(),
+            conn.request(
+                "session/prompt",
+                acp::PromptRequest::new("s1", vec![text_block("fix the bug")]),
+            ),
+            Some((&mut steer_rx, false)),
+            "s1",
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        agent.await.unwrap();
+        assert_eq!(r["usage"]["outputTokens"], 5);
+        // The steered prompt's tokens count too.
+        assert_eq!(t.more_usage.len(), 1);
+        t.usage = Some(r["usage"].clone());
+        t.finish(Ok(acp::StopReason::EndTurn));
+        let m = store.messages(&s.id).unwrap();
+        assert!(
+            m.iter()
+                .any(|m| m.kind == "text" && m.content == "Looking.")
+        );
     }
 
     #[test]
-    fn codex_over_acp_is_opt_in_and_never_strict() {
-        let cfg = AgentConfig {
-            acp: vec!["codex".into()],
-            ..AgentConfig::default()
-        };
-        assert!(enabled(&cfg, AgentKind::Codex, false));
-        // codex-acp can't skip ~/.codex/config.toml: strict stays on codex.rs.
-        assert!(!enabled(&cfg, AgentKind::Codex, true));
-        assert!(!enabled(&cfg, AgentKind::Pi, false));
+    fn every_harness_but_pi_runs_over_acp() {
+        let cfg = AgentConfig::default();
+        for strict in [false, true] {
+            assert!(enabled(&cfg, AgentKind::OpenCode, strict));
+            assert!(enabled(&cfg, AgentKind::Codex, strict));
+            assert!(enabled(&cfg, AgentKind::ClaudeCode, strict));
+            assert!(!enabled(&cfg, AgentKind::Pi, strict));
+        }
     }
 
     #[tokio::test]
@@ -1435,6 +2117,186 @@ mod tests {
         assert_eq!(
             foreign_server("github_create_issue", None, &allowed, &foreign),
             None
+        );
+        // codex-acp's titles.
+        let codex = |n| foreign_server(n, Some("mcp.{server}.{tool}"), &allowed, &[]);
+        assert_eq!(codex("mcp.tab.tab_search"), None);
+        assert_eq!(codex("mcp.slack.post"), Some("slack".into()));
+        assert_eq!(codex("ls -la"), None);
+    }
+
+    /// Claude Code's result comes just before the prompt's answer, on
+    /// another channel: the turn still reads it before it ends.
+    #[tokio::test]
+    async fn what_came_before_the_answer_is_read_first() {
+        let (hub, store, s) = hub_and_session("tab-acp-test-drain");
+        let (client_io, _agent_io) = tokio::io::duplex(1 << 10);
+        let (cr, cw) = tokio::io::split(client_io);
+        let (conn, _) = Conn::start(cw, cr);
+        let (tx, mut incoming) = mpsc::unbounded_channel();
+        tx.send(Incoming::Notification {
+            method: "_claude/sdkMessage".into(),
+            params: json!({ "sessionId": "s", "message": { "type": "result", "is_error": false, "total_cost_usd": 0.01 } }),
+        })
+        .unwrap();
+        let mut t = Translator::new(hub.clone(), s.id.clone(), AgentKind::ClaudeCode);
+        t.raw = Some(super::super::claude::Parser::new(hub, s.id.clone()));
+        let answer = std::future::ready(Ok(json!({ "stopReason": "end_turn" })));
+        let r = prompt_turn(
+            &conn,
+            &mut incoming,
+            &mut t,
+            &CancellationToken::new(),
+            answer,
+            None,
+            "s",
+        )
+        .await
+        .unwrap();
+        assert!(r.is_some_and(|r| r.is_ok()));
+        assert!(t.raw.as_ref().unwrap().finished());
+        let m = store.messages(&s.id).unwrap();
+        assert!(m.iter().any(|m| m.kind == "result"));
+    }
+
+    /// Claude Code's chat comes from its own messages, which tab's Claude
+    /// Code reader turns into the chat as it always has; the ACP updates
+    /// that say the same are skipped.
+    #[tokio::test]
+    async fn claude_codes_own_messages_are_the_chat() {
+        let (hub, store, s) = hub_and_session("tab-acp-test-claude");
+        // The message that started the turn, as `start_turn` stores it.
+        hub.post(
+            &s.id,
+            "user",
+            "text",
+            "list files",
+            json!({ "agent_uuid": "tabs-guess" }),
+        );
+        let (client_io, _agent_io) = tokio::io::duplex(1 << 10);
+        let (cr, cw) = tokio::io::split(client_io);
+        let (conn, _incoming) = Conn::start(cw, cr);
+        let mut parser = super::super::claude::Parser::new(hub.clone(), s.id.clone());
+        parser.learn_prompt_uuid = true;
+        let mut t = Translator::new(hub.clone(), s.id.clone(), AgentKind::ClaudeCode);
+        t.raw = Some(parser);
+        let raw = |m: Value| {
+            Some(Incoming::Notification {
+                method: "_claude/sdkMessage".into(),
+                params: json!({ "sessionId": "s", "message": m }),
+            })
+        };
+        let lines = [
+            json!({ "type": "system", "subtype": "init", "session_id": "conv-1", "mcp_servers": [], "slash_commands": [] }),
+            // The echo of the person's message, with the id Claude Code gave it.
+            json!({ "type": "user", "uuid": "real-uuid", "message": { "role": "user", "content": [{ "type": "text", "text": "list files" }] } }),
+            json!({ "type": "assistant", "uuid": "a1", "message": { "id": "m1", "content": [{ "type": "text", "text": "One file." }] } }),
+            json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [{ "task_id": "b1", "task_type": "local_bash", "description": "watch" }] }),
+        ];
+        for l in lines {
+            assert!(handle(&conn, &mut t, raw(l)).unwrap());
+        }
+        // The same text as an ACP update isn't posted twice.
+        update(
+            &mut t,
+            json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "One file." } }),
+        );
+        assert!(t.raw.as_ref().unwrap().background.contains("b1"));
+        let m = store.messages(&s.id).unwrap();
+        let texts: Vec<_> = m
+            .iter()
+            .filter(|m| m.kind == "text")
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(texts, ["list files", "One file."]);
+        // A rewind to that message names Claude Code's id for it.
+        assert_eq!(m[0].meta["agent_uuid"], "real-uuid");
+        assert_eq!(
+            store
+                .session_get(&s.id)
+                .unwrap()
+                .unwrap()
+                .agent_session_id
+                .as_deref(),
+            Some("conv-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_code_never_switches_to_bypass_permissions() {
+        let (hub, _store, s) = hub_and_session("tab-acp-test-modes");
+        let (client_io, agent_io) = tokio::io::duplex(1 << 14);
+        let (cr, cw) = tokio::io::split(client_io);
+        let (conn, mut incoming) = Conn::start(cw, cr);
+        let (ar, mut aw) = tokio::io::split(agent_io);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(Steer::Mode("bypassPermissions".into())).unwrap();
+        tx.send(Steer::Mode("plan".into())).unwrap();
+        let agent = tokio::spawn(async move {
+            let mut lines = BufReader::new(ar).lines();
+            let prompt: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let mode: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(mode["method"], "session/set_mode");
+            assert_eq!(mode["params"]["modeId"], "plan");
+            for id in [&mode["id"], &prompt["id"]] {
+                let r =
+                    json!({ "jsonrpc": "2.0", "id": id, "result": { "stopReason": "end_turn" } });
+                aw.write_all(format!("{r}\n").as_bytes()).await.unwrap();
+            }
+        });
+        let mut t = Translator::new(hub, s.id.clone(), AgentKind::ClaudeCode);
+        prompt_turn(
+            &conn,
+            &mut incoming,
+            &mut t,
+            &CancellationToken::new(),
+            conn.request(
+                "session/prompt",
+                acp::PromptRequest::new("s", vec![text_block("hi")]),
+            ),
+            Some((&mut rx, true)),
+            "s",
+        )
+        .await
+        .unwrap();
+        agent.await.unwrap();
+    }
+
+    #[test]
+    fn ask_user_question_goes_through_tabs_card_and_back() {
+        // As claude-agent-acp sends it (src/elicitation.ts).
+        let params = json!({
+            "mode": "form", "sessionId": "s", "message": "Please answer the following questions.",
+            "requestedSchema": { "type": "object", "properties": {
+                "question_0": { "type": "string", "title": "DB", "description": "Which database?",
+                    "oneOf": [{ "const": "Postgres", "title": "Postgres" }, { "const": "SQLite", "title": "SQLite" }] },
+                "question_0_custom": { "type": "string", "title": "Other" },
+                "question_1": { "type": "array", "title": "Extras", "description": "Which extras?",
+                    "items": { "anyOf": [{ "const": "Auth", "title": "Auth" }, { "const": "Search", "title": "Search" }] } },
+                "question_1_custom": { "type": "string", "title": "Other" },
+            } }
+        });
+        let input = ask_user_question(&params).unwrap();
+        assert_eq!(input["questions"][0]["question"], "Which database?");
+        assert_eq!(input["questions"][0]["options"][1]["label"], "SQLite");
+        assert_eq!(input["questions"][1]["multiSelect"], true);
+        let d = Decision::Answer(
+            json!({ "Which database?": "DuckDB", "Which extras?": "Auth, Billing" }),
+        );
+        let a = form_answer(&input, &d);
+        assert_eq!(a["action"], "accept");
+        assert_eq!(a["content"]["question_0_custom"], "DuckDB");
+        assert_eq!(a["content"]["question_1"], json!(["Auth"]));
+        assert_eq!(a["content"]["question_1_custom"], "Billing");
+        assert_eq!(
+            form_answer(&input, &Decision::Deny("no".into()))["action"],
+            "decline"
+        );
+        assert!(
+            ask_user_question(&json!({ "requestedSchema": { "properties": { "email": {} } } }))
+                .is_none()
         );
     }
 

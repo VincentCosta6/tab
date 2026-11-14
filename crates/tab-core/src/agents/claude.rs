@@ -6,16 +6,15 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio_util::sync::CancellationToken;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use super::{AgentHub, Steer};
+use super::AgentHub;
 use crate::model::{AgentKind, Session, SessionStatus};
 use crate::sandbox::Trust;
 
 /// Claude Code permission modes tab passes through. `bypassPermissions` is
 /// deliberately not offered: approvals belong to the person.
-const MODES: &[&str] = &["default", "acceptEdits", "plan", "auto", "dontAsk"];
+pub(super) const MODES: &[&str] = &["default", "acceptEdits", "plan", "auto", "dontAsk"];
 
 /// Tool calls in flight, by id. Claude Code reads a steering message only
 /// between tool calls, so "Send now" interrupts while one is running.
@@ -139,29 +138,6 @@ fn reminder(skipped: &[String]) -> String {
     )
 }
 
-/// The stdin line for a steering command, if it needs one: a message is
-/// queued as a user turn; an interrupt (Esc in the terminal) is sent only
-/// while a tool runs, since otherwise the message is read at the next step.
-fn steer_line(steer: Steer, tools_running: bool, n: u64) -> Option<Value> {
-    match steer {
-        Steer::Message(text) | Steer::Reminder(text) => {
-            Some(json!({ "type": "user", "message": { "role": "user", "content": text } }))
-        }
-        Steer::Interrupt if tools_running => Some(json!({
-            "type": "control_request",
-            "request_id": format!("tab-interrupt-{n}"),
-            "request": { "subtype": "interrupt" },
-        })),
-        Steer::Interrupt => None,
-        Steer::Mode(mode) if MODES.contains(&mode.as_str()) => Some(json!({
-            "type": "control_request",
-            "request_id": format!("tab-mode-{n}"),
-            "request": { "subtype": "set_permission_mode", "mode": mode },
-        })),
-        Steer::Mode(_) => None,
-    }
-}
-
 /// Claude Code's folder (`~/.claude`, or `CLAUDE_CONFIG_DIR`).
 fn claude_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR")
@@ -179,38 +155,48 @@ fn own_conversation(policy: &mut crate::sandbox::Policy, cwd: &std::path::Path, 
     }
 }
 
-pub(super) async fn run_turn(
+/// A Claude Code turn over ACP (claude-agent-acp, see `agents::acp`): what
+/// `run_turn` passes the CLI, as the adapter's session options.
+pub(super) struct AcpSetup {
+    /// The conversation to load, when the chat has one.
+    pub resume: Option<String>,
+    /// `_meta` for `session/new` or `session/load`.
+    pub meta: Value,
+    /// For the adapter's process: the person's own `claude`, and file
+    /// checkpoints for a rewind.
+    pub env: Vec<(String, String)>,
+    /// Reads Claude Code's own messages, which the adapter forwards.
+    pub parser: Parser,
+    /// The permission mode to start in. A loaded conversation otherwise
+    /// carries on in the mode its transcript last had.
+    pub mode: String,
+}
+
+/// Sets up a Claude Code turn over ACP the way `run_turn` sets up the CLI:
+/// the sandbox's settings and the chat's own transcript, strict mode, the
+/// permission mode, a coordinator's asks, the budget cap, a rewind. Narrows
+/// `policy` to this conversation.
+pub(super) fn acp_setup(
     hub: &Arc<AgentHub>,
     session: &Session,
-    prompt: &str,
+    cfg: &crate::config::AgentConfig,
+    policy: &mut crate::sandbox::Policy,
     system: &str,
-    uuid: Option<&str>,
-    cancel: CancellationToken,
-) -> anyhow::Result<()> {
-    let cfg = hub.config_for(session);
-    let exe = super::agent_exe(&cfg, AgentKind::ClaudeCode)?;
+) -> anyhow::Result<AcpSetup> {
     let dir = hub.session_dir(&session.id)?;
-    let system_file = dir.join("system.md");
-    std::fs::write(&system_file, system)?;
-
-    // A rewind (see `AgentHub::rewind`) says where this turn picks up.
     let rewind = take_rewind(&dir);
     let resume = match &rewind {
         Some(Rewind::Fresh) => None,
         _ => session.agent_session_id.clone(),
     };
-    // Claude Code's own conversation id, chosen here on the first turn so the
-    // sandbox can let the chat into its transcript and no other.
+    // Chosen here for a new conversation, so the sandbox lets the chat into
+    // its transcript and no other. The adapter picks its own id, so the
+    // CLI gets this one after it (the last `--session-id` wins).
     let agent_id = resume
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let mut policy = hub.policy(session);
-    own_conversation(&mut policy, std::path::Path::new(&session.cwd), &agent_id);
-    let mut settings = crate::sandbox::current().claude_settings(&policy);
-    // A project's coordinator reads outside content (bug reports, email)
-    // with access other chats lack, so it asks before any shell command (a
-    // deploy, a payment CLI) and web fetch; `gh` and `git` already ask
-    // before merging or pushing.
+    own_conversation(policy, std::path::Path::new(&session.cwd), &agent_id);
+    let mut settings = crate::sandbox::current().claude_settings(policy);
     let coordinator =
         super::coordinator::project_of(hub.store.session_key(&session.id)?.as_deref()).is_some();
     if coordinator {
@@ -219,35 +205,12 @@ pub(super) async fn run_turn(
         } else {
             Vec::new()
         });
-        // A fetched page can carry data out in its URL. On a turn tab
-        // started itself, nobody is reading along, so searches ask too.
         let mut ask = vec!["WebFetch"];
         if hub.is_woken(&session.id) {
             ask.push("WebSearch");
         }
         settings["permissions"]["ask"] = json!(ask);
     }
-    // A copy to look at when debugging; Claude Code gets the JSON itself.
-    // Given a file, it vets every folder on the path first and refuses the
-    // file when one can't be examined, which happens under the sandbox.
-    std::fs::write(
-        dir.join("settings.json"),
-        serde_json::to_vec_pretty(&settings)?,
-    )?;
-    let strict = strict(cfg.strict, policy.trust);
-    let mut cmd = super::Args::default();
-    cmd.arg("--settings").arg(serde_json::to_string(&settings)?);
-    cmd.args(isolation_args(cfg.strict, policy.trust));
-    cmd.args([
-        "-p",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-    ]);
-    // The coordinator's asks reach the person whatever mode other chats use.
     let mode = if coordinator {
         "default"
     } else if MODES.contains(&cfg.permission_mode.as_str()) {
@@ -255,258 +218,103 @@ pub(super) async fn run_turn(
     } else {
         "default"
     };
-    cmd.args(["--permission-mode", mode]);
-    cmd.arg("--append-system-prompt-file").arg(&system_file);
-    // Images the person attached live here; reading them needs no prompt.
-    let attachments = hub.attachments_dir();
-    if attachments.is_dir() {
-        cmd.arg("--add-dir").arg(&attachments);
+    // The adapter starts in the settings' default mode.
+    settings["permissions"]["defaultMode"] = json!(mode);
+    std::fs::write(
+        dir.join("settings.json"),
+        serde_json::to_vec_pretty(&settings)?,
+    )?;
+    let strict = strict(cfg.strict, policy.trust);
+    let mut options = serde_json::Map::new();
+    options.insert("settings".into(), settings);
+    if strict {
+        options.insert("strictMcpConfig".into(), json!(true));
+        let sources: &[&str] = if policy.trust == Trust::Person {
+            &["project", "local"]
+        } else {
+            &[]
+        };
+        options.insert("settingSources".into(), json!(sources));
     }
     let remote = hub.remote_servers(policy.trust);
-    // A cloud runner fronts only the connections the person allowed there:
-    // no tab tools, and no approvals (nobody is at its keyboard).
-    let own = !hub.remote_mcp().in_cloud();
-    if let Some(mcp) = hub.mcp().filter(|_| own || !remote.is_empty()) {
-        let mcp_file = dir.join("mcp.json");
-        let headers = json!({
-            "Authorization": format!("Bearer {}", crate::mcp::chat_token(&mcp.token, &session.id)),
-            "X-Tab-Session": session.id,
-        });
-        let mut servers = serde_json::Map::new();
-        if own {
-            servers.insert(
-                "tab".into(),
-                json!({ "type": "http", "url": mcp.url, "headers": headers }),
-            );
-        }
-        // Connected remote servers, through tab, which signs them in.
-        for (name, url) in &remote {
-            servers.insert(
-                name.clone(),
-                json!({ "type": "http", "url": url, "headers": headers }),
-            );
-        }
-        let config = json!({ "mcpServers": servers });
-        std::fs::write(&mcp_file, serde_json::to_vec_pretty(&config)?)?;
-        cmd.arg("--mcp-config").arg(&mcp_file);
-        // Approvals come to tab; tab's own tools need none, and tab asks
-        // about remote tools itself, by the person's choice for each.
-        if own {
-            cmd.args(["--permission-prompt-tool", "mcp__tab__approve"]);
-        }
-        cmd.arg("--allowedTools");
-        if own {
-            cmd.arg("mcp__tab");
-        }
-        for (name, _) in &remote {
-            cmd.arg(format!("mcp__{name}"));
-        }
+    // tab's tools need no approval; tab asks about remote ones itself.
+    let mut allowed: Vec<String> = Vec::new();
+    if hub.mcp().is_some() && !hub.remote_mcp().in_cloud() {
+        allowed.push("mcp__tab".into());
     }
+    allowed.extend(remote.iter().map(|(n, _)| format!("mcp__{n}")));
+    options.insert("allowedTools".into(), json!(allowed));
     if let Some(m) = cfg.model_for(AgentKind::ClaudeCode) {
-        cmd.args(["--model", m]);
+        options.insert("model".into(), json!(m));
     }
     if let Some(cap) = cfg.budget.per_turn_usd.filter(|c| *c > 0.0) {
-        cmd.args(["--max-budget-usd", &format!("{cap:.2}")]);
+        options.insert("maxBudgetUsd".into(), json!(cap));
     }
-    match &resume {
-        Some(id) => cmd.args(["--resume", id]),
-        None => cmd.args(["--session-id", &agent_id]),
-    };
-    if let (Some(_), Some(Rewind::At(at))) = (&resume, &rewind) {
-        cmd.args(["--resume-session-at", at]);
+    options.insert("enableFileCheckpointing".into(), json!(true));
+    let attachments = hub.attachments_dir();
+    if attachments.is_dir() {
+        options.insert("additionalDirectories".into(), json!([attachments]));
     }
-    let mut prepared = crate::sandbox::current()
-        .command(&exe, &cmd.0, std::path::Path::new(&session.cwd), &policy)
-        .await?;
-    hub.add_shims(session, &mut prepared.cmd);
-    // Claude Code backs up each file before editing it, per message, so a
-    // rewind can put the code back too.
-    prepared
-        .cmd
-        .env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "1");
-    // Claude Code otherwise gives up on the approval call (and with it an
-    // open question card) before tab stops waiting for the person.
-    prepared.cmd.env(
-        "MCP_TOOL_TIMEOUT",
-        super::APPROVAL_TIMEOUT.as_millis().to_string(),
-    );
-    if strict {
-        // claude.ai connectors too, should a version load them despite
-        // `--strict-mcp-config`.
-        prepared.cmd.env("ENABLE_CLAUDEAI_MCP_SERVERS", "false");
+    let mut extra = serde_json::Map::new();
+    match (&resume, &rewind) {
+        (None, _) => {
+            extra.insert("session-id".into(), json!(agent_id));
+        }
+        // Loaded up to that reply; what came after is dropped for good.
+        (Some(_), Some(Rewind::At(at))) => {
+            options.insert("resumeSessionAt".into(), json!(at));
+        }
+        _ => {}
     }
-    prepared
-        .cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    tracing::debug!(session = %session.id, mode, strict, resume = ?session.agent_session_id, sandboxed = prepared.enforced, "starting Claude Code turn");
-    let sandboxed = prepared.enforced;
-    let mut child = prepared
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("starting Claude Code ({}) failed: {e}", exe.display()))?;
-    // stdin stays open so the person can steer mid-turn; it closes when the
-    // turn's result arrives (see `steering_close`) and the queue drains.
-    let mut stdin = child.stdin.take().expect("piped");
-    // `initialize` first, as the SDK does: its answer describes the slash
-    // commands (what they do, what arguments they take) for the `/` menu.
-    let init = json!({ "type": "control_request", "request_id": INIT_REQUEST, "request": { "subtype": "initialize" } });
-    let mut first = json!({ "type": "user", "message": { "role": "user", "content": prompt } });
-    // tab's id for the message, so a rewind can name it later.
-    if let Some(u) = uuid {
-        first["uuid"] = json!(u);
-    }
-    stdin
-        .write_all(format!("{init}\n{first}\n").as_bytes())
-        .await?;
-    let mut steer_rx = hub.steering_open(&session.id);
-    let open_tools = OpenTools::default();
-    let tools = open_tools.clone();
-    let unanswered = Arc::new(Mutex::new(Unanswered::default()));
-    let asked = unanswered.clone();
-    tokio::spawn(async move {
-        let mut n = 0;
-        while let Some(steer) = steer_rx.recv().await {
-            n += 1;
-            if let Steer::Message(text) = &steer {
-                asked.lock().unwrap().sent(text);
-            }
-            let running = !tools.lock().unwrap().is_empty();
-            let Some(line) = steer_line(steer, running, n) else {
-                continue;
-            };
-            if stdin
-                .write_all(format!("{line}\n").as_bytes())
-                .await
-                .is_err()
-            {
-                break;
-            }
+    options.insert("extraArgs".into(), Value::Object(extra));
+    let meta = json!({
+        "claudeCode": {
+            "options": options,
+            // Claude Code's own messages too: tab reads the chat from them.
+            "emitRawSDKMessages": true,
         }
     });
-
-    let stdout = child.stdout.take().expect("piped");
-    let mut stderr = child.stderr.take().expect("piped");
-    let err_task = tokio::spawn(async move {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s).await;
-        s
-    });
-
-    let mut lines = BufReader::new(stdout).lines();
+    let exe = super::agent_exe(cfg, AgentKind::ClaudeCode)?;
+    let mut env = vec![
+        // The person's own claude, with their login and version.
+        (
+            "CLAUDE_CODE_EXECUTABLE".to_string(),
+            exe.to_string_lossy().into_owned(),
+        ),
+        (
+            "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".into(),
+            "1".into(),
+        ),
+        // Claude Code otherwise gives up on a tab tool call that waits on
+        // the person (and with it an open question card) before tab does.
+        (
+            "MCP_TOOL_TIMEOUT".into(),
+            super::APPROVAL_TIMEOUT.as_millis().to_string(),
+        ),
+    ];
+    if strict {
+        env.push(("ENABLE_CLAUDEAI_MCP_SERVERS".into(), "false".into()));
+    }
     let mut parser = Parser::new(hub.clone(), session.id.clone());
-    parser.open_tools = open_tools;
-    parser.unanswered = unanswered;
     parser.strict = strict;
     parser.cwd = Some(session.cwd.clone().into());
     parser.allowed_mcp = remote.into_iter().map(|(name, _)| name).collect();
-    // Rough size of what tab adds to the system prompt (the item and its context).
     parser.tab_context_tokens = (system.len() / 4) as i64;
-    // After the result the CLI normally exits right away. If it stays up,
-    // it's waiting on background work it started, so the chat is monitoring.
-    let mut monitoring = false;
-    loop {
-        let settle = async {
-            if parser.finished && !parser.failed && !monitoring {
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await
-            } else {
-                std::future::pending::<()>().await
-            }
-        };
-        // While monitoring, the person may write. The CLI's stdin is closed
-        // by then, so their message can't reach it: stop waiting and let it
-        // run as the next turn instead of after the background work ends.
-        let asked = async {
-            if monitoring {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await
-            } else {
-                std::future::pending::<()>().await
-            }
-        };
-        tokio::select! {
-            _ = settle => {
-                monitoring = true;
-                hub.update(&session.id, Some(SessionStatus::Monitoring), None);
-            }
-            _ = asked => {
-                if stop_waiting_for(hub, &session.id) {
-                    child.kill_tree();
-                    break;
-                }
-            }
-            line = lines.next_line() => match line? {
-                Some(l) if !l.trim().is_empty() => match serde_json::from_str::<Value>(&l) {
-                    Ok(v) => {
-                        parser.handle(&v);
-                        if !parser.leaked.is_empty() {
-                            child.kill_tree();
-                            anyhow::bail!(
-                                "Strict mode stopped this turn: Claude Code loaded {}, which isn't one of tab's connections.",
-                                parser.leaked.join(", ")
-                            );
-                        }
-                        // Background work woke the agent up: it's working again.
-                        if !parser.finished {
-                            monitoring = false;
-                        }
-                    }
-                    Err(_) => tracing::debug!(line = %l, "non-json output from claude"),
-                },
-                Some(_) => {}
-                None => break,
-            },
-            _ = cancel.cancelled() => {
-                child.kill_tree();
-                return Ok(());
-            }
-        }
-    }
-    if monitoring {
-        hub.update(&session.id, Some(SessionStatus::Idle), None);
-    }
-    let status = child.wait().await?;
-    let stderr = err_task.await.unwrap_or_default();
-    if !parser.finished {
-        anyhow::bail!(
-            "Claude Code exited ({status}) before finishing.{}{}",
-            super::per_turn::tail(&stderr),
-            startup_hint(&stderr, sandboxed)
-        );
-    }
-    Ok(())
-}
-
-/// Told to the agent with a message that ended its wait on background work.
-const STOPPED_WAITING: &str = "(From tab, not the person.) The person wrote while you were waiting on \
-background work, so tab stopped that wait (and the background commands you started) to bring you \
-their message. Answer it, then start the background work again if it is still needed.";
-
-/// Whether the person queued a message while the agent waits on background
-/// work. If so, tab's note goes in front of it, so the agent learns why its
-/// background work stopped.
-fn stop_waiting_for(hub: &AgentHub, session_id: &str) -> bool {
-    let mut followups = hub.followups.lock().unwrap();
-    match followups.get_mut(session_id) {
-        Some(queued) if !queued.is_empty() => {
-            queued.insert(0, STOPPED_WAITING.to_string());
-            hub.post(
-                session_id,
-                "system",
-                "status",
-                "Stopped waiting on background work to bring the agent your message.",
-                Value::Null,
-            );
-            true
-        }
-        _ => false,
-    }
+    parser.learn_prompt_uuid = true;
+    let _ = std::fs::write(dir.join("system.md"), system);
+    Ok(AcpSetup {
+        resume,
+        meta,
+        env,
+        parser,
+        mode: mode.to_string(),
+    })
 }
 
 /// Claude Code's runtime (Bun) blames the open-file limit for any error it
 /// can't name while starting, and suggests `ulimit`. Under tab's sandbox the
 /// usual cause is a folder it was kept out of, which no limit fixes.
-fn startup_hint(stderr: &str, sandboxed: bool) -> &'static str {
+pub(super) fn startup_hint(stderr: &str, sandboxed: bool) -> &'static str {
     let fd_message =
         stderr.contains("max file descriptors") || stderr.contains("ran out of file descriptors");
     if fd_message && sandboxed {
@@ -517,7 +325,7 @@ fn startup_hint(stderr: &str, sandboxed: bool) -> &'static str {
 }
 
 /// Turns stream-json lines into transcript entries.
-struct Parser {
+pub(super) struct Parser {
     hub: Arc<AgentHub>,
     session_id: String,
     seen: HashSet<String>,
@@ -557,6 +365,13 @@ struct Parser {
     /// The id of the agent's latest reply: a rewind to the message after
     /// this turn resumes the conversation from there.
     last_reply: Option<String>,
+    /// Over ACP: the background tasks still running (bash, subagents,
+    /// monitors), from `background_tasks_changed`. The turn stays up while
+    /// any runs, as the CLI did.
+    pub(super) background: HashSet<String>,
+    /// Over ACP: the adapter names the person's message itself, so its id
+    /// is learnt from the echo and kept for a rewind to it.
+    pub(super) learn_prompt_uuid: bool,
 }
 
 /// Where the next turn of a rewound chat picks up its conversation.
@@ -766,7 +581,7 @@ fn prompt_tokens(u: &Value) -> i64 {
 }
 
 impl Parser {
-    fn new(hub: Arc<AgentHub>, session_id: String) -> Self {
+    pub(super) fn new(hub: Arc<AgentHub>, session_id: String) -> Self {
         Self {
             hub,
             session_id,
@@ -789,7 +604,58 @@ impl Parser {
             waits: HashSet::new(),
             cwd: None,
             last_reply: None,
+            background: HashSet::new(),
+            learn_prompt_uuid: false,
         }
+    }
+
+    /// The turn ended (its result came).
+    pub(super) fn finished(&self) -> bool {
+        self.finished
+    }
+
+    /// What strict mode stopped: MCP servers or plugins tab didn't add.
+    pub(super) fn leaked(&self) -> &[String] {
+        &self.leaked
+    }
+
+    /// The person's message went to the agent mid-turn.
+    pub(super) fn steered(&self, text: &str) {
+        self.unanswered.lock().unwrap().sent(text);
+    }
+
+    /// A slash command's group, for the `/` menu.
+    pub(super) fn command_kind(&self, name: &str, description: &str) -> super::SlashKind {
+        self.slash_kind(name, false, description)
+    }
+
+    /// Reads one of Claude Code's own messages (stream-json, as the CLI
+    /// prints it; over ACP, from `_claude/sdkMessage`).
+    pub(super) fn read(&mut self, v: &Value) {
+        if v["type"] == "system" && v["subtype"] == "background_tasks_changed" {
+            self.background = v["tasks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t["task_id"].as_str().map(str::to_string))
+                .collect();
+            return;
+        }
+        if self.learn_prompt_uuid
+            && v["type"] == "user"
+            && let Some(uuid) = v["uuid"].as_str()
+            && v["message"]["content"]
+                .as_array()
+                .is_none_or(|c| !c.iter().any(|b| b["type"] == "tool_result"))
+        {
+            // The echo of the message that started the turn.
+            self.learn_prompt_uuid = false;
+            if let Err(e) = self.hub.set_prompt_uuid(&self.session_id, uuid) {
+                tracing::warn!(error = %e, "couldn't keep the message's id for a rewind");
+            }
+            return;
+        }
+        self.handle(v);
     }
 
     fn save_commands(&self, cmds: &Value) {
@@ -1158,6 +1024,7 @@ impl Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::Steer;
     use crate::config::AgentConfig;
     use crate::engine::EngineEvent;
     use crate::store::Store;
@@ -1565,32 +1432,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_message_sent_while_monitoring_stops_the_wait() {
-        let store = Arc::new(Store::in_memory().unwrap());
-        let (tx, _rx) = tokio::sync::broadcast::channel(64);
-        let hub = AgentHub::new(
-            store.clone(),
-            tx,
-            AgentConfig::default(),
-            std::env::temp_dir(),
-        );
-        let s = store
-            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
-            .unwrap();
-        assert!(
-            !stop_waiting_for(&hub, &s.id),
-            "nothing queued: keep waiting"
-        );
-        hub.followups
-            .lock()
-            .unwrap()
-            .insert(s.id.clone(), vec!["Hello?".into()]);
-        assert!(stop_waiting_for(&hub, &s.id));
-        let queued = hub.followups.lock().unwrap()[&s.id].clone();
-        assert_eq!(queued, vec![STOPPED_WAITING.to_string(), "Hello?".into()]);
-    }
-
-    #[tokio::test]
     async fn a_foreground_ci_watch_shows_monitoring_until_it_returns() {
         let store = Arc::new(Store::in_memory().unwrap());
         let (tx, _rx) = tokio::sync::broadcast::channel(64);
@@ -1614,24 +1455,6 @@ mod tests {
             {"type":"tool_result","tool_use_id":"t1","content":"All checks passed"}
         ]}}));
         assert_eq!(status(), SessionStatus::Working);
-    }
-
-    #[test]
-    fn messages_queue_and_send_now_interrupts_only_a_running_tool() {
-        let msg = steer_line(Steer::Message("hi".into()), true, 1).unwrap();
-        assert_eq!(
-            steer_line(Steer::Reminder("hi".into()), true, 2).unwrap(),
-            msg
-        );
-        assert_eq!(
-            (msg["type"].as_str(), msg["message"]["content"].as_str()),
-            (Some("user"), Some("hi"))
-        );
-        let stop = steer_line(Steer::Interrupt, true, 7).unwrap();
-        assert_eq!(stop["request"]["subtype"], "interrupt");
-        assert_eq!(stop["request_id"], "tab-interrupt-7");
-        // Between tool calls the queued message is read anyway.
-        assert_eq!(steer_line(Steer::Interrupt, false, 8), None);
     }
 
     #[tokio::test]

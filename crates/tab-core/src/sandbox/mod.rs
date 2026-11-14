@@ -728,6 +728,9 @@ const HARNESS_SETTINGS: &[&str] = &[
     ".claude/output-styles",
     ".codex/config.toml",
     ".codex/AGENTS.md",
+    // Strict chats' Codex home (agents::codex::strict_home).
+    ".codex/tab-strict/config.toml",
+    ".codex/tab-strict/AGENTS.md",
     ".config/opencode/opencode.json",
     ".config/opencode/opencode.jsonc",
     ".config/opencode/config.json",
