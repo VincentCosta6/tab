@@ -68,7 +68,22 @@
     "bin_dirs": [
       ".local/bin",
       ".claude/local"
-    ]
+    ],
+    "acp": {
+      "command": "claude-agent-acp",
+      "args": [],
+      "env": {},
+      "strict_args": [],
+      "strict_env": {},
+      "mcp_tool_name": "mcp__{server}__{tool}",
+      "steering": "extension",
+      "preview": false,
+      "adapter": {
+        "npm": "@agentclientprotocol/claude-agent-acp",
+        "repo": "https://github.com/agentclientprotocol/claude-agent-acp",
+        "license": "Apache-2.0"
+      }
+    }
   },
   {
     "id": "opencode",
@@ -123,7 +138,8 @@
       },
       "mcp_tool_name": "{server}_{tool}",
       "adapter": null,
-      "preview": false
+      "preview": false,
+      "steering": "prompt"
     }
   },
   {
@@ -179,14 +195,14 @@
       "env": {},
       "strict_args": [],
       "strict_env": {},
-      "strict": false,
       "mcp_tool_name": "mcp.{server}.{tool}",
+      "steering": "extension",
+      "preview": false,
       "adapter": {
         "npm": "@agentclientprotocol/codex-acp",
         "repo": "https://github.com/agentclientprotocol/codex-acp",
         "license": "Apache-2.0"
-      },
-      "preview": true
+      }
     }
   },
   {

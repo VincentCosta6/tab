@@ -76,6 +76,9 @@ pub struct AcpSpec {
     /// a server tab didn't add.
     #[serde(default)]
     pub mcp_tool_name: Option<String>,
+    /// How a message sent mid-turn reaches the running turn, if it can.
+    #[serde(default)]
+    pub steering: Steering,
     /// Still in preview: chats use it only when the person turns it on
     /// (`AgentConfig.acp`); otherwise it's the harness's only way to run.
     #[serde(default)]
@@ -84,6 +87,21 @@ pub struct AcpSpec {
     /// before tab offers it (see `every_acp_adapter_has_an_allowed_license`).
     #[serde(default)]
     pub adapter: Option<AcpAdapter>,
+}
+
+/// How an ACP agent takes a message mid-turn.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Steering {
+    /// It can't: the message waits for the next turn.
+    #[default]
+    None,
+    /// Another `session/prompt` on the running session joins the turn,
+    /// read at the agent's next step (OpenCode).
+    Prompt,
+    /// The `_session/steering` extension (codex-acp, claude-agent-acp; ACP
+    /// RFD #1261), when the agent advertises `_meta.steering.supported`.
+    Extension,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -187,10 +205,29 @@ impl Harness {
 
     /// The command that installs it on this computer, if tab can run one.
     pub fn install_command(&self) -> Option<String> {
+        // The ACP adapter it runs through comes with it.
+        let adapter = self
+            .acp
+            .as_ref()
+            .filter(|a| !a.preview)
+            .and_then(|a| a.adapter.as_ref())
+            .and_then(|a| a.npm.as_deref());
         if let Some(pkg) = &self.install.npm
             && which::which("npm").is_ok()
         {
-            return Some(format!("npm install -g {pkg}"));
+            return Some(match adapter {
+                Some(a) => format!("npm install -g {pkg} {a}"),
+                None => format!("npm install -g {pkg}"),
+            });
+        }
+        if let Some(a) = adapter {
+            // The harness's own installer, then the adapter (needs Node).
+            let own = if cfg!(windows) {
+                self.install.windows.clone()
+            } else {
+                self.install.unix.clone()
+            };
+            return own.map(|o| format!("{o} && npm install -g {a}"));
         }
         if cfg!(windows) {
             self.install.windows.clone()
@@ -500,6 +537,7 @@ mod tests {
         let h = harness(AgentKind::OpenCode);
         let acp = h.acp.as_ref().expect("OpenCode speaks ACP");
         assert_eq!(acp.args_for(false), ["acp"]);
+        assert_eq!(acp.steering, Steering::Prompt);
         assert!(
             acp.env_for(true)
                 .contains(&("OPENCODE_DISABLE_CLAUDE_CODE", "1"))
@@ -508,13 +546,14 @@ mod tests {
     }
 
     #[test]
-    fn codex_runs_over_acp_through_its_adapter_when_turned_on() {
+    fn codex_runs_over_acp_through_its_adapter() {
         let acp = harness(AgentKind::Codex).acp.as_ref().expect("codex-acp");
         assert_eq!(acp.command.as_deref(), Some("codex-acp"));
-        assert!(acp.preview);
-        // No way to skip the person's config.toml: strict chats use codex.rs.
-        assert!(!acp.strict);
-        assert!(harness(AgentKind::OpenCode).acp.as_ref().unwrap().strict);
+        assert!(!acp.preview);
+        // Strict chats get a Codex home without the person's config.toml
+        // (`codex::strict_home`).
+        assert!(acp.strict);
+        assert_eq!(acp.steering, Steering::Extension);
         let a = acp.adapter.as_ref().unwrap();
         assert_eq!(a.npm.as_deref(), Some("@agentclientprotocol/codex-acp"));
     }

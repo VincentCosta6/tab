@@ -1188,6 +1188,26 @@ impl AgentHub {
 
     /// Tells a running turn something from tab itself: read like a steering
     /// message, but not shown in the chat as the person's.
+    /// The agent's own id for the message that started the running turn,
+    /// where the agent names it (Claude Code over ACP): kept on tab's copy,
+    /// which a rewind to it reads.
+    pub(crate) fn set_prompt_uuid(&self, session_id: &str, uuid: &str) -> anyhow::Result<()> {
+        let messages = self.store.messages(session_id)?;
+        let Some(m) = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user" && m.kind == "text" && m.meta["steer"] != true)
+        else {
+            return Ok(());
+        };
+        let mut meta = match &m.meta {
+            serde_json::Value::Object(_) => m.meta.clone(),
+            _ => serde_json::json!({}),
+        };
+        meta["agent_uuid"] = serde_json::json!(uuid);
+        self.store.message_set_meta(m.id, &meta)
+    }
+
     pub(crate) fn remind(&self, session_id: &str, text: String) {
         if let Some(tx) = self.steering.lock().unwrap().get(session_id) {
             let _ = tx.send(Steer::Reminder(text));
@@ -1453,21 +1473,13 @@ impl AgentHub {
             let result = match session.agent {
                 _ if acp => acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await,
                 AgentKind::ClaudeCode => {
-                    claude::run_turn(
-                        &hub,
-                        &session,
-                        &prompt,
-                        &system,
-                        uuid.as_deref(),
-                        cancel.clone(),
-                    )
-                    .await
+                    acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
                 }
                 AgentKind::OpenCode => {
                     acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
                 }
                 AgentKind::Codex => {
-                    codex::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
+                    acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
                 }
                 AgentKind::Pi => {
                     pi::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
@@ -2425,6 +2437,19 @@ async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
         Ok(Ok(o)) if o.status.success() => {
             p.found = true;
             p.version = Some(String::from_utf8_lossy(&o.stdout).trim().to_string());
+            // Its chats run through an ACP adapter, which needs installing too.
+            let acp = catalog::harness(kind).acp.as_ref().filter(|a| !a.preview);
+            if let Some((cmd, adapter)) =
+                acp.and_then(|a| Some((a.command.as_deref()?, a.adapter.as_ref()?)))
+                && resolve(cmd).is_err()
+            {
+                p.found = false;
+                p.error = Some(format!(
+                    "tab runs it through {cmd} ({}, {}), which isn't installed",
+                    adapter.repo, adapter.license
+                ));
+                p.install_command = adapter.npm.as_ref().map(|n| format!("npm install -g {n}"));
+            }
         }
         Ok(Ok(o)) => p.error = Some(String::from_utf8_lossy(&o.stderr).trim().to_string()),
         Ok(Err(e)) => p.error = Some(e.to_string()),
