@@ -1150,7 +1150,7 @@ pub fn tools() -> Value {
             "description": "Create a task in tab's queue, optionally scheduled for later. Only when the person asks for it, or for one concrete thing that has to happen and can't be done now; otherwise list possible follow-ups in your reply. From a chat on a task, the new task is a follow-up of it: it shows under this task in the queue, and each is in the other's Context. For work in phases, pass `after` so later phases wait for earlier ones.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string" },
-                "body": { "type": "string", "description": "What to do and why, with what the next agent needs: the repo, files, PRs, decisions made." },
+                "body": { "type": "string", "description": "What to do and why, with what the next agent needs: the repo, files, PRs, decisions made. Markdown: short paragraphs, lists, `code`, links; it is shown rendered as the task's details." },
                 "priority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
                 "due_in_minutes": { "type": "integer", "minimum": 1 },
                 "url": { "type": "string" },
