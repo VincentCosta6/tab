@@ -16,6 +16,9 @@ path = "src/main.rs"
 [features]
 # The sample-data connector, for trying the app and screenshots.
 sample-data = ["tab-core/sample-data"]
+# Compile the Metal shaders when the app starts instead of at build time,
+# for Macs with only the Command Line Tools (no Xcode, so no `metal`).
+runtime-shaders = ["gpui_platform/runtime_shaders"]
 
 [dependencies]
 anyhow = "1"
