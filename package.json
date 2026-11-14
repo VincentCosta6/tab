@@ -29,7 +29,8 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "shiki": "4.5.0",
-    "simple-icons": "^16.36.0"
+    "simple-icons": "^16.36.0",
+    "streamdown": "2.7.1"
   },
   "devDependencies": {
     "@bufbuild/buf": "^1.75.0",

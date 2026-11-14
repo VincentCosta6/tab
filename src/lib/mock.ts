@@ -1246,7 +1246,15 @@ function simulateTurn(session: Session, item: QueueItem, text: string, attachmen
       post(session, "assistant", "tool", `tab: tab_add_found: ${related.title}`, { tool: "mcp__tab__tab_add_found" });
       post(session, "tool", "tool_result", "Added under found.");
     }
-    const reply = `I looked through your queue for context on **${item.title}**.\n\n- The #incident-checkout thread is the same problem, so I filed it under Found.\n- Next I'd check the cart cache TTL change from the 14:10 deploy.\n\nWant me to open a branch and draft the fix?`;
+    const reply = [
+      `I looked through your queue for context on **${item.title}**.`,
+      "- The #incident-checkout thread is the same problem, so I filed it under Found.\n- Next I'd check the cart cache TTL change from the 14:10 deploy.",
+      "The deploy shortened the TTL in `src/cart/cache.ts`:",
+      "```ts\nexport const CART_TTL_MS = 5_000; // was 60_000\n\nexport function cartKey(userId: string) {\n  return `cart:${userId}`;\n}\n```",
+      "| Before | After | p99 |\n| --- | --- | --- |\n| 60s TTL | 5s TTL | 400ms → 1.7s |",
+      "1. Put the TTL back to 60s.\n2. Add a test that pins it.",
+      "Want me to open a branch and draft the fix?",
+    ].join("\n\n");
     for (let i = 0; i < reply.length; i += 12) {
       emit({ type: "session_delta", session_id: session.id, text: reply.slice(i, i + 12) });
       await sleep(30);

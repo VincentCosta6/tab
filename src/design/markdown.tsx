@@ -22,7 +22,7 @@ export const MarkdownLinks = createContext<((href: string, e: MouseEvent) => voi
  */
 export const MarkdownFiles = createContext<{ base: string | null; imagesAtEnd?: boolean } | null>(null);
 
-function LocalLink({ href, label, children }: { href: string; label: string; children: ReactNode }) {
+export function LocalLink({ href, label, children }: { href: string; label: string; children: ReactNode }) {
   const on = useContext(MarkdownLinks);
   const files = useContext(MarkdownFiles);
   if (!on) {
@@ -43,7 +43,7 @@ function LocalLink({ href, label, children }: { href: string; label: string; chi
  * gathers its images at the end of each turn (`imagesAtEnd`), a local one
  * reads as a card here and shows in full there, once.
  */
-function InlineImage({ src: raw, alt }: { src: string; alt: string }) {
+export function InlineImage({ src: raw, alt }: { src: string; alt: string }) {
   const files = useContext(MarkdownFiles);
   const src = resolvePath(raw, files?.base);
   if (files?.imagesAtEnd && isLocalPath(src)) return <FileChip path={src} label={alt && alt !== raw ? alt : undefined} />;
@@ -72,7 +72,7 @@ export function ImageThumb({ src, alt, list }: { src: string; alt?: string; list
 }
 
 /** A file path in backticks: a file card in chats, plain code elsewhere. */
-function FileOrCode({ path }: { path: string }) {
+export function FileOrCode({ path }: { path: string }) {
   return useContext(MarkdownFiles) ? <FileChip path={path} /> : <code>{path}</code>;
 }
 
@@ -90,6 +90,31 @@ export function linkLabel(href: string): string {
   } catch { return href; }
 }
 
+/**
+ * A bare link reads as a pill. One tab can summarise (a GitHub PR) shows its
+ * title and status; anything else shows owner/repo#12 or host/path.
+ */
+export function BareLink({ href }: { href: string }) {
+  if (parseLink(href)?.preview) return <LinkPill href={href} />;
+  return <a href={href} className="pr-pill" target="_blank" rel="noreferrer" title={href} onClick={(e) => { e.preventDefault(); void openLink(href, e); }}>{linkLabel(href)}</a>;
+}
+
+/** A labelled web link, opened the way tab opens links. */
+export function WebLink({ href, children }: { href: string; children: ReactNode }) {
+  return <a href={href} target="_blank" rel="noreferrer" title={href} onClick={(e) => { e.preventDefault(); void openLink(href, e); }}>{children}</a>;
+}
+
+/**
+ * Inline code: a screenshot the agent saved, named by path, shows; any other
+ * file it names by absolute path (a PDF, a report) is a card that opens it.
+ */
+export function InlineCode({ text }: { text: string }) {
+  const t = text.trim();
+  if (isImagePath(t) && !/\s/.test(t) && (isLocalPath(t) || t.includes("/") || t.includes("\\"))) return <InlineImage src={t} alt={t} />;
+  if (isLocalPath(t) && isFilePath(t)) return <FileOrCode path={t} />;
+  return <code>{text}</code>;
+}
+
 function inline(text: string, key: string): ReactNode[] {
   const out: ReactNode[] = [];
   const re = /(!\[[^\]]*\]\([^)\s]+\)|`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s<>()\[\]`]*[^\s<>()\[\]`.,;:!?'"])/g;
@@ -103,22 +128,12 @@ function inline(text: string, key: string): ReactNode[] {
     if (t.startsWith("![")) {
       const [, alt, src] = /!\[([^\]]*)\]\(([^)\s]+)\)/.exec(t)!;
       out.push(<InlineImage key={k} src={src} alt={alt} />);
-    } else if (t.startsWith("`") && isImagePath(t.slice(1, -1)) && !/\s/.test(t.slice(1, -1).trim()) && (isLocalPath(t.slice(1, -1)) || t.includes("/") || t.includes("\\"))) {
-      // A screenshot the agent saved, named by path: show it.
-      out.push(<InlineImage key={k} src={t.slice(1, -1)} alt={t.slice(1, -1)} />);
-    } else if (t.startsWith("`") && isLocalPath(t.slice(1, -1)) && isFilePath(t.slice(1, -1))) {
-      // Any other file it names by absolute path (a PDF, a report): a card that opens it.
-      out.push(<FileOrCode key={k} path={t.slice(1, -1)} />);
-    } else if (t.startsWith("`")) out.push(<code key={k}>{t.slice(1, -1)}</code>);
+    } else if (t.startsWith("`")) out.push(<InlineCode key={k} text={t.slice(1, -1)} />);
     else if (t.startsWith("**")) out.push(<strong key={k}>{t.slice(2, -2)}</strong>);
-    else if (/^https?:\/\//.test(t)) {
-      // A bare link reads as a pill. One tab can summarise (a GitHub PR) shows its title and
-      // status; anything else shows owner/repo#12 or host/path.
-      if (parseLink(t)?.preview) out.push(<LinkPill key={k} href={t} />);
-      else out.push(<a key={k} href={t} className="pr-pill" target="_blank" rel="noreferrer" title={t} onClick={(e) => { e.preventDefault(); void openLink(t, e); }}>{linkLabel(t)}</a>);
-    } else if (t.startsWith("[")) {
+    else if (/^https?:\/\//.test(t)) out.push(<BareLink key={k} href={t} />);
+    else if (t.startsWith("[")) {
       const [, label, href] = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(t)!;
-      out.push(/^https?:\/\//.test(href) ? <a key={k} href={href} target="_blank" rel="noreferrer" title={href} onClick={(e) => { e.preventDefault(); void openLink(href, e); }}>{label}</a> : <LocalLink key={k} href={href} label={label}>{inline(label, k)}</LocalLink>);
+      out.push(/^https?:\/\//.test(href) ? <WebLink key={k} href={href}>{label}</WebLink> : <LocalLink key={k} href={href} label={label}>{inline(label, k)}</LocalLink>);
     } else out.push(<em key={k}>{t.slice(1, -1)}</em>);
     last = m.index + t.length;
   }

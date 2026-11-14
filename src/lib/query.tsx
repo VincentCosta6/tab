@@ -148,6 +148,7 @@ function LiveEvents() {
     let reload: number | undefined;
     let activity: number | undefined;
     let off: (() => void) | undefined;
+    let gone = false;
     onEngineEvent((e) => {
       switch (e.type) {
         case "item_changed": {
@@ -277,8 +278,14 @@ function LiveEvents() {
           break;
         }
       }
-    }).then((u) => (off = u));
+    }).then((u) => {
+      // Unmounted before listening started (React mounts twice in dev): stop now,
+      // or every event, each streamed token included, arrives twice.
+      if (gone) u();
+      else off = u;
+    });
     return () => {
+      gone = true;
       clearTimeout(reload);
       off?.();
     };
