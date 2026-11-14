@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Blocks } from "../../design/blocks";
 import { cx } from "../../design/components";
 import { Icon } from "../../design/icons";
+import { RichMarkdown } from "../../design/richMarkdown";
 import { usePreview } from "../../lib/hooks";
 import type { Block, QueueItem } from "../../lib/types";
 
@@ -69,7 +70,14 @@ export function Reader({ item, mode }: { item: QueueItem; mode: Mode }) {
     <div className="reader">
       <div className="reader-body">
         {isLoading && <p className="subtle"><Icon name="clock" size={12} /> Loading the full message…</p>}
-        {shown.length ? <Blocks blocks={shown} /> : <p className="subtle">{item.body ?? "Nothing to show."}</p>}
+        {shown.length ? (
+          <Blocks blocks={shown} />
+        ) : item.body ? (
+          // A task's details (written by the person or an agent) are markdown.
+          mode === "plain" ? <p className="block-text">{item.body}</p> : <RichMarkdown text={item.body} />
+        ) : (
+          <p className="subtle">Nothing to show.</p>
+        )}
       </div>
     </div>
   );

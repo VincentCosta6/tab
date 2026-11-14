@@ -10,11 +10,12 @@ import { openImages } from "../lib/images";
 import { Badge, Button, cx } from "./components";
 import { Icon } from "./icons";
 import { Markdown } from "./markdown";
+import { RichMarkdown } from "./richMarkdown";
 
 export function BlockView({ block }: { block: Block }) {
   switch (block.type) {
     case "text":
-      return block.markdown ? <Markdown text={block.text} /> : <p className="block-text">{block.text}</p>;
+      return block.markdown ? <RichMarkdown text={block.text} /> : <p className="block-text">{block.text}</p>;
     case "quote":
       return (
         <blockquote className="block-quote">
