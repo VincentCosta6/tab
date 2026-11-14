@@ -69,8 +69,36 @@ static PROVIDERS: LazyLock<Vec<Provider>> = LazyLock::new(|| {
         .expect("decisions.json is valid")
         .into_iter()
         .filter(|p| dialect(&p.dialect).is_some())
+        .map(|mut p| {
+            if p.via_agent() {
+                p.models = agent_models(&p.models);
+            }
+            p
+        })
         .collect()
 });
+
+/// "Your agent" has one model per harness tab can drive, from the harness
+/// catalog, so a new harness shows up here without a catalog entry. Each
+/// takes its capabilities from the one template model in `decisions.json`
+/// and answers on the harness's small model (`small_model`).
+fn agent_models(template: &[Model]) -> Vec<Model> {
+    let Some(t) = template.first() else {
+        return Vec::new();
+    };
+    crate::agents::catalog::harnesses()
+        .iter()
+        .filter(|h| h.kind().is_some())
+        .map(|h| Model {
+            id: h.id.clone(),
+            label: match &h.small_model {
+                Some(m) => format!("{} ({m})", h.name),
+                None => h.name.clone(),
+            },
+            ..t.clone()
+        })
+        .collect()
+}
 
 /// Every provider tab has an adapter for.
 pub fn providers() -> &'static [Provider] {

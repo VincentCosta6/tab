@@ -322,3 +322,20 @@ fn the_agent_provider_needs_agents_but_no_key() {
     let s = status(&c);
     assert!(s.iter().find(|s| s.provider.id == "agent").unwrap().has_key);
 }
+
+#[test]
+fn the_agent_provider_offers_every_harness_tab_can_drive() {
+    let ids: Vec<_> = provider("agent")
+        .unwrap()
+        .models
+        .iter()
+        .map(|m| m.id.as_str())
+        .collect();
+    let harnesses: Vec<_> = crate::agents::catalog::harnesses()
+        .iter()
+        .filter(|h| h.kind().is_some())
+        .map(|h| h.id.as_str())
+        .collect();
+    assert_eq!(ids, harnesses);
+    assert!(ids.contains(&"codex"));
+}

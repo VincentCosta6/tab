@@ -745,8 +745,10 @@ export const mockApi = {
         case "agent_harnesses": return harnesses;
         case "decision_providers": return (decisionData as unknown as DecisionProvider[]).map((p) => ({
           ...p,
+          // As `decisions::agent_models`: one model per harness, from the template.
+          models: p.dialect === "llm" ? harnesses.map((h) => ({ ...p.models[0], id: h.id, label: h.small_model ? `${h.name} (${h.small_model})` : h.name })) : p.models,
           has_key: p.dialect === "llm" || !!config.ranking.decision?.api_keys[p.id],
-          reusable_from: p.id === "openrouter" && mockOpenCode ? ["opencode"] : [],
+          reusable_from: p.id === "openrouter" && mockOpenCode() ? ["opencode"] : [],
         }));
         case "agent_models": return mockModels();
         case "agent_install": {

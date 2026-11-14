@@ -588,7 +588,7 @@ impl AgentHub {
 
     /// One structured answer from a harness's model, the way the titler and
     /// suggestions ask: no tools, no MCP, no saved session. `model: None` is
-    /// a small Claude model on Claude Code and the chat model on OpenCode.
+    /// the harness's small model (`harnesses.json`), else its chat model.
     /// `Value::Null` when the model returned an error.
     pub async fn ask_structured(
         self: &Arc<Self>,

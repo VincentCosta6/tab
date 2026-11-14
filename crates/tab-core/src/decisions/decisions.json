@@ -8,7 +8,9 @@
     "path": "/api/v1/systemone",
     "env": "OPENROUTER_API_KEY",
     "key_url": "https://openrouter.ai/settings/keys",
-    "key_from": ["opencode"],
+    "key_from": [
+      "opencode"
+    ],
     "models": [
       {
         "id": "typesafe/jev-1.14",
@@ -16,7 +18,15 @@
         "family": "Jev",
         "input_per_mtok": 0.042,
         "output_per_mtok": 0.0,
-        "capabilities": { "question_types": ["choice", "score", "yes_no"], "max_options": 255, "confidence": true }
+        "capabilities": {
+          "question_types": [
+            "choice",
+            "score",
+            "yes_no"
+          ],
+          "max_options": 255,
+          "confidence": true
+        }
       }
     ]
   },
@@ -37,7 +47,15 @@
         "family": "Jev",
         "input_per_mtok": 0.042,
         "output_per_mtok": 0.0,
-        "capabilities": { "question_types": ["choice", "score", "yes_no"], "max_options": 255, "confidence": true }
+        "capabilities": {
+          "question_types": [
+            "choice",
+            "score",
+            "yes_no"
+          ],
+          "max_options": 255,
+          "confidence": true
+        }
       }
     ]
   },
@@ -50,22 +68,32 @@
     "path": "/v1/decisions",
     "env": "OPENAI_API_KEY",
     "key_url": "https://platform.openai.com/api-keys",
-    "key_from": ["opencode"],
+    "key_from": [
+      "opencode"
+    ],
     "models": [
       {
         "id": "gpt-6-luna",
         "label": "GPT-6 Luna",
         "family": "Luna",
-        "input_per_mtok": 0.10,
+        "input_per_mtok": 0.1,
         "output_per_mtok": 0.0,
-        "capabilities": { "question_types": ["choice", "score", "yes_no"], "max_questions": 400, "confidence": true }
+        "capabilities": {
+          "question_types": [
+            "choice",
+            "score",
+            "yes_no"
+          ],
+          "max_questions": 400,
+          "confidence": true
+        }
       }
     ]
   },
   {
     "id": "agent",
     "name": "Your agent",
-    "pitch": "Answers with a model you already pay for, through a harness you've set up: Claude Code on your Claude plan, or OpenCode with a ChatGPT or other login. Nothing new to sign up for, but it's slower and uses more of your plan or tokens than a decision model, and its confidence is the model's own guess, so it can rank less accurately.",
+    "pitch": "Answers with a model you already pay for, through a harness you've set up: Claude Code on your Claude plan, or OpenCode, Codex or Pi with your own login. Nothing new to sign up for, but it's slower and uses more of your plan or tokens than a decision model, and its confidence is the model's own guess, so it can rank less accurately.",
     "dialect": "llm",
     "base_url": "",
     "path": "",
@@ -74,20 +102,21 @@
     "key_from": [],
     "models": [
       {
-        "id": "claude_code",
-        "label": "Claude Code (Haiku)",
+        "id": "harness",
+        "label": "Each harness tab can drive",
         "family": "LLM",
         "input_per_mtok": 0.0,
         "output_per_mtok": 0.0,
-        "capabilities": { "question_types": ["choice", "score", "yes_no"], "max_options": 50, "max_questions": 10, "confidence": false }
-      },
-      {
-        "id": "opencode",
-        "label": "OpenCode (your chat model)",
-        "family": "LLM",
-        "input_per_mtok": 0.0,
-        "output_per_mtok": 0.0,
-        "capabilities": { "question_types": ["choice", "score", "yes_no"], "max_options": 50, "max_questions": 10, "confidence": false }
+        "capabilities": {
+          "question_types": [
+            "choice",
+            "score",
+            "yes_no"
+          ],
+          "max_options": 50,
+          "max_questions": 10,
+          "confidence": false
+        }
       }
     ]
   }

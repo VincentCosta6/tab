@@ -1,4 +1,6 @@
 import { Button, Card, FormRow, Section, TextArea, TextInput, Toggle } from "../../../design/components";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../../../lib/api";
 import { useDecisionProviders, useHarnesses } from "../../../lib/hooks";
 import type { DecisionConfig, TabConfig } from "../../../lib/types";
 import { useDraft } from "../draft";
@@ -20,6 +22,10 @@ export function RankingPage() {
   const decision = draft.ranking.decision ?? noDecision;
   const providers = useDecisionProviders();
   const harnesses = useHarnesses();
+  const probes = useQuery({ queryKey: ["probes"], queryFn: api.detectAgents, staleTime: 60_000 });
+  /** "Your agent" offers the harnesses installed here, and the one picked. */
+  const offered = (dialect: string, id: string) =>
+    dialect !== "llm" || id === decision.model || !probes.data || probes.data.some((a) => a.kind === id && a.found);
   const current = providers.data?.find((p) => p.id === decision.provider);
   const model = current?.models.find((m) => m.id === decision.model) ?? current?.models[0];
   const harnessName = (id?: string) => (id ? (harnesses.data?.find((h) => h.id === id)?.name ?? id) : undefined);
@@ -92,7 +98,7 @@ export function RankingPage() {
               <option value="haiku">Claude Haiku</option>
               {providers.data?.map((p) => (
                 <optgroup key={p.id} label={p.dialect === "llm" ? `${p.name} (slower, may be less accurate)` : p.name}>
-                  {p.models.map((m) => (
+                  {p.models.filter((m) => offered(p.dialect, m.id)).map((m) => (
                     <option key={m.id} value={`${p.id}:${m.id}`}>
                       {p.dialect === "llm" ? m.label : `${m.label} via ${p.name}`}
                     </option>

@@ -184,7 +184,12 @@ impl Engine {
         for f in connectors::registry() {
             gateway.declare_limits(&f.descriptor().rate_limits);
         }
-        let ranker = Arc::new(Pipeline::from_config(cfg, gateway.clone(), store.clone(), None));
+        let ranker = Arc::new(Pipeline::from_config(
+            cfg,
+            gateway.clone(),
+            store.clone(),
+            None,
+        ));
         let me = store.device_id().unwrap_or_else(|_| "this-computer".into());
         Self {
             leases: crate::leases::InMemory::new(&me),
