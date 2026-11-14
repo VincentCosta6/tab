@@ -408,10 +408,26 @@ pub(super) async fn run_turn(
                 std::future::pending::<()>().await
             }
         };
+        // While monitoring, the person may write. The CLI's stdin is closed
+        // by then, so their message can't reach it: stop waiting and let it
+        // run as the next turn instead of after the background work ends.
+        let asked = async {
+            if monitoring {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await
+            } else {
+                std::future::pending::<()>().await
+            }
+        };
         tokio::select! {
             _ = settle => {
                 monitoring = true;
                 hub.update(&session.id, Some(SessionStatus::Monitoring), None);
+            }
+            _ = asked => {
+                if stop_waiting_for(hub, &session.id) {
+                    child.kill_tree();
+                    break;
+                }
             }
             line = lines.next_line() => match line? {
                 Some(l) if !l.trim().is_empty() => match serde_json::from_str::<Value>(&l) {
@@ -453,6 +469,32 @@ pub(super) async fn run_turn(
         );
     }
     Ok(())
+}
+
+/// Told to the agent with a message that ended its wait on background work.
+const STOPPED_WAITING: &str = "(From tab, not the person.) The person wrote while you were waiting on \
+background work, so tab stopped that wait (and the background commands you started) to bring you \
+their message. Answer it, then start the background work again if it is still needed.";
+
+/// Whether the person queued a message while the agent waits on background
+/// work. If so, tab's note goes in front of it, so the agent learns why its
+/// background work stopped.
+fn stop_waiting_for(hub: &AgentHub, session_id: &str) -> bool {
+    let mut followups = hub.followups.lock().unwrap();
+    match followups.get_mut(session_id) {
+        Some(queued) if !queued.is_empty() => {
+            queued.insert(0, STOPPED_WAITING.to_string());
+            hub.post(
+                session_id,
+                "system",
+                "status",
+                "Stopped waiting on background work to bring the agent your message.",
+                Value::Null,
+            );
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Claude Code's runtime (Bun) blames the open-file limit for any error it
@@ -1500,6 +1542,32 @@ mod tests {
         assert!(!p.finished);
         let s = store.session_get(&s.id).unwrap().unwrap();
         assert_eq!(s.status, SessionStatus::Working);
+    }
+
+    #[tokio::test]
+    async fn a_message_sent_while_monitoring_stops_the_wait() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        assert!(
+            !stop_waiting_for(&hub, &s.id),
+            "nothing queued: keep waiting"
+        );
+        hub.followups
+            .lock()
+            .unwrap()
+            .insert(s.id.clone(), vec!["Hello?".into()]);
+        assert!(stop_waiting_for(&hub, &s.id));
+        let queued = hub.followups.lock().unwrap()[&s.id].clone();
+        assert_eq!(queued, vec![STOPPED_WAITING.to_string(), "Hello?".into()]);
     }
 
     #[tokio::test]
