@@ -50,7 +50,7 @@ use crate::model::{
 use crate::store::Store;
 
 /// How long an approval waits for the person before it is denied.
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -1860,6 +1860,30 @@ impl AgentHub {
             .filter(|(a, _)| a.session_id == session_id)
             .map(|(a, _)| a.clone())
             .collect()
+    }
+
+    /// Closes `session_id`'s open approvals for `tool`: the agent's call
+    /// ended without them (Claude Code gave up waiting), so answering one
+    /// would reach nobody, and the chat shows the call's own card instead.
+    pub(crate) fn drop_tool_approvals(&self, session_id: &str, tool: &str) {
+        let stale: Vec<String> = {
+            let mut approvals = self.approvals.lock().unwrap();
+            let ids: Vec<String> = approvals
+                .iter()
+                .filter(|(_, (a, _))| a.session_id == session_id && a.tool == tool)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &ids {
+                approvals.remove(id);
+            }
+            ids
+        };
+        for id in stale {
+            self.emit(EngineEvent::ApprovalResolved {
+                session_id: session_id.into(),
+                id,
+            });
+        }
     }
 
     fn drop_approvals(&self, session_id: &str) {
