@@ -24,6 +24,8 @@ const mockInstalled = new Set<AgentKind>(
   ((typeof location !== "undefined" && new URLSearchParams(location.search).get("agents")) || "claude_code").split(",").filter((k) => k !== "none") as AgentKind[],
 );
 const mockOpenCode = () => mockInstalled.has("opencode");
+// ACP adapters installed (codex-acp); none to start with.
+const mockAdapters = new Set<AgentKind>();
 // What the harnesses report in the app (tab asks each one; see
 // agents/catalog.rs), as a sample.
 const mockModels = (): ModelOption[] => {
@@ -745,6 +747,17 @@ export const mockApi = {
           const steps = [`npm install -g ${h?.install.npm ?? h?.command}`, "added 12 packages in 4s", `Installed ${h?.name} 1.4.2`];
           for (const s of steps) { await new Promise((r) => setTimeout(r, 600)); upgradeListeners.forEach((l) => l(s)); }
           mockInstalled.add(args.kind as AgentKind);
+          return undefined;
+        }
+        case "agent_acp_adapter": {
+          const h = harnesses.find((x) => x.id === args.kind);
+          return h?.acp?.adapter ? mockAdapters.has(args.kind as AgentKind) : null;
+        }
+        case "agent_install_adapter": {
+          const h = harnesses.find((x) => x.id === args.kind);
+          const steps = [`npm install -g ${h?.acp?.adapter?.npm}`, "added 3 packages in 2s"];
+          for (const s of steps) { await new Promise((r) => setTimeout(r, 600)); upgradeListeners.forEach((l) => l(s)); }
+          mockAdapters.add(args.kind as AgentKind);
           return undefined;
         }
         case "set_session_model": {

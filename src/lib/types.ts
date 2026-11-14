@@ -631,7 +631,7 @@ export interface Harness {
   families?: Record<string, string>;
   install: { npm: string | null; unix: string | null; windows: string | null };
   /** How to run it over the Agent Client Protocol, when its chats can go through it. */
-  acp?: { command: string | null; preview?: boolean; adapter: { npm: string | null; repo: string; license: string } | null } | null;
+  acp?: { command: string | null; preview?: boolean; strict?: boolean; adapter: { npm: string | null; repo: string; license: string } | null } | null;
 }
 
 /** One model a harness can run. */

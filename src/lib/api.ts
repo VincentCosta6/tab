@@ -168,6 +168,10 @@ export const api = {
   agentModels: () => call<ModelOption[]>("agent_models"),
   /** Installs a harness; its output arrives through `onAgentUpgrade`. */
   agentInstall: (kind: AgentKind) => call<void>("agent_install", { kind }),
+  /** Whether a harness's ACP adapter is installed; null when it has none. */
+  agentAcpAdapter: (kind: AgentKind) => call<boolean | null>("agent_acp_adapter", { kind }),
+  /** Installs a harness's ACP adapter; its output arrives through `onAgentUpgrade`. */
+  agentInstallAdapter: (kind: AgentKind) => call<void>("agent_install_adapter", { kind }),
   agentHealth: () => call<AgentProbe | null>("agent_health"),
   /** Runs the agent's own update command; its output arrives through `onAgentUpgrade`. */
   agentUpgrade: () => call<void>("agent_upgrade"),
