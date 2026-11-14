@@ -254,6 +254,8 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .transcript { scrollbar-width: none; }
 .transcript::-webkit-scrollbar { display: none; }
 .transcript > * { max-width: 780px; width: 100%; margin-left: auto; margin-right: auto; }
+/* What use-stick-to-bottom watches grow: the transcript's messages, laid out as the transcript lays out its own children. */
+.transcript-content { display: flex; flex-direction: column; gap: var(--space-3); }
 .transcript-head { display: flex; justify-content: center; }
 .empty-chat { justify-content: center; align-items: center; }
 .msg { min-width: 0; line-height: 1.55; overflow-wrap: break-word; }

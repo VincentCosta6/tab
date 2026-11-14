@@ -144,6 +144,37 @@
 .markdown code { font-family: var(--font-mono); font-size: 0.92em; padding: 1px 4px; border-radius: var(--radius-sm); background: var(--bg-sunken); }
 .markdown a { color: var(--tone-accent-fg); }
 
+/* RichMarkdown (agent replies): the rest of GitHub-flavored markdown. */
+.rich-markdown { display: block; }
+.rich-markdown ol, .rich-markdown blockquote, .rich-markdown .md-code, .rich-markdown .md-table { margin: 0 0 var(--space-2); }
+.rich-markdown ol { padding-left: var(--space-5); }
+.rich-markdown li > p { margin: 0; }
+.rich-markdown li + li { margin-top: 2px; }
+.rich-markdown ul.contains-task-list { list-style: none; padding-left: var(--space-1); }
+.rich-markdown li.task-list-item input { margin: 0 6px 0 0; vertical-align: middle; }
+.rich-markdown h3, .rich-markdown h4, .rich-markdown h5, .rich-markdown h6 { margin: var(--space-3) 0 var(--space-1); line-height: 1.3; }
+.rich-markdown h3 { font-size: var(--text-lg); }
+.rich-markdown h4 { font-size: var(--text-md); }
+.rich-markdown h5, .rich-markdown h6 { font-size: var(--text-sm); }
+.rich-markdown blockquote { padding: 0 var(--space-3); border-left: 3px solid var(--border-strong); color: var(--fg-muted); }
+.rich-markdown hr { border: 0; border-top: 1px solid var(--border); margin: var(--space-3) 0; }
+.rich-markdown > :first-child > :first-child, .rich-markdown > :first-child { margin-top: 0; }
+.rich-markdown > :last-child > :last-child, .rich-markdown > :last-child { margin-bottom: 0; }
+
+.md-code { border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-sunken); overflow: hidden; }
+.md-code-head { display: flex; align-items: center; justify-content: space-between; padding: 2px var(--space-2) 2px var(--space-3); border-bottom: 1px solid var(--border); font-size: var(--text-xs); color: var(--fg-subtle); font-family: var(--font-mono); }
+.md-code-copy { display: inline-flex; padding: 4px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-subtle); cursor: pointer; }
+.md-code-copy:hover { background: var(--bg-hover); color: var(--fg); }
+.markdown .md-code-body { margin: 0; padding: var(--space-2) var(--space-3); background: transparent; border-radius: 0; overflow: auto; max-height: 420px; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.5; }
+.markdown .md-code-body code { padding: 0; background: none; font-size: inherit; }
+/* Each token's color is Light+'s; in dark mode use the Dark+ one it carries. */
+@media (prefers-color-scheme: dark) { .md-code-body span[style] { color: var(--shiki-dark) !important; } }
+
+.md-table { overflow-x: auto; }
+.md-table table { border-collapse: collapse; font-size: var(--text-sm); }
+.md-table th, .md-table td { padding: 4px var(--space-2); border: 1px solid var(--border); text-align: left; vertical-align: top; }
+.md-table th { background: var(--bg-sunken); font-weight: 600; }
+
 /* Tables */
 .table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); }
 .table th { text-align: left; font-weight: 500; color: var(--fg-subtle); padding: 6px var(--space-3); border-bottom: 1px solid var(--border); white-space: nowrap; }

@@ -5,6 +5,7 @@ import { Icon } from "../../design/icons";
 import { Attachments } from "../../design/ImageViewer";
 import { FilePreview } from "../../design/FileStage";
 import { ImageThumb, Markdown, MarkdownFiles } from "../../design/markdown";
+import { RichMarkdown } from "../../design/richMarkdown";
 import { fileName, isImagePath, saveAttachment } from "../../lib/images";
 import { filesInText, isShowable } from "../../lib/threadFiles";
 import { useStage } from "../../lib/stage";
@@ -16,6 +17,7 @@ import { SlashPanel, tabCommand, tabCommands, type Panel } from "./SlashPanels";
 import { openSlots, parseHint, splitArgs, type ArgSource } from "./slashArgs";
 import { Dictation } from "./Dictation";
 import { useDropTarget } from "./DropZone";
+import { useStickToBottom } from "use-stick-to-bottom";
 import { api } from "../../lib/api";
 import { useChat, useConfig, useHarnesses, useModels, useStream } from "../../lib/hooks";
 import { HarnessIcon, ModelMenu, modelFor } from "./ModelMenu";
@@ -187,8 +189,9 @@ const TURN_PAGE = 30;
 
 export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { chat: Chat | undefined; suggestions?: string[]; onSuggest?: (s: string) => void; onSend?: (text: string) => void; intro?: React.ReactNode }) {
   const stream = useStream(chat?.session?.id);
-  const box = useRef<HTMLDivElement>(null);
-  const stuck = useRef(true); // following the bottom; off once the person scrolls up to read
+  // Follows new output while the person is at the bottom, and lets go as
+  // soon as they scroll up to read, mid-stream included.
+  const { scrollRef: box, contentRef, scrollToBottom } = useStickToBottom({ initial: "instant", resize: "instant" });
   const messages = chat?.messages ?? [];
   const results = new Map<number, SessionMessage>();
   // Pair each tool call with its result: by id when the agent ran several at once, else the one that follows it.
@@ -230,15 +233,12 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
     heightBefore.current = null;
   }, [drawnTurns]);
 
-  // Follow new output while the person is at the bottom; leave them be once they scroll up.
-  // Their own message always brings them back down.
+  // The person's own new message brings them back down.
   const last = messages[messages.length - 1];
-  useLayoutEffect(() => {
-    const el = box.current;
-    if (!el) return;
-    if (last?.role === "user") stuck.current = true;
-    if (stuck.current) el.scrollTop = el.scrollHeight;
-  }, [messages.length, stream, chat?.approvals.length, chat?.running, last?.role]);
+  const ownId = last?.role === "user" ? last.id : null;
+  useEffect(() => {
+    if (ownId != null) void scrollToBottom("instant");
+  }, [ownId, scrollToBottom]);
 
   if (!messages.length && !stream)
     return (
@@ -259,10 +259,9 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
   return (
     <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null, imagesAtEnd: true }}>
     <div className="transcript" ref={box} onScroll={(e) => {
-      const el = e.currentTarget;
-      stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-      if (hidden && el.scrollTop < 400) showEarlier();
+      if (hidden && e.currentTarget.scrollTop < 400) showEarlier();
     }}>
+      <div className="transcript-content" ref={contentRef}>
       <div className="transcript-head"><AgentStatus chat={chat} /></div>
       {hidden > 0 && (
         <div className="transcript-earlier">
@@ -279,9 +278,12 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
           {t.files.length > 0 && <TurnFiles paths={t.files} />}
         </Fragment>
       ))}
+      {/* The reply being written, until it's stored as a message. */}
+      {stream && <div className="msg msg-assistant msg-streaming"><RichMarkdown text={stream} streaming /></div>}
       {chat?.approvals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
       {chat?.running && chat.session && <SteerWait messages={messages} results={results} sessionId={chat.session.id} />}
       <ProgressBar messages={messages} results={results} running={!!chat?.running} folded={folded} writing={!!stream} />
+      </div>
     </div>
     </MarkdownFiles.Provider>
   );
@@ -709,7 +711,7 @@ function MessageView({ m, result, onSend, rewind }: { m: SessionMessage; result?
   if (m.kind === "secret_request") return m.meta?.superseded ? null : <SecretCard m={m} onSend={onSend} />;
   if (m.kind === "compacted") return <CompactedDivider m={m} />;
   if (m.kind === "wake") return <div className="msg-note msg-wake"><Icon name="clock" size={12} /> {m.content}</div>;
-  if (m.kind === "text") return <div className="msg msg-assistant"><Markdown text={m.content} /></div>;
+  if (m.kind === "text") return <div className="msg msg-assistant"><RichMarkdown text={m.content} /></div>;
   if (m.kind === "tool" && m.meta?.tool === "AskUserQuestion") {
     // Answered through tab (or still waiting on its card): the card did the talking.
     if (!result || !result.meta?.is_error) return null;
