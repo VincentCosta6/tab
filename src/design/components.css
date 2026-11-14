@@ -165,12 +165,10 @@
 .md-code-head { display: flex; align-items: center; justify-content: space-between; padding: 2px var(--space-2) 2px var(--space-3); border-bottom: 1px solid var(--border); font-size: var(--text-xs); color: var(--fg-subtle); font-family: var(--font-mono); }
 .md-code-copy { display: inline-flex; padding: 4px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--fg-subtle); cursor: pointer; }
 .md-code-copy:hover { background: var(--bg-hover); color: var(--fg); }
-.markdown .md-code-body, .md-code-body pre { margin: 0; padding: var(--space-2) var(--space-3); background: transparent; border-radius: 0; overflow: auto; max-height: 420px; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.5; }
-.md-code-body > pre { padding: 0; max-height: none; overflow: visible; }
+.markdown .md-code-body { margin: 0; padding: var(--space-2) var(--space-3); background: transparent; border-radius: 0; overflow: auto; max-height: 420px; font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.5; }
 .markdown .md-code-body code { padding: 0; background: none; font-size: inherit; }
-/* Shiki gives each span both themes' colors; show the one for the system's scheme. */
-.md-code-body span { color: var(--shiki-light); }
-@media (prefers-color-scheme: dark) { .md-code-body span { color: var(--shiki-dark); } }
+/* Each token's color is Light+'s; in dark mode use the Dark+ one it carries. */
+@media (prefers-color-scheme: dark) { .md-code-body span[style] { color: var(--shiki-dark) !important; } }
 
 .md-table { overflow-x: auto; }
 .md-table table { border-collapse: collapse; font-size: var(--text-sm); }

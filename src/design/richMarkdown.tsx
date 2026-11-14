@@ -7,11 +7,12 @@
 // (Streamdown's are styled for Tailwind, which tab doesn't use), so links,
 // file cards and images behave as in `Markdown`.
 
-import { isValidElement, memo, useEffect, useState, type ReactNode } from "react";
-import { Streamdown, defaultRehypePlugins, type Components } from "streamdown";
+import { isValidElement, memo, useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { Streamdown, defaultRehypePlugins, useIsCodeFenceIncomplete, type Components } from "streamdown";
+import type { BundledLanguage } from "shiki";
+import { createCodePlugin, type HighlightResult } from "@streamdown/code";
 import { Icon } from "./icons";
 import { BareLink, InlineCode, InlineImage, LocalLink, WebLink } from "./markdown";
-import { highlightCode } from "./codeHighlight";
 
 /** Plain text of rendered children (a link's label, a code span). */
 function textOf(n: ReactNode): string {
@@ -33,15 +34,32 @@ function Link({ href, children }: { href?: string; children?: ReactNode }) {
   return <LocalLink href={href} label={textOf(children)}>{children}</LocalLink>;
 }
 
-function CodeBlock({ code, lang }: { code: string; lang?: string }) {
-  const [html, setHtml] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+// Streamdown's Shiki plugin: every bundled language, loaded on first use,
+// with the JavaScript regex engine (no WebAssembly, so the content security
+// policy stays strict). A block still streaming in is highlighted from its
+// last complete line on rather than from the top each token.
+const highlighter = createCodePlugin({ themes: ["light-plus", "dark-plus"] });
+
+function useHighlighted(code: string, lang: string | undefined): HighlightResult | null {
+  const streaming = useIsCodeFenceIncomplete();
+  const [result, setResult] = useState<HighlightResult | null>(null);
   useEffect(() => {
+    const language = (lang ?? "").toLowerCase() as BundledLanguage;
+    if (!language || !highlighter.supportsLanguage(language)) return setResult(null);
     let live = true;
-    // While a block streams in it re-highlights as it grows; the last result wins.
-    void highlightCode(code, lang).then((h) => live && setHtml(h));
+    const now = highlighter.highlight(
+      { code, language, themes: highlighter.getThemes(), isIncomplete: streaming },
+      (r) => live && setResult(r),
+    );
+    if (now) setResult(now);
     return () => { live = false; };
-  }, [code, lang]);
+  }, [code, lang, streaming]);
+  return result;
+}
+
+function CodeBlock({ code, lang }: { code: string; lang?: string }) {
+  const highlighted = useHighlighted(code, lang);
+  const [copied, setCopied] = useState(false);
   const copy = () => {
     void navigator.clipboard.writeText(code).then(() => {
       setCopied(true);
@@ -56,8 +74,19 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
           <Icon name={copied ? "check" : "copy"} size={12} />
         </button>
       </div>
-      {/* Shiki escapes the code; its HTML is only spans with colors. */}
-      {html ? <div className="md-code-body" dangerouslySetInnerHTML={{ __html: html }} /> : <pre className="md-code-body"><code>{code}</code></pre>}
+      <pre className="md-code-body">
+        <code>
+          {highlighted
+            ? highlighted.tokens.map((line, i) => (
+                <span key={i} className="line">
+                  {/* Each token carries its light color and `--shiki-dark`. */}
+                  {line.map((t, j) => <span key={j} style={t.htmlStyle as CSSProperties}>{t.content}</span>)}
+                  {i < highlighted.tokens.length - 1 && "\n"}
+                </span>
+              ))
+            : code}
+        </code>
+      </pre>
     </div>
   );
 }

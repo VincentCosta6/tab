@@ -17,7 +17,7 @@ import { SlashPanel, tabCommand, tabCommands, type Panel } from "./SlashPanels";
 import { openSlots, parseHint, splitArgs, type ArgSource } from "./slashArgs";
 import { Dictation } from "./Dictation";
 import { useDropTarget } from "./DropZone";
-import { useFollowBottom } from "./followBottom";
+import { useStickToBottom } from "use-stick-to-bottom";
 import { api } from "../../lib/api";
 import { useChat, useConfig, useHarnesses, useModels, useStream } from "../../lib/hooks";
 import { HarnessIcon, ModelMenu, modelFor } from "./ModelMenu";
@@ -189,7 +189,9 @@ const TURN_PAGE = 30;
 
 export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { chat: Chat | undefined; suggestions?: string[]; onSuggest?: (s: string) => void; onSend?: (text: string) => void; intro?: React.ReactNode }) {
   const stream = useStream(chat?.session?.id);
-  const box = useRef<HTMLDivElement>(null);
+  // Follows new output while the person is at the bottom, and lets go as
+  // soon as they scroll up to read, mid-stream included.
+  const { scrollRef: box, contentRef, scrollToBottom } = useStickToBottom({ initial: "instant", resize: "instant" });
   const messages = chat?.messages ?? [];
   const results = new Map<number, SessionMessage>();
   // Pair each tool call with its result: by id when the agent ran several at once, else the one that follows it.
@@ -231,10 +233,12 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
     heightBefore.current = null;
   }, [drawnTurns]);
 
-  // Follow new output while the person is at the bottom; leave them be once they scroll up.
-  // Their own message always brings them back down.
+  // The person's own new message brings them back down.
   const last = messages[messages.length - 1];
-  const follow = useFollowBottom(box, [messages.length, stream, chat?.approvals.length, chat?.running, last?.role], last?.role === "user" ? last.id : null);
+  const ownId = last?.role === "user" ? last.id : null;
+  useEffect(() => {
+    if (ownId != null) void scrollToBottom("instant");
+  }, [ownId, scrollToBottom]);
 
   if (!messages.length && !stream)
     return (
@@ -254,11 +258,10 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
 
   return (
     <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null, imagesAtEnd: true }}>
-    <div className="transcript" ref={box} tabIndex={-1} {...follow.handlers} onScroll={(e) => {
-      const el = e.currentTarget;
-      follow.onScroll(el);
-      if (hidden && el.scrollTop < 400) showEarlier();
+    <div className="transcript" ref={box} onScroll={(e) => {
+      if (hidden && e.currentTarget.scrollTop < 400) showEarlier();
     }}>
+      <div className="transcript-content" ref={contentRef}>
       <div className="transcript-head"><AgentStatus chat={chat} /></div>
       {hidden > 0 && (
         <div className="transcript-earlier">
@@ -280,6 +283,7 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
       {chat?.approvals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
       {chat?.running && chat.session && <SteerWait messages={messages} results={results} sessionId={chat.session.id} />}
       <ProgressBar messages={messages} results={results} running={!!chat?.running} folded={folded} writing={!!stream} />
+      </div>
     </div>
     </MarkdownFiles.Provider>
   );
