@@ -21,6 +21,7 @@ export function AppHeader({ title, icon }: { title: string; icon: string }) {
   // draws the window buttons at its right end.
   return (
     <header className={cx("app-header", `os-${os}`)} data-tauri-drag-region>
+      <div className="app-header-lead" id={LEAD_ID} />
       <div className="app-header-title" data-tauri-drag-region>
         <Icon name={icon} size={15} />
         <span data-tauri-drag-region>{title}</span>
@@ -32,6 +33,19 @@ export function AppHeader({ title, icon }: { title: string; icon: string }) {
       {os === "windows" && <WindowButtons />}
     </header>
   );
+}
+
+const LEAD_ID = "app-header-lead";
+
+/**
+ * The left end of the title bar, above the page's own sidebar, for a page
+ * that puts its toolbar up there (Work's queue). Portal into it; it's
+ * hidden while empty.
+ */
+export function useHeaderSlot(): HTMLElement | null {
+  const [el, setEl] = useState<HTMLElement | null>(null);
+  useEffect(() => setEl(document.getElementById(LEAD_ID)), []);
+  return el;
 }
 
 /** The OS tab draws its title bar for: macOS (traffic lights inset) or Windows (no native frame). */
