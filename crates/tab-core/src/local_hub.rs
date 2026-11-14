@@ -707,9 +707,20 @@ impl LocalHub {
         self.run_live(store.clone(), events);
         let me = self.clone();
         tokio::spawn(async move {
-            if !me.awaiting_cloud.load(Ordering::Relaxed)
-                && let Err(e) = me.introduce(&store)
-            {
+            // On a blocking thread, like each sync below: once linked to
+            // tab cloud, introducing waits on the cloud's reply, which a
+            // runtime thread mustn't (the link reads replies on one).
+            let (m, st) = (me.clone(), store.clone());
+            let introduced = tokio::task::spawn_blocking(move || {
+                let _turn = m.syncing.lock().unwrap();
+                if m.awaiting_cloud.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                m.introduce(&st)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("introducing panicked: {e}")));
+            if let Err(e) = introduced {
                 tracing::error!(error = %e, "hub: couldn't set up sync; staying local");
                 return;
             }

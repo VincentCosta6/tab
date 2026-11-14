@@ -24,12 +24,14 @@ const mockInstalled = new Set<AgentKind>(
   ((typeof location !== "undefined" && new URLSearchParams(location.search).get("agents")) || "claude_code").split(",").filter((k) => k !== "none") as AgentKind[],
 );
 const mockOpenCode = () => mockInstalled.has("opencode");
+// What the harnesses report in the app (tab asks each one; see
+// agents/catalog.rs), as a sample.
 const mockModels = (): ModelOption[] => {
-  const claude = (harnessData[0].models as { id: string; label: string; common?: boolean }[]).map((m) => ({ agent: "claude_code" as AgentKind, id: m.id, label: m.label, common: !!m.common }));
+  const claude = [["claude-opus-5-5", "Opus 5.5", true], ["claude-fable-5-2", "Fable 5.2", true], ["claude-sonnet-5-5", "Sonnet 5.5", true], ["claude-haiku-5-5", "Haiku 5.5", true], ["claude-fable-5-1", "Fable 5.1", false], ["claude-opus-5", "Opus 5", false]]
+    .map(([id, label, common]) => ({ agent: "claude_code" as AgentKind, id: id as string, label: label as string, common: common as boolean }));
   if (!mockOpenCode()) return mockInstalled.has("claude_code") ? claude : [];
-  const common = harnessData[1].common_models as string[];
   const oc = ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-haiku-5-5", "openai/gpt-5.5", "openai/gpt-5.5-mini", "google/gemini-3-pro", "ollama/qwen3:32b", "openrouter/deepseek/deepseek-v4"]
-    .map((id) => ({ agent: "opencode" as AgentKind, id, label: id.slice(id.indexOf("/") + 1), common: common.includes(id) }));
+    .map((id) => ({ agent: "opencode" as AgentKind, id, label: id.slice(id.indexOf("/") + 1), common: false }));
   return [...(mockInstalled.has("claude_code") ? claude : []), ...oc];
 };
 

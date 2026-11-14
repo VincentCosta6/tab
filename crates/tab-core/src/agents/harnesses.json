@@ -34,43 +34,25 @@
       "budget_cap": true
     },
     "model_hint": "e.g. sonnet or opus",
-    "small_model": "claude-haiku-5-5",
-    "models": [
-      {
-        "id": "claude-opus-5-5",
-        "label": "Opus 5.5",
-        "common": true
-      },
-      {
-        "id": "claude-sonnet-5-5",
-        "label": "Sonnet 5.5",
-        "common": true
-      },
-      {
-        "id": "claude-haiku-5-5",
-        "label": "Haiku 5.5",
-        "common": true
-      },
-      {
-        "id": "claude-fable-5-1",
-        "label": "Fable 5.1",
-        "common": true
-      },
-      {
-        "id": "claude-opus-5",
-        "label": "Opus 5"
-      },
-      {
-        "id": "claude-opus-4-8",
-        "label": "Opus 4.8"
-      }
-    ],
-    "list_models": null,
-    "common_models": [],
+    "small_model": "haiku",
+    "list_models": {
+      "args": [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ],
+      "stdin": [
+        "{\"type\":\"control_request\",\"request_id\":\"tab_models\",\"request\":{\"subtype\":\"initialize\"}}"
+      ],
+      "format": "claude_initialize"
+    },
     "families": {
-      "fast": "claude-haiku-5-5",
-      "balanced": "claude-sonnet-5-5",
-      "deep": "claude-opus-5-5"
+      "fast": "haiku",
+      "balanced": "sonnet",
+      "deep": "opus"
     },
     "install": {
       "npm": "@anthropic-ai/claude-code",
@@ -103,19 +85,12 @@
     },
     "model_hint": "provider/model, e.g. anthropic/claude-sonnet-5-5",
     "small_model": null,
-    "models": [],
     "list_models": {
       "args": [
         "models"
       ],
       "format": "provider_slash_model_lines"
     },
-    "common_models": [
-      "anthropic/claude-opus-5-5",
-      "anthropic/claude-sonnet-5-5",
-      "anthropic/claude-haiku-5-5",
-      "anthropic/claude-fable-5-1"
-    ],
     "families": {
       "fast": "anthropic/claude-haiku-5-5",
       "balanced": "anthropic/claude-sonnet-5-5",
@@ -167,50 +142,17 @@
     },
     "model_hint": "e.g. gpt-6-sol",
     "small_model": null,
-    "models": [
-      {
-        "id": "gpt-6.1-sol",
-        "label": "GPT-6.1 Sol",
-        "common": true
-      },
-      {
-        "id": "gpt-6-astra",
-        "label": "GPT-6 Astra",
-        "common": true
-      },
-      {
-        "id": "gpt-6-sol",
-        "label": "GPT-6 Sol",
-        "common": true
-      },
-      {
-        "id": "gpt-6-luna",
-        "label": "GPT-6 Luna",
-        "common": true
-      },
-      {
-        "id": "gpt-5.6-sol",
-        "label": "GPT-5.6 Sol"
-      },
-      {
-        "id": "gpt-6.1-terra",
-        "label": "GPT-6.1 Terra"
-      },
-      {
-        "id": "gpt-5.6-terra",
-        "label": "GPT-5.6 Terra"
-      },
-      {
-        "id": "gpt-5.6-luna",
-        "label": "GPT-5.6 Luna"
-      },
-      {
-        "id": "gpt-5.5",
-        "label": "GPT-5.5"
-      }
-    ],
-    "list_models": null,
-    "common_models": [],
+    "list_models": {
+      "args": [
+        "app-server"
+      ],
+      "stdin": [
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"tab\",\"version\":\"0\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"model/list\",\"params\":{}}"
+      ],
+      "format": "codex_model_list"
+    },
     "families": {
       "fast": "gpt-6-luna",
       "balanced": "gpt-6-sol",
@@ -248,19 +190,12 @@
     },
     "model_hint": "provider/model, e.g. anthropic/claude-sonnet-5-5",
     "small_model": null,
-    "models": [],
     "list_models": {
       "args": [
         "--list-models"
       ],
       "format": "provider_model_table"
     },
-    "common_models": [
-      "anthropic/claude-opus-5-5",
-      "anthropic/claude-sonnet-5-5",
-      "anthropic/claude-haiku-5-5",
-      "openai/gpt-6-sol"
-    ],
     "families": {
       "fast": "anthropic/claude-haiku-5-5",
       "balanced": "anthropic/claude-sonnet-5-5",
