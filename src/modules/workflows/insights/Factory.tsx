@@ -9,8 +9,9 @@ import type { FactoryWorkflow, Workflow, WorkflowStats } from "../../../lib/type
 import { Delta, Legend, Ring, StackedBars } from "./charts";
 import {
   duration, hasApi, spendParts, hasPlan, interventionRate, MIN_RUNS, pct, planShare, planTokens, plural, rate, rateTone, spendLong, successRate, tokens,
-  unattendedRate, usd, windowDays,
+  unattendedRate, usd,
 } from "./format";
+import { bucket, slotsFor, windowName } from "./periods";
 import { HealthBadge, outcomeSeries, outcomeValues, RateRings, useInsightsLive, WindowPicker } from "./parts";
 import { toneColor } from "./charts";
 import { useFactory } from "./useInsights";
@@ -24,7 +25,9 @@ export function Factory({ workflows, onOpen }: { workflows: Workflow[]; onOpen: 
     <section className="wf-main ins-factory">
       <header className="wf-bar">
         <h2 className="wf-allruns-title">Factory</h2>
-        <span className="subtle ins-bar-note">How every workflow ran, in the last {f?.days ?? "…"} days</span>
+        <span className="subtle ins-bar-note" title={f?.detail_from ? "Runs are kept for 30 days; older days come from daily totals (UTC days). Counts and spend are exact." : undefined}>
+          How every workflow ran, in the last {f ? windowName(f.days) : "…"}{f?.detail_from ? " · older days from daily totals" : ""}
+        </span>
         <span className="wf-bar-spacer" />
         <WindowPicker />
       </header>
@@ -55,6 +58,7 @@ export function Factory({ workflows, onOpen }: { workflows: Workflow[]; onOpen: 
 function HubRow({ totals: t, previous: p, from, days }: { totals: WorkflowStats; previous: WorkflowStats; from: string; days: number }) {
   const enough = p.runs >= MIN_RUNS;
   const thin = t.runs < MIN_RUNS;
+  const slots = slotsFor(from, days);
   return (
     <div className="ins-hub card">
       <div className="ins-hub-rings">
@@ -65,8 +69,8 @@ function HubRow({ totals: t, previous: p, from, days }: { totals: WorkflowStats;
         ]} />
       </div>
       <div className="ins-hub-chart">
-        <span className="ins-stat-label">Every day</span>
-        <StackedBars days={windowDays(from, days)} values={outcomeValues(t.days)} series={outcomeSeries} height={150}
+        <span className="ins-stat-label">{slots.unit === "week" ? "Every week" : "Every day"}</span>
+        <StackedBars days={slots.keys} values={bucket(slots, outcomeValues(t.days))} series={outcomeSeries} height={150} slotLabel={slots.label}
           label={`Daily runs across every workflow: ${t.unattended} on their own, ${t.succeeded - t.unattended} with help, ${t.failed} failed`} />
         <Legend series={outcomeSeries} />
       </div>
@@ -109,7 +113,7 @@ function WorkflowCard({ card: w, from, days, def, onOpen }: { card: FactoryWorkf
   const top = s.failures[0];
   const stepLabel = (id: string, fallback: string) => fallback || def?.steps.find((x) => x.id === id)?.label || id;
   const unplanned = rate(s.unplanned, s.runs);
-  const slots = windowDays(from, days);
+  const slots = slotsFor(from, days);
   return (
     <button className={cx("ins-card", `health-${w.health}`)} onClick={onOpen} aria-label={`${w.name}: open insights`}>
       <header className="ins-card-head">
@@ -124,8 +128,8 @@ function WorkflowCard({ card: w, from, days, def, onOpen }: { card: FactoryWorkf
           label={thin ? `${w.name}: not enough runs to rate` : `${w.name}: ${pct(un)} of runs succeeded with nobody stepping in`} />
         <div className="ins-card-chart">
           {s.runs > 0
-            ? <StackedBars compact days={slots} values={outcomeValues(s.days)} series={outcomeSeries} height={58} label={`Daily runs of ${w.name}: ${s.unattended} on their own, ${s.succeeded - s.unattended} with help, ${s.failed} failed`} />
-            : <div className="ins-card-none subtle">No runs in the last {days} days</div>}
+            ? <StackedBars compact days={slots.keys} values={bucket(slots, outcomeValues(s.days))} series={outcomeSeries} height={58} slotLabel={slots.label} label={`Daily runs of ${w.name}: ${s.unattended} on their own, ${s.succeeded - s.unattended} with help, ${s.failed} failed`} />
+            : <div className="ins-card-none subtle">No runs in the last {windowName(days)}</div>}
           <span className="ins-card-caption subtle">
             {s.runs ? <>{plural(s.runs, "run")} · {pct(successRate(s))} succeeded</> : w.enabled ? "Waiting for its trigger" : "Turned off"}
           </span>

@@ -30,6 +30,9 @@
 //! * `tab_run_workflow`, `tab_get_workflow_run`: start a workflow the
 //!   person turned on, and follow the run. Every guardrail applies; a
 //!   blocked step waits for the person, never for an agent.
+//! * `tab_workflow_stats`, `tab_workflow_failures`: how a workflow is
+//!   doing (rates, time, spend, models, what fails) and what's suggested,
+//!   so the builder's assistant and coordinators can improve it.
 //! * `tab_vault_search`, `tab_vault_get` (a project's coordinator) and
 //!   `tab_vault_request` (its other threads): the end-to-end encrypted
 //!   vault ([`crate::e2e`]), listed only to chats the person drives on the
@@ -1285,7 +1288,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_save_workflow",
-            "description": "Create or update a workflow from its JSON definition. Pass id to update one. It is checked first (actions exist, required inputs are set, templates only read earlier steps, it can't loop with other workflows) and not saved if anything is wrong; fix what it says and try again. It's always saved turned off: the person reviews it in the Workflows tab and turns it on. Missing inputs get the action's defaults.\n\nShape: {\"name\", \"description\", \"trigger\": {\"type\":\"item\",\"changes\":[\"ingested\"],\"sources\":[\"github\"],\"kinds\":[\"github.review_requested\"],\"when\":[conditions]} | {\"type\":\"signal\",\"name\"} | {\"type\":\"schedule\",\"every_minutes\"} | {\"type\":\"manual\"}, \"steps\": [{\"id\":\"pr\",\"type\":\"action\",\"connector\":\"github\",\"action\":\"pr.get\",\"input\":{...},\"when\":[conditions]}, {\"id\":\"small\",\"type\":\"filter\",\"conditions\":[...]}, {\"id\":\"vals\",\"type\":\"set\",\"values\":{...}}, {\"id\":\"tell\",\"type\":\"emit\",\"signal\":\"name\",\"payload\":{...}}, {\"id\":\"test\",\"type\":\"command\",\"program\":\"cargo\",\"args\":[\"test\"],\"folder\":\"\",\"network\":[\"crates.io\",\"*.crates.io\"],\"env\":{},\"image\":\"\",\"timeout_secs\":600}, {\"id\":\"fix\",\"type\":\"agent\",\"prompt\":\"...\",\"repo\":\"owner/name\",\"family\":\"balanced\"}], \"limits\": {\"max_runs_per_hour\":30,\"cooldown_minutes\":0}}. A condition is {\"field\":\"item.kind\",\"op\":\"equals|not_equals|contains|not_contains|starts_with|matches|in|gt|lt|exists|missing\",\"value\":...}. Changes: ingested, updated, ranked, snoozed, woke, done, reopened. Templates: {{item.title}}, {{item.metadata.repo}}, {{item.score}}, {{steps.<id>.<output>}}, {{signal.<key>}}, {{now}}. An agent step runs on a model family from tab_list_actions (family), or on one harness and model (harness, model), which win when set.",
+            "description": "Create or update a workflow from its JSON definition. Pass id to update one. It is checked first (actions exist, required inputs are set, templates only read earlier steps, it can't loop with other workflows) and not saved if anything is wrong; fix what it says and try again. It's always saved turned off: the person reviews it in the Workflows tab and turns it on. Missing inputs get the action's defaults.\n\nShape: {\"name\", \"description\", \"trigger\": {\"type\":\"item\",\"changes\":[\"ingested\"],\"sources\":[\"github\"],\"kinds\":[\"github.review_requested\"],\"when\":[conditions]} | {\"type\":\"signal\",\"name\"} | {\"type\":\"schedule\",\"every_minutes\"} | {\"type\":\"manual\"}, \"steps\": [{\"id\":\"pr\",\"type\":\"action\",\"connector\":\"github\",\"action\":\"pr.get\",\"input\":{...},\"when\":[conditions]}, {\"id\":\"small\",\"type\":\"filter\",\"conditions\":[...]}, {\"id\":\"vals\",\"type\":\"set\",\"values\":{...}}, {\"id\":\"tell\",\"type\":\"emit\",\"signal\":\"name\",\"payload\":{...}}, {\"id\":\"test\",\"type\":\"command\",\"program\":\"cargo\",\"args\":[\"test\"],\"folder\":\"\",\"network\":[\"crates.io\",\"*.crates.io\"],\"env\":{},\"image\":\"\",\"timeout_secs\":600}, {\"id\":\"fix\",\"type\":\"agent\",\"prompt\":\"...\",\"repo\":\"owner/name\",\"family\":\"balanced\"}], \"limits\": {\"max_runs_per_hour\":30,\"cooldown_minutes\":0,\"monthly_cap_usd\":0,\"monthly_cap_plan_tokens\":0}}. The monthly caps hold new runs back once the workflow's spend this UTC calendar month reaches them: monthly_cap_usd is dollars billed through API keys, monthly_cap_plan_tokens is subscription tokens (input plus output; never converted to dollars); 0 means no cap and neither may be negative. You may set or lower a cap in a draft. A condition is {\"field\":\"item.kind\",\"op\":\"equals|not_equals|contains|not_contains|starts_with|matches|in|gt|lt|exists|missing\",\"value\":...}. Changes: ingested, updated, ranked, snoozed, woke, done, reopened. Templates: {{item.title}}, {{item.metadata.repo}}, {{item.score}}, {{steps.<id>.<output>}}, {{signal.<key>}}, {{now}}. An agent step runs on a model family from tab_list_actions (family), or on one harness and model (harness, model), which win when set.",
             "inputSchema": { "type": "object", "properties": {
                 "workflow": { "type": "object", "description": "The workflow definition. Include id to update." }
             }, "required": ["workflow"] }
@@ -1313,6 +1316,22 @@ pub fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": {
                 "run_id": { "type": "string" }
             }, "required": ["run_id"] }
+        },
+        {
+            "name": "tab_workflow_stats",
+            "description": "How a workflow is doing over the last days: runs and rates (0 to 1, over runs that did work; runs the person declined at an approval and runs held back by limits are counted apart), each step's time (p50/p95 ms; agent steps split into queue, work and waiting on the person), failures, interventions and spend (API keys in dollars; subscriptions as tokens and plan share, never dollars), agent models compared per step, versions, and deterministic suggestions (a cheaper or stronger model family, more time, a higher hourly limit, a placement, approvals always granted). Use it before proposing a change to a workflow.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow_id": { "type": "string" },
+                "days": { "type": "integer", "description": "1 to 30, default 7." }
+            }, "required": ["workflow_id"] }
+        },
+        {
+            "name": "tab_workflow_failures",
+            "description": "What fails in a workflow over the last days: failures grouped by step and error (numbers and ids taken out), most frequent first, each with its count, first and last time, and the latest run it happened in (read that run with tab_get_workflow_run to see the step's input, output and error). Also the run counts and suggestions.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow_id": { "type": "string" },
+                "days": { "type": "integer", "description": "1 to 30, default 7." }
+            }, "required": ["workflow_id"] }
         },
         {
             "name": "approve",
@@ -3028,6 +3047,17 @@ impl McpServer {
                     &run, false,
                 ))?))
             }
+            "tab_workflow_stats" | "tab_workflow_failures" => {
+                let id = s("workflow_id").ok_or_else(|| anyhow::anyhow!("pass workflow_id"))?;
+                let days = args["days"].as_u64().unwrap_or(7).clamp(1, 30) as u32;
+                let r = workflow::suggest_store::report(&self.store, &id, days, 0, Utc::now())?;
+                let out = if name == "tab_workflow_stats" {
+                    workflow::suggest_store::stats_json(&r)
+                } else {
+                    workflow::suggest_store::failures_json(&r)
+                };
+                Ok(text(serde_json::to_string(&out)?))
+            }
             _ => anyhow::bail!("unknown tool {name}"),
         }
     }
@@ -3122,7 +3152,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 26);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 28);
         let always: Vec<&str> = list["result"]["tools"]
             .as_array()
             .unwrap()
@@ -5132,6 +5162,80 @@ rl.on('line', (l) => {
         assert!(
             server
                 .call(None, "tab_get_workflow_run", json!({}))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn agents_read_how_a_workflow_is_doing_and_what_fails() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let server = McpServer {
+            store: store.clone(),
+            hub,
+            engine: Arc::new(Starts(store.clone(), Default::default())),
+            events,
+            token: "t".into(),
+        };
+        let w = store
+            .workflow_save(&workflow::templates()[0], "user", Utc::now())
+            .unwrap();
+        for (n, ok) in [(0, true), (1, false), (2, true)] {
+            let at = Utc::now() - chrono::Duration::minutes(n * 5 + 1);
+            let run: workflow::Run = serde_json::from_value(json!({
+                "id": format!("r{n}"), "workflow_id": w.id, "workflow_name": w.name, "version": 1,
+                "status": if ok { "succeeded" } else { "failed" }, "dry_run": false, "trigger": "t",
+                "trigger_key": null, "item_id": null, "chain": [], "error": null,
+                "steps": [{ "id": "snooze", "label": "Snooze", "status": if ok { "ok" } else { "failed" },
+                    "error": if ok { None } else { Some("Item 4411 is gone") }, "ms": 30 }],
+                "started_at": at, "finished_at": at,
+            }))
+            .unwrap();
+            store.workflow_run_insert(&run).unwrap();
+        }
+        let read = |v: Value| -> Value {
+            serde_json::from_str(v["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+        let stats = read(
+            server
+                .call(
+                    None,
+                    "tab_workflow_stats",
+                    json!({ "workflow_id": w.id, "days": 7 }),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(stats["runs"]["did_work"], 3);
+        assert_eq!(stats["rates"]["success"], 0.667);
+        assert_eq!(stats["steps"][0]["failed"], 1);
+        assert!(
+            stats["suggestions"].as_array().unwrap().is_empty(),
+            "too little to go on"
+        );
+        let failures = read(
+            server
+                .call(
+                    None,
+                    "tab_workflow_failures",
+                    json!({ "workflow_id": w.id }),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(failures["days"], 7);
+        assert_eq!(failures["failure_groups"][0]["error"], "Item # is gone");
+        assert_eq!(failures["failure_groups"][0]["sample_run_id"], "r1");
+        assert!(
+            server
+                .call(None, "tab_workflow_stats", json!({ "workflow_id": "nope" }))
                 .await
                 .is_err()
         );

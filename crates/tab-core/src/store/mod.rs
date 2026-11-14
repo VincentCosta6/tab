@@ -16,6 +16,7 @@ mod knowledge;
 mod links;
 mod previews;
 mod projects;
+mod rollups;
 mod segments;
 mod sessions;
 mod usage;
@@ -83,6 +84,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/025_session_mode.sql"),
     include_str!("migrations/026_model_families.sql"),
     include_str!("migrations/027_workflow_run_items.sql"),
+    include_str!("migrations/028_workflow_rollups.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {

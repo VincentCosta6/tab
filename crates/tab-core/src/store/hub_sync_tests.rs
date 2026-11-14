@@ -652,3 +652,60 @@ fn rows_from_older_apps_without_state_at_merge_by_their_times() {
         .unwrap();
     assert_eq!(state(&a, &item.id), ItemState::Open);
 }
+
+#[test]
+fn devices_sharing_a_hub_roll_up_the_same_rows_without_echoing_them() {
+    use crate::workflow::rollups::{Maintained, maintain};
+    use crate::workflow::{Run, RunStatus};
+    let (a, b) = (store(), store());
+    let w = a
+        .workflow_save(&crate::workflow::templates().remove(0), "me", now())
+        .unwrap();
+    for n in 0..40i64 {
+        let at = now() - chrono::Duration::hours(20 * n + 3);
+        a.workflow_run_insert(&Run {
+            id: format!("r{n}"),
+            workflow_id: w.id.clone(),
+            workflow_name: w.name.clone(),
+            version: 1,
+            status: if n % 3 == 0 {
+                RunStatus::Failed
+            } else {
+                RunStatus::Succeeded
+            },
+            dry_run: false,
+            trigger: "t".into(),
+            trigger_key: None,
+            item_id: None,
+            chain: vec![],
+            steps: vec![],
+            error: None,
+            started_at: at,
+            finished_at: Some(at + chrono::Duration::seconds(30)),
+            runner: String::new(),
+            resume: None,
+            rerun_of: None,
+            started_by: None,
+            caused_by: None,
+            approved: vec![],
+        })
+        .unwrap();
+    }
+    // Both hold the runs; b rolls up first, then a, then they swap rows.
+    sync(&a, &b);
+    let from_b = maintain(&b, now()).unwrap();
+    let from_a = maintain(&a, now()).unwrap();
+    assert!(from_a.written > 0);
+    assert_eq!(from_a, from_b);
+    sync(&a, &b);
+    sync(&b, &a);
+    assert_eq!(dump(&a), dump(&b));
+    assert!(dump(&a).iter().any(|(t, _)| t == "workflow_rollups"));
+    // Neither has anything left to write.
+    assert_eq!(maintain(&a, now()).unwrap(), Maintained::default());
+    assert_eq!(maintain(&b, now()).unwrap(), Maintained::default());
+    assert_eq!(
+        (a.hub_outbox_len().unwrap(), b.hub_outbox_len().unwrap()),
+        (0, 0)
+    );
+}

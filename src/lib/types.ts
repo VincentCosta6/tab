@@ -313,18 +313,58 @@ export type Step = { id: string; label: string; when: Condition[]; continue_on_e
 
 export interface Workflow {
   id: string; name: string; description: string; enabled: boolean; allow_destructive: boolean; allow_commands?: boolean;
-  trigger: Trigger; steps: Step[]; limits: { max_runs_per_hour: number; cooldown_minutes: number };
+  trigger: Trigger; steps: Step[]; limits: WorkflowLimits;
   created_by: string; version: number; updated_at: string | null;
+}
+/** Mirrors `tab_domain::workflow::Limits`. The monthly caps are per UTC calendar month; 0 (or missing, from older apps) means no cap. */
+export interface WorkflowLimits {
+  max_runs_per_hour: number; cooldown_minutes: number;
+  /** API-key spend, in dollars. */
+  monthly_cap_usd?: number;
+  /** Subscription tokens (input and output), never priced. */
+  monthly_cap_plan_tokens?: number;
 }
 export interface Issue { at: string | null; error: boolean; message: string }
 
 export type RunStatus = "running" | "waiting" | "succeeded" | "stopped" | "failed" | "blocked" | "throttled" | "loop_stopped";
 export type StepStatus = "ok" | "waiting" | "skipped" | "stopped" | "failed" | "blocked" | "throttled" | "dry";
-export interface StepRun { id: string; label: string; status: StepStatus; input: unknown; output: unknown; error: string | null; ms: number }
+/** How an agent session is paid for: dollars through an API key, usage on a subscription. */
+export type Billing = "api" | "subscription" | "unknown";
+/** What an agent step took and spent (mirror tab_domain::workflow::StepMetrics). */
+export interface StepMetrics {
+  /** From the job being created to a runner claiming it. */
+  queue_ms: number;
+  /** From the claim to the result. */
+  work_ms: number;
+  /** Time inside `work_ms` spent waiting on the person. */
+  human_wait_ms: number;
+  billing: Billing;
+  /** Zero on a subscription, where nothing is billed per run. */
+  cost_usd: number;
+  /** On a subscription: the share of a plan window used, 0 to 1. */
+  plan_share: number;
+  input_tokens: number; output_tokens: number;
+  /** The family the step asked for; empty when it pinned a model. */
+  family: string; harness: string; model: string;
+  attempts: number;
+  /** Times the runner moved on to the family's next model. */
+  fallbacks: number;
+}
+export type InterventionKind = "approval" | "question" | "message" | "stopped" | "rerun";
+/** A time a person had to step in on a step. `approval` is planned (the workflow asks for it); the rest aren't. */
+export interface Intervention { kind: InterventionKind; at: string }
+export interface StepRun {
+  id: string; label: string; status: StepStatus; input: unknown; output: unknown; error: string | null; ms: number;
+  /** Agent steps only, once their job finished; absent on runs from before it was recorded. */
+  metrics?: StepMetrics | null;
+  interventions?: Intervention[];
+}
 export interface WorkflowRun {
   id: string; workflow_id: string; workflow_name: string; version: number; status: RunStatus; dry_run: boolean;
   trigger: string; trigger_key: string | null; item_id: string | null; chain: string[]; steps: StepRun[];
   error: string | null; started_at: string; finished_at: string | null;
+  /** The failed run a person ran again to get this one. */
+  rerun_of?: string | null;
   /** The agent chat (session id) that started it. */
   started_by?: string | null;
   /** The run that led to this one, when known. */
@@ -375,6 +415,10 @@ export interface StepStats {
   id: string; label: string; runs: number; ok: number; failed: number; blocked: number; throttled: number; skipped: number;
   ms: Quantiles; queue_ms: Quantiles; work_ms: Quantiles; human_wait_ms: Quantiles; spend: Spend;
   interventions: number; unplanned_interventions: number; fallbacks: number;
+  /** Times the person OK'd it at an approval and it went ahead. */
+  approved?: number;
+  /** Times the person said no to it at an approval. */
+  declined?: number;
 }
 export interface ModelStats {
   step_id: string; harness: string; model: string; family: string;
@@ -385,13 +429,45 @@ export interface FailureGroup { step_id: string; label: string; error: string; c
 export interface DayStats extends RunCounts { day: string; duration_ms: Quantiles; spend: Spend }
 export interface WorkflowStats extends RunCounts {
   in_progress: number; held_back: number; loop_stopped: number; duration_ms: Quantiles; spend: Spend;
+  /** Of `held_back`, refused by the workflow's own runs-per-hour limit (about one a busy hour). */
+  held_by_limit?: number;
+  /** The person said no at an approval: neither a success nor a failure, and left out of every rate. */
+  declined?: number;
   steps: StepStats[]; models: ModelStats[]; versions: VersionStats[]; failures: FailureGroup[]; days: DayStats[];
 }
 export type WorkflowHealth = "unknown" | "healthy" | "degraded" | "failing";
-export interface WorkflowInsights { workflow_id: string; days: number; from: string; to: string; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats }
+/** This UTC month's spend against a workflow's caps (`tab_domain::workflow::cap::CapUsage`); a cap of 0 means none. */
+export interface CapUsage { month: string | null; spend: Spend; cap_usd: number; cap_plan_tokens: number }
+/**
+ * Windows past 30 days (90, 365) break at UTC midnight and read days before the run log from daily rollups:
+ * counts, spend and days are exact, step timing approximate. `detail_from`, when set, is where failure groups
+ * and models start (they only come from the run log).
+ */
+export interface WorkflowInsights {
+  workflow_id: string; days: number; from: string; to: string; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats;
+  detail_from?: string | null; cap?: CapUsage | null;
+}
+
+// --- Suggestions (mirror tab_domain::workflow::suggest) ---
+
+export type SuggestionKind = "cheaper_model" | "stronger_model" | "more_time" | "rate_limit" | "placement" | "always_approved";
+/** One number behind a suggestion: `value` (of `of`, for a count). Rates are 0 to 1. */
+export interface SuggestionFact { label: string; value: number; of?: number | null; unit: "count" | "rate" | "ms" | "usd" | "tokens" }
+export interface Suggestion {
+  /** Stable for the same kind on the same step. */
+  id: string; kind: SuggestionKind;
+  /** The step it's about; absent for the whole workflow. */
+  step_id?: string | null;
+  title: string;
+  /** The evidence in words. */
+  because: string;
+  facts: SuggestionFact[];
+  /** The workflow with the change made, to load as an unsaved draft. Absent when there's only something to know (never one that allows destructive steps or commands). */
+  change?: Workflow | null;
+}
 export interface FactoryWorkflow { id: string; name: string; enabled: boolean; version: number; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats }
 /** `totals` are run-level only: their steps, models, versions and failures are empty. */
-export interface WorkflowFactory { days: number; from: string; to: string; totals: WorkflowStats; previous_totals: WorkflowStats; workflows: FactoryWorkflow[] }
+export interface WorkflowFactory { days: number; from: string; to: string; totals: WorkflowStats; previous_totals: WorkflowStats; workflows: FactoryWorkflow[]; detail_from?: string | null }
 
 // --- Runners and jobs (mirror tab_domain::runner) ---
 

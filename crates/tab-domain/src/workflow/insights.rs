@@ -2,25 +2,48 @@
 //! workflow's [`Stats`] for a window of days next to the window before it,
 //! and every workflow's at once with hub-wide totals.
 //!
-//! Pure, like [`stats`](super::stats): the caller loads the runs and passes
-//! `now` in. Windows break at the person's midnight, so a 7-day window is
-//! today and the six days before it, and the previous window is the seven
-//! days before that. Runs are kept for 30 days, so a 30-day window's
-//! previous window is mostly empty; it says so by having no runs.
+//! Pure, like [`stats`](super::stats): the caller loads the runs (and,
+//! for long windows, the [`rollup`](super::rollup)s) and passes `now` in.
+//!
+//! Short windows, up to [`RUN_DAYS`], break at the person's midnight and
+//! are read from runs alone, so a 7-day window is today and the six days
+//! before it, and the previous window is the seven days before that. Runs
+//! are kept for 30 days, so a 30-day window's previous window is mostly
+//! empty; it says so by having no runs.
+//!
+//! Longer windows (90 days, a year) break at **UTC** midnight, because
+//! their older days come from daily rollups, which are by UTC day. Days
+//! before the run log are read from rollups and the rest from runs
+//! ([`rollup::summarize_span`]): counts, spend and the daily chart are
+//! exact, step timing is approximate, and failure groups and the model
+//! comparison cover only the run log (`detail_from` says from when). A
+//! previous window that reaches past the 13 months of rollups is left
+//! empty rather than compared against a part of itself.
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::cap::CapUsage;
+use super::rollup::{self, Rollup};
 use super::stats::{Health, Stats, Window, health, summarize};
 use super::{Run, Workflow};
 
-/// The longest window: runs aren't kept longer.
-pub const MAX_DAYS: u32 = 30;
+/// The longest window: a year, from rollups.
+pub const MAX_DAYS: u32 = 365;
+/// The longest window read from runs alone, at the person's midnight.
+pub const RUN_DAYS: u32 = 30;
 
-/// The window of `days` days ending today (in the person's time), and the
-/// same number of days before it.
+/// The window of `days` days ending today (in the person's time, or UTC
+/// for windows longer than [`RUN_DAYS`]), and the same number of days
+/// before it.
 pub fn windows(now: DateTime<Utc>, days: u32, utc_offset_minutes: i32) -> (Window, Window) {
-    let days = days.clamp(1, MAX_DAYS) as i64;
+    let days = days.clamp(1, MAX_DAYS);
+    let utc_offset_minutes = if days > RUN_DAYS {
+        0
+    } else {
+        utc_offset_minutes
+    };
+    let days = days as i64;
     let offset = Duration::minutes(utc_offset_minutes as i64);
     let today = (now + offset).date_naive();
     let midnight = (today - Duration::days(days - 1))
@@ -52,6 +75,14 @@ pub struct WorkflowInsights {
     pub health: Health,
     pub stats: Stats,
     pub previous: Stats,
+    /// When set, the window reaches back past the run log: failure groups
+    /// and models only cover runs from this time on, and step timing is
+    /// approximate.
+    #[serde(default)]
+    pub detail_from: Option<DateTime<Utc>>,
+    /// This month's spend against the workflow's caps, when it has any.
+    #[serde(default)]
+    pub cap: Option<CapUsage>,
 }
 
 /// Adds up one workflow's runs. `runs` may hold any runs; only this
@@ -63,20 +94,76 @@ pub fn workflow_insights(
     days: u32,
     utc_offset_minutes: i32,
 ) -> WorkflowInsights {
+    workflow_insights_with(workflow_id, runs, &[], now, days, utc_offset_minutes)
+}
+
+/// [`workflow_insights`] with the rollups a long window reads.
+pub fn workflow_insights_with(
+    workflow_id: &str,
+    runs: &[Run],
+    rollups: &[Rollup],
+    now: DateTime<Utc>,
+    days: u32,
+    utc_offset_minutes: i32,
+) -> WorkflowInsights {
     let (current, previous) = windows(now, days, utc_offset_minutes);
     let mine: Vec<Run> = runs
         .iter()
         .filter(|r| r.workflow_id == workflow_id)
         .cloned()
         .collect();
+    let my_rollups: Vec<Rollup> = rollups
+        .iter()
+        .filter(|r| r.workflow_id == workflow_id)
+        .cloned()
+        .collect();
+    let span = Span::new(now, days);
     WorkflowInsights {
         workflow_id: workflow_id.to_string(),
         days: days.clamp(1, MAX_DAYS),
         from: current.from,
         to: current.to,
         health: health(&mine),
-        stats: summarize(&mine, &current),
-        previous: summarize(&mine, &previous),
+        stats: span.summarize(&mine, &my_rollups, &current),
+        previous: span.previous(&mine, &my_rollups, &previous),
+        detail_from: span.detail_from(&current),
+        cap: None,
+    }
+}
+
+/// How a window is read: from runs alone, or from rollups and runs.
+struct Span {
+    long: bool,
+    split: DateTime<Utc>,
+    keep_from: DateTime<Utc>,
+}
+
+impl Span {
+    fn new(now: DateTime<Utc>, days: u32) -> Self {
+        Self {
+            long: days.clamp(1, MAX_DAYS) > RUN_DAYS,
+            split: rollup::run_log_start(now),
+            keep_from: rollup::day_start(rollup::keep_rollups_from(now)),
+        }
+    }
+
+    fn summarize(&self, runs: &[Run], rollups: &[Rollup], w: &Window) -> Stats {
+        if self.long {
+            rollup::summarize_span(runs, rollups, w, self.split)
+        } else {
+            summarize(runs, w)
+        }
+    }
+
+    fn previous(&self, runs: &[Run], rollups: &[Rollup], w: &Window) -> Stats {
+        if self.long && w.from < self.keep_from {
+            return Stats::default();
+        }
+        self.summarize(runs, rollups, w)
+    }
+
+    fn detail_from(&self, w: &Window) -> Option<DateTime<Utc>> {
+        (self.long && w.from < self.split).then_some(self.split)
     }
 }
 
@@ -106,6 +193,9 @@ pub struct Factory {
     /// What needs a look first: failing, then degraded, then healthy, then
     /// too new to say; within each, the lowest unattended success first.
     pub workflows: Vec<FactoryWorkflow>,
+    /// As on [`WorkflowInsights::detail_from`].
+    #[serde(default)]
+    pub detail_from: Option<DateTime<Utc>>,
 }
 
 /// The factory overview over `workflows`. Runs of workflows not in the
@@ -117,11 +207,29 @@ pub fn factory(
     days: u32,
     utc_offset_minutes: i32,
 ) -> Factory {
+    factory_with(workflows, runs, &[], now, days, utc_offset_minutes)
+}
+
+/// [`factory`] with the rollups a long window reads.
+pub fn factory_with(
+    workflows: &[Workflow],
+    runs: &[Run],
+    rollups: &[Rollup],
+    now: DateTime<Utc>,
+    days: u32,
+    utc_offset_minutes: i32,
+) -> Factory {
     let (current, previous) = windows(now, days, utc_offset_minutes);
+    let span = Span::new(now, days);
     let mut cards: Vec<FactoryWorkflow> = workflows
         .iter()
         .map(|w| {
             let mine: Vec<Run> = runs
+                .iter()
+                .filter(|r| r.workflow_id == w.id)
+                .cloned()
+                .collect();
+            let my_rollups: Vec<Rollup> = rollups
                 .iter()
                 .filter(|r| r.workflow_id == w.id)
                 .cloned()
@@ -132,8 +240,8 @@ pub fn factory(
                 enabled: w.enabled,
                 version: w.version,
                 health: health(&mine),
-                stats: summarize(&mine, &current),
-                previous: summarize(&mine, &previous),
+                stats: span.summarize(&mine, &my_rollups, &current),
+                previous: span.previous(&mine, &my_rollups, &previous),
             }
         })
         .collect();
@@ -155,13 +263,19 @@ pub fn factory(
         .filter(|r| workflows.iter().any(|w| w.id == r.workflow_id))
         .cloned()
         .collect();
+    let listed_rollups: Vec<Rollup> = rollups
+        .iter()
+        .filter(|r| workflows.iter().any(|w| w.id == r.workflow_id))
+        .cloned()
+        .collect();
     Factory {
         days: days.clamp(1, MAX_DAYS),
         from: current.from,
         to: current.to,
-        totals: run_level(summarize(&listed, &current)),
-        previous_totals: run_level(summarize(&listed, &previous)),
+        totals: run_level(span.summarize(&listed, &listed_rollups, &current)),
+        previous_totals: run_level(span.previous(&listed, &listed_rollups, &previous)),
         workflows: cards,
+        detail_from: span.detail_from(&current),
     }
 }
 
@@ -273,12 +387,93 @@ mod tests {
     }
 
     #[test]
-    fn days_are_clamped_to_what_is_kept() {
-        let (cur, _) = windows(now(), 90, 0);
-        assert_eq!(cur.to - cur.from, Duration::days(30));
+    fn days_are_clamped_to_a_year_and_long_windows_break_at_utc_midnight() {
         let (cur, _) = windows(now(), 0, 0);
         assert_eq!(cur.to - cur.from, Duration::days(1));
-        assert_eq!(workflow_insights("a", &[], now(), 365, 0).days, 30);
+        assert_eq!(workflow_insights("a", &[], now(), 1000, 0).days, 365);
+        for days in [90, 365] {
+            let (cur, prev) = windows(now(), days, -480);
+            assert_eq!(cur.to - cur.from, Duration::days(days as i64));
+            assert_eq!(cur.to, Utc.with_ymd_and_hms(2026, 11, 13, 0, 0, 0).unwrap());
+            assert_eq!((cur.utc_offset_minutes, prev.to), (0, cur.from));
+        }
+        // Short windows are always wholly inside the run log, whatever the
+        // time zone, so they never need rollups.
+        for offset in [-720, -480, 0, 330, 840] {
+            for hour in [0, 11, 23] {
+                let t = Utc.with_ymd_and_hms(2026, 11, 12, hour, 59, 0).unwrap();
+                let (cur, _) = windows(t, RUN_DAYS, offset);
+                assert!(cur.from >= rollup::run_log_start(t), "{offset} {hour}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_window_adds_rollups_to_runs_and_says_where_detail_starts() {
+        let day = Duration::days(1);
+        // Runs from 80 days back; only the last 30 days are still in the log.
+        let all: Vec<Run> = (0..80)
+            .map(|n| {
+                let status = if n % 4 == 0 {
+                    RunStatus::Failed
+                } else {
+                    RunStatus::Succeeded
+                };
+                run("a", n, status, now() - day * n as i32 - Duration::hours(1))
+            })
+            .collect();
+        let rows = {
+            let p = rollup::plan(now(), &all, &[]);
+            p.put
+        };
+        let split = rollup::run_log_start(now());
+        let log: Vec<Run> = all
+            .iter()
+            .filter(|r| r.started_at >= split)
+            .cloned()
+            .collect();
+
+        let i = workflow_insights_with("a", &log, &rows, now(), 90, 0);
+        assert_eq!((i.stats.counts.runs, i.stats.counts.failed), (80, 20));
+        assert_eq!(i.stats.days.len(), 80);
+        assert_eq!(i.detail_from, Some(split));
+        // Failures only from the log.
+        let in_log = log.iter().filter(|r| r.status == RunStatus::Failed).count() as u32;
+        assert_eq!(i.stats.failures[0].count, in_log);
+        // The 90 days before hold nothing, and that's not hidden.
+        assert_eq!(i.previous.counts.runs, 0);
+        // Without rollups, only the log counts.
+        assert_eq!(
+            workflow_insights_with("a", &log, &[], now(), 90, 0)
+                .stats
+                .counts
+                .runs,
+            log.len() as u32
+        );
+        // A year's previous window reaches past what rollups keep: empty.
+        let y = workflow_insights_with("a", &log, &rows, now(), 365, 0);
+        assert_eq!((y.stats.counts.runs, y.previous.counts.runs), (80, 0));
+        // Short windows have no detail cut.
+        assert_eq!(
+            workflow_insights_with("a", &log, &rows, now(), 30, 0).detail_from,
+            None
+        );
+
+        let f = factory_with(&[wf("a")], &log, &rows, now(), 90, 0);
+        assert_eq!(f.totals.counts.runs, 80);
+        assert_eq!(f.workflows[0].stats.counts.runs, 80);
+        assert_eq!(f.detail_from, Some(split));
+        assert!(f.totals.steps.is_empty());
+    }
+
+    #[test]
+    fn insights_from_before_rollups_still_parse() {
+        let i = workflow_insights("a", &[], now(), 7, 0);
+        let mut v = serde_json::to_value(&i).unwrap();
+        v.as_object_mut().unwrap().remove("detail_from");
+        v.as_object_mut().unwrap().remove("cap");
+        let back: WorkflowInsights = serde_json::from_value(v).unwrap();
+        assert_eq!(back, i);
     }
 
     #[test]

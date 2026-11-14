@@ -223,7 +223,7 @@ export function workflowMock(cmd: string, args: Record<string, any>, env: { item
       return clone(w);
     }
     case "workflow_delete": workflows = workflows.filter((w) => w.id !== args.id); return null;
-    case "workflow_insights": case "workflow_factory": return insightsMock(cmd, args, workflows);
+    case "workflow_insights": case "workflow_factory": case "workflow_suggestions": case "workflow_rerun": return insightsMock(cmd, args, workflows, families());
     case "workflow_runs": return [...runs, ...insightRuns(workflows)].filter((r) => !args.workflowId || r.workflow_id === args.workflowId).sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, args.limit ?? 50);
     case "workflow_run": {
       const item = env.items().find((i) => i.id === args.itemId) ?? null;

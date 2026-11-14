@@ -192,8 +192,10 @@ async fn declining_a_blocked_step_ends_the_run_and_runs_nothing() {
     let out = rt.answer_blocked(&run.id, false).await.unwrap();
     assert_eq!(out.status, RunStatus::Stopped);
     assert!(out.resume.is_none() && out.awaiting_approval().is_none());
-    assert!(out.error.unwrap().contains("declined"));
+    assert!(out.error.as_deref().unwrap().contains("declined"));
     assert_eq!(out.steps.len(), 2);
+    // Stats tell it from a filter stop: neither a success nor a failure.
+    assert!(out.declined());
     assert!(host.github.0.lock().unwrap().is_empty());
     assert!(rt.answer_blocked(&run.id, true).await.is_err(), "it's over");
     assert!(host.github.0.lock().unwrap().is_empty());

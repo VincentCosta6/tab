@@ -1,15 +1,20 @@
-// The window (7 or 30 days) the Factory, Insights and canvas badges share,
-// remembered per person, and the queries behind them.
+// The window (7 or 30 days, 90 days or a year) the Factory, Insights and
+// canvas badges share, remembered per person, and the queries behind them.
+// Windows past 30 days reach back past the run log into daily rollups.
 
 import { useSyncExternalStore } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../../lib/api";
 
-export type WindowDays = 7 | 30;
+export type WindowDays = 7 | 30 | 90 | 365;
+export const WINDOW_DAYS: WindowDays[] = [7, 30, 90, 365];
 
 const KEY = "tab.workflows.insights.days";
 let days: WindowDays = (() => {
-  try { return localStorage.getItem(KEY) === "30" ? 30 : 7; } catch { return 7; }
+  try {
+    const n = Number(localStorage.getItem(KEY));
+    return (WINDOW_DAYS as number[]).includes(n) ? (n as WindowDays) : 7;
+  } catch { return 7; }
 })();
 const listeners = new Set<() => void>();
 

@@ -128,6 +128,7 @@ impl Store {
         let conn = self.conn();
         conn.execute("DELETE FROM workflows WHERE id = ?1", [id])?;
         conn.execute("DELETE FROM workflow_runs WHERE workflow_id = ?1", [id])?;
+        conn.execute("DELETE FROM workflow_rollups WHERE workflow_id = ?1", [id])?;
         drop(conn);
         self.workflows_bump();
         Ok(())
