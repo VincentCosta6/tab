@@ -1442,12 +1442,17 @@ impl AgentHub {
                     pi::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
                 }
             };
+            // Messages the person sent mid-turn that never reached the agent:
+            // still in the steering channel because the turn never opened it.
+            let mut unread = Vec::new();
             let followups = {
                 let mut running = hub.running.lock().unwrap();
                 running.remove(&session.id);
                 hub.woken.lock().unwrap().remove(&session.id);
                 hub.steering_close(&session.id);
-                hub.steering_rx.lock().unwrap().remove(&session.id);
+                if let Some(rx) = hub.steering_rx.lock().unwrap().remove(&session.id) {
+                    unread = drain_messages(rx);
+                }
                 hub.followups
                     .lock()
                     .unwrap()
@@ -1498,7 +1503,35 @@ impl AgentHub {
                         &format!("{e:#}"),
                         serde_json::Value::Null,
                     );
-                    hub.update(&session.id, Some(SessionStatus::Failed), None);
+                    // The chat already shows what the person sent while the
+                    // turn ran, so don't drop it: give it to a fresh turn.
+                    unread.extend(followups);
+                    if unread.is_empty() {
+                        hub.update(&session.id, Some(SessionStatus::Failed), None);
+                    } else if cancel.is_cancelled() {
+                        hub.post(
+                            &session.id,
+                            "system",
+                            "note",
+                            UNDELIVERED,
+                            serde_json::Value::Null,
+                        );
+                        hub.update(&session.id, Some(SessionStatus::Failed), None);
+                    } else if let Err(e2) = hub.start_turn(
+                        &session.id,
+                        &after_failure(&format!("{e:#}"), &unread),
+                        false,
+                        &[],
+                    ) {
+                        hub.post(
+                            &session.id,
+                            "system",
+                            "error",
+                            &format!("{UNDELIVERED} ({e2:#})"),
+                            serde_json::Value::Null,
+                        );
+                        hub.update(&session.id, Some(SessionStatus::Failed), None);
+                    }
                 }
             }
         });
@@ -2429,6 +2462,54 @@ fn ends_with_question(text: &str) -> bool {
         .rfind(|l| !l.is_empty() && !l.starts_with("```"))
         .map(|l| l.trim_end_matches(['*', '_', '`', ')', '"', '\'', ' ']))
         .is_some_and(|l| l.ends_with('?'))
+}
+
+/// Shown when what the person sent during a failed turn can't be passed on.
+const UNDELIVERED: &str = "The agent didn't get what you sent while it was working, because its turn failed. Send it again.";
+
+/// The person's messages left in a steering channel nobody read.
+fn drain_messages(mut rx: mpsc::UnboundedReceiver<Steer>) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(s) = rx.try_recv() {
+        if let Steer::Message(m) = s {
+            out.push(m);
+        }
+    }
+    out
+}
+
+/// The prompt for the turn after a failed one, carrying the messages the
+/// failed turn never read.
+fn after_failure(error: &str, messages: &[String]) -> String {
+    format!(
+        "Your last turn failed ({error}) before you read what the person sent while it ran. \
+         Their messages, in order:\n\n{}",
+        messages.join("\n\n")
+    )
+}
+
+#[cfg(test)]
+mod failed_turn_tests {
+    use super::{Steer, after_failure, drain_messages};
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn keeps_only_the_persons_messages_in_order() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(Steer::Message("first".into())).unwrap();
+        tx.send(Steer::Interrupt).unwrap();
+        tx.send(Steer::Reminder("from tab".into())).unwrap();
+        tx.send(Steer::Message("second".into())).unwrap();
+        drop(tx);
+        assert_eq!(drain_messages(rx), ["first", "second"]);
+    }
+
+    #[test]
+    fn prompt_names_the_error_and_carries_every_message() {
+        let p = after_failure("overloaded", &["a?".into(), "b".into()]);
+        assert!(p.contains("overloaded"));
+        assert!(p.ends_with("a?\n\nb"));
+    }
 }
 
 #[cfg(test)]
