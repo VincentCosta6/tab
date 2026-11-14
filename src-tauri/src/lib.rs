@@ -1265,6 +1265,23 @@ async fn agent_install(app: tauri::AppHandle, kind: AgentKind) -> CmdResult<()> 
     .map_err(err)
 }
 
+/// Whether a harness's ACP adapter is installed; null when it has none.
+#[tauri::command]
+fn agent_acp_adapter(kind: AgentKind) -> Option<bool> {
+    tab_core::agents::acp_adapter_installed(kind)
+}
+
+/// Installs a harness's ACP adapter with npm. Output lines arrive as
+/// `tab://agent-upgrade` events while it runs.
+#[tauri::command]
+async fn agent_install_adapter(app: tauri::AppHandle, kind: AgentKind) -> CmdResult<()> {
+    tab_core::agents::run_install_adapter(kind, move |line| {
+        let _ = app.emit("tab://agent-upgrade", &line);
+    })
+    .await
+    .map_err(err)
+}
+
 /// The configured agent's version, the newest release and how to update it.
 #[tauri::command]
 async fn agent_health(state: State<'_, AppState>) -> CmdResult<Option<AgentProbe>> {
@@ -3806,6 +3823,8 @@ pub fn run() {
             agent_harnesses,
             agent_models,
             agent_install,
+            agent_acp_adapter,
+            agent_install_adapter,
             mcp_info,
             hub_status,
             account::account_status,

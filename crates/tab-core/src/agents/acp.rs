@@ -42,9 +42,11 @@ const CANCEL_GRACE: Duration = Duration::from_secs(3);
 
 /// Whether `kind`'s chats run through ACP: `harnesses.json` says how, and
 /// either it's the harness's only way (OpenCode) or, for an entry still in
-/// preview, the person turned it on.
-pub(crate) fn enabled(cfg: &crate::config::AgentConfig, kind: AgentKind) -> bool {
+/// preview, the person turned it on. A strict chat stays on the harness's
+/// own adapter when the ACP one can't keep the person's setup out.
+pub(crate) fn enabled(cfg: &crate::config::AgentConfig, kind: AgentKind, strict: bool) -> bool {
     match &catalog::harness(kind).acp {
+        Some(spec) if strict && !spec.strict => false,
         Some(spec) if spec.preview => cfg.acp.iter().any(|k| k == kind.as_str()),
         Some(_) => true,
         None => false,
@@ -116,6 +118,21 @@ async fn run(
     hub.add_shims(session, &mut prepared.cmd);
     for (k, v) in spec.env_for(strict) {
         prepared.cmd.env(k, v);
+    }
+    if kind == AgentKind::Codex {
+        // The person's own Codex (its version, its sign-in), not the copy
+        // codex-acp bundles. Where tab's sandbox bounds the process, Codex's
+        // own can't start inside it, as in codex.rs; elsewhere Codex keeps
+        // to the workspace and asks, which comes to tab as an approval card.
+        prepared
+            .cmd
+            .env("CODEX_PATH", super::agent_exe(&cfg, kind)?);
+        let mode = if prepared.enforced {
+            "agent-full-access"
+        } else {
+            "workspace-write"
+        };
+        prepared.cmd.env("INITIAL_AGENT_MODE", mode);
     }
     // Servers the person set up that strict mode turned off; a tool from
     // one of them stops the turn.
@@ -1143,16 +1160,21 @@ fn kind_name(k: &acp::ToolKind) -> &'static str {
 
 /// The MCP server a tool named `name` comes from, if it's one tab didn't
 /// add. `format` is how the agent names MCP tools: `mcp__{server}__{tool}`
-/// names the server outright; `{server}_{tool}` can only be matched against
-/// the person's own servers.
+/// and `mcp.{server}.{tool}` name the server outright; `{server}_{tool}`
+/// can only be matched against the person's own servers.
 fn foreign_server(
     name: &str,
     format: Option<&str>,
     allowed: &[String],
     foreign: &[String],
 ) -> Option<String> {
-    if let Some(rest) = name.strip_prefix("mcp__") {
-        let server = rest.split("__").next().unwrap_or(rest);
+    let named = match format {
+        Some("mcp.{server}.{tool}") => name.strip_prefix("mcp.").map(|r| (r, ".")),
+        _ => None,
+    }
+    .or_else(|| name.strip_prefix("mcp__").map(|r| (r, "__")));
+    if let Some((rest, sep)) = named {
+        let server = rest.split(sep).next().unwrap_or(rest);
         return (!allowed.iter().any(|a| a == server)).then(|| server.to_string());
     }
     if format == Some("{server}_{tool}") {
@@ -1366,8 +1388,21 @@ mod tests {
     #[test]
     fn opencode_always_runs_over_acp() {
         let cfg = AgentConfig::default();
-        assert!(enabled(&cfg, AgentKind::OpenCode));
-        assert!(!enabled(&cfg, AgentKind::Codex));
+        assert!(enabled(&cfg, AgentKind::OpenCode, false));
+        assert!(enabled(&cfg, AgentKind::OpenCode, true));
+        assert!(!enabled(&cfg, AgentKind::Codex, false));
+    }
+
+    #[test]
+    fn codex_over_acp_is_opt_in_and_never_strict() {
+        let cfg = AgentConfig {
+            acp: vec!["codex".into()],
+            ..AgentConfig::default()
+        };
+        assert!(enabled(&cfg, AgentKind::Codex, false));
+        // codex-acp can't skip ~/.codex/config.toml: strict stays on codex.rs.
+        assert!(!enabled(&cfg, AgentKind::Codex, true));
+        assert!(!enabled(&cfg, AgentKind::Pi, false));
     }
 
     #[tokio::test]
@@ -1391,6 +1426,12 @@ mod tests {
         assert_eq!(f("mcp__slack__post"), Some("slack".into()));
         assert_eq!(f("github_create_issue"), Some("github".into()));
         assert_eq!(f("bash"), None);
+        // codex-acp's titles.
+        let codex = |n| foreign_server(n, Some("mcp.{server}.{tool}"), &allowed, &[]);
+        assert_eq!(codex("mcp.tab.tab_search"), None);
+        assert_eq!(codex("mcp.slack.post"), Some("slack".into()));
+        assert_eq!(codex("mcp__slack__post"), Some("slack".into()));
+        assert_eq!(codex("execute"), None);
         assert_eq!(
             foreign_server("github_create_issue", None, &allowed, &foreign),
             None

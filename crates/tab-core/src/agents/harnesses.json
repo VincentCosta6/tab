@@ -172,7 +172,22 @@
     "bin_dirs": [
       ".local/bin",
       ".codex/bin"
-    ]
+    ],
+    "acp": {
+      "command": "codex-acp",
+      "args": [],
+      "env": {},
+      "strict_args": [],
+      "strict_env": {},
+      "strict": false,
+      "mcp_tool_name": "mcp.{server}.{tool}",
+      "adapter": {
+        "npm": "@agentclientprotocol/codex-acp",
+        "repo": "https://github.com/agentclientprotocol/codex-acp",
+        "license": "Apache-2.0"
+      },
+      "preview": true
+    }
   },
   {
     "id": "pi",

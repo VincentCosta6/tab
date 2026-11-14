@@ -1,11 +1,13 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { openOnboarding } from "../../work/Chat";
 import { Button, Card, FormRow, Section, TextArea, TextInput, Toggle } from "../../../design/components";
-import { api } from "../../../lib/api";
+import { api, onAgentUpgrade } from "../../../lib/api";
 import { useFolderProblem, useHarnesses, useModels } from "../../../lib/hooks";
 import { ModelMenu, modelFor, useInstalled } from "../../work/ModelMenu";
 import { orderHarnesses } from "../../../lib/harnesses";
 import { useDraft } from "../draft";
+import type { Harness } from "../../../lib/types";
 import { AgentVersionRow } from "./AgentVersion";
 import { ModelFamiliesSettings } from "./ModelFamilies";
 import { SandboxSettings } from "./Sandbox";
@@ -66,6 +68,8 @@ export function AgentsPage() {
                 checked={!!draft.agent.acp?.includes(draft.agent.kind)}
                 onChange={(v) => set((c) => void (c.agent.acp = [...(c.agent.acp ?? []).filter((k) => k !== c.agent.kind), ...(v && c.agent.kind ? [c.agent.kind] : [])]))}
               />
+              {harness.acp.strict === false && <small>Strict chats keep tab's own adapter: this one can't keep your own setup out.</small>}
+              {draft.agent.acp?.includes(draft.agent.kind) && <AcpAdapterInstall harness={harness} />}
             </FormRow>
           )}
         </Card>
@@ -136,5 +140,42 @@ function DollarInput({ value, onChange }: { value: number | null; onChange: (v: 
       onChange={(e) => onChange(e.target.value === "" ? null : Math.max(0, Number(e.target.value)))}
       style={{ maxWidth: 160 }}
     />
+  );
+}
+
+/** When ACP runs through an adapter program (codex-acp) that isn't installed: what it is, its license, and a button that installs it. */
+function AcpAdapterInstall({ harness }: { harness: Harness }) {
+  const qc = useQueryClient();
+  const adapter = harness.acp?.adapter;
+  const installed = useQuery({ queryKey: ["acp-adapter", harness.id], queryFn: () => api.agentAcpAdapter(harness.id), enabled: !!adapter });
+  const [line, setLine] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!adapter || installed.data !== false) return null;
+  const install = async () => {
+    setBusy(true);
+    setError(null);
+    const stop = await onAgentUpgrade(setLine);
+    try {
+      await api.agentInstallAdapter(harness.id);
+      await qc.invalidateQueries({ queryKey: ["acp-adapter", harness.id] });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      stop();
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="settings-version">
+      <div className="settings-version-line">
+        <span>
+          Needs <a href={adapter.repo} target="_blank" rel="noreferrer">{harness.acp?.command}</a> ({adapter.license}), which isn't installed.
+        </span>
+        {adapter.npm && <Button size="sm" variant="primary" disabled={busy} onClick={() => void install()}>{busy ? "Installing…" : "Install"}</Button>}
+      </div>
+      {busy && line && <pre className="updater-log">{line}</pre>}
+      {error && <p className="settings-error">{error}</p>}
+    </div>
   );
 }

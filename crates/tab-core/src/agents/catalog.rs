@@ -52,7 +52,7 @@ pub struct Harness {
 
 /// An ACP agent as data: the program, its arguments and environment, and
 /// what strict mode adds. A new ACP agent is a new entry.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AcpSpec {
     /// The program; `None` runs the harness's own command (it speaks ACP).
     #[serde(default)]
@@ -66,8 +66,14 @@ pub struct AcpSpec {
     pub strict_args: Vec<String>,
     #[serde(default)]
     pub strict_env: std::collections::BTreeMap<String, String>,
-    /// How it names MCP tools (`mcp__{server}__{tool}` or
-    /// `{server}_{tool}`), so strict mode can spot a server tab didn't add.
+    /// It can keep the person's own setup out. When it can't (codex-acp
+    /// has no way to skip `~/.codex/config.toml` or execpolicy rules),
+    /// strict chats stay on the harness's own adapter.
+    #[serde(default = "yes")]
+    pub strict: bool,
+    /// How it names MCP tools (`mcp__{server}__{tool}`,
+    /// `mcp.{server}.{tool}` or `{server}_{tool}`), so strict mode can spot
+    /// a server tab didn't add.
     #[serde(default)]
     pub mcp_tool_name: Option<String>,
     /// Still in preview: chats use it only when the person turns it on
@@ -86,6 +92,10 @@ pub struct AcpAdapter {
     pub repo: String,
     /// SPDX id, as read from the repository.
     pub license: String,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl AcpSpec {
@@ -495,6 +505,18 @@ mod tests {
                 .contains(&("OPENCODE_DISABLE_CLAUDE_CODE", "1"))
         );
         assert!(acp.env_for(false).is_empty());
+    }
+
+    #[test]
+    fn codex_runs_over_acp_through_its_adapter_when_turned_on() {
+        let acp = harness(AgentKind::Codex).acp.as_ref().expect("codex-acp");
+        assert_eq!(acp.command.as_deref(), Some("codex-acp"));
+        assert!(acp.preview);
+        // No way to skip the person's config.toml: strict chats use codex.rs.
+        assert!(!acp.strict);
+        assert!(harness(AgentKind::OpenCode).acp.as_ref().unwrap().strict);
+        let a = acp.adapter.as_ref().unwrap();
+        assert_eq!(a.npm.as_deref(), Some("@agentclientprotocol/codex-acp"));
     }
 
     #[test]

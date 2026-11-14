@@ -367,6 +367,35 @@ pub async fn run_install(
     run_streaming(cmd, &cmdline, on_line).await
 }
 
+/// Whether `kind`'s ACP adapter (codex-acp) is installed. `None` when the
+/// harness has no adapter program of its own.
+pub fn acp_adapter_installed(kind: AgentKind) -> Option<bool> {
+    let spec = catalog::harness(kind).acp.as_ref()?;
+    spec.adapter.as_ref()?;
+    Some(resolve(spec.command.as_deref()?).is_ok())
+}
+
+/// Installs `kind`'s ACP adapter with npm, passing each line it prints to
+/// `on_line`. Only adapters whose license tab allows have an entry (see
+/// `catalog::tests::every_acp_adapter_has_an_allowed_license`).
+pub async fn run_install_adapter(
+    kind: AgentKind,
+    on_line: impl Fn(String) + Send + Sync + 'static,
+) -> anyhow::Result<()> {
+    let h = catalog::harness(kind);
+    let pkg = h
+        .acp
+        .as_ref()
+        .and_then(|a| a.adapter.as_ref())
+        .and_then(|a| a.npm.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("{} has no ACP adapter to install.", h.name))?;
+    let npm = which::which("npm")
+        .map_err(|_| anyhow::anyhow!("`npm` isn't on PATH. Install Node.js, then try again."))?;
+    let mut c = command(&npm);
+    c.args(["install", "-g", pkg]);
+    run_streaming(c, &format!("npm install -g {pkg}"), on_line).await
+}
+
 /// Runs an installer or updater, a line of its output at a time.
 async fn run_streaming(
     mut cmd: tokio::process::Command,
@@ -1418,7 +1447,9 @@ impl AgentHub {
         let hub = self.clone();
         tokio::spawn(async move {
             let system = hub.system_prompt(&session);
-            let acp = acp::enabled(&hub.config_for(&session), session.agent);
+            let cfg = hub.config_for(&session);
+            let strict = cfg.strict || hub.policy(&session).trust != crate::sandbox::Trust::Person;
+            let acp = acp::enabled(&cfg, session.agent, strict);
             let result = match session.agent {
                 _ if acp => acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await,
                 AgentKind::ClaudeCode => {
