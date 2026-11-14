@@ -34,15 +34,15 @@ export function useProjectTint(id: string | null | undefined): { className?: str
   return p ? { className: "has-project", style: { "--project": p.color } as React.CSSProperties } : {};
 }
 
-/** A small chip naming an item's project. */
-export function ProjectChip({ id }: { id: string | null | undefined }) {
+/** An item's project, quietly: a dot of its color and its name. */
+export function ProjectDot({ id }: { id: string | null | undefined }) {
   const { data: projects = [] } = useProjects();
   const p = id ? projects.find((x) => x.id === id) : undefined;
   if (!p) return null;
   return (
-    <span className="pj-chip" style={{ color: p.color }} title={`Project: ${p.name}`}>
-      <Icon name={p.icon} size={11} />
-      <span>{p.name}</span>
+    <span className="pj-dot" title={`Project: ${p.name}`}>
+      <i style={{ background: p.color }} />
+      {p.name}
     </span>
   );
 }

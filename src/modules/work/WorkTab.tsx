@@ -1,7 +1,7 @@
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, EmptyState, Tabs, TextInput, cx } from "../../design/components";
+import { Badge, Button, EmptyState, TextInput, cx } from "../../design/components";
 import { Brand, SourceGlyph, hasBrand } from "../../design/brands";
 import { FlapTitle } from "../../design/FlapTitle";
 import { Icon } from "../../design/icons";
@@ -17,7 +17,8 @@ import { WorkflowPill } from "./WorkflowStatus";
 import { takePendingOpen } from "./Chat";
 import { ItemPane } from "./ItemPane";
 import { NewChat } from "./NewChat";
-import { ProjectChip, ProjectPicker, useRememberedProject } from "./Projects";
+import { ProjectDot, ProjectPicker, useRememberedProject } from "./Projects";
+import { useHeaderSlot } from "../shell/AppHeader";
 import { SnoozeMenu, snoozeOptions } from "./SnoozeMenu";
 import { ScoreBreakdown } from "./ScoreBreakdown";
 import { api } from "../../lib/api";
@@ -27,6 +28,8 @@ import { afterBlockers, nest } from "./followups";
 const urgencyOrder: Urgency[] = ["now", "today", "this_week", "whenever"];
 const urgencyHeading: Record<Urgency, string> = { now: "Now", today: "Today", this_week: "This week", whenever: "Whenever" };
 const NEW = "__new__";
+const viewLabel: Record<ItemState, string> = { open: "Queue", snoozed: "Snoozed", done: "Done" };
+const appIcon = (icon: string) => (hasBrand(icon) ? <Brand name={icon} size={12} /> : <Icon name={icon} size={12} />);
 type Leaving = "done" | "away";
 /** A row animating out, kept drawn after the optimistic update drops it from the list. */
 type Ghost = { kind: Leaving; item: QueueItem; after: string | null };
@@ -54,6 +57,8 @@ export function WorkTab() {
   // The item that opened because the one before it was closed; it rises in.
   const [arrived, setArrived] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const headerSlot = useHeaderSlot();
   const [listWidth, setListWidth] = useState(() => {
     try {
       return clampWidth(Number(localStorage.getItem(WIDTH_KEY)) || DEFAULT_LIST_WIDTH);
@@ -302,7 +307,7 @@ export function WorkTab() {
       if (typing || e.metaKey || e.ctrlKey) return;
       if (e.key === "j" || e.key === "ArrowDown") (e.preventDefault(), move(1));
       if (e.key === "k" || e.key === "ArrowUp") (e.preventDefault(), move(-1));
-      if (e.key === "/") (e.preventDefault(), searchRef.current?.focus());
+      if (e.key === "/") (e.preventDefault(), setSearchOpen(true), searchRef.current?.focus());
       if (e.key === "n") (e.preventDefault(), setSelected(NEW));
     };
     window.addEventListener("keydown", onKey);
@@ -323,7 +328,7 @@ export function WorkTab() {
     const waiting = (i.blocked_by ?? []).map((b) => titles.get(b) ?? "another task");
     return (
       <div key={i.id} className={cx(depth > 0 && "followup")}>
-        <QueueRow item={i} agent={activity.get(i.id)} workflow={workflows.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} waiting={waiting} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
+        <QueueRow item={i} agent={activity.get(i.id)} workflow={workflows.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} waiting={waiting} hideProject={!!project} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
         {kids && (
           <button className={cx("followups-toggle", open && "open")} aria-expanded={open} onClick={() => toggleFollowups(i.id)}>
             <Icon name="chevron-right" size={12} />
@@ -336,42 +341,59 @@ export function WorkTab() {
     );
   };
 
+  const searching = searchOpen || !!query;
+  const sourceApp = apps.find((a) => a.id === app);
+  const toolbar = (
+    <div className="queue-bar" style={headerSlot ? { width: listWidth } : undefined} data-tauri-drag-region>
+      {searching ? (
+        <span className="queue-search">
+          <TextInput ref={searchRef} icon="search" autoFocus placeholder="Search everything" value={query} onChange={(e) => setQuery(e.target.value)}
+            onBlur={() => !query && setSearchOpen(false)}
+            onKeyDown={(e) => e.key === "Escape" && (setQuery(""), setSearchOpen(false))} />
+          <button className="icon-btn" title="Close search" aria-label="Close search" onMouseDown={(e) => e.preventDefault()} onClick={() => (setQuery(""), setSearchOpen(false))}>
+            <Icon name="x" size={13} />
+          </button>
+        </span>
+      ) : (
+        <>
+          <ProjectPicker value={project} onChange={setProject} none="All projects" compact />
+          <BarMenu
+            label={sourceApp ? <>{appIcon(sourceApp.icon)} {sourceApp.label}</> : <>All <span className="count">{items.length}</span></>}
+            title="Filter by source"
+            value={app}
+            onChange={setApp}
+            options={[
+              { value: null, label: "All sources", count: items.length },
+              ...apps.filter((a) => counts[a.id]).map((a) => ({ value: a.id, label: a.label, icon: appIcon(a.icon), count: counts[a.id] })),
+            ]}
+          />
+          <span className="queue-bar-gap" data-tauri-drag-region />
+          <button className="icon-btn" title="Search  /" aria-label="Search" onClick={() => setSearchOpen(true)}>
+            <Icon name="search" size={14} />
+          </button>
+        </>
+      )}
+      <BarMenu
+        label={viewLabel[view]}
+        title="Show"
+        align="right"
+        value={view}
+        onChange={(v) => v && setView(v)}
+        options={(Object.keys(viewLabel) as ItemState[]).map((v) => ({ value: v, label: viewLabel[v] }))}
+      />
+      <button className={cx("icon-btn queue-new", selected === NEW && "active")} title="New chat  N" aria-label="New chat" onClick={() => setSelected(NEW)}>
+        <Icon name="plus" size={15} />
+      </button>
+    </div>
+  );
+
   return (
     <div className="work" style={{ gridTemplateColumns: `${listWidth}px 1fr` }}>
       <section className="queue">
         <div className="queue-resize" onMouseDown={startResize} onDoubleClick={() => saveWidth(DEFAULT_LIST_WIDTH)} title="Drag to resize. Double-click to reset." />
-        <div className="queue-top">
-          <div className="queue-title">
-            <ProjectPicker value={project} onChange={setProject} none="All projects" />
-            <Button variant={selected === NEW ? "primary" : "secondary"} size="sm" icon="plus" shortcut="N" onClick={() => setSelected(NEW)}>
-              New
-            </Button>
-          </div>
-          <div className="queue-filters">
-            <Tabs<ItemState>
-              value={view}
-              onChange={setView}
-              items={[
-                { value: "open", label: "Queue" },
-                { value: "snoozed", label: "Snoozed" },
-                { value: "done", label: "Done" },
-              ]}
-            />
-          </div>
-          <TextInput ref={searchRef} icon="search" placeholder="Search everything  /" value={query} onChange={(e) => setQuery(e.target.value)} />
-          <div className="chips">
-            <button className={cx("chip", !app && "active")} onClick={() => setApp(null)}>
-              All <span className="count">{items.length}</span>
-            </button>
-            {apps
-              .filter((a) => counts[a.id])
-              .map((a) => (
-                <button key={a.id} className={cx("chip", app === a.id && "active")} onClick={() => setApp(app === a.id ? null : a.id)}>
-                  {hasBrand(a.icon) ? <Brand name={a.icon} size={12} /> : <Icon name={a.icon} size={12} />} {a.label} <span className="count">{counts[a.id]}</span>
-                </button>
-              ))}
-          </div>
-        </div>
+        {/* The toolbar sits in the window's title bar, above the queue, when
+            the header has room for it (see AppHeader's lead slot). */}
+        {headerSlot ? createPortal(toolbar, headerSlot) : <div className="queue-top">{toolbar}</div>}
         <div className="queue-list" role="listbox" aria-label="Work queue">
           {!drawn.length && (
             <EmptyState icon={query ? "search" : "check"} title={query ? "No matches" : view === "open" ? "Queue is clear" : `Nothing ${view}`}>
@@ -429,8 +451,10 @@ function byline(item: QueueItem): string {
   return [actor, same(item.context) ? null : item.context].filter(Boolean).join(" · ");
 }
 
-export function QueueRow({ item, agent, workflow, status, waiting, selected, leaving, onSelect, onAct, compact }: {
+export function QueueRow({ item, agent, workflow, status, waiting, hideProject, selected, leaving, onSelect, onAct, compact }: {
   item: QueueItem;
+  /** The queue is filtered to one project, so naming it on each row repeats it. */
+  hideProject?: boolean;
   /** Titles of the tasks this one waits on. */
   waiting?: string[];
   agent?: AgentActivity;
@@ -450,6 +474,18 @@ export function QueueRow({ item, agent, workflow, status, waiting, selected, lea
   const [menu, setMenu] = useState(false);
   const [ctx, setCtx] = useState<{ x: number; y: number } | null>(null);
   const [showScore, setShowScore] = useState(false);
+  const by = byline(item);
+  const snippet = !compact && item.body ? item.body : "";
+  const sub = by || snippet;
+  const project = hideProject ? null : <ProjectDot id={item.project_id} />;
+  const pill = status ? <StatusPill status={agent ? { ...status, title: `${status.title} · chat updated ${timeAgo(agent.updated_at)}` } : status} />
+    : agent ? <SessionPill status={agent.status} title={`Chat ${sessionLook[agent.status].label.toLowerCase()} · updated ${timeAgo(agent.updated_at)}`} /> : null;
+  const waitingOn = !!waiting?.length && item.state !== "done" && (
+    <span className="row-waiting" title={`Waiting on: ${waiting.join(", ")}`}>
+      <Icon name="clock" size={11} /> Waiting{waiting.length > 1 ? ` on ${waiting.length}` : ""}
+    </span>
+  );
+  const snoozed = item.state === "snoozed" && item.snoozed_until && <Badge icon="clock">{timeUntil(item.snoozed_until)}</Badge>;
   return (
     <div id={compact ? undefined : `row-${item.id}`} role="option" aria-selected={selected} className={cx("row", selected && "selected", menu && "menu-open", compact && "compact", leaving && "leaving", leaving === "done" && "leaving-done")} onClick={onSelect}
       onContextMenu={(e) => (e.preventDefault(), setMenu(false), setCtx({ x: e.clientX, y: e.clientY }))}>
@@ -457,25 +493,26 @@ export function QueueRow({ item, agent, workflow, status, waiting, selected, lea
         <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={compact ? 24 : 28} />
         {leaving === "done" && <span className="row-check"><Icon name="check" size={compact ? 13 : 15} /></span>}
       </span>
+      {/* Two lines of text, then the status line only when there's one. */}
       <div className="row-main">
-        <FlapTitle as="div" className="row-title" id={item.id} text={item.title} />
-        <div className="row-meta">
-          <span className="row-meta-main">
-            {status ? <StatusPill status={agent ? { ...status, title: `${status.title} · chat updated ${timeAgo(agent.updated_at)}` } : status} />
-              : agent && <SessionPill status={agent.status} title={`Chat ${sessionLook[agent.status].label.toLowerCase()} · updated ${timeAgo(agent.updated_at)}`} />}
-            {workflow && <WorkflowPill status={workflow} />}
-            <ProjectChip id={item.project_id} />
-            <span className="row-byline">{byline(item)}</span>
-          </span>
-          {!!waiting?.length && item.state !== "done" && (
-            <span className="row-waiting" title={`Waiting on: ${waiting.join(", ")}`}>
-              <Icon name="clock" size={11} /> Waiting{waiting.length > 1 ? ` on ${waiting.length}` : ""}
-            </span>
-          )}
-          {item.state === "snoozed" && item.snoozed_until && <Badge icon="clock">{timeUntil(item.snoozed_until)}</Badge>}
+        <div className="row-head">
+          <FlapTitle as="div" className="row-title" id={item.id} text={item.title} />
           <span className="row-time">{timeAgo(item.occurred_at)}</span>
         </div>
-        {!compact && item.body && <div className="row-snippet">{item.body}</div>}
+        {(sub || project) && (
+          <div className="row-sub">
+            {project}
+            {sub && <span className="row-sub-text">{by && <span className="row-byline">{by}</span>}{by && snippet && " · "}{snippet}</span>}
+          </div>
+        )}
+        {(pill || workflow || waitingOn || snoozed) && (
+          <div className="row-status">
+            {pill}
+            {workflow && <WorkflowPill status={workflow} />}
+            {waitingOn}
+            {snoozed}
+          </div>
+        )}
       </div>
       {onAct && (
         <div className="row-actions" onClick={(e) => e.stopPropagation()}>
@@ -508,6 +545,45 @@ export function QueueRow({ item, agent, workflow, status, waiting, selected, lea
       )}
       {showScore && <ScoreBreakdown item={item} onClose={() => setShowScore(false)} />}
     </div>
+  );
+}
+
+/** A dropdown in the queue's toolbar: a quiet button naming the choice, and a menu of the rest. */
+function BarMenu<T extends string | null>({ label, title, value, onChange, options, align }: {
+  label: React.ReactNode;
+  title: string;
+  value: T;
+  onChange: (v: T) => void;
+  options: { value: T; label: string; icon?: React.ReactNode; count?: number }[];
+  align?: "right";
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => (window.removeEventListener("mousedown", onDown), window.removeEventListener("keydown", onKey));
+  }, [open]);
+  return (
+    <span className="menu-anchor bar-menu" ref={ref}>
+      <button className={cx("bar-trigger", open && "active")} title={title} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        {label}
+        <Icon name="chevron-down" size={11} />
+      </button>
+      {open && (
+        <div className={cx("menu", align === "right" && "right")} role="menu">
+          {options.map((o) => (
+            <button key={o.value ?? ""} role="menuitemradio" aria-checked={o.value === value} className={cx(o.value === value && "active")} onClick={() => (onChange(o.value), setOpen(false))}>
+              <span className="bar-option">{o.icon}{o.label}{o.count !== undefined && <span className="count">{o.count}</span>}</span>
+              {o.value === value && <Icon name="check" size={13} />}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
   );
 }
 
