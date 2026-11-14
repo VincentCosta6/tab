@@ -36,7 +36,7 @@ export function OpenMenu({ url, onOpenInTab, tabLabel = "Open in tab" }: { url: 
   const pick = (f: () => void) => () => (setOpen(false), f());
   return (
     <span className="menu-anchor" ref={ref}>
-      <Button size="sm" icon="external" shortcut="O" onClick={() => setOpen((v) => !v)} aria-haspopup="menu" aria-expanded={open}>Open</Button>
+      <Button size="sm" icon="external" shortcut="O" title="Open (O)" onClick={() => setOpen((v) => !v)} aria-haspopup="menu" aria-expanded={open}>Open</Button>
       {open && (
         <div className="menu open-menu" role="menu">
           {onOpenInTab && <button role="menuitem" onClick={pick(onOpenInTab)}><span><Icon name="inbox" size={13} /> {tabLabel}</span></button>}

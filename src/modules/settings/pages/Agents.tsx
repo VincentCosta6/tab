@@ -1,11 +1,16 @@
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { openOnboarding } from "../../work/Chat";
 import { Button, Card, FormRow, Section, TextArea, TextInput, Toggle } from "../../../design/components";
-import { api } from "../../../lib/api";
-import { useHarnesses, useModels } from "../../../lib/hooks";
-import { ModelMenu, modelFor } from "../../work/ModelMenu";
+import { api, onAgentUpgrade } from "../../../lib/api";
+import { useFolderProblem, useHarnesses, useModels } from "../../../lib/hooks";
+import { ModelMenu, modelFor, useInstalled } from "../../work/ModelMenu";
+import { orderHarnesses } from "../../../lib/harnesses";
 import { useDraft } from "../draft";
+import type { Harness } from "../../../lib/types";
 import { AgentVersionRow } from "./AgentVersion";
+import { ModelFamiliesSettings } from "./ModelFamilies";
+import { SandboxSettings } from "./Sandbox";
 
 export function AgentsPage() {
   const { draft, set } = useDraft();
@@ -13,6 +18,8 @@ export function AgentsPage() {
   const titler = draft.agent.titler ?? { enabled: true, model: null, instructions: "" };
   const { data: harnesses = [] } = useHarnesses();
   const { data: models = [] } = useModels();
+  const installed = useInstalled();
+  const workdirProblem = useFolderProblem(draft.agent.workdir);
   const titlerAgent = titler.agent ?? draft.agent.kind;
   const harness = harnesses.find((h) => h.id === draft.agent.kind);
   const setTitler = (patch: Partial<typeof titler>) => set((c) => void (c.agent.titler = { ...titler, ...patch }));
@@ -23,7 +30,7 @@ export function AgentsPage() {
           <FormRow label="Agent">
             <select className="select" value={draft.agent.kind ?? ""} onChange={(e) => set((c) => void ((c.agent.kind = (e.target.value || null) as typeof c.agent.kind), (c.agent.model = c.agent.kind ? c.agent.models?.[c.agent.kind] ?? null : null)))}>
               <option value="">Not set up</option>
-              {harnesses.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+              {orderHarnesses(harnesses, installed).map((h) => <option key={h.id} value={h.id}>{h.name}{installed.has(h.id) ? "" : " (not found on this computer)"}</option>)}
             </select>
           </FormRow>
           <AgentVersionRow />
@@ -32,6 +39,7 @@ export function AgentsPage() {
           </FormRow>
           <FormRow label="Work folder" help="Where sessions start.">
             <TextInput value={draft.agent.workdir ?? ""} onChange={(e) => set((c) => void (c.agent.workdir = e.target.value || null))} />
+            {workdirProblem && <small className="text-danger" role="alert">{workdirProblem}</small>}
           </FormRow>
           {draft.agent.kind && (
             <FormRow label="Model" help="For new chats on this agent. Each chat can switch too.">
@@ -53,13 +61,23 @@ export function AgentsPage() {
               </select>
             </FormRow>
           )}
-          {harness?.capabilities.external_server && (
-            <FormRow label="Server URL" help="Leave empty and tab starts its own server.">
-              <TextInput placeholder="http://127.0.0.1:4096" value={draft.agent.opencode_url ?? ""} onChange={(e) => set((c) => void (c.agent.opencode_url = e.target.value || null))} />
+          {harness?.acp?.preview && draft.agent.kind && (
+            <FormRow label="Agent Client Protocol" help={`Preview: run ${harness.name} chats over ACP, the open protocol Zed and other editors use, instead of tab's own adapter. Turn it off if a chat behaves differently.`}>
+              <Toggle
+                label="Use ACP"
+                checked={!!draft.agent.acp?.includes(draft.agent.kind)}
+                onChange={(v) => set((c) => void (c.agent.acp = [...(c.agent.acp ?? []).filter((k) => k !== c.agent.kind), ...(v && c.agent.kind ? [c.agent.kind] : [])]))}
+              />
+              {harness.acp.strict === false && <small>Strict chats keep tab's own adapter: this one can't keep your own setup out.</small>}
+              {draft.agent.acp?.includes(draft.agent.kind) && <AcpAdapterInstall harness={harness} />}
             </FormRow>
           )}
         </Card>
       </Section>
+
+      <SandboxSettings />
+
+      <ModelFamiliesSettings />
 
       <Section title="Chat titles" description="After the first few turns of a chat, a small model names it for what the thread is actually doing. It stops once it's confident, and never touches a title you've set yourself.">
         <Card>
@@ -122,5 +140,42 @@ function DollarInput({ value, onChange }: { value: number | null; onChange: (v: 
       onChange={(e) => onChange(e.target.value === "" ? null : Math.max(0, Number(e.target.value)))}
       style={{ maxWidth: 160 }}
     />
+  );
+}
+
+/** When ACP runs through an adapter program (codex-acp) that isn't installed: what it is, its license, and a button that installs it. */
+function AcpAdapterInstall({ harness }: { harness: Harness }) {
+  const qc = useQueryClient();
+  const adapter = harness.acp?.adapter;
+  const installed = useQuery({ queryKey: ["acp-adapter", harness.id], queryFn: () => api.agentAcpAdapter(harness.id), enabled: !!adapter });
+  const [line, setLine] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!adapter || installed.data !== false) return null;
+  const install = async () => {
+    setBusy(true);
+    setError(null);
+    const stop = await onAgentUpgrade(setLine);
+    try {
+      await api.agentInstallAdapter(harness.id);
+      await qc.invalidateQueries({ queryKey: ["acp-adapter", harness.id] });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      stop();
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="settings-version">
+      <div className="settings-version-line">
+        <span>
+          Needs <a href={adapter.repo} target="_blank" rel="noreferrer">{harness.acp?.command}</a> ({adapter.license}), which isn't installed.
+        </span>
+        {adapter.npm && <Button size="sm" variant="primary" disabled={busy} onClick={() => void install()}>{busy ? "Installing…" : "Install"}</Button>}
+      </div>
+      {busy && line && <pre className="updater-log">{line}</pre>}
+      {error && <p className="settings-error">{error}</p>}
+    </div>
   );
 }

@@ -6,16 +6,28 @@
 
 mod activity;
 mod context;
+mod families;
 mod graph;
 mod http;
 pub mod hub_sync;
 mod items;
+mod jobs;
+mod knowledge;
+mod links;
 mod previews;
 mod projects;
+mod rollups;
+mod segments;
 mod sessions;
 mod usage;
+mod vault;
 mod vectors;
+mod workflow_items;
 mod workflows;
+pub use jobs::CloudConnection;
+pub use knowledge::{ChunkHit, IndexTarget, Reader};
+pub use projects::ResourceInput;
+pub use segments::{DIVIDER as COMPACTED, ProjectChange, Segment, WatchState};
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -25,7 +37,8 @@ use rusqlite::Connection;
 
 pub use http::{AuditEntry, AuditQuery, CachedResponse, UsageRow};
 pub use items::{Scope, Upsert};
-pub use usage::{NewUsage, PlanWindow, UsageSummary};
+pub use usage::{NewUsage, PlanWindow, TurnUsage, UsageSummary};
+pub use vault::{VAULT_TITLE, VaultAuditRow, VaultDevice, VaultGeneration};
 pub use vectors::Doc;
 
 pub struct Store {
@@ -37,6 +50,9 @@ pub struct Store {
     workflows_rev: std::sync::atomic::AtomicU64,
     /// Woken after every commit, so the hub sync sends changes right away.
     commits: std::sync::Arc<tokio::sync::Notify>,
+    /// Woken when a resource or repo is added or changed, so it's indexed
+    /// right away rather than on the next pass.
+    knowledge_wake: std::sync::Arc<tokio::sync::Notify>,
 }
 
 /// Ordered migrations; `PRAGMA user_version` records how many have run.
@@ -54,6 +70,21 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/011_entity_blocks.sql"),
     include_str!("migrations/012_ranking_fired.sql"),
     include_str!("migrations/013_session_sync.sql"),
+    include_str!("migrations/014_project_profile.sql"),
+    include_str!("migrations/015_session_branches.sql"),
+    include_str!("migrations/016_runners_jobs.sql"),
+    include_str!("migrations/017_session_model.sql"),
+    include_str!("migrations/018_item_state_at.sql"),
+    include_str!("migrations/019_project_resources.sql"),
+    include_str!("migrations/020_resource_chunks.sql"),
+    include_str!("migrations/021_item_links.sql"),
+    include_str!("migrations/022_coordinator.sql"),
+    include_str!("migrations/023_session_opened.sql"),
+    include_str!("migrations/024_vault.sql"),
+    include_str!("migrations/025_session_mode.sql"),
+    include_str!("migrations/026_model_families.sql"),
+    include_str!("migrations/027_workflow_run_items.sql"),
+    include_str!("migrations/028_workflow_rollups.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {
@@ -108,6 +139,7 @@ impl Store {
         }));
         Ok(Self {
             commits,
+            knowledge_wake: Default::default(),
             conn: Mutex::new(conn),
             embedder: std::sync::RwLock::new(None),
             index_status: Mutex::new(Default::default()),
@@ -124,6 +156,14 @@ impl Store {
             .query_row("SELECT device FROM this_device WHERE id = 1", [], |r| {
                 r.get(0)
             })?)
+    }
+
+    /// Makes this install go by `device` instead (a cloud runner goes by the
+    /// id its hub gives it, so it can't say hello as anything else).
+    pub fn set_device_id(&self, device: &str) -> anyhow::Result<()> {
+        self.conn()
+            .execute("UPDATE this_device SET device = ?1 WHERE id = 1", [device])?;
+        Ok(())
     }
 
     /// Fires after every commit to `tab.db` (once per wait, however many

@@ -1,23 +1,29 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, cx } from "../../design/components";
-import { Brand } from "../../design/brands";
 import { Icon } from "../../design/icons";
-import { Markdown } from "../../design/markdown";
 import { Attachments } from "../../design/ImageViewer";
-import { MarkdownFiles } from "../../design/markdown";
-import { saveAttachment } from "../../lib/images";
+import { FilePreview } from "../../design/FileStage";
+import { ImageThumb, Markdown, MarkdownFiles } from "../../design/markdown";
+import { RichMarkdown } from "../../design/richMarkdown";
+import { fileName, isImagePath, saveAttachment } from "../../lib/images";
+import { filesInText, isShowable } from "../../lib/threadFiles";
+import { useStage } from "../../lib/stage";
+import { sessionLook } from "../shell/AppHeader";
 import { AgentNotice } from "./AgentNotice";
+import { ContextMeter } from "./ContextMeter";
+import { CompactedDivider } from "../projects/Compaction";
+import { SlashPanel, tabCommand, tabCommands, type Panel } from "./SlashPanels";
+import { openSlots, parseHint, splitArgs, type ArgSource } from "./slashArgs";
 import { Dictation } from "./Dictation";
 import { useDropTarget } from "./DropZone";
+import { useStickToBottom } from "use-stick-to-bottom";
 import { api } from "../../lib/api";
-import { useChat, useConfig, useHarnesses, useStream } from "../../lib/hooks";
-import { ModelMenu, modelFor } from "./ModelMenu";
+import { useChat, useConfig, useHarnesses, useModels, useStream } from "../../lib/hooks";
+import { HarnessIcon, ModelMenu, modelFor } from "./ModelMenu";
 import { keys } from "../../lib/query";
-import type { AgentKind, Approval, Chat, QueueItem, SessionMessage, SessionStatus } from "../../lib/types";
+import type { AgentKind, Approval, Chat, QueueItem, Session, SessionMessage, SessionStatus, SlashCommand, SlashKind } from "../../lib/types";
 
-export const agentLabel: Record<AgentKind, string> = { claude_code: "Claude Code", opencode: "OpenCode" };
-const agentBrand: Record<AgentKind, string> = { claude_code: "claude", opencode: "opencode" };
 
 export function openOnboarding() {
   window.dispatchEvent(new CustomEvent("tab:onboarding"));
@@ -84,14 +90,44 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
     }
   };
 
+  const shell = async (command: string) => {
+    setError(null);
+    try {
+      const started = await api.chatShell(item.id, command);
+      qc.setQueryData<Chat>(keys.chat(item.id), (c) => ({ session: started.session, approvals: c?.approvals ?? [], running: c?.running ?? false, messages: c?.messages ?? [] }));
+      qc.invalidateQueries({ queryKey: keys.chat(item.id) });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   return (
     <div className="chat">
       {/* The body stays mounted while hidden, so switching back doesn't reload it. */}
       {body && <div className="chat-body" hidden={!showBody}>{body}</div>}
       {(!body || !showBody) && <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />}
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
-      <Composer chat={chat} onSend={send} placeholder={`Ask about this, or tell the agent what to do…`} />
+      <Composer chat={chat} onSend={send} onShell={shell} placeholder={`Ask about this, or tell the agent what to do…`} />
     </div>
+  );
+}
+
+/**
+ * Where this chat runs, as small as it gets: a computer or cloud, the
+ * device's name, and a dot for whether it's connected (the rest on hover).
+ */
+export function DevicePill({ session }: { session: Session }) {
+  const hub = useQuery({ queryKey: ["hub-status"], queryFn: api.hubStatus, refetchInterval: 5000 });
+  const runners = useQuery({ queryKey: ["runners"], queryFn: api.runners, refetchInterval: 30_000 });
+  const list = runners.data ?? [];
+  const l = sessionLook(session, list, hub.data ?? null);
+  const name = l.place === "This computer" ? list.find((r) => r.this_app)?.name || "This computer" : l.place;
+  return (
+    <span className="device-pill" title={`${l.label}. ${l.detail}`}>
+      <Icon name={l.icon} size={11} />
+      <span className="device-pill-name">{name}</span>
+      <span className={cx("header-chip-state", `tone-${l.tone}`)}><i className="header-dot" aria-hidden="true" /></span>
+    </span>
   );
 }
 
@@ -102,7 +138,7 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
 export function SandboxPill() {
   const { data } = useQuery({ queryKey: ["sandbox"], queryFn: api.sandboxStatus, staleTime: 60_000 });
   if (!data?.enabled) return null;
-  const github = "gh and git reach GitHub through tab with your GitHub connection; force pushes, merges and deletes ask you first.";
+  const github = "gh and git reach GitHub through tab with your GitHub connection; force pushes (except to a branch this chat created), merges and deletes ask you first.";
   return (
     <span className={cx("sandbox-pill", !data.enforced && "limited")} title={`${data.summary} ${github}`}>
       <Icon name="shield" size={11} /> {data.enforced ? "Sandboxed" : "Limited sandbox"}
@@ -112,8 +148,8 @@ export function SandboxPill() {
 
 /**
  * Strict mode: blue "Strict" when chats load only tab's connections, amber
- * "Not strict" when strict is on but this agent can't be held to it (an
- * OpenCode server you run yourself), nothing when it's off.
+ * "Not strict" when strict is on but this agent can't be held to it,
+ * nothing when it's off.
  */
 export function StrictPill({ kind }: { kind?: AgentKind | null }) {
   const { data: config } = useConfig();
@@ -121,10 +157,10 @@ export function StrictPill({ kind }: { kind?: AgentKind | null }) {
   const agent = config?.agent;
   const harness = harnesses?.find((h) => h.id === (kind ?? agent?.kind));
   if (!agent || !harness || agent.strict === false) return null;
-  // Its adapter can't keep your setup out, or it's attached to a server you run.
-  const remote = !harness.capabilities.strict || (harness.capabilities.external_server && !!agent.opencode_url?.trim());
+  // Its adapter can't keep your setup out.
+  const remote = !harness.capabilities.strict;
   const title = remote
-    ? `Strict mode is on, but tab can't control what ${harness.name} loads here${harness.capabilities.external_server ? " (it's attached to a server you started)" : ""}.`
+    ? `Strict mode is on, but tab can't control what ${harness.name} loads here.`
     : "Strict mode: this chat loads only tab's connections. Your personal MCP servers, connectors, plugins, hooks and user settings stay out; the repo's own config still loads. If anything else loads, tab stops the turn.";
   return (
     <span className={cx("strict-pill", remote && "limited")} title={title}>
@@ -133,141 +169,29 @@ export function StrictPill({ kind }: { kind?: AgentKind | null }) {
   );
 }
 
-const k = (n: number) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
-
-/**
- * How full the agent's context window is, from the last turn's usage, with
- * a breakdown: the agent's own setup (system prompt, tools, MCP), what tab
- * adds (this item and its attached context), and the conversation so far.
- */
-function ContextMeter({ messages }: { messages: SessionMessage[] }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  const now = useNow(30_000);
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
-    window.addEventListener("mousedown", close);
-    return () => window.removeEventListener("mousedown", close);
-  }, [open]);
-
-  const turns = messages.filter((m) => m.kind === "result" && m.meta?.context?.used);
-  const lastTurn = turns[turns.length - 1];
-  const last = lastTurn?.meta.context;
-  if (!last) return null;
-  const used = Number(last.used);
-  // Claude Code reports the model's largest window, which can be 1M even
-  // when the plan only gets 200k. Trust 1M only for a "[1m]" model or once
-  // the chat is actually past 200k.
-  const reported = Number(last.window) || 200_000;
-  const long = /\[1m\]/i.test(String(last.model ?? "")) || used > 200_000;
-  const size = reported > 200_000 && !long ? 200_000 : reported;
-  // The session's very first model call: setup plus the first message.
-  const base = Number(turns[0].meta.context.first_call ?? used);
-  const tab = Math.min(Number(last.tab_context) || 0, base);
-  const parts = [
-    { label: "Agent setup", hint: "System prompt, tools and MCP servers", n: Math.max(0, base - tab), cls: "cw-setup" },
-    { label: "tab context", hint: "This item and the context attached to it", n: tab, cls: "cw-tab" },
-    { label: "Conversation", hint: "Your messages, replies and tool output", n: Math.max(0, used - base), cls: "cw-chat" },
-  ];
-  const pct = Math.min(100, (used / size) * 100);
-  const tone = pct >= 90 ? "danger" : pct >= 75 ? "warning" : "accent";
-
-  // Prompt cache: Claude keeps the conversation's prefix cached for about
-  // five minutes after each call. A message sent while it's warm re-reads it
-  // at a tenth of the price; after that the whole context is written again.
-  const n = (k: string) => Number(last[k]) || 0;
-  const read = n("cache_read"), write = n("cache_write"), fresh = n("fresh_input");
-  const hit = read + write + fresh ? read / (read + write + fresh) : 0;
-  const cached = read + write > 0;
-  const left = cached ? Math.max(0, CACHE_TTL - (now - new Date(lastTurn.created_at).getTime())) : 0;
-  const cache = !cached ? "none" : left <= 0 ? "cold" : left < 60_000 ? "cooling" : "warm";
-  const total = turns.reduce((t, m) => {
-    const c = m.meta.context;
-    return { read: t.read + (Number(c.cache_read) || 0), all: t.all + (Number(c.cache_read) || 0) + (Number(c.cache_write) || 0) + (Number(c.fresh_input) || 0) };
-  }, { read: 0, all: 0 });
-
-  return (
-    <div className="cw" ref={ref}>
-      <button className="cw-chip" onClick={() => setOpen(!open)} title={`Context: ${k(used)} of ${k(size)} · cache ${cacheText(cache, left)}`}>
-        <span className="cw-ring" style={{ ["--p" as string]: `${pct}%` }} data-tone={tone} />
-        {k(used)}
-        {cache !== "none" && <span className={cx("cw-cache", `cache-${cache}`)}>{cache === "cold" ? "cold" : clock(left)}</span>}
-      </button>
-      {open && (
-        <div className="cw-pop">
-          <div className="cw-pop-head">
-            <strong>Context window</strong>
-            <span className={`text-${tone}`}>{k(used)} / {k(size)} · {Math.round(pct)}%</span>
-          </div>
-          <div className="cw-bar">
-            {parts.map((p) => <span key={p.label} className={p.cls} style={{ width: `${(p.n / size) * 100}%` }} title={`${p.label}: ${k(p.n)}`} />)}
-          </div>
-          <ul className="cw-list">
-            {parts.map((p) => (
-              <li key={p.label}><i className={p.cls} /><span><strong>{p.label}</strong><small>{p.hint}</small></span><span>{k(p.n)}</span></li>
-            ))}
-            <li><i className="cw-free" /><span><strong>Free</strong></span><span>{k(Math.max(0, size - used))}</span></li>
-          </ul>
-          <div className="cw-pop-head">
-            <strong>Prompt cache</strong>
-            <span className={cx("cw-cache", `cache-${cache}`)}>{cacheText(cache, left)}</span>
-          </div>
-          <div className="cw-bar">
-            <span className="cw-read" style={{ width: `${hit * 100}%` }} title={`Read from cache: ${k(read)}`} />
-            <span className="cw-write" style={{ width: `${(read + write + fresh ? write / (read + write + fresh) : 0) * 100}%` }} title={`Written to cache: ${k(write)}`} />
-            <span className="cw-fresh" style={{ width: `${(read + write + fresh ? fresh / (read + write + fresh) : 0) * 100}%` }} title={`Uncached: ${k(fresh)}`} />
-          </div>
-          <ul className="cw-list">
-            <li><i className="cw-read" /><span><strong>Read from cache</strong><small>About a tenth of the input price</small></span><span>{k(read)}</span></li>
-            <li><i className="cw-write" /><span><strong>Written to cache</strong><small>A little over the input price, once</small></span><span>{k(write)}</span></li>
-            <li><i className="cw-fresh" /><span><strong>Uncached input</strong></span><span>{k(fresh)}</span></li>
-          </ul>
-          <p className="subtle">
-            Last call {Math.round(hit * 100)}% cached{total.all ? `, ${Math.round((total.read / total.all) * 100)}% across this chat` : ""}.{" "}
-            {cache === "cold"
-              ? `The cache has expired, so the next message writes all ${k(used)} again.`
-              : "Claude keeps it about 5 minutes after each reply. Changing model or mode starts a fresh cache."}
-            {last.model ? ` · ${String(last.model).replace(/^claude-/, "")}` : ""}
-            {pct >= 75 && " The agent compacts older history when it gets close to full."}
-          </p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Claude's default prompt-cache lifetime, refreshed on every call. */
-const CACHE_TTL = 5 * 60_000;
-const clock = (ms: number) => (ms < 60_000 ? "<1m" : `${Math.ceil(ms / 60_000)}m`);
-const cacheText = (c: string, left: number) => (c === "none" ? "not used" : c === "cold" ? "expired" : `warm for ${clock(left)}`);
-
-function useNow(every: number) {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const t = window.setInterval(() => setNow(Date.now()), every);
-    return () => window.clearInterval(t);
-  }, [every]);
-  return now;
-}
-
 export function AgentStatus({ chat }: { chat: Chat | undefined }) {
+  const { data: harnesses = [] } = useHarnesses();
   const s = chat?.session;
   if (!s) return null;
+  const harness = harnesses.find((h) => h.id === s.agent);
   const status: SessionStatus = chat.approvals.length ? "needs_input" : s.status;
   const text = { idle: "Idle", working: "Working…", needs_input: "Needs you", monitoring: "Monitoring", failed: "Failed" }[status];
   return (
     <span className={cx("agent-status", `agent-${status}`)}>
-      <Brand name={agentBrand[s.agent]} size={12} />
-      {agentLabel[s.agent]} · {text}
+      <HarnessIcon harness={harness} size={12} />
+      {harness?.name ?? s.agent} · {text}
     </span>
   );
 }
 
+/** Chat turns drawn at a time. */
+const TURN_PAGE = 30;
+
 export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { chat: Chat | undefined; suggestions?: string[]; onSuggest?: (s: string) => void; onSend?: (text: string) => void; intro?: React.ReactNode }) {
   const stream = useStream(chat?.session?.id);
-  const box = useRef<HTMLDivElement>(null);
-  const stuck = useRef(true); // following the bottom; off once the person scrolls up to read
+  // Follows new output while the person is at the bottom, and lets go as
+  // soon as they scroll up to read, mid-stream included.
+  const { scrollRef: box, contentRef, scrollToBottom } = useStickToBottom({ initial: "instant", resize: "instant" });
   const messages = chat?.messages ?? [];
   const results = new Map<number, SessionMessage>();
   // Pair each tool call with its result: by id when the agent ran several at once, else the one that follows it.
@@ -286,15 +210,35 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
     if (m.kind === "secret_request" && newestCard.get(m.meta?.connector_id) !== m.id) m.meta = { ...m.meta, superseded: true };
   });
 
-  // Follow new output while the person is at the bottom; leave them be once they scroll up.
-  // Their own message always brings them back down.
-  const last = messages[messages.length - 1];
+  const base = chat?.session?.cwd ?? null;
+  // Claude Code keeps a checkpoint per message; going back needs the turn over.
+  const rewindable = chat?.session?.agent === "claude_code" && !chat.running;
+  const folded = useMemo(() => foldedTexts(messages, !!chat?.running), [messages, chat?.running]);
+  const turns = useMemo(() => splitTurns(messages, base), [messages, base]);
+
+  // Draw the latest turns only; earlier ones come in as the person scrolls up.
+  // Every message costs DOM, and a long chat held hundreds of MB.
+  const [drawnTurns, setDrawnTurns] = useState(TURN_PAGE);
+  const hidden = Math.max(0, turns.length - drawnTurns);
+  const heightBefore = useRef<number | null>(null);
+  const showEarlier = () => {
+    if (heightBefore.current !== null) return;
+    heightBefore.current = box.current?.scrollHeight ?? 0;
+    setDrawnTurns((n) => n + TURN_PAGE);
+  };
+  // Keep what the person was reading in place as turns are added above it.
   useLayoutEffect(() => {
     const el = box.current;
-    if (!el) return;
-    if (last?.role === "user") stuck.current = true;
-    if (stuck.current) el.scrollTop = el.scrollHeight;
-  }, [messages.length, stream, chat?.approvals.length, chat?.running, last?.role]);
+    if (el && heightBefore.current !== null) el.scrollTop += el.scrollHeight - heightBefore.current;
+    heightBefore.current = null;
+  }, [drawnTurns]);
+
+  // The person's own new message brings them back down.
+  const last = messages[messages.length - 1];
+  const ownId = last?.role === "user" ? last.id : null;
+  useEffect(() => {
+    if (ownId != null) void scrollToBottom("instant");
+  }, [ownId, scrollToBottom]);
 
   if (!messages.length && !stream)
     return (
@@ -313,22 +257,33 @@ export function Transcript({ chat, suggestions, onSuggest, onSend, intro }: { ch
     );
 
   return (
-    <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null }}>
-    <div className="transcript" ref={box} onScroll={(e) => { const el = e.currentTarget; stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48; }}>
+    <MarkdownFiles.Provider value={{ base: chat?.session?.cwd ?? null, imagesAtEnd: true }}>
+    <div className="transcript" ref={box} onScroll={(e) => {
+      if (hidden && e.currentTarget.scrollTop < 400) showEarlier();
+    }}>
+      <div className="transcript-content" ref={contentRef}>
       <div className="transcript-head"><AgentStatus chat={chat} /></div>
-      {groupTools(messages, paired).map((g) =>
-        Array.isArray(g)
-          ? <ToolGroup key={g[0].id} calls={g} results={results} />
-          : <MessageView key={g.id} m={g} result={results.get(g.id)} onSend={onSend} />,
-      )}
-      {stream && (
-        <div className="msg msg-assistant streaming">
-          <Markdown text={stream} />
+      {hidden > 0 && (
+        <div className="transcript-earlier">
+          <Button variant="ghost" size="sm" onClick={showEarlier}>Show {Math.min(hidden, TURN_PAGE)} earlier turn{Math.min(hidden, TURN_PAGE) === 1 ? "" : "s"} of {hidden}</Button>
         </div>
       )}
+      {turns.slice(hidden).map((t) => (
+        <Fragment key={t.messages[0].id}>
+          {groupTools(t.messages, paired, folded).map((g) =>
+            Array.isArray(g)
+              ? <ToolGroup key={g[0].id} calls={g} results={results} />
+              : <MessageView key={g.id} m={g} result={results.get(g.id)} onSend={onSend} rewind={rewindable && chat?.session ? chat.session.id : undefined} />,
+          )}
+          {t.files.length > 0 && <TurnFiles paths={t.files} />}
+        </Fragment>
+      ))}
+      {/* The reply being written, until it's stored as a message. */}
+      {stream && <div className="msg msg-assistant msg-streaming"><RichMarkdown text={stream} streaming /></div>}
       {chat?.approvals.map((a) => <ApprovalCard key={a.id} approval={a} />)}
       {chat?.running && chat.session && <SteerWait messages={messages} results={results} sessionId={chat.session.id} />}
-      <ProgressBar messages={messages} results={results} running={!!chat?.running} />
+      <ProgressBar messages={messages} results={results} running={!!chat?.running} folded={folded} writing={!!stream} />
+      </div>
     </div>
     </MarkdownFiles.Provider>
   );
@@ -437,14 +392,23 @@ function describeTool(m: SessionMessage): string {
 }
 
 /**
+ * Where the running (or last) turn starts: just after the person's last
+ * message that started one. A message sent mid-turn (a steer) joins the
+ * turn already running, so the plan from before it still counts.
+ */
+function turnStart(messages: SessionMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user" && !messages[i].meta?.steer) return i + 1;
+  return 0;
+}
+
+/**
  * The agent's step list, from whichever todo tool it uses: TodoWrite
  * (Claude Code, and opencode's todowrite) sends the whole list each time;
  * TaskCreate/TaskUpdate (newer Claude Code) builds it up one step at a time.
  * Only shown when this turn touched it, so an old list doesn't linger.
  */
 function agentSteps(messages: SessionMessage[], results: Map<number, SessionMessage>): Todo[] {
-  let turn = 0;
-  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { turn = i + 1; break; }
+  const turn = turnStart(messages);
   for (let i = messages.length - 1; i >= turn; i--) {
     const m = messages[i];
     if (m.kind === "tool" && isStepsTool(m.meta?.tool)) {
@@ -478,10 +442,12 @@ function agentSteps(messages: SessionMessage[], results: Map<number, SessionMess
 }
 
 /**
- * Pinned to the bottom of the chat while the agent works: its step list
- * with each step's status, and the tool it's running right now.
+ * The last thing in the chat, never over it: the agent's plan for this turn
+ * with each step's status, and what it's doing right now. A step that's
+ * under way spins, so "Working" shows only when none is (at the foot of the
+ * list, where the work is), never as a second spinner beside a step's.
  */
-function ProgressBar({ messages, results, running }: { messages: SessionMessage[]; results: Map<number, SessionMessage>; running: boolean }) {
+function ProgressBar({ messages, results, running, folded, writing }: { messages: SessionMessage[]; results: Map<number, SessionMessage>; running: boolean; folded: Set<number>; writing: boolean }) {
   // Open while the agent works, folded to one line once it's done (click to open either way).
   const [toggled, setToggled] = useState<boolean | null>(null);
   useEffect(() => setToggled(null), [running]);
@@ -492,8 +458,7 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
   // the last few tool calls with done/doing marks, so there's always something to follow.
   const activity: Todo[] = [];
   if (!plan.length && running) {
-    let turn = 0;
-    for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "user") { turn = i + 1; break; }
+    const turn = turnStart(messages);
     for (const m of messages.slice(turn)) {
       if (m.kind !== "tool" || isStepTool(m.meta?.tool) || m.meta?.tool === "AskUserQuestion") continue;
       activity.push({ content: describeTool(m), status: results.has(m.id) ? "completed" : "in_progress" });
@@ -501,29 +466,42 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
   }
   const earlier = Math.max(0, activity.length - 5);
   const todos = plan.length ? plan : activity.slice(-5);
+  // What it's doing now, in its own words if it said (its latest working-out), else the tool it ran.
   let step = "";
+  let note = "";
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m.role === "user") break; // only this turn's work
-    if (m.kind !== "tool") continue;
+    if (m.role === "user" && !m.meta?.steer) break; // only this turn's work
+    if (!note && folded.has(m.id)) note = m.content.trim().split("\n")[0].replace(/[`*]/g, "");
+    if (step || m.kind !== "tool") continue;
     const tool = m.meta?.tool;
     if (isStepTool(tool) || tool === "AskUserQuestion") continue;
     step = m.content.replace(/^mcp__tab__/, "tab: ").split("\n")[0];
-    break;
   }
   if (!running && !todos.length) return null;
   const done = todos.filter((t) => t.status === "completed").length;
   const active = plan.find((t) => t.status === "in_progress");
-  const label = active ? active.activeForm || active.content : step || "Working";
+  const busy = todos.some((t) => t.status === "in_progress");
+  const now = writing ? "Writing a reply" : note || step || "Working";
+  const label = active ? active.activeForm || active.content : now;
   const count = plan.length ? `${done} of ${plan.length}` : activity.length ? `${activity.length} tool call${activity.length > 1 ? "s" : ""}` : "";
+  const open = todos.length > 0 && !collapsed;
   return (
     <div className={cx("progress-bar", running && "running")}>
-      <button className="progress-head" onClick={() => todos.length && setCollapsed(!collapsed)} aria-expanded={!collapsed}>
-        {running ? <span className="dots"><i /><i /><i /></span> : <Icon name="check" size={12} />}
-        <span className="progress-label">{running ? (collapsed || !todos.length ? label : "Working") : "Done"}</span>
-        {count && <span className="progress-count">{count}</span>}
-      </button>
-      {todos.length > 0 && !collapsed && (
+      {open ? (
+        <button className="progress-head" onClick={() => setCollapsed(true)} aria-expanded>
+          {!running && <Icon name="check" size={12} />}
+          <span className="progress-label">{running ? (plan.length ? "Steps" : "This turn") : "Done"}</span>
+          {count && <span className="progress-count">{count}</span>}
+        </button>
+      ) : (
+        <button className="progress-head" onClick={() => todos.length && setCollapsed(false)} aria-expanded={false}>
+          {running ? <span className="dots"><i /><i /><i /></span> : <Icon name="check" size={12} />}
+          <span className="progress-label">{running ? label : "Done"}</span>
+          {count && <span className="progress-count">{count}</span>}
+        </button>
+      )}
+      {open && (
         <ul className={cx("progress-list", !plan.length && "activity")}>
           {earlier > 0 && <li className="progress-earlier">{earlier} earlier</li>}
           {todos.map((t, i) => (
@@ -532,9 +510,15 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
               <span>{t.status === "in_progress" && running ? t.activeForm || t.content : t.content}</span>
             </li>
           ))}
+          {running && !busy && (
+            <li className="progress-now">
+              <span className="dots"><i /><i /><i /></span>
+              <span>{now}</span>
+            </li>
+          )}
         </ul>
       )}
-      {running && step && active && <div className="progress-step">{step}</div>}
+      {running && busy && (note || step) && <div className="progress-step">{note || step}</div>}
     </div>
   );
 }
@@ -543,17 +527,102 @@ function ProgressBar({ messages, results, running }: { messages: SessionMessage[
 const isRow = (m: SessionMessage) => m.kind === "tool" && !isStepTool(m.meta?.tool) && m.meta?.tool !== "AskUserQuestion";
 
 /**
- * The transcript with runs of back-to-back tool calls gathered into one
- * group each, so a long stretch of work reads as one line, not fifty.
- * Step updates and paired results inside a run don't break it.
+ * The agent's text between tool calls ("Reading the config next…") is its
+ * working-out, not its answer: it folds into the work group around it, so
+ * a turn reads as the person's message, one line of work, and the reply.
+ * Text stays out when nothing but its answer follows it. While the agent
+ * works, all of this turn's text folds (it can't be told apart yet), except
+ * its reply to a message sent mid-turn, which the person is waiting on.
  */
-function groupTools(messages: SessionMessage[], paired: Set<SessionMessage>): (SessionMessage | SessionMessage[])[] {
+function foldedTexts(messages: SessionMessage[], running: boolean): Set<number> {
+  const out = new Set<number>();
+  let laterWork = running; // walking back: real work comes after this point in the turn
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "user") {
+      // The reply to a steer: its first text stays where the person can see it.
+      if (m.meta?.steer) for (let j = i + 1; j < messages.length && messages[j].role !== "user"; j++) {
+        if (messages[j].role === "assistant" && messages[j].kind === "text") { out.delete(messages[j].id); break; }
+      }
+      laterWork = false;
+      continue;
+    }
+    if (isRow(m)) laterWork = true;
+    else if (m.role === "assistant" && m.kind === "text" && laterWork) out.add(m.id);
+  }
+  return out;
+}
+
+interface Turn { messages: SessionMessage[]; files: string[] }
+
+/**
+ * The chat by turn (each person's message and what the agent did after it),
+ * with the files the agent showed in that turn: shown together at the end of
+ * the turn, not wherever its working-out named them.
+ */
+function splitTurns(messages: SessionMessage[], base: string | null): Turn[] {
+  const turns: Turn[] = [];
+  const attached = new Set<string>();
+  for (const m of messages) if (m.role === "user" && Array.isArray(m.meta?.attachments)) for (const p of m.meta.attachments) attached.add(p);
+  const seen = new Set<string>();
+  for (const m of messages) {
+    if (m.role === "user" || !turns.length) turns.push({ messages: [], files: [] });
+    const t = turns[turns.length - 1];
+    t.messages.push(m);
+    if (m.role !== "assistant" || m.kind !== "text") continue;
+    for (const p of filesInText(m.content, base)) {
+      if (seen.has(p) || attached.has(p) || !isShowable(p)) continue;
+      seen.add(p);
+      t.files.push(p);
+    }
+  }
+  return turns;
+}
+
+/** What the agent showed in a turn: images in full, documents as cards that open on the stage. */
+function TurnFiles({ paths }: { paths: string[] }) {
+  const stage = useStage();
+  const images = paths.filter(isImagePath);
+  const docs = paths.filter((p) => !isImagePath(p));
+  return (
+    <div className="turn-files">
+      {images.map((p) => <ImageThumb key={p} src={p} list={images} />)}
+      {docs.length > 0 && (
+        <div className="turn-docs">
+          {docs.map((p, i) => (
+            <button
+              key={p}
+              className="file-tile turn-doc"
+              title={p}
+              onClick={(e) => {
+                if (e.altKey || !stage) return void api.fileOpen(p, e.altKey).catch(() => {});
+                stage.open(docs, i);
+              }}
+            >
+              <FilePreview path={p} size="sm" />
+              <span className="file-tile-name">{fileName(p)}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A turn with runs of back-to-back tool calls, and the agent's working-out
+ * between them, gathered into one group each, so a long stretch of work
+ * reads as one line, not fifty. Step updates and paired results inside a
+ * run don't break it.
+ */
+function groupTools(messages: SessionMessage[], paired: Set<SessionMessage>, folded: Set<number>): (SessionMessage | SessionMessage[])[] {
   const out: (SessionMessage | SessionMessage[])[] = [];
   let run: SessionMessage[] | null = null;
   for (const m of messages) {
     if (m.kind === "tool_result" && paired.has(m)) continue;
     if (m.kind === "tool" && isStepTool(m.meta?.tool)) continue;
-    if (isRow(m)) {
+    if (m.kind === "suggestion") continue;
+    if (isRow(m) || folded.has(m.id)) {
       if (!run) out.push((run = []));
       run.push(m);
       continue;
@@ -564,22 +633,28 @@ function groupTools(messages: SessionMessage[], paired: Set<SessionMessage>): (S
   return out;
 }
 
-/** A run of tool calls: one line saying how many and which, opening to each call. */
-function ToolGroup({ calls, results }: { calls: SessionMessage[]; results: Map<number, SessionMessage> }) {
-  if (calls.length === 1) return <ToolRow m={calls[0]} result={results.get(calls[0].id)} />;
+/** A run of work: one line saying how many tool calls and which, opening to each call and the agent's notes between them. */
+function ToolGroup({ calls: run, results }: { calls: SessionMessage[]; results: Map<number, SessionMessage> }) {
+  const calls = run.filter((m) => m.kind === "tool");
+  if (run.length === 1 && calls.length === 1) return <ToolRow m={calls[0]} result={results.get(calls[0].id)} />;
   const names = [...new Set(calls.map((c) => toolName(c.meta?.tool ?? c.content)))];
   const failed = calls.filter((c) => results.get(c.id)?.meta?.is_error).length;
+  const note = run.find((m) => m.kind === "text");
   return (
     <details className={cx("msg-tool msg-tool-group", failed > 0 && "failed")}>
       <summary>
         <Icon name="terminal" size={12} />
         <span className="msg-tool-name">
-          {calls.length} tool calls · {names.slice(0, 4).join(", ")}{names.length > 4 ? ` +${names.length - 4}` : ""}
+          {calls.length
+            ? <>{calls.length} tool call{calls.length > 1 ? "s" : ""} · {names.slice(0, 4).join(", ")}{names.length > 4 ? ` +${names.length - 4}` : ""}</>
+            : note?.content.split("\n")[0]}
         </span>
         {failed > 0 && <span className="msg-tool-flag">{failed} failed</span>}
       </summary>
       <div className="msg-tool-list">
-        {calls.map((c) => <ToolRow key={c.id} m={c} result={results.get(c.id)} />)}
+        {run.map((c) => c.kind === "text"
+          ? <div key={c.id} className="msg-thought"><Markdown text={c.content} /></div>
+          : <ToolRow key={c.id} m={c} result={results.get(c.id)} />)}
       </div>
     </details>
   );
@@ -611,19 +686,32 @@ function ToolRow({ m, result }: { m: SessionMessage; result?: SessionMessage }) 
   );
 }
 
-function MessageView({ m, result, onSend }: { m: SessionMessage; result?: SessionMessage; onSend?: (text: string) => void }) {
+/** Asks the composer to open `/rewind` at one of the person's messages. */
+export function openRewind(sessionId: string, messageId: number) {
+  window.dispatchEvent(new CustomEvent("tab:rewind", { detail: { sessionId, messageId } }));
+}
+
+function MessageView({ m, result, onSend, rewind }: { m: SessionMessage; result?: SessionMessage; onSend?: (text: string) => void; rewind?: string }) {
   if (m.kind === "suggestion") return null;
+  if (m.kind === "shell") return <ShellRun m={m} />;
   if (m.role === "user") {
     const images: string[] = Array.isArray(m.meta?.attachments) ? m.meta.attachments : [];
     return (
       <div className="msg msg-user">
         {images.length > 0 && <Attachments paths={images} size={96} />}
         {/```|\]\(/.test(m.content) ? <Markdown text={m.content} /> : m.content}
+        {rewind && m.meta?.agent_uuid && (
+          <button className="msg-rewind" onClick={() => openRewind(rewind, m.id)} title="Rewind: go back to before this message (the conversation, the code, or both)" aria-label="Rewind to before this message">
+            <Icon name="refresh" size={11} /> Rewind
+          </button>
+        )}
       </div>
     );
   }
   if (m.kind === "secret_request") return m.meta?.superseded ? null : <SecretCard m={m} onSend={onSend} />;
-  if (m.kind === "text") return <div className="msg msg-assistant"><Markdown text={m.content} /></div>;
+  if (m.kind === "compacted") return <CompactedDivider m={m} />;
+  if (m.kind === "wake") return <div className="msg-note msg-wake"><Icon name="clock" size={12} /> {m.content}</div>;
+  if (m.kind === "text") return <div className="msg msg-assistant"><RichMarkdown text={m.content} /></div>;
   if (m.kind === "tool" && m.meta?.tool === "AskUserQuestion") {
     // Answered through tab (or still waiting on its card): the card did the talking.
     if (!result || !result.meta?.is_error) return null;
@@ -644,6 +732,22 @@ function MessageView({ m, result, onSend }: { m: SessionMessage; result?: Sessio
     return <div className="msg-note">{[secs != null && `${secs}s`, cost != null && `$${Number(cost).toFixed(3)}`].filter(Boolean).join(" · ")}</div>;
   }
   return <div className="msg-note">{m.content}</div>;
+}
+
+/** A command the person ran with `!`, and what it printed. The agent sees both with their next message. */
+function ShellRun({ m }: { m: SessionMessage }) {
+  const output: string = m.meta?.output ?? "";
+  const code: number | null = m.meta?.exit_code ?? null;
+  return (
+    <div className="msg-shell" title="Ran in the chat's folder. The agent sees this with your next message.">
+      <div className="msg-shell-cmd">
+        <span className="msg-shell-bang">!</span>
+        <code>{m.content}</code>
+        {code !== 0 && <span className="msg-tool-flag">{code == null ? "stopped" : `exit ${code}`}</span>}
+      </div>
+      {output ? <pre>{output}</pre> : <div className="msg-tool-empty">No output</div>}
+    </div>
+  );
 }
 
 interface Question { question: string; header?: string; multiSelect?: boolean; options?: { label: string; description?: string }[] }
@@ -803,7 +907,51 @@ function SecretCard({ m, onSend }: { m: SessionMessage; onSend?: (text: string) 
 
 function ApprovalCard({ approval }: { approval: Approval }) {
   if (approval.tool === "AskUserQuestion") return <QuestionApproval approval={approval} />;
+  if (approval.tool === "tab_vault") return <VaultApproval approval={approval} />;
   return <ToolApproval approval={approval} />;
+}
+
+/** An agent wants something from the vault: unlock it, release fields, or share them with a thread. */
+function VaultApproval({ approval }: { approval: Approval }) {
+  const input = approval.input as { kind: "unlock" | "release" | "request"; why?: string; entry?: string; fields?: (string | { label: string; masked: string })[]; file?: boolean };
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const allow = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      // Approving opens the vault here first (Touch ID / Windows Hello).
+      const st = await api.vaultStatus();
+      if (st.state === "locked") await api.vaultUnlock();
+      else if (st.state !== "open") throw new Error("This device can't open the vault. Answer on the computer running this chat.");
+      await api.approvalResolve(approval.id, "allow");
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  };
+  const deny = async () => (setBusy(true), await api.approvalResolve(approval.id, "deny"));
+  const fields = input.fields ?? [];
+  return (
+    <div className="approval vault-approval">
+      <div className="approval-head"><Icon name="lock" size={14} /> {approval.summary}</div>
+      {fields.length > 0 && (
+        <div className="vault-approval-fields">
+          {fields.map((f) => typeof f === "string"
+            ? <span key={f} className="vault-chip">{f}</span>
+            : <span key={f.label} className="vault-chip">{f.label} <code>{f.masked}</code></span>)}
+          {input.file && <span className="vault-chip">file text</span>}
+        </div>
+      )}
+      {input.why && <p className="vault-approval-why"><span className="subtle">Why:</span> {input.why}</p>}
+      {input.kind !== "unlock" && <p className="subtle vault-approval-note">Only this one answer gets the values; the saved chat shows them masked. Logged in the vault's activity.</p>}
+      {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
+      <div className="toolbar">
+        <Button size="sm" variant="primary" icon="check" disabled={busy} onClick={allow}>{input.kind === "unlock" ? "Unlock" : input.kind === "release" ? "Show to the coordinator" : "Share"}</Button>
+        <Button size="sm" variant="ghost" icon="x" disabled={busy} onClick={deny}>Deny</Button>
+      </div>
+    </div>
+  );
 }
 
 function ToolApproval({ approval }: { approval: Approval }) {
@@ -826,9 +974,10 @@ function ToolApproval({ approval }: { approval: Approval }) {
 }
 
 /** A compact picker for the composer bar: as wide as its label, menu above. */
-function BarPicker({ value, options, onChange, title, className }: { value: string; options: { value: string; label: string; help?: string }[]; onChange: (v: string) => void; title: string; className?: string }) {
+function BarPicker({ value, options, onChange, title, className, openSignal }: { value: string; options: { value: string; label: string; help?: string }[]; onChange: (v: string) => void; title: string; className?: string; openSignal?: number }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
+  useEffect(() => void (openSignal && setOpen(true)), [openSignal]);
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => ref.current && !ref.current.contains(e.target as Node) && setOpen(false);
@@ -861,40 +1010,102 @@ function BarPicker({ value, options, onChange, title, className }: { value: stri
 
 /**
  * Which model this chat runs on, from every installed harness. Before the
- * chat starts any harness can be picked (and becomes the one new chats use);
- * after, it stays on its harness, and the pick applies from the next message
- * to that harness's chats.
+ * chat starts any harness can be picked, and the pick becomes what new chats
+ * start on. After, the chat keeps its own model on its harness: changing it
+ * applies from the next message to this chat only.
  */
-function ChatModelPicker({ chat }: { chat: Chat | undefined }) {
+function ChatModelPicker({ chat, openSignal }: { chat: Chat | undefined; openSignal?: number }) {
   const { data: config } = useConfig();
+  const { data: models = [] } = useModels();
   const qc = useQueryClient();
-  const agent = chat?.session?.agent ?? config?.agent.kind;
+  // A switch on a started chat waits here until the person confirms it.
+  const [pending, setPending] = useState<string | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+  const session = chat?.session;
+  const agent = session?.agent ?? config?.agent.kind;
   if (!config || !agent) return null;
-  const started = !!chat?.session;
+  // Older chats have no model of their own until their next message.
+  const own = session?.model;
+  const model = own != null ? own || null : modelFor(config.agent, agent);
+  const label = (m: string | null) => (m ? models.find((x) => x.agent === agent && x.id === m)?.label ?? m : "the default model");
+  const confirm = async () => {
+    if (!session || pending === undefined) return;
+    setBusy(true);
+    try {
+      await api.setSessionModel(session.id, pending);
+      setPending(undefined);
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
-    <ModelMenu
-      value={{ agent, model: modelFor(config.agent, agent) }}
-      lock={started ? agent : undefined}
-      title="Model for this chat, from the next message"
-      onChange={async (p) => qc.setQueryData(keys.config, await api.setAgentModel(p.model, p.agent, !started))}
-    />
+    <>
+      <ModelMenu
+        value={{ agent, model }}
+        lock={session ? agent : undefined}
+        openSignal={openSignal}
+        title={session ? "Model for this chat, from the next message" : "Model for this chat and new ones"}
+        onChange={async (p) => {
+          if (session) setPending(p.model);
+          else qc.setQueryData(keys.config, await api.setAgentModel(p.model, p.agent, true));
+        }}
+      />
+      {pending !== undefined && (
+        <div
+          className="confirm-overlay"
+          role="dialog"
+          aria-label="Switch model"
+          onMouseDown={(e) => e.target === e.currentTarget && !busy && setPending(undefined)}
+          onKeyDown={(e) => e.key === "Escape" && !busy && setPending(undefined)}
+        >
+          <div className="confirm-dialog">
+            <div className="confirm-dialog-title">Switch this chat to {label(pending)}?</div>
+            <div className="subtle">
+              It's on {label(model)} now. The switch applies from your next message, to this chat only. The agent
+              starts without a warm cache, so that reply can cost more.
+            </div>
+            <div className="confirm-dialog-foot">
+              <Button variant="ghost" size="sm" onClick={() => setPending(undefined)} disabled={busy}>Cancel</Button>
+              <Button variant="primary" size="sm" autoFocus onClick={() => void confirm()} disabled={busy}>Switch model</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
-/** The harness's permission mode (from its metadata), saved at once. Applies from the next message. */
-function ModePicker({ chat }: { chat: Chat | undefined }) {
+/** The modes the chat's harness offers (from its metadata). */
+function usePermissionModes(chat: Chat | undefined) {
   const { data: config } = useConfig();
   const { data: harnesses } = useHarnesses();
   const qc = useQueryClient();
-  const agent = chat?.session?.agent ?? config?.agent.kind;
+  const session = chat?.session;
+  const agent = session?.agent ?? config?.agent.kind;
   const modes = harnesses?.find((h) => h.id === agent)?.capabilities.permission_modes.map((m) => ({ ...m, help: m.help ?? undefined })) ?? [];
-  if (!config || !modes.length) return null;
-  const current = config.agent.permission_mode || "default";
-  const options = modes.some((m) => m.value === current) ? modes : [...modes, { value: current, label: current }];
-  return <BarPicker value={current} options={options} title="Permission mode" className={cx(current === "auto" && "mode-auto")} onChange={async (v) => qc.setQueryData(keys.config, await api.setAgentMode(v))} />;
+  // A started chat has its own; before that, it's what new chats start in.
+  const current = session?.permission_mode || config?.agent.permission_mode || "default";
+  const set = async (v: string) => {
+    if (session) await api.setSessionMode(session.id, v);
+    else qc.setQueryData(keys.config, await api.setAgentMode(v));
+  };
+  return { ready: !!config && modes.length > 0, modes, current, set };
 }
 
-/** What Claude Code's built-in commands do; custom commands and skills show just their name. */
+/**
+ * The chat's permission mode. On a started chat it's that chat's own (a
+ * Claude Code turn under way switches at once); before, it sets the mode
+ * new chats start in. Shift+Tab in the box cycles it, as in Claude Code.
+ */
+function ModePicker({ chat, openSignal }: { chat: Chat | undefined; openSignal?: number }) {
+  const { ready, modes, current, set } = usePermissionModes(chat);
+  if (!ready) return null;
+  const options = modes.some((m) => m.value === current) ? modes : [...modes, { value: current, label: current }];
+  const title = chat?.session ? "Permission mode for this chat" : "Permission mode for this chat and new ones";
+  return <BarPicker value={current} options={options} title={title} className={cx(current === "auto" && "mode-auto")} openSignal={openSignal} onChange={(v) => void set(v)} />;
+}
+
+/** What Claude Code's built-in commands do, for an agent that reported only their names. */
 const slashDescriptions: Record<string, string> = {
   compact: "Summarise the conversation so far to free up context",
   context: "Show what's using the context window",
@@ -912,44 +1123,147 @@ const slashDescriptions: Record<string, string> = {
   "release-notes": "Show Claude Code's release notes",
   todos: "List the current todo items",
 };
-// Terminal-only commands that do nothing useful in a headless turn.
-const interactiveOnly = new Set(["config", "permissions", "login", "logout", "vim", "exit", "quit", "theme", "terminal-setup", "ide", "resume", "statusline", "upgrade", "bug", "feedback", "privacy-settings", "output-style", "install-github-app", "migrate-installer", "rewind", "add-dir", "export", "clear"]);
-const fallbackSlash = ["compact", "context", "cost", "mcp", "status", "init", "review", "pr-comments", "security-review"];
+// Terminal-only commands that do nothing useful in a headless turn and that
+// tab has no answer for. The ones it does answer are in `tabCommands`.
+const interactiveOnly = new Set(["vim", "exit", "quit", "theme", "terminal-setup", "ide", "statusline", "bug", "feedback", "privacy-settings", "output-style", "install-github-app", "migrate-installer", "add-dir", "export", "color", "focus", "heapdump", "import"]);
+const fallbackSlash = ["compact", "context", "cost", "mcp", "model", "status", "init", "review", "pr-comments", "security-review"];
+
+/** The `/` menu's groups, in order. */
+const slashGroups: Record<SlashKind | "tab", string> = { builtin: "Built in", tab: "Answered by tab", command: "Your commands", skill: "Skills", mcp: "MCP prompts" };
+const groupOrder = Object.keys(slashGroups) as (SlashKind | "tab")[];
+const harnessNames: Record<AgentKind, string> = { claude_code: "Claude Code", opencode: "OpenCode", codex: "Codex", pi: "Pi" };
+/** Headings for argument values, by where they come from. */
+const argGroups: Record<ArgSource, string> = { pr: "Pull requests", branch: "Branches", path: "Files", model: "Models", agent: "Subagents" };
+
+/** One row of the `/` menu: a command, or a value for the argument being typed. */
+interface SlashRow { value: string; label: string; detail?: string; hint?: string; group?: string; tab?: boolean }
+
+/** Open pull requests to offer for a `<pr#>` argument: yours, and the ones in the queue. Those in the chat's repo come first. */
+async function openPulls(repoName: string): Promise<SlashRow[]> {
+  const [mine, items] = await Promise.all([api.githubMyPulls().catch(() => []), api.listItems(["open"]).catch(() => [] as QueueItem[])]);
+  const seen = new Set<string>();
+  const rows: (SlashRow & { here: boolean })[] = [];
+  const add = (repo: string, n: number, title: string) => {
+    if (seen.has(`${repo}#${n}`)) return;
+    seen.add(`${repo}#${n}`);
+    rows.push({ value: String(n), label: `#${n}`, detail: `${repo} · ${title}`, here: repo.split("/").pop()?.toLowerCase() === repoName });
+  };
+  for (const p of mine) add(p.repo, p.number, p.summary.title);
+  for (const i of items) {
+    const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(i.url ?? "");
+    if (m) add(m[1], Number(m[2]), i.title);
+  }
+  return rows.sort((a, b) => Number(b.here) - Number(a.here));
+}
 
 /**
- * The `/` menu: Claude Code's commands, custom commands and skills, as it
- * reported them when it last started. The command is sent as typed and
- * Claude Code runs it.
+ * The `/` menu. While the command is typed it lists Claude Code's commands,
+ * custom commands, skills and MCP prompts, as the agent described them when
+ * it last started, grouped; tab's own answers are marked "tab". Once a
+ * command is picked, its argument hint shows as ghost text and the values
+ * tab knows for the next argument (enum words, PRs, branches, paths, models,
+ * subagents) are offered.
  */
-function useSlashMenu(text: string) {
-  const { data } = useQuery({ queryKey: ["slash-commands"], queryFn: api.slashCommands, staleTime: 60_000 });
+function useSlashMenu(text: string, cwd: string | undefined, agent: AgentKind | undefined) {
+  const { data } = useQuery({ queryKey: ["slash-commands", agent], queryFn: () => api.slashCommands(agent ?? null), enabled: !!agent, staleTime: 60_000 });
+  // Each harness has its own commands; the built-in names tab knows are Claude Code's.
+  const claude = agent === "claude_code";
   const [index, setIndex] = useState(0);
+  const [moved, setMoved] = useState(false);
   const [dismissed, setDismissed] = useState<string | null>(null);
-  const m = /^\/([\w:.-]*)$/.exec(text);
-  const q = m?.[1].toLowerCase() ?? "";
-  const names = data?.length ? data : fallbackSlash;
-  const matches = m
-    ? names
-        .filter((n) => !interactiveOnly.has(n) && n.toLowerCase().includes(q))
-        .sort((a, b) => Number(!a.toLowerCase().startsWith(q)) - Number(!b.toLowerCase().startsWith(q)))
-        .slice(0, 8)
-        .map((name) => ({ name, description: slashDescriptions[name] }))
-    : [];
-  const open = matches.length > 0 && dismissed !== text;
-  useEffect(() => setIndex(0), [q]);
-  const handleKey = (e: React.KeyboardEvent, pick: (name: string) => void) => {
+  const commands: SlashCommand[] = data?.length || !claude ? data ?? [] : fallbackSlash.map((name) => ({ name, description: "", argument_hint: "", aliases: [], kind: "builtin" }));
+  const find = (n: string) => commands.find((c) => c.name.toLowerCase() === n || c.aliases.some((a) => a.toLowerCase() === n));
+
+  // `/name`, or `/name args…` once a space follows.
+  const typing = /^\/([\w:.-]*)$/.exec(text);
+  const withArgs = /^\/([\w:.-]+)\s([^\n]*)$/.exec(text);
+  const q = typing?.[1].toLowerCase() ?? "";
+  const cmd = withArgs && !(withArgs[1].toLowerCase() in tabCommands) ? find(withArgs[1].toLowerCase()) : undefined;
+  const { args, word } = splitArgs(withArgs?.[2] ?? "");
+  const slots = useMemo(() => openSlots(parseHint(cmd?.argument_hint ?? ""), args), [cmd?.argument_hint, args.join(" ")]);
+  const wants = new Set(slots.flatMap((s) => s.sources));
+
+  const repoName = cwd?.split(/[\\/]/).filter(Boolean).pop()?.toLowerCase() ?? "";
+  const pulls = useQuery({ queryKey: ["slash-prs", repoName], queryFn: () => openPulls(repoName), enabled: wants.has("pr"), staleTime: 60_000 });
+  const branches = useQuery({ queryKey: ["slash-branches", cwd], queryFn: () => api.slashArgValues(cwd!, "branch", ""), enabled: wants.has("branch") && !!cwd, staleTime: 30_000 });
+  // A folder's entries, fetched once per folder and filtered as you type.
+  const folder = word.slice(0, word.lastIndexOf("/") + 1) + (word.slice(word.lastIndexOf("/") + 1).startsWith(".") ? "." : "");
+  const paths = useQuery({ queryKey: ["slash-paths", cwd, folder], queryFn: () => api.slashArgValues(cwd!, "path", folder), enabled: wants.has("path") && !!cwd, staleTime: 10_000 });
+  const { data: models = [] } = useModels();
+  // Subagents are Claude Code's.
+  const agents = useQuery({ queryKey: ["subagents"], queryFn: api.subagents, enabled: wants.has("agent") && claude, staleTime: 60_000 });
+
+  let rows: SlashRow[] = [];
+  let ghost = "";
+  if (typing) {
+    const hit = (c: { name: string; aliases: string[] }) => [c.name, ...c.aliases].some((n) => n.toLowerCase().includes(q));
+    const starts = (c: { name: string; aliases: string[] }) => [c.name, ...c.aliases].some((n) => n.toLowerCase().startsWith(q));
+    const agentRows = commands
+      .filter((c) => !(claude && interactiveOnly.has(c.name)) && !(c.name in tabCommands) && !c.description.startsWith("(removed)") && hit(c))
+      .map((c) => ({ c, kind: c.kind as SlashKind | "tab", row: { value: c.name, label: c.name, detail: c.description || (claude ? slashDescriptions[c.name] : undefined), hint: c.argument_hint } }));
+    const tabRows = Object.entries(tabCommands)
+      .filter(([name]) => name.includes(q))
+      .map(([name, t]) => ({ c: { name, aliases: [] }, kind: "tab" as const, row: { value: name, label: name, detail: t.description, tab: true } }));
+    rows = [...agentRows, ...tabRows]
+      .sort((a, b) => groupOrder.indexOf(a.kind) - groupOrder.indexOf(b.kind) || Number(!starts(a.c)) - Number(!starts(b.c)))
+      .slice(0, 60)
+      .map(({ kind, row }) => ({ ...row, group: kind === "builtin" && agent ? harnessNames[agent] : slashGroups[kind] }));
+    // The whole name typed: what it takes, before the space.
+    const exact = q && !(q in tabCommands) ? find(q) : undefined;
+    if (exact?.argument_hint) ghost = ` ${exact.argument_hint}`;
+  } else if (cmd) {
+    const w = word.toLowerCase();
+    const seen = new Set<string>();
+    const offer = (r: SlashRow) => {
+      const match = r.value.toLowerCase().startsWith(w) || (w.length > 1 && !!r.detail?.toLowerCase().includes(w));
+      if (match && !seen.has(r.value)) (seen.add(r.value), rows.push(r));
+    };
+    for (const s of slots) {
+      for (const v of s.values) offer({ value: v, label: v, group: "Options" });
+      for (const src of s.sources) {
+        const group = argGroups[src];
+        if (src === "pr") pulls.data?.forEach((r) => offer({ ...r, group }));
+        if (src === "branch") branches.data?.forEach((b) => offer({ value: b, label: b, group }));
+        if (src === "path") paths.data?.forEach((p) => offer({ value: p, label: p, group }));
+        if (src === "model") models.filter((m) => m.agent === "claude_code").forEach((m) => offer({ value: m.id, label: m.id, detail: m.label, group }));
+        if (src === "agent") agents.data?.forEach((a) => offer({ value: a.name, label: a.name, detail: a.description, group }));
+      }
+    }
+    // Each group together, in the order the hint first offers it.
+    const order = [...new Set(rows.map((r) => r.group))];
+    rows.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group));
+    rows = rows.slice(0, 40);
+    if (!word && slots.length) ghost = slots.map((s) => s.text).join(" ");
+  }
+
+  const open = rows.length > 0 && dismissed !== text;
+  const mode = typing ? "command" : "arg";
+  useEffect(() => (setIndex(0), setMoved(false)), [q, word, cmd?.name, args.length]);
+  /** Fills in the picked row: a command's name, or the argument being typed. */
+  const fill = (row: SlashRow) => {
+    if (mode === "command") return row.value;
+    const before = text.slice(0, text.length - word.length);
+    // A folder goes on to its entries; anything else is a whole argument.
+    return before + row.value + (row.value.endsWith("/") ? "" : " ");
+  };
+  const handleKey = (e: React.KeyboardEvent, pick: (row: SlashRow) => void) => {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
       const d = e.key === "ArrowDown" ? 1 : -1;
-      setIndex((i) => (i + d + matches.length) % matches.length);
+      setIndex((i) => (i + d + rows.length) % rows.length);
+      setMoved(true);
       return true;
     }
     if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing)) {
-      const c = matches[Math.min(index, matches.length - 1)];
-      // A full command already typed sends on Enter.
-      if (e.key === "Enter" && c.name.toLowerCase() === q) return false;
+      const r = rows[Math.min(index, rows.length - 1)];
+      if (e.key === "Enter") {
+        // A full command or value already typed sends on Enter, and so does
+        // Enter after a space unless the person went into the list.
+        if (mode === "command" && (r.value.toLowerCase() === q || find(q)?.name === r.value)) return false;
+        if (mode === "arg" && (r.value.toLowerCase() === word.toLowerCase() || (!word && !moved))) return false;
+      }
       e.preventDefault();
-      pick(c.name);
+      pick(r);
       return true;
     }
     if (e.key === "Escape") {
@@ -959,12 +1273,119 @@ function useSlashMenu(text: string) {
     }
     return false;
   };
-  return { open, matches, index, setIndex, handleKey, close: () => setDismissed(null) };
+  return { open, mode, rows, index, setIndex, handleKey, fill, ghost: dismissed === text && mode === "command" ? "" : ghost, close: () => setDismissed(null) };
 }
 
-export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat: Chat | undefined; onSend: (text: string, attachments: string[]) => void; placeholder: string; autoFocus?: boolean; extra?: React.ReactNode }) {
+/** The `/` menu's list, with a heading where its group changes. */
+function SlashMenu({ slash, onPick }: { slash: { rows: SlashRow[]; index: number; setIndex: (i: number) => void; mode: string }; onPick: (row: SlashRow) => void }) {
+  const list = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    list.current?.querySelector(".active")?.scrollIntoView({ block: "nearest" });
+  }, [slash.index]);
+  return (
+    <div ref={list} className="slash-menu" role="listbox">
+      {slash.rows.map((r, i) => (
+        <Fragment key={r.value}>
+          {r.group && r.group !== slash.rows[i - 1]?.group && <div className="slash-group">{r.group}</div>}
+          <button role="option" aria-selected={i === slash.index} className={cx(i === slash.index && "active")} title={r.detail} onMouseDown={(e) => (e.preventDefault(), onPick(r))} onMouseEnter={() => slash.setIndex(i)}>
+            {slash.mode === "mention" && <Icon name={r.value.endsWith("/") ? "folder" : "file"} size={12} />}
+            <span className="slash-name">{slash.mode === "command" ? `/${r.label}` : r.label}</span>
+            {r.hint && <span className="slash-hint">{r.hint}</span>}
+            {r.detail && <span className="slash-desc">{r.detail}</span>}
+            {r.tab && <span className="slash-tab" title="tab answers this itself">tab</span>}
+          </button>
+        </Fragment>
+      ))}
+    </div>
+  );
+}
+
+/** An `@` mention as typed, ending at the caret: `@src/Ch`. */
+const MENTION = /(^|\s)@([^\s@"]*)$/;
+
+/**
+ * The `@` menu: files and folders in the chat's folder, best match for
+ * what's typed after `@` first, as in Claude Code. Picking one puts its
+ * path in the message; a folder goes on to its entries.
+ */
+function useMentionMenu(text: string, caret: number, cwd: string | undefined) {
+  const before = text.slice(0, caret);
+  const q = MENTION.exec(before)?.[2] ?? null;
+  const [index, setIndex] = useState(0);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const { data = [] } = useQuery({
+    queryKey: ["mentions", cwd, q],
+    queryFn: () => api.chatMentions(cwd!, q!),
+    enabled: q !== null && !!cwd,
+    staleTime: 10_000,
+    placeholderData: (prev) => prev,
+  });
+  const rows: SlashRow[] = q === null ? [] : data.map((p) => ({ value: p, label: p }));
+  const open = rows.length > 0 && dismissed !== before;
+  useEffect(() => setIndex(0), [q]);
+  /** The text with the picked path in place of what was typed, and where the caret goes. */
+  const fill = (row: SlashRow) => {
+    const start = caret - (q ?? "").length;
+    const path = /\s/.test(row.value) ? `"${row.value}"` : row.value;
+    const add = row.value.endsWith("/") ? path : `${path} `;
+    const after = text.slice(caret).replace(/^\S*/, "");
+    const rest = add.endsWith(" ") ? after.replace(/^ /, "") : after;
+    return { text: text.slice(0, start) + add + rest, caret: start + add.length };
+  };
+  const handleKey = (e: React.KeyboardEvent, pick: (row: SlashRow) => void) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const d = e.key === "ArrowDown" ? 1 : -1;
+      setIndex((i) => (i + d + rows.length) % rows.length);
+      return true;
+    }
+    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing)) {
+      const r = rows[Math.min(index, rows.length - 1)];
+      // Already typed out in full: Enter sends.
+      if (e.key === "Enter" && r.value === q) return false;
+      e.preventDefault();
+      pick(r);
+      return true;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setDismissed(before);
+      return true;
+    }
+    return false;
+  };
+  return { open, mode: "mention", rows, index, setIndex, handleKey, fill };
+}
+
+const HISTORY_KEY = "tab.composerHistory";
+
+/** What the person sent from any chat, newest first, for ↑ in the composer. */
+function sentHistory(): string[] {
+  try {
+    const h = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? "[]");
+    return Array.isArray(h) ? h.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function remember(text: string) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify([text, ...sentHistory().filter((x) => x !== text)].slice(0, 100)));
+  } catch {
+    // History is a convenience; a full or blocked storage just skips it.
+  }
+}
+
+export function Composer({ chat, onSend, onShell, placeholder, autoFocus, extra }: { chat: Chat | undefined; onSend: (text: string, attachments: string[]) => void; onShell?: (command: string) => void; placeholder: string; autoFocus?: boolean; extra?: React.ReactNode }) {
   const { data: config } = useConfig();
   const [text, setText] = useState("");
+  const [caret, setCaret] = useState(0);
+  // Where ↑/↓ is in the history, and what was typed before it started.
+  const [recall, setRecall] = useState<{ i: number; draft: string } | null>(null);
+  // The first Esc of a possible Esc Esc, and leaving the box if none follows.
+  const lastEsc = useRef<{ at: number; leave: number } | null>(null);
+  const mode = usePermissionModes(chat);
   const [images, setImages] = useState<string[]>([]);
   const [uploading, setUploading] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -973,8 +1394,64 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   const running = !!chat?.running;
   const last = chat?.messages[chat.messages.length - 1];
   const suggestion = !running && last?.kind === "suggestion" && config?.agent.suggest_replies !== false ? last.content : "";
-  const slash = useSlashMenu(text);
-  const pickSlash = (name: string) => (setText(`/${name} `), slash.close(), ref.current?.focus());
+  const slash = useSlashMenu(text, chat?.session?.cwd, chat?.session?.agent ?? config?.agent.kind ?? undefined);
+  const shellMode = !!onShell && text.startsWith("!");
+  const mention = useMentionMenu(text, caret, chat?.session?.cwd ?? config?.agent.workdir ?? undefined);
+  const [panel, setPanel] = useState<Panel | null>(null);
+  const [rewindTo, setRewindTo] = useState<number | null>(null);
+  // "Rewind" on a message in this chat opens the panel there.
+  useEffect(() => {
+    const open = (e: Event) => {
+      const d = (e as CustomEvent<{ sessionId: string; messageId: number }>).detail;
+      if (d.sessionId !== chat?.session?.id) return;
+      setRewindTo(d.messageId);
+      setPanel("rewind");
+    };
+    window.addEventListener("tab:rewind", open);
+    return () => window.removeEventListener("tab:rewind", open);
+  }, [chat?.session?.id]);
+  const onRewound = (r: { text: string; attachments: string[] }, conversation: boolean) => {
+    setRewindTo(null);
+    if (conversation) {
+      setText(r.text);
+      setImages(r.attachments);
+    }
+    ref.current?.focus();
+  };
+  const pickMention = (row: SlashRow) => {
+    const next = mention.fill(row);
+    setText(next.text);
+    setCaret(next.caret);
+    requestAnimationFrame(() => ref.current?.setSelectionRange(next.caret, next.caret));
+    ref.current?.focus();
+  };
+  /** Past messages for ↑: this chat's newest first, then what was sent elsewhere. */
+  const history = () => {
+    const own = (chat?.messages ?? [])
+      .filter((m) => (m.role === "user" && m.kind === "text") || m.kind === "shell")
+      .map((m) => (m.kind === "shell" ? `!${m.content}` : m.content))
+      .reverse();
+    return [...new Set([...own, ...sentHistory()].filter((t) => t.trim()))];
+  };
+  const [picker, setPicker] = useState<{ which: "model" | "mode"; n: number }>({ which: "model", n: 0 });
+  // A tab command runs at once; the agent's own get a space for arguments.
+  const pickSlash = (row: SlashRow) => {
+    slash.close();
+    if (slash.mode === "command" && tabCommands[row.value]) return runCommand(`/${row.value}`);
+    setText(slash.mode === "command" ? `/${row.value} ` : slash.fill(row));
+    ref.current?.focus();
+  };
+  /** Answers an interactive command in tab. False when it's for the agent. */
+  const runCommand = (t: string) => {
+    const c = tabCommand(t);
+    if (!c) return false;
+    setText("");
+    const a = c.action;
+    if ("panel" in a) (setRewindTo(null), setPanel(a.panel));
+    else if ("picker" in a) (setPanel(null), setPicker((p) => ({ which: a.picker, n: p.n + 1 })));
+    else (setPanel(null), a.go());
+    return true;
+  };
 
   useEffect(() => {
     const t = ref.current;
@@ -1009,10 +1486,72 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
   const submit = () => {
     const t = text.trim();
     if ((!t && !images.length) || uploading) return;
+    setRecall(null);
+    if (shellMode) {
+      const command = t.slice(1).trim();
+      if (!command) return;
+      remember(t);
+      setText("");
+      setError(null);
+      onShell!(command);
+      return;
+    }
+    if (!images.length && runCommand(t)) return;
+    if (t) remember(t);
     setText("");
     setImages([]);
     setError(null);
     onSend(t, images);
+  };
+
+  /** ↑ on the first line goes back through what was sent, ↓ on the last comes forward. */
+  const recallKey = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const el = e.currentTarget;
+    if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey || el.selectionStart !== el.selectionEnd) return false;
+    if (e.key === "ArrowUp" && !text.slice(0, el.selectionStart).includes("\n")) {
+      const past = history();
+      const i = (recall?.i ?? -1) + 1;
+      if (i >= past.length) return false;
+      e.preventDefault();
+      setRecall({ i, draft: recall?.draft ?? text });
+      setText(past[i]);
+      return true;
+    }
+    if (e.key === "ArrowDown" && recall && !text.slice(el.selectionEnd).includes("\n")) {
+      e.preventDefault();
+      const i = recall.i - 1;
+      setText(i < 0 ? recall.draft : history()[i] ?? recall.draft);
+      setRecall(i < 0 ? null : { ...recall, i });
+      return true;
+    }
+    return false;
+  };
+
+  /**
+   * Esc Esc, as in Claude Code: clears what's typed, or with nothing typed,
+   * opens /rewind. A single Esc still leaves the box, a moment later.
+   */
+  const escKey = (e: React.KeyboardEvent) => {
+    if (e.key !== "Escape" || panel || (!text && !chat?.session)) return;
+    e.preventDefault();
+    const first = lastEsc.current;
+    if (!first || Date.now() - first.at > 800) {
+      const leave = window.setTimeout(() => ((lastEsc.current = null), ref.current?.blur()), 800);
+      lastEsc.current = { at: Date.now(), leave };
+      return;
+    }
+    window.clearTimeout(first.leave);
+    lastEsc.current = null;
+    // The panel that opens listens for Esc to close; this one isn't for it.
+    e.stopPropagation();
+    if (text) {
+      remember(text);
+      setText("");
+      setRecall(null);
+    } else if (chat?.session) {
+      setRewindTo(null);
+      setPanel("rewind");
+    }
   };
 
   if (config && !config.agent.kind)
@@ -1026,19 +1565,25 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
 
   return (
     <div ref={drop.ref} className={cx("composer", drop.armed && "drop-armed", drop.targeted && "dragging")}>
-      <AgentNotice messages={chat?.messages} />
+      <AgentNotice messages={chat?.messages} starting={!chat?.session && !chat?.running} />
+      {panel && <SlashPanel panel={panel} chat={chat} rewind={{ to: rewindTo, onRewound }} onClose={() => (setPanel(null), setRewindTo(null), ref.current?.focus())} />}
       {(images.length > 0 || uploading > 0) && (
         <div className="composer-images">
           <Attachments paths={images} size={56} onRemove={(p) => setImages((xs) => xs.filter((x) => x !== p))} />
           {uploading > 0 && <span className="thumb thumb-busy" style={{ width: 56, height: 56 }}><Icon name="refresh" size={14} /></span>}
         </div>
       )}
+      <div className={cx("composer-input", shellMode && "shell-mode")}>
+      {slash.ghost && !text.includes("\n") && (
+        <div className="composer-ghost" aria-hidden><span>{text}</span>{slash.ghost}</div>
+      )}
       <textarea
         ref={ref}
         rows={1}
         value={text}
         placeholder={suggestion || (running ? "Steer the agent while it works…" : placeholder)}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => (setText(e.target.value), setCaret(e.target.selectionStart), setRecall(null))}
+        onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
         onPaste={(e) => {
           const files = [...e.clipboardData.files];
           if (!files.length) return;
@@ -1046,22 +1591,24 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
           void add(files);
         }}
         onKeyDown={(e) => {
+          if (mention.open && mention.handleKey(e, pickMention)) return;
           if (slash.open && slash.handleKey(e, pickSlash)) return;
+          if (!mention.open && !slash.open && recallKey(e)) return;
+          // Shift+Tab cycles the permission mode, as in Claude Code.
+          if (e.key === "Tab" && e.shiftKey && mode.ready) {
+            e.preventDefault();
+            const i = mode.modes.findIndex((m) => m.value === mode.current);
+            return void mode.set(mode.modes[(i + 1) % mode.modes.length].value);
+          }
+          escKey(e);
           // Tab takes the suggested reply; Enter then sends it.
           if (e.key === "Tab" && !e.shiftKey && !text && suggestion) return (e.preventDefault(), setText(suggestion));
           if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) (e.preventDefault(), submit());
         }}
       />
-      {slash.open && (
-        <div className="slash-menu" role="listbox">
-          {slash.matches.map((c, i) => (
-            <button key={c.name} role="option" aria-selected={i === slash.index} className={cx(i === slash.index && "active")} onMouseDown={(e) => (e.preventDefault(), pickSlash(c.name))} onMouseEnter={() => slash.setIndex(i)}>
-              <span className="slash-name">/{c.name}</span>
-              {c.description && <span className="slash-desc">{c.description}</span>}
-            </button>
-          ))}
-        </div>
-      )}
+      </div>
+      {mention.open ? <SlashMenu slash={mention} onPick={pickMention} /> : slash.open && <SlashMenu slash={slash} onPick={pickSlash} />}
+      {shellMode && <div className="composer-suggest subtle">Shell: runs in the chat's folder. The agent sees the output with your next message.</div>}
       {error && <div className="composer-error">{error}</div>}
       {suggestion && !text && <div className="composer-suggest subtle"><kbd>Tab</kbd> to use the suggested reply, then <kbd>Enter</kbd> to send</div>}
       <div className="composer-foot">
@@ -1069,14 +1616,14 @@ export function Composer({ chat, onSend, placeholder, autoFocus, extra }: { chat
           <button className="bar-icon" onClick={() => file.current?.click()} title="Attach files or images (or paste or drop them)" aria-label="Attach files"><Icon name="plus" size={14} /></button>
           <input ref={file} type="file" multiple hidden onChange={(e) => (void add([...(e.target.files ?? [])]), (e.target.value = ""))} />
           <Dictation onText={(t) => setText((cur) => (cur && !/\s$/.test(cur) ? `${cur} ${t}` : cur + t))} target={ref} />
-          {config?.agent.kind && <><ChatModelPicker chat={chat} /><ModePicker chat={chat} /></>}
+          {config?.agent.kind && <><ChatModelPicker chat={chat} openSignal={picker.which === "model" ? picker.n : 0} /><ModePicker chat={chat} openSignal={picker.which === "mode" ? picker.n : 0} /></>}
           {extra}
           {chat?.messages && <ContextMeter messages={chat.messages} />}
         </span>
         {running && chat?.session && (
-          <Button size="sm" icon="stop" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
+          <Button size="sm" icon="stop" className="composer-stop" title="Stop the agent" onClick={() => api.chatStop(chat.session!.id)}>Stop</Button>
         )}
-        <Button size="sm" variant="primary" icon="arrow-up" disabled={(!text.trim() && !images.length) || uploading > 0} onClick={submit}>{running ? "Steer" : "Send"}</Button>
+        <Button size="sm" variant="primary" icon={shellMode ? "terminal" : "arrow-up"} disabled={(!text.trim() && !images.length) || uploading > 0} onClick={submit}>{shellMode ? "Run" : running ? "Steer" : "Send"}</Button>
       </div>
     </div>
   );

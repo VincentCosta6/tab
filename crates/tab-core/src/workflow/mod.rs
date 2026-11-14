@@ -5,7 +5,11 @@
 pub use tab_domain::workflow::*;
 
 pub mod command;
+pub mod insights_store;
+pub mod items;
+pub mod rollups;
 pub mod runtime;
+pub mod suggest_store;
 
 /// The builder assistant's chat key for one workflow: each workflow gets its
 /// own conversation, and an unsaved draft uses `workflows:new` until the
@@ -36,7 +40,7 @@ mod tests {
             .collect();
         for mut t in templates() {
             fill_defaults(&mut t, &catalog);
-            let errors: Vec<_> = validate(&t, &catalog, &[])
+            let errors: Vec<_> = validate(&t, &catalog, &[], &[])
                 .into_iter()
                 .filter(|i| i.error)
                 .collect();
@@ -57,7 +61,7 @@ mod tests {
                 input: Map::new(),
             },
         });
-        let issues = validate(&bad, &catalog, &[]);
+        let issues = validate(&bad, &catalog, &[], &[]);
         let msgs: Vec<_> = issues.iter().map(|i| i.message.as_str()).collect();
         assert!(
             msgs.iter().any(|m| m.contains("hasn't run yet")),

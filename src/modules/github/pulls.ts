@@ -1,9 +1,13 @@
 import { api } from "../../lib/api";
 import type { LinkMatcher } from "../../lib/links";
+import { whereAmI, type Origin } from "../../lib/nav";
 import { toPreview } from "./preview";
 
+/** A PR opened from elsewhere, and where it was opened from (so Back returns there). */
+export interface LinkedPull { repo: string; number: number; from?: Origin }
+
 /** A PR the Reviews tab should open when it next mounts or hears `tab:open-pr`. */
-let pendingPull: { repo: string; number: number } | null = null;
+let pendingPull: LinkedPull | null = null;
 export function takePendingPull() {
   const p = pendingPull;
   pendingPull = null;
@@ -19,7 +23,7 @@ export function setReviewsOpener(f: (() => void) | null) {
 /** Opens a PR in the review workspace, if the Reviews tab is available. */
 export function openPull(repo: string, number: number): boolean {
   if (!showReviews) return false;
-  pendingPull = { repo, number };
+  pendingPull = { repo, number, from: whereAmI() };
   showReviews();
   window.dispatchEvent(new CustomEvent("tab:open-pr"));
   return true;

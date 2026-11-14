@@ -335,6 +335,9 @@ pub fn changes_since_past_head_is_empty<S: HubStore>(s: &mut S) {
     assert!(s.changes_since(1, 10).unwrap().is_empty());
     assert!(s.changes_since(1_000, 10).unwrap().is_empty());
     assert!(s.changes_since(u64::MAX >> 2, 10).unwrap().is_empty());
+    // What the app asks a cloud hub for its head with.
+    assert!(s.changes_since(i64::MAX as u64, 1).unwrap().is_empty());
+    assert!(s.changes_since(u64::MAX, usize::MAX).unwrap().is_empty());
 }
 
 pub fn head_tracks_many_batches<S: HubStore>(s: &mut S) {

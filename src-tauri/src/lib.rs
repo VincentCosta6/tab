@@ -7,10 +7,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
-use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint};
+use tab_core::agents::{AgentHub, AgentProbe, Decision, McpEndpoint, coordinator};
 use tab_core::config::ConnectorConfig;
 use tab_core::connectors::github_review::{self, PrRef, PullReview, ReviewAction};
 use tab_core::connectors::registry;
+use tab_core::families::ModelFamily;
 use tab_core::gateway::{Call, RateLimitState};
 use tab_core::live::SteerCommand;
 use tab_core::local_hub::{HubStatusView, LocalHub};
@@ -29,7 +30,13 @@ use tab_core::workspace::{self, SearchHit, SearchQuery, Target, Workspace, Works
 use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tauri::{Emitter, Manager, State};
 
+mod account;
+mod bundle_update;
+mod cloud_runner;
+mod dev;
+mod remote_mcp;
 mod updates;
+mod vault;
 use tokio::sync::{Mutex, RwLock, broadcast};
 
 /// Shown in place of stored secrets; sending it back means "keep the old value".
@@ -48,6 +55,31 @@ struct Core {
     config_path: PathBuf,
     /// Which embedding model search by meaning wants (None when it's off).
     embed: tokio::sync::watch::Sender<Option<&'static str>>,
+    /// The hub's leases, once the hub is open, so the engine shares
+    /// workflow triggers with the person's other runners.
+    leases: std::sync::Mutex<Option<Arc<dyn tab_core::leases::Leases>>>,
+}
+
+/// Where the project indexer reads files and email from.
+struct KnowledgeSources {
+    hub: Option<Arc<LocalHub>>,
+    core: Arc<Core>,
+}
+
+#[async_trait::async_trait]
+impl tab_core::knowledge::Sources for KnowledgeSources {
+    async fn file(&self, hash: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        let Some(hub) = self.hub.clone() else {
+            anyhow::bail!("the hub isn't running");
+        };
+        let hash = hash.to_string();
+        tokio::task::spawn_blocking(move || hub.file_bytes(&hash)).await?
+    }
+
+    async fn email(&self) -> Option<tab_core::config::ConnectorConfig> {
+        let cfg = self.core.config.lock().await;
+        cfg.connectors.get("email").filter(|c| c.enabled).cloned()
+    }
 }
 
 struct AppState {
@@ -63,24 +95,43 @@ struct AppState {
 impl AppState {
     /// An attachment path as this device has it. Chats synced from another
     /// device, or files swept from the cache, name a path that isn't here;
-    /// one in the hub's naming (`.../<hash hex>/<name>`) is fetched from the
-    /// hub into this device's attachments folder.
+    /// one in the hub's naming (`.../<hash hex>/<name>`), or one an agent's
+    /// reply named on another device ([`tab_core::named_files`]), is fetched
+    /// from the hub (the cloud hub, when this computer syncs with one) into
+    /// this device's attachments folder.
     fn local_attachment(&self, path: &str) -> String {
         let p = std::path::Path::new(path);
         if p.exists() {
             return path.to_string();
         }
-        let (Some(hub), Some(file)) = (&self.work_hub, tab_core::live::file_ref(p)) else {
+        let Some(hub) = &self.work_hub else {
             return path.to_string();
         };
-        match hub.file_materialize(&self.hub.attachments_dir(), &file.hash, &file.name) {
+        // An attachment, by its hub name; or a file an agent's reply named
+        // on another device, by what that reply recorded for the path.
+        let file =
+            tab_core::live::file_ref(p).or_else(|| self.store.named_file(path).ok().flatten());
+        let Some(file) = file else {
+            return path.to_string();
+        };
+        // Fetching from the cloud blocks; let the runtime move other work off
+        // this thread meanwhile.
+        let got = tokio::task::block_in_place(|| {
+            hub.file_materialize(&self.hub.attachments_dir(), &file.hash, &file.name)
+        });
+        match got {
             Ok(local) => local.display().to_string(),
             Err(_) => path.to_string(),
         }
     }
 
     /// Sends the person's message to a session another device runs.
-    fn steer_remote(&self, session: &str, text: &str, attachments: &[String]) -> CmdResult<()> {
+    async fn steer_remote(
+        &self,
+        session: &str,
+        text: &str,
+        attachments: &[String],
+    ) -> CmdResult<()> {
         let hub = self
             .work_hub
             .as_ref()
@@ -96,6 +147,7 @@ impl AppState {
                 files,
             },
         )
+        .await
         .map_err(err)?;
         Ok(())
     }
@@ -149,12 +201,33 @@ impl EngineAccess for LiveEngine {
         next.connectors.insert(id.to_string(), cfg);
         self.0.apply(next).await.map(|_| ())
     }
+    async fn set_remote_tool_policy(
+        &self,
+        server: &str,
+        tool: &str,
+        policy: tab_core::remote_mcp::ToolPolicy,
+    ) -> anyhow::Result<()> {
+        remote_mcp::set_tool(&self.0, server, tool, Some(policy)).await
+    }
     async fn dry_run_workflow(&self, w: Workflow, item_id: Option<String>) -> anyhow::Result<Run> {
         let guard = self.0.engine.read().await;
         guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
             .run_workflow(w, item_id.as_deref(), true)
+            .await
+    }
+    async fn run_workflow_for_agent(
+        &self,
+        workflow_id: String,
+        item_id: Option<String>,
+        session: Option<String>,
+    ) -> anyhow::Result<workflow::runtime::AgentRun> {
+        let guard = self.0.engine.read().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
+            .run_workflow_for_agent(&workflow_id, item_id.as_deref(), session.as_deref())
             .await
     }
 }
@@ -180,6 +253,7 @@ impl Core {
             Ok(sources) => {
                 for source in sources {
                     if source != "tab"
+                        && !tab_core::remote_mcp::sync::syncs(cfg, &source)
                         && (cfg.connector(&source).is_none()
                             || !tab_core::connectors::known(&source))
                     {
@@ -196,21 +270,31 @@ impl Core {
             }
             Err(e) => tracing::warn!(error = %e, "couldn't list sources"),
         }
-        *engine = Some(
-            Engine::with_agents(
-                cfg,
-                self.store.clone(),
-                self.gateway.clone(),
-                self.events.clone(),
-                Some(self.hub.clone()),
-            )
-            .start(),
-        );
+        let next = Engine::from_config(
+            cfg,
+            self.store.clone(),
+            self.gateway.clone(),
+            self.events.clone(),
+        )
+        .with_mcp(cfg, self.hub.remote_mcp())
+        .with_agents(cfg, &self.hub);
+        let next = match self.leases.lock().unwrap().clone() {
+            Some(l) => next.with_leases(l),
+            None => next,
+        };
+        *engine = Some(next.start());
     }
 
     /// Saves settings, restarts the engine with them and tells the UI.
     async fn apply(&self, next: TabConfig) -> anyhow::Result<TabConfig> {
         let mut current = self.config.lock().await;
+        // Only when it changed, so a folder that went away later doesn't
+        // block saving everything else.
+        if next.agent.workdir != current.agent.workdir
+            && let Some(why) = next.agent.workdir_problem()
+        {
+            anyhow::bail!("Work folder: {why}");
+        }
         next.save(&self.config_path)?;
         let ranking_changed = next.ranking != current.ranking || next.profile != current.profile;
         *current = next.clone();
@@ -218,10 +302,9 @@ impl Core {
         let sandbox = tab_core::sandbox::current();
         if sandbox.config() != next.sandbox {
             sandbox.set_config(next.sandbox.clone());
-            // OpenCode servers keep the policy they started with.
-            self.hub.stop_opencode().await;
         }
         self.hub.set_config(next.agent.clone()).await;
+        self.hub.remote_mcp().set_servers(next.mcp_servers.clone());
         self.restart(&next).await;
         if ranking_changed && let Some(e) = self.engine.read().await.as_ref() {
             e.rerank_all()?;
@@ -450,6 +533,29 @@ async fn file_read(state: State<'_, AppState>, path: String) -> CmdResult<tauri:
     Ok(tauri::ipc::Response::new(std::fs::read(p).map_err(err)?))
 }
 
+/// When each file was last written and how big it is (`None` once it's
+/// gone). The chat polls this for the files in it, so a file the agent
+/// rewrites reloads wherever it shows.
+#[tauri::command]
+async fn file_stamps(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> CmdResult<Vec<Option<(u64, u64)>>> {
+    Ok(paths
+        .iter()
+        .take(64)
+        .map(|path| {
+            let meta = std::fs::metadata(state.local_attachment(path)).ok()?;
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_millis() as u64);
+            Some((modified, meta.len()))
+        })
+        .collect())
+}
+
 /// Starts the system's own dictation in the focused text box (macOS: the
 /// same as Edit → Start Dictation). Elsewhere, says how to start it.
 #[tauri::command]
@@ -633,9 +739,14 @@ struct Chat {
 #[tauri::command]
 async fn chat_open(state: State<'_, AppState>, item_id: String) -> CmdResult<Chat> {
     let session = state.store.session_for_item(&item_id).map_err(err)?;
+    chat_of(&state, session)
+}
+
+fn chat_of(state: &AppState, session: Option<Session>) -> CmdResult<Chat> {
     let (messages, approvals, running) = match &session {
+        // Since it was last compacted, with the last few lines before.
         Some(s) => (
-            state.store.messages(&s.id).map_err(err)?,
+            state.store.messages_current(&s.id, 3).map_err(err)?,
             state.hub.pending_approvals(&s.id),
             state.hub.is_running(&s.id),
         ),
@@ -647,6 +758,62 @@ async fn chat_open(state: State<'_, AppState>, item_id: String) -> CmdResult<Cha
         approvals,
         running,
     })
+}
+
+/// `/clear`: a fresh chat on the same task. The old one stays for `/resume`.
+#[tauri::command]
+async fn chat_clear(state: State<'_, AppState>, item_id: String) -> CmdResult<Chat> {
+    if state.hub.config().kind.is_none() {
+        return Err("Set up an agent first (Settings → Agent).".into());
+    }
+    let session = state.hub.session_new_for_item(&item_id).map_err(err)?;
+    chat_of(&state, Some(session))
+}
+
+/// One of a task's chats, for `/resume`.
+#[derive(Serialize)]
+struct ChatSummary {
+    session: Session,
+    /// The first thing the person said in it.
+    first: String,
+    /// How many messages it has, the person's and the agent's.
+    messages: usize,
+    running: bool,
+}
+
+/// `/resume`: every chat a task has had, the current one first.
+#[tauri::command]
+async fn chat_list(state: State<'_, AppState>, item_id: String) -> CmdResult<Vec<ChatSummary>> {
+    let sessions = state.store.sessions_for_item(&item_id).map_err(err)?;
+    let ids: Vec<String> = sessions.iter().map(|s| s.id.clone()).collect();
+    let mut firsts = state.store.sessions_first_prompt(&ids).map_err(err)?;
+    Ok(sessions
+        .into_iter()
+        .map(|s| {
+            let (first, messages) = firsts.remove(&s.id).unwrap_or_default();
+            let running = state.hub.is_running(&s.id);
+            ChatSummary {
+                session: s,
+                first,
+                messages,
+                running,
+            }
+        })
+        .collect())
+}
+
+/// `/resume`: makes one of a task's earlier chats its current one again.
+#[tauri::command]
+async fn chat_resume(state: State<'_, AppState>, session_id: String) -> CmdResult<Chat> {
+    let session = state
+        .store
+        .session_open(&session_id, Utc::now())
+        .map_err(err)?
+        .ok_or("that chat no longer exists")?;
+    let _ = state.events.send(EngineEvent::SessionChanged {
+        session: session.clone(),
+    });
+    chat_of(&state, Some(session))
 }
 
 #[derive(Serialize)]
@@ -702,7 +869,7 @@ async fn chat_send(
     let session = state.hub.session_for_item(&item.id).map_err(err)?;
     // Another device runs this chat: the message goes there through the hub.
     if !state.hub.runs_here(&session) {
-        state.steer_remote(&session.id, &text, &attachments)?;
+        state.steer_remote(&session.id, &text, &attachments).await?;
         return Ok(ChatStarted { item, session });
     }
     // A turn in flight takes the message (and its files) as steering;
@@ -748,8 +915,9 @@ async fn review_chat_open(
         .session_for_key(&review_chat_key(&repo, number))
         .map_err(err)?;
     let (messages, approvals, running) = match &session {
+        // Since it was last compacted, with the last few lines before.
         Some(s) => (
-            state.store.messages(&s.id).map_err(err)?,
+            state.store.messages_current(&s.id, 3).map_err(err)?,
             state.hub.pending_approvals(&s.id),
             state.hub.is_running(&s.id),
         ),
@@ -911,6 +1079,71 @@ async fn project_note_delete(state: State<'_, AppState>, id: String) -> CmdResul
     Ok(())
 }
 
+/// The person writing what a project is about and its rules.
+#[tauri::command]
+async fn project_set_profile(
+    state: State<'_, AppState>,
+    id: String,
+    about: Option<String>,
+    rules: Option<String>,
+) -> CmdResult<Option<tab_core::model::Project>> {
+    state
+        .store
+        .project_set_profile(&id, about.as_deref(), rules.as_deref(), Utc::now())
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn project_repos(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<tab_core::model::ProjectRepo>> {
+    state.store.project_repos(&project_id).map_err(err)
+}
+
+#[tauri::command]
+async fn project_repo_save(
+    state: State<'_, AppState>,
+    project_id: String,
+    repo: String,
+    path: Option<String>,
+    note: Option<String>,
+) -> CmdResult<tab_core::model::ProjectRepo> {
+    state
+        .store
+        .repo_save(
+            &project_id,
+            &repo,
+            path.as_deref(),
+            note.as_deref(),
+            "user",
+            Utc::now(),
+        )
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn project_repo_delete(
+    state: State<'_, AppState>,
+    project_id: String,
+    id: String,
+) -> CmdResult<()> {
+    state.store.repo_delete(&project_id, &id).map_err(err)?;
+    Ok(())
+}
+
+/// The project's recent items, open ones first.
+#[tauri::command]
+async fn project_items(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<QueueItem>> {
+    state
+        .store
+        .project_items(&project_id, None, 50)
+        .map_err(err)
+}
+
 #[tauri::command]
 async fn item_set_project(
     state: State<'_, AppState>,
@@ -940,6 +1173,7 @@ async fn chat_stop(state: State<'_, AppState>, session_id: String) -> CmdResult<
     match (&state.work_hub, remote) {
         (Some(h), true) => {
             h.steer_remote(&session_id, &SteerCommand::Stop)
+                .await
                 .map_err(err)?;
         }
         _ => state.hub.stop(&session_id),
@@ -959,6 +1193,7 @@ async fn chat_interrupt(state: State<'_, AppState>, session_id: String) -> CmdRe
     match (&state.work_hub, remote) {
         (Some(h), true) => {
             h.steer_remote(&session_id, &SteerCommand::Interrupt)
+                .await
                 .map_err(err)?;
         }
         _ => {
@@ -996,6 +1231,7 @@ async fn approval_resolve(
             answers,
         },
     )
+    .await
     .map_err(err)?;
     Ok(true)
 }
@@ -1040,6 +1276,23 @@ async fn agent_install(app: tauri::AppHandle, kind: AgentKind) -> CmdResult<()> 
     .map_err(err)
 }
 
+/// Whether a harness's ACP adapter is installed; null when it has none.
+#[tauri::command]
+fn agent_acp_adapter(kind: AgentKind) -> Option<bool> {
+    tab_core::agents::acp_adapter_installed(kind)
+}
+
+/// Installs a harness's ACP adapter with npm. Output lines arrive as
+/// `tab://agent-upgrade` events while it runs.
+#[tauri::command]
+async fn agent_install_adapter(app: tauri::AppHandle, kind: AgentKind) -> CmdResult<()> {
+    tab_core::agents::run_install_adapter(kind, move |line| {
+        let _ = app.emit("tab://agent-upgrade", &line);
+    })
+    .await
+    .map_err(err)
+}
+
 /// The configured agent's version, the newest release and how to update it.
 #[tauri::command]
 async fn agent_health(state: State<'_, AppState>) -> CmdResult<Option<AgentProbe>> {
@@ -1065,13 +1318,14 @@ struct McpInfo {
     token: String,
 }
 
-/// Where the hub listens for other devices (the next free port up from here).
-const HUB_PORT: u16 = 47_850;
-
 /// For Settings → Hub.
 #[tauri::command]
 async fn hub_status(state: State<'_, AppState>) -> CmdResult<Option<HubStatusView>> {
     let Some(hub) = state.work_hub.clone() else {
+        // Not "this computer": the work is still in tab cloud.
+        if state.config.lock().await.hub.cloud_hub.is_some() {
+            return Err("Your work is in tab cloud, but this computer's hub didn't open, so nothing syncs right now. Quit and reopen tab.".into());
+        }
         return Ok(None);
     };
     tauri::async_runtime::spawn_blocking(move || hub.status())
@@ -1079,6 +1333,94 @@ async fn hub_status(state: State<'_, AppState>) -> CmdResult<Option<HubStatusVie
         .map_err(err)?
         .map(Some)
         .map_err(err)
+}
+
+/// Moves this computer's work into the signed-in person's private cloud
+/// hub, then syncs with it from now on (see `LocalHub::move_to_cloud`).
+/// Reports progress as `tab://hub-move` events (`[done, total]`).
+#[tauri::command]
+async fn hub_move_to_cloud(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    account: State<'_, account::AccountState>,
+) -> Result<tab_core::local_hub::MoveOutcome, account::CloudFailure> {
+    let hub = state
+        .work_hub
+        .clone()
+        .ok_or_else(|| account::CloudFailure::internal("this computer's hub isn't running"))?;
+    let hub_id = account.ready_hub().await?;
+    let link = account
+        .link(&hub_id)
+        .ok_or_else(|| account::CloudFailure::internal("sign-in is turned off in this build"))?;
+    let store = state.store.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        hub.move_to_cloud(link, &store, |done, total| {
+            let _ = app.emit("tab://hub-move", [done, total]);
+        })
+    })
+    .await
+    .map_err(account::CloudFailure::internal)?
+    .map_err(|e| {
+        tracing::error!(error = %e, "hub: couldn't move to tab cloud");
+        account::CloudFailure::internal(e)
+    })?;
+    // Remembered, so the next launch syncs with the cloud too.
+    let mut current = state.config.lock().await;
+    let mut next = current.clone();
+    next.hub.mode = tab_core::config::HubMode::Cloud;
+    next.hub.cloud_hub = Some(hub_id.clone());
+    next.save(&state.config_path).map_err(|e| {
+        tracing::error!(error = %e, "hub: moved to tab cloud, but couldn't save that");
+        account::CloudFailure::internal(e)
+    })?;
+    tracing::info!(cloud_hub = %hub_id, "hub: moved to tab cloud");
+    *current = next.clone();
+    drop(current);
+    let _ = state.events.send(EngineEvent::ConfigChanged);
+    // The cloud runner gets the agent setup (and any connections already
+    // set to run there) now, not at the next save.
+    if let Err(e) =
+        cloud_runner::sync_connections(&account, &state.store, state.hub.remote_mcp(), &next).await
+    {
+        tracing::warn!(error = %e.message(), "couldn't send the cloud runner its setup");
+    }
+    Ok(outcome)
+}
+
+/// Brings this computer's work back from tab cloud into its own hub (see
+/// `LocalHub::move_to_local`). Connections set to run in tab cloud run on
+/// this computer again, so none stops, and the secrets the hub kept for its
+/// cloud runner are removed first. Returns how many rows it copied.
+#[tauri::command]
+async fn hub_move_to_local(
+    state: State<'_, AppState>,
+    account: State<'_, account::AccountState>,
+) -> CmdResult<u64> {
+    let hub = state
+        .work_hub
+        .clone()
+        .ok_or_else(|| err("this computer's hub isn't running"))?;
+    let cfg = state.config.lock().await.clone();
+    if let Err(e) =
+        cloud_runner::forget_cloud(&account, &state.store, state.hub.remote_mcp(), &cfg).await
+    {
+        // Moving back still works offline; the runner's secrets then stay
+        // until removed in Settings → Hub.
+        tracing::warn!(error = %e.message(), "couldn't remove the cloud runner's secrets");
+    }
+    let store = state.store.clone();
+    let rows = tauri::async_runtime::spawn_blocking(move || hub.move_to_local(&store))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
+    let mut next = state.config.lock().await.clone();
+    next.hub.mode = tab_core::config::HubMode::Local;
+    next.hub.cloud_hub = None;
+    for c in next.connectors.values_mut() {
+        c.runs_on = tab_core::runner::RunsOn::ThisComputer;
+    }
+    state.apply(next).await.map_err(err)?;
+    Ok(rows)
 }
 
 #[tauri::command]
@@ -1160,19 +1502,17 @@ async fn graph_delete(
     state.store.entities_delete(&ids, Utc::now()).map_err(err)
 }
 
-fn ask_chat_key(project_id: Option<&str>) -> String {
-    format!("ask:{}", project_id.unwrap_or("all"))
-}
-
+/// A project's coordinator chat: one per project, long-running.
 #[tauri::command]
-async fn ask_chat_open(state: State<'_, AppState>, project_id: Option<String>) -> CmdResult<Chat> {
+async fn coordinator_chat_open(state: State<'_, AppState>, project_id: String) -> CmdResult<Chat> {
     let session = state
         .store
-        .session_for_key(&ask_chat_key(project_id.as_deref()))
+        .session_for_key(&coordinator::key(&project_id))
         .map_err(err)?;
     let (messages, approvals, running) = match &session {
+        // Since it was last compacted, with the last few lines before.
         Some(s) => (
-            state.store.messages(&s.id).map_err(err)?,
+            state.store.messages_current(&s.id, 3).map_err(err)?,
             state.hub.pending_approvals(&s.id),
             state.hub.is_running(&s.id),
         ),
@@ -1186,14 +1526,13 @@ async fn ask_chat_open(state: State<'_, AppState>, project_id: Option<String>) -
     })
 }
 
-/// A question from the Ask page: one ongoing chat per project (or for
-/// everything), about what tab knows, with the nodes the person selected.
+/// A message to a project's coordinator. It steers a turn in flight, or
+/// starts the next one.
 #[tauri::command]
-async fn ask_chat_send(
+async fn coordinator_chat_send(
     state: State<'_, AppState>,
-    project_id: Option<String>,
+    project_id: String,
     text: String,
-    focus: Option<Vec<String>>,
     attachments: Option<Vec<String>>,
 ) -> CmdResult<Session> {
     let attachments = attachments.unwrap_or_default();
@@ -1207,37 +1546,21 @@ async fn ask_chat_send(
     if state.hub.config().kind.is_none() {
         return Err("Set up an agent first (Settings → Agent).".into());
     }
-    let project = match &project_id {
-        Some(p) => state.store.project_find(p).map_err(err)?,
-        None => None,
-    };
-    if let Some(f) = focus.filter(|f| !f.is_empty()) {
-        text = format!("(Selected in the graph: {})\n\n{text}", f.join(", "));
-    }
-    let brief = format!(
-        "This chat is on tab's Ask page: the person is looking at their knowledge graph (projects, repos, \
-         people, PRs, tickets, email contacts and how they connect) and asking about their work. Answer \
-         from what tab knows: tab_graph_search and tab_graph_expand for the graph, tab_search for items \
-         (with a time window when they mean recent work), tab_project for a project's notes and recent \
-         work. Name the items you rely on. {}",
-        match &project {
-            Some(p) => format!(
-                "They have the graph filtered to the project \"{}\"; scope to it unless they ask wider (tab_search with project \"{}\").",
-                p.name, p.name
-            ),
-            None => "They're looking at everything, across projects.".to_string(),
-        }
-    );
-    let title = match &project {
-        Some(p) => format!("Ask · {}", p.name),
-        None => "Ask".to_string(),
-    };
+    let project = state
+        .store
+        .project_find(&project_id)
+        .map_err(err)?
+        .ok_or("That project was deleted.")?;
     let cwd = state.hub.workdir();
     let session = state
         .hub
-        .session_for_key(&ask_chat_key(project_id.as_deref()), &title, &cwd, &brief)
+        .session_for_key(
+            &coordinator::key(&project.id),
+            &coordinator::title(&project),
+            &cwd,
+            &coordinator::brief(&project),
+        )
         .map_err(err)?;
-    // A turn in flight takes the message as steering; otherwise it starts one.
     if !state
         .hub
         .steer_with(&session.id, &text, &attachments)
@@ -1251,10 +1574,310 @@ async fn ask_chat_send(
     Ok(session)
 }
 
+/// The coordinator's settings: watching the queue, the morning brief and
+/// where its chat compacts.
+#[tauri::command]
+async fn coordinator_settings_save(
+    state: State<'_, AppState>,
+    project_id: String,
+    watch: Option<bool>,
+    brief: Option<String>,
+    compact_at: Option<i64>,
+) -> CmdResult<tab_core::model::Project> {
+    state
+        .store
+        .project_set_coordinator(&project_id, watch, brief.as_deref(), compact_at, Utc::now())
+        .map_err(err)?
+        .ok_or_else(|| "That project was deleted.".into())
+}
+
+/// The coordinator chat's compacted stretches, newest first.
+#[tauri::command]
+async fn coordinator_history(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<tab_core::store::Segment>> {
+    match state
+        .store
+        .session_for_key(&coordinator::key(&project_id))
+        .map_err(err)?
+    {
+        Some(s) => state.store.segments(&s.id).map_err(err),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[tauri::command]
+async fn coordinator_segment(
+    state: State<'_, AppState>,
+    segment_id: String,
+) -> CmdResult<Option<tab_core::store::Segment>> {
+    state.store.segment_get(&segment_id).map_err(err)
+}
+
+#[tauri::command]
+async fn coordinator_segment_messages(
+    state: State<'_, AppState>,
+    segment_id: String,
+) -> CmdResult<Vec<tab_core::model::SessionMessage>> {
+    state.store.segment_messages(&segment_id).map_err(err)
+}
+
+/// The person's edit to what the coordinator carried forward.
+#[tauri::command]
+async fn coordinator_summary_save(
+    state: State<'_, AppState>,
+    segment_id: String,
+    summary: String,
+) -> CmdResult<tab_core::store::Segment> {
+    state
+        .store
+        .segment_set_summary(&segment_id, &summary, Utc::now())
+        .map_err(err)?
+        .ok_or_else(|| "That summary is gone.".into())
+}
+
+/// Compacts the coordinator's chat now.
+#[tauri::command]
+async fn coordinator_compact(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<tab_core::store::Segment> {
+    let session = state
+        .store
+        .session_for_key(&coordinator::key(&project_id))
+        .map_err(err)?
+        .ok_or("The coordinator hasn't started yet.")?;
+    if !state.hub.runs_here(&session) {
+        return Err("The coordinator runs on another device; compact it there.".into());
+    }
+    coordinator::compact(&state.hub, &session.id, "manual")
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn project_resources(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<tab_core::model::ProjectResource>> {
+    // The person sees everything in their own projects.
+    state
+        .store
+        .project_resources(&project_id, "vault")
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn project_resource_save(
+    state: State<'_, AppState>,
+    project_id: String,
+    resource: tab_core::store::ResourceInput,
+) -> CmdResult<tab_core::model::ProjectResource> {
+    state
+        .store
+        .resource_save(&project_id, &resource, "user", Utc::now())
+        .map_err(err)
+}
+
+/// Adds a file to a project: its bytes go into the hub (so every device
+/// can index it), and a `file` resource names it by hash. The body is the
+/// file; its name and who may read it come in headers.
+#[tauri::command]
+async fn project_file_add(
+    state: State<'_, AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> CmdResult<tab_core::model::ProjectResource> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected the file's bytes".into());
+    };
+    if bytes.len() > MAX_ATTACHMENT {
+        return Err("that file is over 50 MB".into());
+    }
+    let header = |k: &str| {
+        request
+            .headers()
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .map(percent_decode)
+            .unwrap_or_default()
+    };
+    let (project_id, name, access) = (header("x-project"), header("x-name"), header("x-access"));
+    let name = safe_file_name(&name);
+    if !tab_core::knowledge::extract::supported(&name) {
+        return Err(format!(
+            "tab can't read {name} yet: add PDF, Word (.docx), Excel (.xlsx), markdown or text files"
+        ));
+    }
+    let hub = state
+        .work_hub
+        .as_ref()
+        .ok_or("the hub isn't running, so files can't be added")?;
+    let meta = hub.file_put(bytes).map_err(err)?;
+    state
+        .store
+        .resource_save(
+            &project_id,
+            &tab_core::store::ResourceInput {
+                kind: "file".into(),
+                title: name.clone(),
+                url: Some(meta.hash),
+                access: (!access.is_empty()).then_some(access),
+                options: Some(serde_json::json!({ "name": name, "size": bytes.len() })),
+                ..Default::default()
+            },
+            "user",
+            Utc::now(),
+        )
+        .map_err(err)
+}
+
+/// Reads a resource again now, rather than on its schedule.
+#[tauri::command]
+async fn project_resource_reindex(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.store.knowledge_refresh(&id).map_err(err)
+}
+
+#[tauri::command]
+async fn project_resource_delete(
+    state: State<'_, AppState>,
+    project_id: String,
+    id: String,
+) -> CmdResult<bool> {
+    state.store.resource_delete(&project_id, &id).map_err(err)
+}
+
 /// Slash commands the agent last reported, for the composer's `/` menu.
 #[tauri::command]
-fn agent_slash_commands(state: State<'_, AppState>) -> Vec<String> {
-    state.hub.slash_commands()
+fn agent_slash_commands(
+    state: State<'_, AppState>,
+    agent: Option<AgentKind>,
+) -> Vec<tab_core::agents::SlashCommand> {
+    state
+        .hub
+        .slash_commands(agent.unwrap_or(AgentKind::ClaudeCode))
+}
+
+/// The subagents the agent last reported, for `/` argument completion.
+#[tauri::command]
+fn agent_subagents(state: State<'_, AppState>) -> Vec<tab_core::agents::Subagent> {
+    state.hub.subagents()
+}
+
+/// Values for a slash command argument from the chat's folder: `branch`
+/// names, or the `path`s that what's typed could go on to.
+#[tauri::command]
+async fn slash_arg_values(cwd: String, kind: String, typed: String) -> Vec<String> {
+    use tab_core::agents::slash_args;
+    tauri::async_runtime::spawn_blocking(move || {
+        let cwd = std::path::Path::new(&cwd);
+        match kind.as_str() {
+            "branch" => slash_args::branches(cwd),
+            "path" => slash_args::paths(cwd, &typed),
+            _ => Vec::new(),
+        }
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Files and folders in a chat's folder for an `@` mention, best first.
+#[tauri::command]
+async fn chat_mentions(cwd: String, query: String) -> Vec<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        tab_core::agents::slash_args::mentions(std::path::Path::new(&cwd), &query)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Runs a command typed after `!` in the chat's folder and puts its output
+/// in the chat, for the agent to see with the next message. Without an
+/// item (the "New" chat), the command first becomes a tab task.
+#[tauri::command]
+async fn chat_shell(
+    state: State<'_, AppState>,
+    item_id: Option<String>,
+    command: String,
+    project_id: Option<String>,
+) -> CmdResult<ChatStarted> {
+    let command = command.trim().to_string();
+    if command.is_empty() {
+        return Err("type a command after !".into());
+    }
+    let item = match item_id {
+        Some(id) => state
+            .store
+            .get(&id)
+            .map_err(err)?
+            .ok_or("that item no longer exists")?,
+        None => with_engine!(state, e => e.create_task(NewTask {
+            title: format!("!{}", command.chars().take(79).collect::<String>()),
+            created_by: "user".into(),
+            project_id,
+            auto_title: true,
+            ..Default::default()
+        }).map_err(err))?,
+    };
+    let session = state.hub.session_for_item(&item.id).map_err(err)?;
+    state
+        .hub
+        .run_shell(&session.id, &command)
+        .await
+        .map_err(err)?;
+    Ok(ChatStarted { item, session })
+}
+
+#[derive(Serialize)]
+struct ChatRewound {
+    chat: Chat,
+    #[serde(flatten)]
+    rewound: tab_core::agents::Rewound,
+}
+
+/// Takes a chat back to before one of the person's messages: its
+/// conversation, the files the agent changed since, or both.
+#[tauri::command]
+async fn chat_rewind(
+    state: State<'_, AppState>,
+    session_id: String,
+    message_id: i64,
+    conversation: bool,
+    files: bool,
+) -> CmdResult<ChatRewound> {
+    let rewound = state
+        .hub
+        .rewind(&session_id, message_id, conversation, files)
+        .await
+        .map_err(err)?;
+    let session = state.store.session_get(&session_id).map_err(err)?;
+    Ok(ChatRewound {
+        chat: chat_of(&state, session)?,
+        rewound,
+    })
+}
+
+/// What rewinding the files to before a message would change.
+#[tauri::command]
+async fn chat_rewind_preview(
+    state: State<'_, AppState>,
+    session_id: String,
+    message_id: i64,
+) -> CmdResult<tab_core::agents::RewoundFiles> {
+    state
+        .hub
+        .rewind_preview(&session_id, message_id)
+        .await
+        .map_err(err)
+}
+
+/// The MCP servers a chat's agent reported at its last turn, with status.
+#[tauri::command]
+fn agent_mcp_servers(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Vec<tab_core::agents::AgentMcpServer> {
+    state.hub.agent_mcp(&session_id)
 }
 
 /// The state of each item's latest chat (working, needs you, monitoring,
@@ -1632,6 +2255,31 @@ async fn github_file(
         .map_err(err)
 }
 
+/// An image's bytes at a commit, for the review's image diff: from the local
+/// clone when there is one, else the contents API. Only images are served.
+#[tauri::command]
+async fn review_file_bytes(
+    state: State<'_, AppState>,
+    repo: String,
+    sha: String,
+    path: String,
+    local: bool,
+) -> CmdResult<tauri::ipc::Response> {
+    if image_ext(&path).is_none() && !path.to_ascii_lowercase().ends_with(".svg") {
+        return Err("not an image".into());
+    }
+    let bytes = if local {
+        state.workspaces.read_bytes(&repo, &sha, &path).await
+    } else {
+        github_review::file_bytes_at(&state.gateway, &repo, &sha, &path).await
+    }
+    .map_err(err)?;
+    if bytes.len() > MAX_IMAGE {
+        return Err("this image is too big to show here".into());
+    }
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[tauri::command]
 async fn github_review_action(
     state: State<'_, AppState>,
@@ -1885,7 +2533,37 @@ async fn workflow_validate(
 ) -> CmdResult<Vec<Issue>> {
     let catalog = with_engine!(state, e => e.connectors());
     let saved = state.store.workflows().map_err(err)?;
-    Ok(workflow::validate(&workflow, &catalog, &saved))
+    let families = state.store.model_family_ids().map_err(err)?;
+    Ok(workflow::validate(&workflow, &catalog, &saved, &families))
+}
+
+/// Model families agent steps can run on: the built-in ones (or the
+/// person's edits of them), then the person's own.
+#[tauri::command]
+async fn model_families_list(state: State<'_, AppState>) -> CmdResult<Vec<ModelFamily>> {
+    state.store.model_families().map_err(err)
+}
+
+#[tauri::command]
+async fn model_family_save(
+    state: State<'_, AppState>,
+    family: ModelFamily,
+) -> CmdResult<Vec<ModelFamily>> {
+    state
+        .store
+        .model_family_save(&family, Utc::now())
+        .map_err(err)?;
+    state.store.model_families().map_err(err)
+}
+
+/// Deletes the person's family, or resets a built-in one.
+#[tauri::command]
+async fn model_family_delete(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<ModelFamily>> {
+    state.store.model_family_delete(&id).map_err(err)?;
+    state.store.model_families().map_err(err)
 }
 
 #[derive(Serialize)]
@@ -1899,7 +2577,9 @@ struct SavedWorkflow {
 async fn workflow_save(state: State<'_, AppState>, workflow: Workflow) -> CmdResult<SavedWorkflow> {
     let catalog = with_engine!(state, e => e.connectors());
     let saved = state.store.workflows().map_err(err)?;
-    let (w, issues) = workflow::prepare_save(workflow, SavedBy::Person, &catalog, &saved);
+    let families = state.store.model_family_ids().map_err(err)?;
+    let (w, issues) =
+        workflow::prepare_save(workflow, SavedBy::Person, &catalog, &saved, &families);
     let w = state
         .store
         .workflow_save(&w, "user", Utc::now())
@@ -1932,9 +2612,10 @@ async fn workflow_set_enabled(
     if enabled {
         let catalog = with_engine!(state, e => e.connectors());
         let saved = state.store.workflows().map_err(err)?;
+        let families = state.store.model_family_ids().map_err(err)?;
         let mut check = w.clone();
         check.enabled = true;
-        if let Some(i) = workflow::validate(&check, &catalog, &saved)
+        if let Some(i) = workflow::validate(&check, &catalog, &saved, &families)
             .into_iter()
             .find(|i| i.error)
         {
@@ -1991,6 +2672,37 @@ async fn workflow_runs(
         .map_err(err)
 }
 
+/// One workflow's stats for the last `days` days (7 or 30) and the span
+/// before it, with days breaking at the caller's midnight.
+#[tauri::command]
+async fn workflow_insights(
+    state: State<'_, AppState>,
+    workflow_id: String,
+    days: u32,
+    utc_offset_minutes: i32,
+) -> CmdResult<workflow::insights::WorkflowInsights> {
+    workflow::insights_store::workflow_insights(
+        &state.store,
+        &workflow_id,
+        days,
+        utc_offset_minutes,
+        Utc::now(),
+    )
+    .map_err(err)
+}
+
+/// Every workflow's stats and health, and hub-wide totals, for the factory
+/// overview.
+#[tauri::command]
+async fn workflow_factory(
+    state: State<'_, AppState>,
+    days: u32,
+    utc_offset_minutes: i32,
+) -> CmdResult<workflow::insights::Factory> {
+    workflow::insights_store::workflow_factory(&state.store, days, utc_offset_minutes, Utc::now())
+        .map_err(err)
+}
+
 #[tauri::command]
 async fn workflow_versions(
     state: State<'_, AppState>,
@@ -2020,6 +2732,127 @@ async fn workflow_run(
         .map_err(err)
 }
 
+/// Each item's workflow status (running, waiting for you, …) for the queue
+/// rows, in one read. Items with nothing to show are left out.
+#[tauri::command]
+async fn workflow_activity(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<workflow::item_status::ItemWorkflowStatus>> {
+    let hub = state.hub.clone();
+    let pending = move |id: &str| !hub.pending_approvals(id).is_empty();
+    workflow::items::statuses(&state.store, &pending, Utc::now()).map_err(err)
+}
+
+/// An item's workflow runs, newest first, with what each links to.
+#[tauri::command]
+async fn item_workflow_runs(
+    state: State<'_, AppState>,
+    item_id: String,
+) -> CmdResult<Vec<workflow::items::RunView>> {
+    let hub = state.hub.clone();
+    let pending = move |id: &str| !hub.pending_approvals(id).is_empty();
+    workflow::items::item_runs(&state.store, &item_id, 20, &pending, Utc::now()).map_err(err)
+}
+
+/// One run with what it links to, for the Runs panel.
+#[tauri::command]
+async fn workflow_run_view(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> CmdResult<Option<workflow::items::RunView>> {
+    let hub = state.hub.clone();
+    let pending = move |id: &str| !hub.pending_approvals(id).is_empty();
+    workflow::items::run_view(&state.store, &run_id, &pending, Utc::now()).map_err(err)
+}
+
+/// The person's answer to a run blocked on a step: approve that one step
+/// for that one run (it carries on from there), or decline and end it.
+/// Only the app's buttons call this; no agent or MCP tool can.
+#[tauri::command]
+async fn workflow_run_answer(
+    state: State<'_, AppState>,
+    run_id: String,
+    approve: bool,
+) -> CmdResult<Run> {
+    let guard = state.engine.read().await;
+    let e = guard.as_ref().ok_or("engine is not running")?;
+    e.answer_workflow_run(&run_id, approve).await.map_err(err)
+}
+
+/// Runs a failed run again, as the person asked from the Runs panel or a
+/// failure group. The new run notes the one it re-runs (`rerun_of`).
+#[tauri::command]
+async fn workflow_rerun(state: State<'_, AppState>, run_id: String) -> CmdResult<Run> {
+    let guard = state.engine.read().await;
+    let e = guard.as_ref().ok_or("engine is not running")?;
+    e.rerun_workflow(&run_id).await.map_err(err)
+}
+
+/// What could make a workflow cheaper or steadier, from its runs over the
+/// last `days` days: deterministic rules, each with its evidence and,
+/// where there is one, the changed workflow to load as a draft.
+#[tauri::command]
+async fn workflow_suggestions(
+    state: State<'_, AppState>,
+    workflow_id: String,
+    days: u32,
+    utc_offset_minutes: i32,
+) -> CmdResult<Vec<workflow::suggest::Suggestion>> {
+    workflow::suggest_store::workflow_suggestions(
+        &state.store,
+        &workflow_id,
+        days,
+        utc_offset_minutes,
+        Utc::now(),
+    )
+    .map_err(err)
+}
+
+/// The chat of a workflow job's agent.
+#[tauri::command]
+async fn job_chat_open(state: State<'_, AppState>, job_id: String) -> CmdResult<Chat> {
+    let session = state
+        .store
+        .session_for_key(&format!("job:{job_id}"))
+        .map_err(err)?;
+    let (messages, approvals, running) = match &session {
+        Some(s) => (
+            state.store.messages_current(&s.id, 3).map_err(err)?,
+            state.hub.pending_approvals(&s.id),
+            state.hub.is_running(&s.id),
+        ),
+        None => (Vec::new(), Vec::new(), false),
+    };
+    Ok(Chat {
+        session,
+        messages,
+        approvals,
+        running,
+    })
+}
+
+/// A message (an answer, usually) to a workflow job's agent.
+#[tauri::command]
+async fn job_chat_send(
+    state: State<'_, AppState>,
+    job_id: String,
+    text: String,
+) -> CmdResult<Session> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("message is empty".into());
+    }
+    let session = state
+        .store
+        .session_for_key(&format!("job:{job_id}"))
+        .map_err(err)?
+        .ok_or("that agent's chat isn't on this device")?;
+    if !state.hub.steer(&session.id, &text).map_err(err)? {
+        state.hub.send(&session.id, &text).map_err(err)?;
+    }
+    Ok(session)
+}
+
 #[tauri::command]
 async fn item_activity(
     state: State<'_, AppState>,
@@ -2037,8 +2870,9 @@ async fn workflow_chat_open(
     let key = tab_core::workflow::chat_key(workflow_id.as_deref().unwrap_or(""));
     let session = state.store.session_for_key(&key).map_err(err)?;
     let (messages, approvals, running) = match &session {
+        // Since it was last compacted, with the last few lines before.
         Some(s) => (
-            state.store.messages(&s.id).map_err(err)?,
+            state.store.messages_current(&s.id, 3).map_err(err)?,
             state.hub.pending_approvals(&s.id),
             state.hub.is_running(&s.id),
         ),
@@ -2146,6 +2980,21 @@ async fn done_guards(
     Ok(guards)
 }
 
+/// Where the things in each item's Context stand ("Review PR", "Merged"),
+/// for the queue rows. Items with nothing to report are left out; so is
+/// everything if the engine isn't running.
+#[tauri::command]
+async fn context_status(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> CmdResult<std::collections::HashMap<String, Vec<tab_core::model::ContextStatus>>> {
+    let guard = state.engine.read().await;
+    let Some(e) = guard.as_ref() else {
+        return Ok(Default::default());
+    };
+    Ok(e.context_statuses(&ids).await)
+}
+
 #[tauri::command]
 async fn snooze(
     state: State<'_, AppState>,
@@ -2198,21 +3047,9 @@ async fn api_usage(state: State<'_, AppState>, hours: i64) -> CmdResult<Vec<Usag
         .map_err(err)
 }
 
-/// Keys of settings that hold secrets, per connector, from the descriptors.
-fn secret_keys() -> Vec<(String, String)> {
-    registry()
-        .into_iter()
-        .flat_map(|f| {
-            let d = f.descriptor();
-            d.settings
-                .into_iter()
-                .filter(|s| s.kind == SettingKind::Secret)
-                .map(move |s| (d.id.clone(), s.key))
-        })
-        .collect()
-}
+use tab_core::secrets::secret_keys;
 
-fn masked(cfg: &TabConfig) -> TabConfig {
+pub(crate) fn masked(cfg: &TabConfig) -> TabConfig {
     let mut cfg = cfg.clone();
     if cfg.ranking.ai.api_key.is_some() {
         cfg.ranking.ai.api_key = Some(SECRET_MASK.into());
@@ -2286,10 +3123,35 @@ async fn sandbox_status() -> CmdResult<tab_core::sandbox::Status> {
     Ok(tab_core::sandbox::current().status().await)
 }
 
+/// Why a folder can't be where sessions start, for the settings forms.
 #[tauri::command]
-async fn save_config(state: State<'_, AppState>, config: TabConfig) -> CmdResult<TabConfig> {
-    let next = unmask(config, &*state.config.lock().await);
-    state.apply(next).await.map(|c| masked(&c)).map_err(err)
+fn folder_problem(path: String) -> Option<String> {
+    tab_core::config::folder_problem(&path)
+}
+
+#[tauri::command]
+async fn save_config(
+    state: State<'_, AppState>,
+    account: State<'_, account::AccountState>,
+    config: TabConfig,
+) -> CmdResult<TabConfig> {
+    let current = state.config.lock().await;
+    let mut next = unmask(config, &current);
+    // Only moving sets the cloud hub, and once moved, work stays there
+    // (moving back isn't built yet): Settings can't undo either.
+    next.hub.cloud_hub = current.hub.cloud_hub.clone();
+    if next.hub.cloud_hub.is_some() {
+        next.hub.mode = tab_core::config::HubMode::Cloud;
+    }
+    drop(current);
+    let saved = state.apply(next).await.map_err(err)?;
+    // Connections in tab cloud get their changed settings there too.
+    if let Err(e) =
+        cloud_runner::sync_connections(&account, &state.store, state.hub.remote_mcp(), &saved).await
+    {
+        tracing::warn!(error = ?e.message(), "couldn't update connections in tab cloud");
+    }
+    Ok(masked(&saved))
 }
 
 /// Switches the model chats use. Only the agent hub picks it up, so
@@ -2323,11 +3185,42 @@ async fn set_agent_model(
     Ok(masked(&next))
 }
 
-/// Sets the Claude Code permission mode from the chat composer; applies
-/// from the next message.
+/// Switches one chat's model, from its next message. Other chats and the
+/// model new chats start on stay as they are.
+#[tauri::command]
+async fn set_session_model(
+    state: State<'_, AppState>,
+    session_id: String,
+    model: Option<String>,
+) -> CmdResult<Session> {
+    state
+        .hub
+        .set_session_model(&session_id, model.as_deref())
+        .map_err(err)
+}
+
+/// The permission modes the composer offers.
+const PERMISSION_MODES: &[&str] = &["default", "acceptEdits", "plan", "auto"];
+
+/// Switches one chat's permission mode. Other chats, and the mode new chats
+/// start in, stay as they are.
+#[tauri::command]
+async fn set_session_mode(
+    state: State<'_, AppState>,
+    session_id: String,
+    mode: String,
+) -> CmdResult<Session> {
+    if !PERMISSION_MODES.contains(&mode.as_str()) {
+        return Err(format!("unknown permission mode {mode}"));
+    }
+    state.hub.set_session_mode(&session_id, &mode).map_err(err)
+}
+
+/// Sets the permission mode new chats start in, from the composer before a
+/// chat starts.
 #[tauri::command]
 async fn set_agent_mode(state: State<'_, AppState>, mode: String) -> CmdResult<TabConfig> {
-    if !["default", "acceptEdits", "plan", "auto"].contains(&mode.as_str()) {
+    if !PERMISSION_MODES.contains(&mode.as_str()) {
         return Err(format!("unknown permission mode {mode}"));
     }
     let mut current = state.config.lock().await;
@@ -2368,9 +3261,11 @@ async fn connection_set_secrets(
         cfg.settings.insert(k, v);
     }
     cfg.enabled = descriptor.settings.iter().filter(|f| f.required).all(|f| {
-        cfg.settings
-            .get(&f.key)
-            .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty()))
+        cfg.covered_by_sign_in(&f.key)
+            || cfg
+                .settings
+                .get(&f.key)
+                .is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty()))
     });
     state.apply(next).await.map(|c| masked(&c)).map_err(err)
 }
@@ -2515,30 +3410,117 @@ fn browser_close(app: tauri::AppHandle, id: String) -> Result<(), String> {
     }
 }
 
+/// Opens this computer's hub, trying again for a few seconds: right after
+/// an update restarts tab, the old app can still be closing `hub.db`.
+fn open_hub(path: &std::path::Path) -> anyhow::Result<Arc<LocalHub>> {
+    let mut tries = 0;
+    loop {
+        match LocalHub::open(path) {
+            Ok(h) => return Ok(h),
+            Err(e) if tries < 5 => {
+                tries += 1;
+                tracing::warn!(error = %e, tries, "hub didn't open; trying again");
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// `tab.log` in the app's log folder, once setup knows where that is.
+static LOG_FILE: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> = std::sync::OnceLock::new();
+
+/// Writes log lines to `tab.log` once it's open (and nowhere before).
+struct LogFile;
+
+impl std::io::Write for LogFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match LOG_FILE.get() {
+            Some(f) => f.lock().unwrap().write(buf),
+            None => Ok(buf.len()),
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        match LOG_FILE.get() {
+            Some(f) => f.lock().unwrap().flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Keeps a log on disk, so what happened at a launch (say, the one after
+/// an update) can be read afterwards. The last launch's goes to
+/// `tab.old.log`.
+fn open_log_file(dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
+    let path = dir.join("tab.log");
+    let _ = std::fs::rename(&path, dir.join("tab.old.log"));
+    match std::fs::File::create(&path) {
+        Ok(f) => {
+            let _ = LOG_FILE.set(std::sync::Mutex::new(f));
+            tracing::info!(version = env!("CARGO_PKG_VERSION"), "tab starting");
+        }
+        Err(e) => tracing::warn!(error = %e, "couldn't open the log file"),
+    }
+}
+
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,tab_core=debug".into()),
         )
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(|| LogFile),
+        )
         .init();
+    // Opened from Finder, tab gets a soft limit of 256 open files, and every
+    // agent it starts inherits it.
+    tab_core::limits::raise_open_file_limit();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updates::PendingUpdate::default())
         .setup(|app| {
+            // On Windows tab draws its own title bar, window buttons and
+            // all (see AppHeader); macOS keeps its traffic lights over it.
+            #[cfg(target_os = "windows")]
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_decorations(false);
+            }
+            if let Ok(dir) = app.path().app_log_dir() {
+                open_log_file(&dir);
+            }
             let data_dir = app.path().app_data_dir()?;
             lsp::set_tools_dir(data_dir.join("tools"));
             let config_path = app.path().app_config_dir()?.join("config.json");
-            let config = TabConfig::load(&config_path)?;
+            tab_core::secrets::install(&config_path);
+            let mut config = TabConfig::load(&config_path)?;
+            if let Some(dir) = config_path.parent() {
+                app.manage(account::AccountState::new(dir));
+            }
+            // A dev build (`pnpm dev:tab`) has its own folders through its
+            // identifier, and its own ports here, so it runs beside the
+            // installed app.
+            let ports = dev::Ports::for_build(&app.config().identifier, config.mcp.port);
+            config.mcp.port = ports.mcp;
             // Before anything starts a process: agents, language servers
             // and workflow commands all go through it.
-            tab_core::sandbox::install(Arc::new(tab_core::sandbox::Sandbox::new(
-                config.sandbox.clone(),
-                Some(data_dir.clone()),
-                config_path.parent().map(Into::into),
-            )));
+            let identifier = &app.config().identifier;
+            let installed = dev::installed_app_dirs(identifier, &data_dir, config_path.parent());
+            tab_core::sandbox::install(Arc::new(
+                tab_core::sandbox::Sandbox::new(
+                    config.sandbox.clone(),
+                    Some(data_dir.clone()),
+                    config_path.parent().map(Into::into),
+                )
+                .guarding(installed),
+            ));
             let store = Arc::new(Store::open(&data_dir.join("tab.db"))?);
             let gateway = Arc::new(Gateway::new(store.clone()));
             // Search by meaning: follows the setting on the tab connection.
@@ -2574,6 +3556,9 @@ pub fn run() {
                 config.agent.clone(),
                 data_dir.clone(),
             );
+            dev::report_status(hub.clone());
+            hub.remote_mcp().set_servers(config.mcp_servers.clone());
+            remote_mcp::forward_sign_ins(app.handle().clone(), hub.remote_mcp().clone());
             let engine: SharedEngine = Arc::new(RwLock::new(None));
             let core = Arc::new(Core {
                 store: store.clone(),
@@ -2584,13 +3569,32 @@ pub fn run() {
                 config: Mutex::new(config.clone()),
                 config_path,
                 embed,
+                leases: Default::default(),
             });
             // The hub: this device's copy (tab.db) syncs through its change
             // log, and other devices connect to it on localhost.
-            let work_hub = match LocalHub::open(&data_dir.join("hub.db")) {
+            // Tried a few times: without it, work that moved to tab cloud
+            // looks like it's back on this computer until the next launch.
+            let work_hub = match open_hub(&data_dir.join("hub.db")) {
                 Ok(h) => {
                     // Other devices steer the sessions this one runs.
                     h.attach_agents(hub.clone());
+                    *core.leases.lock().unwrap() = Some(h.clone());
+                    // Agent jobs from workflows: this computer takes the
+                    // ones it can, on the hub's leases.
+                    let name = tab_core::jobs::computer_name();
+                    let runner = tab_core::jobs::JobRunner::new(
+                        store.clone(),
+                        Arc::new(hub.clone()),
+                        h.clone(),
+                        tab_core::runner::RunnerKind::Computer,
+                        &name,
+                    );
+                    // Setup isn't on the async runtime, and the runner's
+                    // loop is a task on it: start it from there.
+                    tauri::async_runtime::spawn(async move {
+                        runner.start(tab_core::jobs::CancellationToken::new());
+                    });
                     Some(h)
                 }
                 Err(e) => {
@@ -2598,6 +3602,31 @@ pub fn run() {
                     None
                 }
             };
+            // The end-to-end encrypted vault: its key never leaves this
+            // device, and its sealed files go into the hub.
+            {
+                let v = tab_core::e2e::E2e::new(
+                    store.clone(),
+                    &data_dir,
+                    Arc::new(tab_core::e2e::presence::System),
+                );
+                if let Some(h) = &work_hub {
+                    v.set_files(Arc::new(vault::HubFiles(h.clone())));
+                }
+                hub.set_vault(v);
+            }
+            // What projects know: indexed here, from the hub's files, the
+            // email connection and the web.
+            {
+                let sources = Arc::new(KnowledgeSources {
+                    hub: work_hub.clone(),
+                    core: core.clone(),
+                });
+                let (store, gateway) = (store.clone(), core.gateway.clone());
+                tauri::async_runtime::spawn(async move {
+                    tab_core::knowledge::spawn(store, gateway, sources);
+                });
+            }
             let state = AppState {
                 core: core.clone(),
                 work_hub: work_hub.clone(),
@@ -2625,10 +3654,48 @@ pub fn run() {
                     }
                 });
             }
+            // Moved to tab cloud before: sync with it, not hub.db.
+            let cloud_hub = match (&config.hub.mode, &config.hub.cloud_hub) {
+                (tab_core::config::HubMode::Cloud, Some(id)) => Some(id.clone()),
+                _ => None,
+            };
+            tracing::info!(
+                mode = ?config.hub.mode,
+                cloud_hub = ?config.hub.cloud_hub,
+                hub_open = work_hub.is_some(),
+                "hub: where work is kept"
+            );
+            if let (Some(h), Some(id)) = (&work_hub, &cloud_hub) {
+                h.expect_cloud(id);
+                let (h, store, app, id) = (h.clone(), store.clone(), app.handle().clone(), id.clone());
+                tauri::async_runtime::spawn(async move {
+                    // On the runtime: the link's socket is a task there.
+                    let link = app.state::<account::AccountState>().link(&id);
+                    let Some(link) = link else {
+                        tracing::error!("hub: moved to tab cloud, but sign-in is off in this build");
+                        return;
+                    };
+                    // Until it connects (offline, signed out), changes wait.
+                    let mut wait = 2;
+                    loop {
+                        let (h, s, l) = (h.clone(), store.clone(), link.clone());
+                        match tauri::async_runtime::spawn_blocking(move || h.use_cloud(l, &s)).await {
+                            Ok(Ok(())) => {
+                                tracing::info!("hub: syncing with tab cloud");
+                                break;
+                            }
+                            Ok(Err(e)) => tracing::warn!(error = %e, retry_in = wait, "hub: tab cloud isn't reachable yet"),
+                            Err(e) => tracing::error!(error = %e, "hub: connecting to tab cloud panicked"),
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                        wait = (wait * 2).min(60);
+                    }
+                });
+            }
             tauri::async_runtime::block_on(async {
                 if let Some(h) = &work_hub {
                     h.follow(store.clone(), events.clone());
-                    match h.serve(HUB_PORT, config.mcp.token.clone()).await {
+                    match h.serve(ports.hub, config.mcp.token.clone()).await {
                         Ok(url) => tracing::info!(%url, "hub listening"),
                         Err(e) => tracing::error!(error = %e, "hub listener failed to start"),
                     }
@@ -2652,6 +3719,7 @@ pub fn run() {
                         *state.mcp_url.lock().unwrap() = Some(url);
                         // Turns cut off by the last quit carry on now.
                         hub.resume_interrupted();
+                        coordinator::spawn_monitor(hub.clone());
                     }
                     Err(e) => tracing::error!(error = %e, "MCP server failed to start"),
                 }
@@ -2661,6 +3729,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             updates::app_version,
+            cloud_runner::connection_runs_on,
+            cloud_runner::cloud_runner_status,
+            cloud_runner::cloud_runner_wake,
+            cloud_runner::cloud_secret_names,
+            cloud_runner::cloud_secret_set,
             updates::app_update_check,
             updates::app_update_install,
             sandbox_status,
@@ -2678,6 +3751,7 @@ pub fn run() {
             attachment_save,
             image_read,
             file_read,
+            file_stamps,
             file_open,
             start_dictation,
             github_link_summary,
@@ -2685,6 +3759,7 @@ pub fn run() {
             item_preview,
             mark_done,
             done_guards,
+            context_status,
             snooze,
             reopen,
             list_connectors,
@@ -2693,9 +3768,12 @@ pub fn run() {
             api_usage,
             get_config,
             save_config,
+            folder_problem,
             connection_set_secrets,
             set_agent_model,
+            set_session_model,
             set_agent_mode,
+            set_session_mode,
             rate_pressure,
             item_context,
             context_add,
@@ -2703,6 +3781,9 @@ pub fn run() {
             context_remove,
             create_task,
             chat_open,
+            chat_clear,
+            chat_list,
+            chat_resume,
             chat_send,
             chat_stop,
             chat_interrupt,
@@ -2714,16 +3795,55 @@ pub fn run() {
             agent_activity,
             items_for_link,
             agent_slash_commands,
+            agent_subagents,
+            slash_arg_values,
+            chat_mentions,
+            chat_shell,
+            chat_rewind,
+            chat_rewind_preview,
+            agent_mcp_servers,
             agent_health,
             agent_upgrade,
             graph_view,
             graph_node,
             graph_delete,
-            ask_chat_open,
-            ask_chat_send,
+            coordinator_chat_open,
+            coordinator_chat_send,
+            coordinator_settings_save,
+            coordinator_history,
+            coordinator_segment,
+            coordinator_segment_messages,
+            coordinator_summary_save,
+            coordinator_compact,
+            project_resources,
+            project_resource_save,
+            project_resource_delete,
+            project_file_add,
+            vault::vault_status,
+            vault::vault_create,
+            vault::vault_unlock,
+            vault::vault_lock,
+            vault::vault_ask,
+            vault::vault_recover,
+            vault::vault_approve,
+            vault::vault_deny,
+            vault::vault_remove_device,
+            vault::vault_entries,
+            vault::vault_entry_save,
+            vault::vault_entry_delete,
+            vault::vault_reveal,
+            vault::vault_file_add,
+            vault::vault_file_export,
+            vault::vault_audit,
+            project_resource_reindex,
             project_notes,
             project_note_save,
             project_note_delete,
+            project_set_profile,
+            project_repos,
+            project_repo_save,
+            project_repo_delete,
+            project_items,
             review_chat_open,
             review_chat_send,
             approval_resolve,
@@ -2732,14 +3852,49 @@ pub fn run() {
             decision_providers,
             agent_models,
             agent_install,
+            agent_acp_adapter,
+            agent_install_adapter,
             mcp_info,
             hub_status,
+            account::account_status,
+            account::account_sign_in,
+            account::account_cancel_sign_in,
+            account::account_sign_out,
+            account::cloud_hub_status,
+            hub_move_to_cloud,
+            hub_move_to_local,
+            cloud_runner::runners,
+            cloud_runner::jobs_recent,
+            account::cloud_hubs,
+            account::cloud_hub_set_up,
             gh_status,
             usage_summary,
             gh_login,
+            remote_mcp::mcp_catalog,
+            remote_mcp::mcp_servers,
+            remote_mcp::mcp_probe,
+            remote_mcp::mcp_add,
+            remote_mcp::mcp_sign_in,
+            remote_mcp::mcp_sign_out,
+            remote_mcp::email_sign_in_status,
+            remote_mcp::email_sign_in,
+            remote_mcp::email_sign_out,
+            remote_mcp::mcp_remove,
+            remote_mcp::mcp_set_enabled,
+            remote_mcp::mcp_set_queue,
+            remote_mcp::mcp_tools,
+            remote_mcp::mcp_set_tool,
+            remote_mcp::mcp_cloud_states,
+            remote_mcp::mcp_set_cloud,
+            remote_mcp::mcp_cloud_sign_in,
+            remote_mcp::mcp_set_cloud_tool,
+            remote_mcp::cloud_job_gaps,
+            remote_mcp::mcp_import_scan,
+            remote_mcp::mcp_import,
             gh_install,
             github_pull,
             github_file,
+            review_file_bytes,
             github_review_action,
             review_workspace_prepare,
             review_workspace_file,
@@ -2762,11 +3917,24 @@ pub fn run() {
             workflow_templates,
             workflow_validate,
             workflow_save,
+            model_families_list,
+            model_family_save,
+            model_family_delete,
             workflow_set_enabled,
             workflow_delete,
             workflow_runs,
+            workflow_insights,
+            workflow_factory,
             workflow_versions,
             workflow_run,
+            workflow_activity,
+            item_workflow_runs,
+            workflow_run_view,
+            workflow_run_answer,
+            workflow_rerun,
+            workflow_suggestions,
+            job_chat_open,
+            job_chat_send,
             item_activity,
             workflow_chat_open,
             workflow_chat_send,

@@ -1,0 +1,34 @@
+name: Site
+
+# Deploys site/ to tabqueue.com (the Cloudflare Pages project "tabqueue")
+# on pushes to main that change it. There are no preview deploys.
+
+on:
+  push:
+    branches: [main]
+    paths: [site/**, .github/workflows/site.yml]
+  workflow_dispatch:
+
+concurrency:
+  group: site
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Run workflow from another branch would deploy it to production.
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      # wrangler straight from npx: wrangler-action finds pnpm-lock.yaml at
+      # the root and looks for pnpm, which this job doesn't need.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npx --yes wrangler@4 pages deploy site --project-name="$PROJECT" --branch=main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          PROJECT: ${{ vars.CLOUDFLARE_PAGES_PROJECT || 'tabqueue' }}

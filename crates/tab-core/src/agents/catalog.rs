@@ -1,6 +1,7 @@
 //! What tab knows about each agent harness, as data (`harnesses.json`): its
-//! name and command, its models (a fixed list, or a command that lists
-//! them), the ones shown first, and how to install and update it. The
+//! name and command, how to ask it for its models, and how to install and
+//! update it. Models always come from the harness itself, never a list
+//! kept here, so a new model shows up as soon as the harness offers it. The
 //! pickers and onboarding read this, so a new harness is a new entry plus
 //! its adapter, not new UI.
 
@@ -30,20 +31,87 @@ pub struct Harness {
     /// The model background helpers (titler, suggestions) use when none is
     /// set. `None` means the harness's own default.
     pub small_model: Option<String>,
-    /// Models it always offers.
-    #[serde(default)]
-    pub models: Vec<ModelSpec>,
-    /// A command that lists more, for harnesses that know their providers.
+    /// How to ask it which models it offers.
     pub list_models: Option<ListModels>,
-    /// Listed models shown first.
+    /// Its model in each built-in model family (`fast`, `balanced`,
+    /// `deep`), which seeds those families. Where the harness has aliases
+    /// that follow its releases (Claude Code's `haiku`), those.
     #[serde(default)]
-    pub common_models: Vec<String>,
+    pub families: std::collections::BTreeMap<String, String>,
     pub install: Install,
     pub upgrade: Upgrade,
     /// Where its installers put it, relative to home, for when the app's
     /// PATH doesn't include them yet.
     #[serde(default)]
     pub bin_dirs: Vec<String>,
+    /// How to run it over the Agent Client Protocol (see `agents::acp`),
+    /// for harnesses whose chats can go through it.
+    #[serde(default)]
+    pub acp: Option<AcpSpec>,
+}
+
+/// An ACP agent as data: the program, its arguments and environment, and
+/// what strict mode adds. A new ACP agent is a new entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AcpSpec {
+    /// The program; `None` runs the harness's own command (it speaks ACP).
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Added in strict mode, to keep the person's own setup out.
+    #[serde(default)]
+    pub strict_args: Vec<String>,
+    #[serde(default)]
+    pub strict_env: std::collections::BTreeMap<String, String>,
+    /// It can keep the person's own setup out. When it can't (codex-acp
+    /// has no way to skip `~/.codex/config.toml` or execpolicy rules),
+    /// strict chats stay on the harness's own adapter.
+    #[serde(default = "yes")]
+    pub strict: bool,
+    /// How it names MCP tools (`mcp__{server}__{tool}`,
+    /// `mcp.{server}.{tool}` or `{server}_{tool}`), so strict mode can spot
+    /// a server tab didn't add.
+    #[serde(default)]
+    pub mcp_tool_name: Option<String>,
+    /// Still in preview: chats use it only when the person turns it on
+    /// (`AgentConfig.acp`); otherwise it's the harness's only way to run.
+    #[serde(default)]
+    pub preview: bool,
+    /// The adapter, when it's a program of its own. Its license is checked
+    /// before tab offers it (see `every_acp_adapter_has_an_allowed_license`).
+    #[serde(default)]
+    pub adapter: Option<AcpAdapter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AcpAdapter {
+    pub npm: Option<String>,
+    pub repo: String,
+    /// SPDX id, as read from the repository.
+    pub license: String,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl AcpSpec {
+    pub fn args_for(&self, strict: bool) -> Vec<std::ffi::OsString> {
+        let extra = if strict { &self.strict_args[..] } else { &[] };
+        self.args.iter().chain(extra).map(Into::into).collect()
+    }
+
+    pub fn env_for(&self, strict: bool) -> Vec<(&str, &str)> {
+        let extra = strict.then_some(&self.strict_env).into_iter().flatten();
+        self.env
+            .iter()
+            .chain(extra)
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
 }
 
 /// How the app draws it.
@@ -64,9 +132,6 @@ pub struct Capabilities {
     /// Permission modes it takes; empty hides the picker.
     #[serde(default)]
     pub permission_modes: Vec<Choice>,
-    /// It can attach to a server the person runs (where strict can't apply).
-    #[serde(default)]
-    pub external_server: bool,
     /// It stops a turn past a spend cap (`per_turn_usd`).
     #[serde(default)]
     pub budget_cap: bool,
@@ -81,18 +146,19 @@ pub struct Choice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ModelSpec {
-    pub id: String,
-    pub label: String,
-    #[serde(default)]
-    pub common: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ListModels {
     pub args: Vec<String>,
+    /// Lines written to its stdin, for harnesses that answer over a
+    /// protocol. With these, tab reads until the answer arrives and then
+    /// stops the process; without, it waits for the command to finish.
+    #[serde(default)]
+    pub stdin: Vec<String>,
     /// How to read its output. `provider_slash_model_lines`: one
-    /// `provider/model` per line.
+    /// `provider/model` per line. `provider_model_table`: a table whose
+    /// first two columns are the provider and the model.
+    /// `claude_initialize`: the `models` of Claude Code's stream-json
+    /// `initialize` answer. `codex_model_list`: the app server's
+    /// `model/list` answer.
     pub format: String,
 }
 
@@ -116,9 +182,7 @@ pub struct Upgrade {
 
 impl Harness {
     pub fn kind(&self) -> Option<AgentKind> {
-        [AgentKind::ClaudeCode, AgentKind::OpenCode]
-            .into_iter()
-            .find(|k| k.as_str() == self.id)
+        AgentKind::ALL.into_iter().find(|k| k.as_str() == self.id)
     }
 
     /// The command that installs it on this computer, if tab can run one.
@@ -149,6 +213,23 @@ pub fn harnesses() -> &'static [Harness] {
     &HARNESSES
 }
 
+/// The model families tab ships: each lists every harness's model for it,
+/// in `harnesses.json` order.
+pub fn built_in_families() -> Vec<tab_domain::families::ModelFamily> {
+    use tab_domain::families::{BUILT_IN, Candidate, ModelFamily};
+    BUILT_IN
+        .iter()
+        .map(|id| ModelFamily {
+            id: id.to_string(),
+            name: format!("{}{}", id[..1].to_uppercase(), &id[1..]),
+            candidates: HARNESSES
+                .iter()
+                .filter_map(|h| h.families.get(*id).map(|m| Candidate::new(&h.id, m)))
+                .collect(),
+        })
+        .collect()
+}
+
 pub fn harness(kind: AgentKind) -> &'static Harness {
     HARNESSES
         .iter()
@@ -169,14 +250,18 @@ pub fn installed_elsewhere(kind: AgentKind) -> Option<PathBuf> {
     } else {
         vec![h.command.clone()]
     };
+    // Homebrew's folders too, which the app's PATH lacks when opened from
+    // Finder.
+    let system: &[&str] = if cfg!(windows) {
+        &[]
+    } else {
+        &["/opt/homebrew/bin", "/usr/local/bin"]
+    };
     h.bin_dirs
         .iter()
-        .flat_map(|d| {
-            names
-                .iter()
-                .map(|n| home.join(d).join(n))
-                .collect::<Vec<_>>()
-        })
+        .map(|d| home.join(d))
+        .chain(system.iter().map(PathBuf::from))
+        .flat_map(|d| names.iter().map(|n| d.join(n)).collect::<Vec<_>>())
         .find(|p| p.is_file())
 }
 
@@ -191,56 +276,144 @@ pub struct ModelOption {
     pub common: bool,
 }
 
-/// A harness's fixed models, then what its list command printed.
+/// The models a harness reported, read from what its list command printed.
 pub fn options(h: &Harness, listed: &str) -> Vec<ModelOption> {
     let Some(agent) = h.kind() else {
         return Vec::new();
     };
-    let mut seen = std::collections::HashSet::new();
-    let fixed = h.models.iter().map(|m| ModelOption {
-        agent,
-        id: m.id.clone(),
-        label: m.label.clone(),
-        common: m.common,
-    });
     let format = h.list_models.as_ref().map(|l| l.format.as_str());
-    let mut more: Vec<ModelOption> = match format {
+    let opt = |id: &str, label: &str, common: bool| ModelOption {
+        agent,
+        id: id.to_string(),
+        label: label.to_string(),
+        common,
+    };
+    let mut out: Vec<ModelOption> = match format {
         Some("provider_slash_model_lines") => listed
             .lines()
             .map(str::trim)
-            .filter(|l| {
-                !l.contains(char::is_whitespace)
-                    && l.split_once('/')
-                        .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty())
+            .filter(|l| !l.contains(char::is_whitespace))
+            .filter_map(|id| Some(opt(id, id.split_once('/')?.1, false)))
+            .collect(),
+        // A table whose first two columns are provider and model, under a
+        // `provider model …` header.
+        Some("provider_model_table") => {
+            let cols = |l: &str| {
+                let mut c = l.split_whitespace();
+                Some((c.next()?.to_string(), c.next()?.to_string()))
+            };
+            listed
+                .lines()
+                .skip_while(|l| cols(l).is_none_or(|(p, m)| p != "provider" || m != "model"))
+                .skip(1)
+                .filter_map(cols)
+                .map(|(p, m)| opt(&format!("{p}/{m}"), &m, false))
+                .collect()
+        }
+        // Claude Code lists its aliases (`opus`, `fable`) first, each with
+        // the model it stands for today, then pinned older ones. Chats keep
+        // the model itself, so a new release doesn't change a running chat;
+        // the aliases' models are the common ones. Its `default` is tab's
+        // "Default model" row.
+        Some("claude_initialize") => answer(listed, format)
+            .and_then(|v| v["response"]["response"]["models"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|m| {
+                let value = m["value"].as_str()?;
+                let id = m["resolvedModel"].as_str().unwrap_or(value);
+                let label = m["displayName"].as_str().unwrap_or(id);
+                (value != "default").then(|| opt(id, label, value != id))
             })
-            .map(|id| ModelOption {
-                agent,
-                id: id.into(),
-                label: id.split_once('/').map(|(_, m)| m).unwrap_or(id).into(),
-                common: h.common_models.iter().any(|c| c == id),
+            .collect(),
+        // Codex's own picker: every model it doesn't hide.
+        Some("codex_model_list") => answer(listed, format)
+            .and_then(|v| v["result"]["data"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter(|m| !m["hidden"].as_bool().unwrap_or(false))
+            .filter_map(|m| {
+                let id = m["model"].as_str().or(m["id"].as_str())?;
+                Some(opt(id, m["displayName"].as_str().unwrap_or(id), true))
             })
             .collect(),
         _ => Vec::new(),
     };
-    more.sort_by(|a, b| b.common.cmp(&a.common).then_with(|| a.id.cmp(&b.id)));
-    fixed
-        .chain(more)
-        .filter(|m| seen.insert(m.id.clone()))
-        .collect()
+    out.retain(|m| match format {
+        Some("provider_slash_model_lines" | "provider_model_table") => {
+            m.id.split_once('/')
+                .is_some_and(|(p, m)| !p.is_empty() && !m.is_empty())
+        }
+        _ => !m.id.is_empty(),
+    });
+    if !matches!(format, Some("claude_initialize" | "codex_model_list")) {
+        // Plain listings carry no order of their own.
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|m| seen.insert(m.id.clone()));
+    out
+}
+
+/// For a protocol listing, the line that answers tab's request.
+fn answer(listed: &str, format: Option<&str>) -> Option<serde_json::Value> {
+    listed
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| match format {
+            Some("claude_initialize") => {
+                v["type"] == "control_response" && v["response"]["request_id"] == "tab_models"
+            }
+            Some("codex_model_list") => v["id"] == 2,
+            _ => false,
+        })
 }
 
 async fn list_output(h: &Harness, exe: &Path) -> String {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let Some(list) = &h.list_models else {
         return String::new();
     };
-    let out = tokio::time::timeout(
-        Duration::from_secs(20),
-        command(exe).args(&list.args).output(),
-    )
-    .await;
-    match out {
-        Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-        _ => String::new(),
+    if list.stdin.is_empty() {
+        let out = tokio::time::timeout(
+            Duration::from_secs(20),
+            command(exe).args(&list.args).output(),
+        )
+        .await;
+        return match out {
+            Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => String::new(),
+        };
+    }
+    // A protocol: send the requests, keep stdin open (closing it can end
+    // the process before it answers), read until the answer, then stop it.
+    let format = Some(list.format.as_str());
+    let run = async {
+        let mut child = command(exe)
+            .args(&list.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let mut stdin = child.stdin.take()?;
+        let input: String = list.stdin.iter().map(|l| format!("{l}\n")).collect();
+        stdin.write_all(input.as_bytes()).await.ok()?;
+        let mut lines = BufReader::new(child.stdout.take()?).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if answer(&line, format).is_some() {
+                return Some(line);
+            }
+        }
+        None
+    };
+    match tokio::time::timeout(Duration::from_secs(30), run).await {
+        Ok(Some(line)) => line,
+        _ => {
+            tracing::warn!(harness = %h.id, "couldn't list the harness's models");
+            String::new()
+        }
     }
 }
 
@@ -251,8 +424,8 @@ impl AgentHub {
         super::agent_exe(&self.config(), kind).ok()
     }
 
-    /// Every model of every installed harness. Listed ones are kept for ten
-    /// minutes, since listing can ask each provider.
+    /// Every model of every installed harness, as each reports it. Kept for
+    /// ten minutes, since listing starts the harness and can ask providers.
     pub async fn models(&self) -> Vec<ModelOption> {
         use std::collections::HashMap;
         use std::sync::Mutex;
@@ -292,8 +465,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_adapter_has_metadata() {
+    fn a_custom_command_that_is_the_default_name_is_found_like_no_custom() {
         for kind in [AgentKind::ClaudeCode, AgentKind::OpenCode] {
+            let bare = default_command(kind);
+            assert_eq!(
+                super::super::find(kind, Some(bare)).ok(),
+                super::super::find(kind, None).ok()
+            );
+            assert_eq!(
+                super::super::find(kind, Some(&format!(" {bare} "))).ok(),
+                super::super::find(kind, None).ok()
+            );
+        }
+    }
+
+    #[test]
+    fn every_acp_adapter_has_an_allowed_license() {
+        // Same list as deny.toml: tab only offers adapters it could ship.
+        const ALLOWED: &[&str] = &["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC"];
+        for h in harnesses() {
+            if let Some(a) = h.acp.as_ref().and_then(|a| a.adapter.as_ref()) {
+                assert!(
+                    ALLOWED.contains(&a.license.as_str()),
+                    "{}: {}",
+                    h.id,
+                    a.license
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strict_adds_its_arguments_and_environment() {
+        let h = harness(AgentKind::OpenCode);
+        let acp = h.acp.as_ref().expect("OpenCode speaks ACP");
+        assert_eq!(acp.args_for(false), ["acp"]);
+        assert!(
+            acp.env_for(true)
+                .contains(&("OPENCODE_DISABLE_CLAUDE_CODE", "1"))
+        );
+        assert!(acp.env_for(false).is_empty());
+    }
+
+    #[test]
+    fn codex_runs_over_acp_through_its_adapter_when_turned_on() {
+        let acp = harness(AgentKind::Codex).acp.as_ref().expect("codex-acp");
+        assert_eq!(acp.command.as_deref(), Some("codex-acp"));
+        assert!(acp.preview);
+        // No way to skip the person's config.toml: strict chats use codex.rs.
+        assert!(!acp.strict);
+        assert!(harness(AgentKind::OpenCode).acp.as_ref().unwrap().strict);
+        let a = acp.adapter.as_ref().unwrap();
+        assert_eq!(a.npm.as_deref(), Some("@agentclientprotocol/codex-acp"));
+    }
+
+    #[test]
+    fn every_adapter_has_metadata() {
+        for kind in AgentKind::ALL {
             let h = harness(kind);
             assert_eq!(h.command, default_command(kind));
             assert!(h.install.npm.is_some() || h.install.unix.is_some());
@@ -304,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn listed_models_follow_the_fixed_ones_common_first() {
+    fn listed_models_are_sorted_and_deduplicated() {
         let oc = harness(AgentKind::OpenCode);
         let out = "Some notice\n\nopenai/gpt-5\nanthropic/claude-sonnet-5-5\nanthropic/claude-sonnet-5-5\nnot a model\nollama/qwen3:32b\n";
         let m = options(oc, out);
@@ -317,14 +545,67 @@ mod tests {
                 "openai/gpt-5"
             ]
         );
-        assert!(m[0].common && !m[1].common);
         assert_eq!(m[0].label, "claude-sonnet-5-5");
     }
 
     #[test]
-    fn a_fixed_list_needs_no_command() {
-        let m = options(harness(AgentKind::ClaudeCode), "");
-        assert!(m.iter().take_while(|m| m.common).count() >= 3);
-        assert!(m.iter().all(|m| m.agent == AgentKind::ClaudeCode));
+    fn a_model_table_reads_its_first_two_columns() {
+        let pi = harness(AgentKind::Pi);
+        let out = "Warning: errors loading models.json\nprovider   model              context  max-out  thinking  images\nanthropic  claude-sonnet-5-5  1M       64K      yes       yes\nopenai     gpt-6-sol          400K     128K     yes       yes\n";
+        let ids: Vec<_> = options(pi, out).into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, ["anthropic/claude-sonnet-5-5", "openai/gpt-6-sol"]);
+    }
+
+    #[test]
+    fn claude_codes_models_come_from_its_initialize_answer() {
+        let out = r#"{"type":"system","subtype":"other"}
+{"type":"control_response","response":{"subtype":"success","request_id":"tab_models","response":{"models":[{"value":"default","resolvedModel":"claude-opus-5-5","displayName":"Default (recommended)"},{"value":"opus","resolvedModel":"claude-opus-5-5","displayName":"Opus 5.5"},{"value":"fable","resolvedModel":"claude-fable-5-2","displayName":"Fable 5.2"},{"value":"claude-fable-5-1","resolvedModel":"claude-fable-5-1","displayName":"Fable 5.1"},{"value":"claude-opus-4-8","displayName":"Opus 4.8"}]}}}"#;
+        let m: Vec<_> = options(harness(AgentKind::ClaudeCode), out)
+            .into_iter()
+            .map(|m| (m.id, m.label, m.common))
+            .collect();
+        let row = |id: &str, label: &str, common| (id.to_string(), label.to_string(), common);
+        assert_eq!(
+            m,
+            [
+                row("claude-opus-5-5", "Opus 5.5", true),
+                row("claude-fable-5-2", "Fable 5.2", true),
+                row("claude-fable-5-1", "Fable 5.1", false),
+                row("claude-opus-4-8", "Opus 4.8", false),
+            ]
+        );
+    }
+
+    #[test]
+    fn codexs_models_come_from_its_app_server() {
+        let out = r#"{"id":2,"result":{"data":[{"id":"gpt-6-astra","model":"gpt-6-astra","displayName":"GPT-6-Astra","hidden":false,"isDefault":true},{"id":"secret","model":"secret","displayName":"Secret","hidden":true}],"nextCursor":null}}"#;
+        let m = options(harness(AgentKind::Codex), out);
+        assert_eq!(m.len(), 1);
+        assert_eq!(
+            (m[0].id.as_str(), m[0].label.as_str()),
+            ("gpt-6-astra", "GPT-6-Astra")
+        );
+    }
+
+    #[test]
+    fn no_harness_keeps_a_model_list_of_its_own() {
+        for h in harnesses() {
+            assert!(h.list_models.is_some(), "{} can't list its models", h.id);
+            assert!(options(h, "").is_empty(), "{}", h.id);
+        }
+    }
+
+    #[test]
+    fn built_in_families_are_seeded_from_every_harness_in_order() {
+        let all = built_in_families();
+        let ids: Vec<_> = all.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, ["fast", "balanced", "deep"]);
+        assert_eq!(all[0].name, "Fast");
+        for f in &all {
+            assert!(tab_domain::families::check(f).is_none(), "{f:?}");
+            assert_eq!(f.candidates[0].harness, "claude_code", "{f:?}");
+            assert_eq!(f.candidates.len(), harnesses().len(), "{f:?}");
+        }
+        assert_eq!(all[0].candidates[0].model, "haiku");
     }
 }

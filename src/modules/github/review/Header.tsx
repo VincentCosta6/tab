@@ -154,7 +154,7 @@ function copy(text: string) {
   navigator.clipboard?.writeText(text).catch(() => {});
 }
 
-export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () => void; local: boolean; onRefresh: () => void; refreshing: boolean }) {
+export function Header({ onBack, onMerged, local, onRefresh, refreshing }: { onBack: () => void; onMerged?: () => void; local: boolean; onRefresh: () => void; refreshing: boolean }) {
   const { pr, act, notify, ai } = useReview();
   const [menu, setMenu] = useState(false);
   const [submit, setSubmit] = useState(false);
@@ -196,14 +196,14 @@ export function Header({ onBack, local, onRefresh, refreshing }: { onBack: () =>
       body: <>This merges <code>{pr.head_ref}</code> into <code>{pr.base_ref}</code> on GitHub. It can't be undone from here.</>,
       confirm: label,
       merge: true,
-      run: () => act({ type: "merge", method }).then(() => notify("Merged", "success")),
+      run: () => act({ type: "merge", method }).then(() => (notify("Merged", "success"), onMerged?.())),
     });
   };
 
   return (
     <header className="rv-header">
       <div className="rv-header-row">
-        <Button size="sm" variant="ghost" icon="arrow-left" onClick={onBack} title="Back to reviews" />
+        <Button size="sm" variant="ghost" icon="arrow-left" onClick={onBack} title="Back" />
         <Brand name="github" size={18} />
         <div className="rv-title">
           <h1 title={pr.title}>{pr.title} <span className="subtle">#{pr.number}</span></h1>

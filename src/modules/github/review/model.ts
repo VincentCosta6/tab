@@ -67,7 +67,7 @@ export function checkSummary(c: ReturnType<typeof checkCounts>) {
 
 /** The PR's lifecycle state, shown first in the header. */
 export function statePill(pr: PullReview): Pill {
-  if (pr.state === "merged") return { key: "state", label: "Merged", tone: "accent", icon: "git-merge" };
+  if (pr.state === "merged") return { key: "state", label: "Merged", tone: "merged", icon: "git-merge" };
   if (pr.state === "closed") return { key: "state", label: "Closed", tone: "danger", icon: "git-pull-request-closed" };
   if (pr.draft) return { key: "state", label: "Draft", tone: "neutral", icon: "git-pull-request-draft" };
   return { key: "state", label: "Open", tone: "success", icon: "git-pull-request" };

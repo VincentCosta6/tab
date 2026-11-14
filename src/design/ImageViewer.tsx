@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
-import { fileName, isImagePath, isLocalPath, openImages, useImageSrc, type ViewerImage } from "../lib/images";
+import { fileName, isImagePath, isLocalPath, MISSING_IMAGE, openImages, useImage, useImageSrc, type ViewerImage } from "../lib/images";
 import { useStage } from "../lib/stage";
 import { Icon } from "./icons";
 
@@ -52,7 +52,7 @@ export function ImageViewer() {
   });
 
   const current = state?.images[state.index];
-  const src = useImageSrc(current?.src);
+  const { url: src, failed } = useImage(current?.src);
   if (!state || !current) return null;
 
   return (
@@ -93,7 +93,7 @@ export function ImageViewer() {
           }}
         />
       ) : (
-        <div className="iv-loading">Loading…</div>
+        <div className="iv-loading">{failed ? MISSING_IMAGE : "Loading…"}</div>
       )}
     </div>
   );

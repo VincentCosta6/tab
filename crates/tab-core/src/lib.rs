@@ -20,31 +20,47 @@
 //! under their old paths (`tab_core::model`, `tab_core::links`, ...), so code
 //! that used them doesn't change. See `docs/ARCHITECTURE.md` for the crate map.
 
+pub mod account;
 pub mod agents;
+pub mod cloud;
+pub mod cloud_link;
 pub mod config;
 pub mod connector;
 pub mod connectors;
 pub mod decisions;
 pub mod deps;
+pub mod e2e;
 pub mod embed;
 pub mod engine;
 pub mod gateway;
 pub mod gh;
 pub mod hub_tls;
+pub mod jobs;
+pub mod knowledge;
+pub mod leases;
+pub mod limits;
 pub mod live;
 pub mod local_hub;
 pub mod lsp;
+pub mod mail_oauth;
 pub mod mcp;
+pub mod named_files;
+pub mod net;
 pub mod ranker;
 pub mod ratelimit;
+pub mod remote_mcp;
 pub mod sandbox;
+pub mod secrets;
+pub mod shell_path;
 pub mod storage;
 pub mod store;
+pub mod term;
 pub mod usage;
+pub mod vault;
 pub mod workflow;
 pub mod workspace;
 
-pub use tab_domain::{links, model};
+pub use tab_domain::{families, links, model, runner};
 
 pub use config::TabConfig;
 pub use engine::{Change, Engine, EngineEvent, EngineHandle};

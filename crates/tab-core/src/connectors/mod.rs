@@ -66,6 +66,10 @@ pub fn build_enabled(
         let Some(c) = cfg.connector(&id) else {
             continue;
         };
+        // Set to run in tab cloud: the cloud runner polls it, not this app.
+        if !c.runs_here() {
+            continue;
+        }
         match f.build(c, gateway.clone()) {
             Some(Ok(conn)) => ok.push(conn),
             Some(Err(e)) => failed.push((id, e.to_string())),

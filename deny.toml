@@ -1,0 +1,70 @@
+# Licenses and sources for every crate tab builds, including git
+# dependencies and everything they pull in. CI runs `cargo deny check` on
+# every pull request; see CLAUDE.md ("Third-party code").
+
+[graph]
+all-features = true
+
+[licenses]
+# Licenses tab's FSL-1.1-MIT code can ship with. Add one only after reading
+# it; copyleft (GPL, AGPL, LGPL) never goes on this list.
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CC0-1.0",
+  # Mozilla's CA list (webpki-roots), data under a permissive license.
+  "CDLA-Permissive-2.0",
+  # File-level copyleft: fine to depend on unmodified (Tauri's cssparser,
+  # selectors, dtoa-short; option-ext). Changing an MPL file means
+  # publishing that file's changes, so tab never patches or copies one.
+  "MPL-2.0",
+]
+confidence-threshold = 0.9
+# tab's own crates, by name. Not `private = { ignore = true }`: Zed marks its
+# crates `publish = false`, so that would skip exactly the crates this file
+# is here to check.
+exceptions = [
+  { crate = "tab", allow = ["FSL-1.1-MIT"] },
+  { crate = "tab-core", allow = ["FSL-1.1-MIT"] },
+  { crate = "tab-domain", allow = ["FSL-1.1-MIT"] },
+  { crate = "tab-hub", allow = ["FSL-1.1-MIT"] },
+  { crate = "tab-protocol", allow = ["FSL-1.1-MIT"] },
+  { crate = "tab-runner", allow = ["FSL-1.1-MIT"] },
+  { crate = "tab-store", allow = ["FSL-1.1-MIT"] },
+]
+
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+# Belt and braces: Zed's GPL crates, by name (the license check catches them
+# anyway). `text` and `ui` are left out: crates.io crates share those names.
+deny = [
+  { crate = "editor" },
+  { crate = "multi_buffer" },
+  { crate = "buffer_diff" },
+  { crate = "rope" },
+  { crate = "language" },
+  { crate = "lsp" },
+  { crate = "terminal" },
+  { crate = "markdown" },
+  { crate = "extension_host" },
+  { crate = "project" },
+  { crate = "workspace" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/zed-industries/zed"]
+
+[advisories]
+# Licenses are what this file is for; advisories run but don't fail the build yet.
+unmaintained = "none"

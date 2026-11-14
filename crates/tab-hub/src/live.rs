@@ -131,6 +131,12 @@ impl<S: HubStore> Hub<S> {
         id: u64,
         p: pb::Publish,
     ) -> Result<Handled, Refused> {
+        if p.event_json.len() > crate::MAX_LIVE_BYTES {
+            return Err(Refused::new(
+                pb::error::Code::BadRequest,
+                format!("a live event is at most {} bytes", crate::MAX_LIVE_BYTES),
+            ));
+        }
         match self.runner(&p.session) {
             None => {
                 return Err(Refused::new(
@@ -173,6 +179,15 @@ impl<S: HubStore> Hub<S> {
         id: u64,
         st: pb::Steer,
     ) -> Result<Handled, Refused> {
+        if st.body_json.len() > crate::MAX_LIVE_BYTES {
+            return Err(Refused::new(
+                pb::error::Code::BadRequest,
+                format!(
+                    "a steering message is at most {} bytes",
+                    crate::MAX_LIVE_BYTES
+                ),
+            ));
+        }
         let Some(runner) = self.runner(&st.session) else {
             return Err(Refused::new(
                 pb::error::Code::BadRequest,

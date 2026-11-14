@@ -1,14 +1,26 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, Card, PageHeader, Section, StatusDot, Tabs, Toggle, cx } from "../../design/components";
 import { Brand, hasBrand } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
 import { useConfig, useSaveConfig, useSearchIndex } from "../../lib/hooks";
-import type { ConnectorInfo, ConnectorStatus, Tone } from "../../lib/types";
+import type { ConnectorInfo, ConnectorStatus, RunsOn, Tone } from "../../lib/types";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api } from "../../lib/api";
+import { keys } from "../../lib/query";
+import { showTab } from "../../lib/nav";
+import { asFailure } from "../../lib/protocol/cloud";
+import { openSettings } from "../settings/SettingsTab";
 import { startSetupChat } from "../work/Chat";
 import { ApiUsage } from "./ApiUsage";
 import { GhConnect } from "./GhConnect";
+import { EmailSignIn, usesMailSignIn } from "./EmailSignIn";
+import { ImportBanner, ImportDialog } from "./ClaudeImport";
+import { AddByUrl, Caps, McpCatalogCard, McpDetail, McpInstalledRow, useConnect, useMcpCatalog, useMcpServers } from "./RemoteMcp";
+
+/** Connectors whose sign-in agents also use in chats (tab's own tools, `gh` and `git`). */
+const agentToolConnectors = new Set(["tab", "github"]);
 
 type View = "installed" | "marketplace" | "usage";
 
@@ -21,6 +33,7 @@ export function statusView(s: ConnectorStatus, available: boolean): { tone: Tone
     case "rate_limited": return { tone: "warning", text: `Rate limited, resumes in ${timeUntil(s.until)}` };
     case "error": return { tone: "danger", text: s.message };
     case "stopped": return { tone: "neutral", text: "Stopped" };
+    case "in_cloud": return { tone: "accent", text: "Runs in tab cloud" };
   }
 }
 
@@ -39,20 +52,57 @@ const shelves: { id: string; label: string }[] = [
   { id: "built_in", label: "Built in" },
 ];
 
+let requested: string | null = null;
+
+/** Opens Connections from anywhere, at a connection (`mcp:<id>` for a remote MCP one) or the list. */
+export function openConnection(open: string | null = null) {
+  requested = open;
+  window.dispatchEvent(new CustomEvent("tab:open-connection", { detail: open }));
+  showTab("connections");
+}
+
 export function ConnectionsTab() {
   const { connectors } = useApp();
   const [view, setView] = useState<View>("installed");
-  const [open, setOpen] = useState<string | null>(null);
+  // A connector id, or `mcp:<id>` for a remote MCP connection.
+  const [open, setOpen] = useState<string | null>(() => requested);
+  useEffect(() => {
+    requested = null;
+    const go = (e: Event) => { setOpen((e as CustomEvent<string | null>).detail); requested = null; };
+    window.addEventListener("tab:open-connection", go);
+    return () => window.removeEventListener("tab:open-connection", go);
+  }, []);
   const installed = connectors.filter((c) => c.enabled);
   const current = connectors.find((c) => c.id === open);
+  const { data: servers = [] } = useMcpServers();
+  const { data: catalog = [] } = useMcpCatalog();
+  const added = new Set(servers.map((x) => x.catalog).filter(Boolean));
+  const available = catalog.filter((e) => !added.has(e.id));
+  const colorOf = (catalogId?: string | null) => catalog.find((e) => e.id === catalogId)?.color;
+  const onConnected = useCallback((id: string) => setOpen(`mcp:${id}`), []);
+  const connect = useConnect(onConnected);
+  const taken = servers.map((x) => x.id);
+  const [importing, setImporting] = useState(false);
+  const importDialog = importing && <ImportDialog onClose={() => setImporting(false)} onOpen={(id) => setOpen(`mcp:${id}`)} />;
 
   if (current) return <ConnectorDetail c={current} onBack={() => setOpen(null)} />;
+  if (open?.startsWith("mcp:")) {
+    const id = open.slice(4);
+    return <McpDetail id={id} color={colorOf(servers.find((x) => x.id === id)?.catalog)} onBack={() => setOpen(null)} />;
+  }
+  const connectEntry = (e: (typeof catalog)[number]) => {
+    let id = e.id;
+    for (let n = 2; taken.includes(id); n++) id = `${e.id}-${n}`;
+    void connect
+      .add({ id, name: e.name, url: e.url, signIn: true, catalog: e.id, color: e.color })
+      .catch((err) => connect.setError(String(err)));
+  };
 
   return (
     <div className="page">
       <PageHeader
         title="Connections"
-        subtitle="Everything tab knows comes in through a connection. Each one brings its own kinds of work, settings and rate budgets."
+        subtitle="Each connection can bring work into your queue, give agents tools to act there, or both."
         actions={<AssistButton />}
       />
       <div className="page-tabs">
@@ -60,36 +110,57 @@ export function ConnectionsTab() {
           value={view}
           onChange={setView}
           items={[
-            { value: "installed", label: "Installed", count: installed.length },
-            { value: "marketplace", label: "Marketplace", count: connectors.filter((c) => !c.enabled).length },
+            { value: "installed", label: "Installed", count: installed.length + servers.length },
+            { value: "marketplace", label: "Marketplace", count: connectors.filter((c) => !c.enabled).length + available.length },
             { value: "usage", label: "API usage" },
           ]}
         />
       </div>
+      {view !== "usage" && <ImportBanner onReview={() => setImporting(true)} />}
       {view === "installed" && (
         <div className="connector-list">
           {installed.map((c) => (
             <InstalledRow key={c.id} c={c} onOpen={() => setOpen(c.id)} />
+          ))}
+          {servers.map((x) => (
+            <McpInstalledRow key={x.id} s={x} color={colorOf(x.catalog)} onOpen={() => setOpen(`mcp:${x.id}`)} />
           ))}
           <button className="connector-add" onClick={() => setView("marketplace")}>
             <Icon name="store" size={16} /> Browse the marketplace
           </button>
         </div>
       )}
+      {connect.error && <p className="chat-error">{connect.error}</p>}
       {view === "marketplace" &&
         shelves.map((shelf) => {
           const items = connectors.filter((c) => (c.category || "built_in") === shelf.id && !c.enabled);
-          if (!items.length) return null;
+          const remote = available.filter((e) => e.category === shelf.id);
+          if (!items.length && !remote.length) return null;
           return (
             <Section key={shelf.id} title={shelf.label}>
               <div className="connector-grid">
                 {items.map((c) => (
                   <MarketCard key={c.id} c={c} onOpen={() => setOpen(c.id)} />
                 ))}
+                {remote.map((e) => (
+                  <McpCatalogCard key={e.id} entry={e} onConnect={() => connectEntry(e)} />
+                ))}
               </div>
             </Section>
           );
         })}
+      {view === "marketplace" && (
+        <Section title="Advanced" description="Any service with a remote MCP server works too: tab signs in for you when it asks.">
+          <div className="connector-list">
+            <AddByUrl onAdd={connect.add} />
+            <button className="connector-add" onClick={() => setImporting(true)}>
+              <Icon name="download" size={15} /> Import MCP servers from Claude Code
+            </button>
+          </div>
+        </Section>
+      )}
+      {connect.dialog}
+      {importDialog}
       {view === "usage" && <ApiUsage />}
     </div>
   );
@@ -158,6 +229,7 @@ function MarketCard({ c, onOpen }: { c: ConnectorInfo; onOpen: () => void }) {
         {c.available && <Button size="sm" variant="primary" onClick={onOpen}>Install</Button>}
       </div>
       <p className="connector-desc">{c.description}</p>
+      <Caps queue={c.kinds.length > 0} tools={agentToolConnectors.has(c.id)} />
       {c.features.length > 0 && (
         <ul className="feature-list">
           {c.features.slice(0, 2).map((f) => (
@@ -181,13 +253,15 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
   useEffect(() => setDraft(saved?.settings ?? {}), [saved]);
 
   // GitHub's token lives in the sign-in card, next to the GitHub CLI login.
-  const settings = c.id === "github" ? c.settings.filter((f) => f.key !== "token") : c.settings;
-  const missingRequired = c.settings.some((f) => f.required && !String(draft[f.key] ?? "").trim());
+  // Email signed in with Google or Microsoft has no password.
+  const hidden = c.id === "github" ? "token" : c.id === "email" && usesMailSignIn(draft) ? "password" : null;
+  const settings = c.settings.filter((f) => f.key !== hidden);
+  const missingRequired = c.settings.some((f) => f.required && f.key !== hidden && !String(draft[f.key] ?? "").trim());
   const write = async (enabled: boolean) => {
     if (!config) return;
     setError(null);
     try {
-      await save.mutateAsync({ ...config, connectors: { ...config.connectors, [c.id]: { enabled, settings: draft } } });
+      await save.mutateAsync({ ...config, connectors: { ...config.connectors, [c.id]: { ...saved, enabled, settings: draft } } });
     } catch (e) {
       setError(String(e));
     }
@@ -239,7 +313,11 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
         </Section>
       )}
 
+      {c.id === "email" && c.available && <EmailSignIn auth={saved?.settings?.auth} />}
+
       {c.id === "tab" && <SearchIndexCard />}
+
+      {c.enabled && !c.builtin && <RunsOnCard c={c} />}
 
       {settings.length > 0 && (
         <Section title="Settings">
@@ -298,6 +376,56 @@ function ConnectorDetail({ c, onBack }: { c: ConnectorInfo; onBack: () => void }
         </Section>
       )}
     </div>
+  );
+}
+
+/**
+ * Where a connection runs: on this computer (it stops while the computer
+ * sleeps), or in tab cloud, where the hub's runner keeps it going. Each
+ * connection is set on its own, so one can stay on this machine.
+ */
+function RunsOnCard({ c }: { c: ConnectorInfo }) {
+  const qc = useQueryClient();
+  const { data: config } = useConfig();
+  const hub = useQuery({ queryKey: ["hub-status"], queryFn: api.hubStatus });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const runsOn: RunsOn = config?.connectors[c.id]?.runs_on ?? "this_computer";
+  const moved = !!hub.data?.cloud_hub;
+  const pick = async (next: RunsOn) => {
+    if (next === runsOn) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const saved = await api.connectionRunsOn(c.id, next);
+      qc.setQueryData(keys.config, saved);
+    } catch (e) {
+      setError(asFailure(e).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Section title="Where it runs" description="Each connection runs in one place, so nothing comes into your queue twice.">
+      <Card>
+        <div className="runs-on" role="radiogroup" aria-label="Where it runs">
+          <button role="radio" aria-checked={runsOn === "this_computer"} className={cx("runs-on-option", runsOn === "this_computer" && "active")} disabled={busy} onClick={() => void pick("this_computer")}>
+            <Icon name="monitor" size={18} />
+            <span><strong>This computer</strong><small>Its sign-in stays here. It pauses while this computer is off or asleep.</small></span>
+          </button>
+          <button role="radio" aria-checked={runsOn === "cloud"} className={cx("runs-on-option", runsOn === "cloud" && "active")} disabled={busy || !moved} onClick={() => void pick("cloud")}>
+            <Icon name="cloud" size={18} />
+            <span><strong>tab cloud</strong><small>Keeps running when every computer is off. The sign-in you entered for it is kept encrypted in your hub; your GitHub CLI login never leaves this computer.</small></span>
+          </button>
+        </div>
+        {!moved && (
+          <p className="subtle runs-on-note">
+            To run it in tab cloud, move your work there first. <button className="link-btn" onClick={() => openSettings("hub")}>Settings → Hub</button>
+          </p>
+        )}
+        {error && <p className="chat-error">{error}</p>}
+      </Card>
+    </Section>
   );
 }
 

@@ -10,6 +10,7 @@
 //! - [`workflow`]: workflow definitions, validation and templates.
 //! - [`decision`]: questions for decision models and their typed answers.
 //! - [`links`]: recognizing links agents create or mention.
+//! - [`runner`]: runners, jobs, and the leases that decide who does what.
 //!
 //! Every place a hub runs uses this crate: the desktop engine (`tab-core`),
 //! the hub library (`tab-hub`), and later the Cloudflare Worker. So nothing
@@ -19,11 +20,13 @@
 pub mod blob;
 pub mod cli;
 pub mod decision;
+pub mod families;
 pub mod lease;
 pub mod links;
 pub mod model;
 pub mod ops;
 pub mod rules;
+pub mod runner;
 pub mod workflow;
 
 pub use cli::*;

@@ -513,6 +513,40 @@ pub async fn file_at(gw: &Gateway, repo: &str, sha: &str, path: &str) -> anyhow:
     }
 }
 
+/// A file's bytes at a commit, for showing images in the review. The contents
+/// API sends files up to 1 MB as base64 inside its JSON; bigger ones come back
+/// without content and read as empty. Not cached here: the cache keys on the
+/// URL, which `file_at` shares with a different response. The UI keeps them.
+pub async fn file_bytes_at(
+    gw: &Gateway,
+    repo: &str,
+    sha: &str,
+    path: &str,
+) -> anyhow::Result<Vec<u8>> {
+    use base64::Engine;
+    let call = Call::get(
+        "github",
+        "github",
+        "review: file bytes",
+        format!("{API}/repos/{repo}/contents/{path}"),
+    )
+    .query("ref", sha);
+    let body: Value = match gw.send(call).await {
+        Ok(r) => r.json()?,
+        Err(crate::gateway::GatewayError::Http { status: 404, .. }) => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    if body["encoding"].as_str() != Some("base64") {
+        return Ok(Vec::new());
+    }
+    let b64: String = body["content"]
+        .as_str()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect();
+    Ok(base64::engine::general_purpose::STANDARD.decode(b64)?)
+}
+
 /// What the UI knows about the PR that every action needs.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrRef {
@@ -1069,13 +1103,16 @@ pub struct LinkSummary {
     pub merge_state: Option<String>,
     pub review_decision: Option<String>,
     pub open_threads: Option<u32>,
+    /// PRs: lines added and removed across the diff.
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
 }
 
 const LINK_PULL_QUERY: &str = r#"
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      title state isDraft merged updatedAt mergeable mergeStateStatus reviewDecision
+      title state isDraft merged updatedAt mergeable mergeStateStatus reviewDecision additions deletions
       author { login }
       reviewThreads(first: 100) { nodes { isResolved } }
       commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
@@ -1161,6 +1198,8 @@ pub async fn link_summary(
                 merge_state: None,
                 review_decision: None,
                 open_threads: None,
+                additions: None,
+                deletions: None,
             })
         }
         "commit" => {
@@ -1180,6 +1219,8 @@ pub async fn link_summary(
                 merge_state: None,
                 review_decision: None,
                 open_threads: None,
+                additions: None,
+                deletions: None,
             })
         }
         _ => anyhow::bail!("tab doesn't summarise GitHub {what} links"),
@@ -1229,6 +1270,8 @@ fn pull_summary(pr: &Value) -> LinkSummary {
         merge_state,
         review_decision: Some(lower(pr, "reviewDecision")).filter(|s| !s.is_empty()),
         open_threads,
+        additions: pr["additions"].as_u64(),
+        deletions: pr["deletions"].as_u64(),
     }
 }
 
@@ -1246,7 +1289,7 @@ query {
   search(query: "is:pr is:open author:@me archived:false sort:updated-desc", type: ISSUE, first: 50) {
     nodes {
       ... on PullRequest {
-        number url title state isDraft merged updatedAt mergeable mergeStateStatus reviewDecision
+        number url title state isDraft merged updatedAt mergeable mergeStateStatus reviewDecision additions deletions
         author { login }
         repository { nameWithOwner }
         reviewThreads(first: 100) { nodes { isResolved } }
@@ -1360,6 +1403,8 @@ mod link_cache_tests {
             merge_state: None,
             review_decision: None,
             open_threads: None,
+            additions: None,
+            deletions: None,
         };
         LINK_CACHE
             .lock()

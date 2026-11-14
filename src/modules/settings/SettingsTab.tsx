@@ -5,14 +5,13 @@ import { Button, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
 import type { TabConfig } from "../../lib/types";
-import { useAppUpdate } from "../updates/appUpdate";
+import { useUpdates } from "../updates/UpdatesBadge";
 import { DraftContext } from "./draft";
 import { AgentsPage } from "./pages/Agents";
-import { GeneralPage } from "./pages/General";
+import { AccountPage } from "./pages/Account";
 import { HubPage } from "./pages/Hub";
 import { McpPage } from "./pages/Mcp";
 import { RankingPage } from "./pages/Ranking";
-import { SandboxPage } from "./pages/Sandbox";
 import { StoragePage } from "./pages/Storage";
 import { UpdatesPage } from "./pages/Updates";
 
@@ -27,12 +26,11 @@ interface Page {
 
 // A new settings page is one entry here and one file in pages/.
 const pages: Page[] = [
-  { id: "general", label: "General", icon: "user", component: GeneralPage, edits: (c) => c.profile },
-  { id: "agents", label: "Agents", icon: "bot", component: AgentsPage, edits: (c) => c.agent },
+  { id: "account", label: "Account", icon: "user", component: AccountPage, edits: (c) => c.profile },
+  { id: "hub", label: "Hub", icon: "cloud", component: HubPage, edits: (c) => c.hub },
+  { id: "agents", label: "Agents", icon: "bot", component: AgentsPage, edits: (c) => [c.agent, c.sandbox] },
   { id: "ranking", label: "Ranking", icon: "filter", component: RankingPage, edits: (c) => c.ranking },
-  { id: "sandbox", label: "Sandbox", icon: "shield", component: SandboxPage, edits: (c) => c.sandbox },
   { id: "storage", label: "Storage", icon: "folder", component: StoragePage, edits: (c) => c.storage },
-  { id: "hub", label: "Hub", icon: "cloud", component: HubPage },
   { id: "mcp", label: "MCP server", icon: "terminal", component: McpPage },
   { id: "updates", label: "Updates", icon: "refresh", component: UpdatesPage },
 ];
@@ -62,7 +60,7 @@ export function SettingsTab() {
   const [note, setNote] = useState<string | null>(null);
   const [pageId, setPageId] = useState(initialPage);
   const qc = useQueryClient();
-  const { check } = useAppUpdate();
+  const updates = useUpdates();
 
   useEffect(() => {
     api.getConfig().then((c) => (setSaved(c), setDraft(c)));
@@ -98,7 +96,9 @@ export function SettingsTab() {
 
   if (!draft || !saved || !ctx) return <div className="page"><div className="skeleton" /></div>;
 
-  const page = pages.find((p) => p.id === pageId) ?? pages[0];
+  // Pages that moved: General became Account, Sandbox is part of Agents.
+  const moved: Record<string, string> = { general: "account", sandbox: "agents" };
+  const page = pages.find((p) => p.id === (moved[pageId] ?? pageId)) ?? pages[0];
   const changed = (p: Page) => !!p.edits && JSON.stringify(p.edits(draft)) !== JSON.stringify(p.edits(saved));
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved);
 
@@ -127,7 +127,7 @@ export function SettingsTab() {
             <Icon name={p.icon} size={15} />
             <span>{p.label}</span>
             {changed(p) && <span className="settings-nav-dot" title="Unsaved changes" />}
-            {p.id === "updates" && check.data && <span className="settings-nav-badge" title={`${check.data.version} available`}>1</span>}
+            {p.id === "updates" && updates.length > 0 && <span className="settings-nav-badge" title={`${updates.join(" and ")} available`}>{updates.length}</span>}
           </button>
         ))}
       </nav>

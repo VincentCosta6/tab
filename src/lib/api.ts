@@ -3,12 +3,15 @@
 // and screenshotted without the desktop shell.
 
 import type {
-  AgentKind, AgentProbe, AuditEntry, DecisionProvider, Harness, ModelOption, Chat, ChatStarted, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  AgentActivity, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem,
-  RateLimitState, ReviewAction, HubStatus, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
-  Activity, Issue, Workflow, WorkflowRun, AppVersion, AppUpdate, AppUpdateProgress,
+  AgentKind, AgentProbe, AuditEntry, DecisionProvider, Harness, ModelOption, Chat, ChatStarted, ChatSummary, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
+  AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceAccess, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem, SlashCommand, Subagent,
+  RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
+  Activity, Issue, Suggestion, Workflow, WorkflowRun, ItemWorkflowStatus, RunView, WorkflowFactory, WorkflowInsights, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, ModelFamily, Runner, RunsOn,
+  AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
+  EmailSignInStatus, MailProvider, Segment, SessionMessage, ChatRewound, RewoundFiles, VaultAudit, VaultEntry, VaultEntryInput, VaultStatus,
 } from "./types";
 import { mockApi } from "./mock";
+import { HubListSchema, HubStatusSchema, RunnerStatusSchema, decode } from "./protocol/cloud";
 
 export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -48,6 +51,9 @@ export const api = {
   contextRemove: (id: string) => call<void>("context_remove", { id }),
   createTask: (task: NewTask) => call<QueueItem>("create_task", { task }),
   chatOpen: (itemId: string) => call<Chat>("chat_open", { itemId }),
+  chatClear: (itemId: string) => call<Chat>("chat_clear", { itemId }),
+  chatList: (itemId: string) => call<ChatSummary[]>("chat_list", { itemId }),
+  chatResume: (sessionId: string) => call<Chat>("chat_resume", { sessionId }),
   chatSend: (itemId: string | null, text: string, projectId?: string | null, attachments: string[] = []) => call<ChatStarted>("chat_send", { itemId, text, projectId: projectId ?? null, attachments }),
   attachmentSave: async (name: string, bytes: Uint8Array): Promise<string> => {
     if (!inTauri) return mockApi.invoke<string>("attachment_save", { name, bytes });
@@ -56,15 +62,39 @@ export const api = {
   },
   imageRead: (path: string) => call<ArrayBuffer>("image_read", { path }),
   fileRead: (path: string) => call<ArrayBuffer>("file_read", { path }),
+  /** Per path, `[modified ms, size]`, or null once the file is gone. */
+  fileStamps: (paths: string[]) => call<([number, number] | null)[]>("file_stamps", { paths }),
   fileOpen: (path: string, reveal = false) => call<void>("file_open", { path, reveal }),
   startDictation: () => call<void>("start_dictation"),
   agentActivity: () => call<AgentActivity[]>("agent_activity"),
-  slashCommands: () => call<string[]>("agent_slash_commands"),
+  contextStatus: (ids: string[]) => call<Record<string, ContextStatus[]>>("context_status", { ids }),
+  /** The slash commands a harness reported when it last started. */
+  slashCommands: (agent: AgentKind | null) => call<SlashCommand[]>("agent_slash_commands", { agent }),
+  subagents: () => call<Subagent[]>("agent_subagents"),
+  /** Values for a slash command argument from a chat's folder: its git branches, or the paths `typed` could go on to. */
+  slashArgValues: (cwd: string, kind: "branch" | "path", typed: string) => call<string[]>("slash_arg_values", { cwd, kind, typed }),
+  /** Files and folders in a chat's folder for an `@` mention, best match first. */
+  chatMentions: (cwd: string, query: string) => call<string[]>("chat_mentions", { cwd, query }),
+  /** Runs a `!` command in the chat's folder; its output goes in the chat for the agent's next message. */
+  chatShell: (itemId: string | null, command: string, projectId?: string | null) => call<ChatStarted>("chat_shell", { itemId, command, projectId: projectId ?? null }),
+  /** Takes a chat back to before one of the person's messages: the conversation, the files, or both. */
+  chatRewind: (sessionId: string, messageId: number, conversation: boolean, files: boolean) => call<ChatRewound>("chat_rewind", { sessionId, messageId, conversation, files }),
+  /** What restoring the files to before a message would change. */
+  chatRewindPreview: (sessionId: string, messageId: number) => call<RewoundFiles>("chat_rewind_preview", { sessionId, messageId }),
+  /** The MCP servers a chat's agent reported at its last turn. */
+  agentMcpServers: (sessionId: string) => call<AgentMcpServer[]>("agent_mcp_servers", { sessionId }),
   graphView: (projectId: string | null, days: number | null, limit?: number) => call<GraphView>("graph_view", { projectId, days, limit: limit ?? null }),
   graphNode: (id: number) => call<GraphNode>("graph_node", { id }),
   graphDelete: (id: number, withExclusive: boolean) => call<number>("graph_delete", { id, withExclusive }),
-  askChatOpen: (projectId: string | null) => call<Chat>("ask_chat_open", { projectId }),
-  askChatSend: (projectId: string | null, text: string, focus: string[], attachments: string[] = []) => call<Session>("ask_chat_send", { projectId, text, focus, attachments }),
+  coordinatorChatOpen: (projectId: string) => call<Chat>("coordinator_chat_open", { projectId }),
+  coordinatorChatSend: (projectId: string, text: string, attachments: string[] = []) => call<Session>("coordinator_chat_send", { projectId, text, attachments }),
+  coordinatorSettingsSave: (projectId: string, p: { watch?: boolean; brief?: string; compactAt?: number }) =>
+    call<Project>("coordinator_settings_save", { projectId, watch: p.watch ?? null, brief: p.brief ?? null, compactAt: p.compactAt ?? null }),
+  coordinatorHistory: (projectId: string) => call<Segment[]>("coordinator_history", { projectId }),
+  coordinatorSegment: (segmentId: string) => call<Segment | null>("coordinator_segment", { segmentId }),
+  coordinatorSegmentMessages: (segmentId: string) => call<SessionMessage[]>("coordinator_segment_messages", { segmentId }),
+  coordinatorSummarySave: (segmentId: string, summary: string) => call<Segment>("coordinator_summary_save", { segmentId, summary }),
+  coordinatorCompact: (projectId: string) => call<Segment>("coordinator_compact", { projectId }),
   searchIndexStatus: () => call<IndexStatus>("search_index_status"),
   projectsList: () => call<Project[]>("projects_list"),
   projectSave: (p: { id?: string; name: string; color: string; icon: string }) =>
@@ -75,12 +105,58 @@ export const api = {
   projectNoteSave: (projectId: string, note: { id?: string; topic: string; text: string }) =>
     call<void>("project_note_save", { projectId, id: note.id ?? null, topic: note.topic, text: note.text }),
   projectNoteDelete: (id: string) => call<void>("project_note_delete", { id }),
+  projectSetProfile: (id: string, p: { about?: string; rules?: string }) =>
+    call<Project | null>("project_set_profile", { id, about: p.about ?? null, rules: p.rules ?? null }),
+  projectRepos: (projectId: string) => call<ProjectRepo[]>("project_repos", { projectId }),
+  projectRepoSave: (projectId: string, r: { repo: string; path?: string | null; note?: string | null }) =>
+    call<ProjectRepo>("project_repo_save", { projectId, repo: r.repo, path: r.path ?? null, note: r.note ?? null }),
+  projectRepoDelete: (projectId: string, id: string) => call<void>("project_repo_delete", { projectId, id }),
+  projectResources: (projectId: string) => call<ProjectResource[]>("project_resources", { projectId }),
+  projectResourceSave: (projectId: string, resource: ResourceInput) => call<ProjectResource>("project_resource_save", { projectId, resource }),
+  projectResourceDelete: (projectId: string, id: string) => call<boolean>("project_resource_delete", { projectId, id }),
+  projectResourceReindex: (id: string) => call<void>("project_resource_reindex", { id }),
+  /** Puts a file in the hub and adds it to the project's Files. */
+  projectFileAdd: async (projectId: string, name: string, bytes: Uint8Array, access: ResourceAccess): Promise<ProjectResource> => {
+    if (!inTauri) return mockApi.invoke<ProjectResource>("project_file_add", { projectId, name, bytes, access });
+    const { invoke } = await import("@tauri-apps/api/core");
+    const headers = { "x-project": encodeURIComponent(projectId), "x-name": encodeURIComponent(name), "x-access": access };
+    return invoke<ProjectResource>("project_file_add", bytes, { headers });
+  },
+  vaultStatus: () => call<VaultStatus>("vault_status"),
+  /** Sets the vault up; returns the recovery key's 24 words, shown once. */
+  vaultCreate: () => call<string>("vault_create"),
+  /** Touch ID / Windows Hello, then open for 10 minutes. */
+  vaultUnlock: () => call<void>("vault_unlock"),
+  vaultLock: () => call<void>("vault_lock"),
+  /** Asks an open device to let this one in; returns the code to compare. */
+  vaultAsk: () => call<string>("vault_ask"),
+  vaultRecover: (words: string) => call<void>("vault_recover", { words }),
+  vaultApprove: (deviceId: string) => call<void>("vault_approve", { deviceId }),
+  vaultDeny: (deviceId: string) => call<void>("vault_deny", { deviceId }),
+  vaultRemoveDevice: (deviceId: string) => call<void>("vault_remove_device", { deviceId }),
+  vaultEntries: (projectId: string) => call<VaultEntry[]>("vault_entries", { projectId }),
+  vaultEntrySave: (projectId: string, entry: VaultEntryInput) => call<VaultEntry>("vault_entry_save", { projectId, entry }),
+  vaultEntryDelete: (projectId: string, id: string) => call<void>("vault_entry_delete", { projectId, id }),
+  vaultReveal: (projectId: string, id: string, label: string) => call<string>("vault_reveal", { projectId, id, label }),
+  /** Seals a file on this device, then puts it in the hub. */
+  vaultFileAdd: async (projectId: string, name: string, bytes: Uint8Array): Promise<VaultEntry> => {
+    if (!inTauri) return mockApi.invoke<VaultEntry>("vault_file_add", { projectId, name, bytes });
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<VaultEntry>("vault_file_add", bytes, { headers: { "x-project": encodeURIComponent(projectId), "x-name": encodeURIComponent(name) } });
+  },
+  /** Saves a decrypted copy in Downloads; returns its path. */
+  vaultFileExport: (projectId: string, id: string) => call<string>("vault_file_export", { projectId, id }),
+  vaultAudit: (projectId: string | null) => call<VaultAudit[]>("vault_audit", { projectId }),
+  projectItems: (projectId: string) => call<QueueItem[]>("project_items", { projectId }),
   reviewChatOpen: (repo: string, number: number) => call<Chat>("review_chat_open", { repo, number }),
   reviewChatSend: (target: { repo: string; number: number; title: string; url: string; head_ref: string; base_ref: string }, text: string, attachments: string[] = []) =>
     call<Session>("review_chat_send", { target, text, attachments }),
   /** Sets `agent`'s model. Before a chat starts, `forNewChats` also makes `agent` the harness new chats use. */
+  setSessionModel: (sessionId: string, model: string | null) => call<Session>("set_session_model", { sessionId, model }),
   setAgentModel: (model: string | null, agent?: AgentKind, forNewChats = false) => call<TabConfig>("set_agent_model", { model, agent: agent ?? null, forNewChats }),
   setAgentMode: (mode: string) => call<TabConfig>("set_agent_mode", { mode }),
+  /** One chat's permission mode; a Claude Code turn under way switches at once. */
+  setSessionMode: (sessionId: string, mode: string) => call<Session>("set_session_mode", { sessionId, mode }),
   connectionSetSecrets: (id: string, values: Record<string, string>) => call<TabConfig>("connection_set_secrets", { id, values }),
   chatStop: (sessionId: string) => call<void>("chat_stop", { sessionId }),
   /** Stop the tool the turn is waiting on so steering already sent is read now. */
@@ -94,6 +170,10 @@ export const api = {
   agentModels: () => call<ModelOption[]>("agent_models"),
   /** Installs a harness; its output arrives through `onAgentUpgrade`. */
   agentInstall: (kind: AgentKind) => call<void>("agent_install", { kind }),
+  /** Whether a harness's ACP adapter is installed; null when it has none. */
+  agentAcpAdapter: (kind: AgentKind) => call<boolean | null>("agent_acp_adapter", { kind }),
+  /** Installs a harness's ACP adapter; its output arrives through `onAgentUpgrade`. */
+  agentInstallAdapter: (kind: AgentKind) => call<void>("agent_install_adapter", { kind }),
   agentHealth: () => call<AgentProbe | null>("agent_health"),
   /** Runs the agent's own update command; its output arrives through `onAgentUpgrade`. */
   agentUpgrade: () => call<void>("agent_upgrade"),
@@ -106,9 +186,13 @@ export const api = {
   ghStatus: () => call<GhStatus>("gh_status"),
   ghLogin: () => call<GhStatus>("gh_login"),
   ghInstall: () => call<GhStatus>("gh_install"),
+  /** Why a folder can't be where sessions start, or null when it can. */
+  folderProblem: (path: string) => call<string | null>("folder_problem", { path }),
   mcpInfo: () => call<{ url: string | null; token: string }>("mcp_info"),
   githubPull: (repo: string, number: number, sample: boolean) => call<PullReview>("github_pull", { repo, number, sample }),
   githubFile: (repo: string, sha: string, path: string) => call<string>("github_file", { repo, sha, path }),
+  /** An image's bytes at a commit, for the review's image diff: from the local clone, or the API. */
+  reviewFileBytes: (repo: string, sha: string, path: string, local: boolean) => call<ArrayBuffer>("review_file_bytes", { repo, sha, path, local }),
   githubReviewAction: (pr: PrRef, action: ReviewAction) => call<void>("github_review_action", { pr, action }),
   workspacePrepare: (target: { repo: string; number: number; head_sha: string; base_sha: string; base_ref: string }) =>
     call<ReviewWorkspace>("review_workspace_prepare", { target }),
@@ -121,6 +205,74 @@ export const api = {
   sandboxStatus: () => call<SandboxStatus>("sandbox_status"),
   storageUsage: () => call<StorageUsage>("storage_usage"),
   hubStatus: () => call<HubStatus | null>("hub_status"),
+  accountStatus: () => call<AccountStatus>("account_status"),
+  /** Opens the browser and resolves once it comes back signed in. */
+  accountSignIn: (provider: "apple" | "google") => call<Account>("account_sign_in", { provider }),
+  accountCancelSignIn: () => call<void>("account_cancel_sign_in"),
+  accountSignOut: () => call<void>("account_sign_out"),
+  /** The signed-in person's personal cloud hub. Rejects with a CloudFailure. */
+  cloudHubStatus: async () => decode(HubStatusSchema, await call<ArrayBuffer>("cloud_hub_status")),
+  /** Every cloud hub they belong to, personal first. Rejects with a CloudFailure. */
+  cloudHubs: async () => decode(HubListSchema, await call<ArrayBuffer>("cloud_hubs")),
+  /** Sets up (or retries) their personal hub; resolves once it's ready or failed. Rejects with a CloudFailure. */
+  cloudHubSetUp: async () => decode(HubStatusSchema, await call<ArrayBuffer>("cloud_hub_set_up")),
+  /** Moves this computer's work into their private cloud hub and syncs with it from then on. Rejects with a CloudFailure. */
+  hubMoveToCloud: () => call<MoveOutcome>("hub_move_to_cloud"),
+  /** Brings the work back from tab cloud into this computer's own hub and stops syncing. Resolves with the rows copied. */
+  hubMoveToLocal: () => call<number>("hub_move_to_local"),
+  /** This computer, the person's other computers and the cloud runner, as the hub knows them. */
+  runners: () => call<Runner[]>("runners"),
+  /** Jobs workflows handed to runners, newest first. */
+  jobsRecent: () => call<Job[]>("jobs_recent"),
+  /** Services tab knows the MCP server of. */
+  mcpCatalog: () => call<McpCatalogEntry[]>("mcp_catalog"),
+  /** Connected remote MCP servers and whether each is ready. */
+  mcpServers: () => call<McpServerInfo[]>("mcp_servers"),
+  /** What's at a URL: an MCP server, and does it want a sign-in? */
+  mcpProbe: (url: string) => call<McpProbe>("mcp_probe", { url }),
+  /** Adds a server. Resolves with the sign-in page to open, when it wants one. */
+  mcpAdd: (a: { id: string; name: string; url: string; signIn: boolean; catalog: string | null }) =>
+    call<string | null>("mcp_add", a),
+  /** Starts a sign-in again. Resolves with the page to open; `onMcpSignIn` says when it's done. */
+  mcpSignIn: (id: string) => call<string>("mcp_sign_in", { id }),
+  mcpSignOut: (id: string) => call<void>("mcp_sign_out", { id }),
+  /** Which mail providers this build can sign in with, and who's signed in. */
+  emailSignInStatus: () => call<EmailSignInStatus>("email_sign_in_status"),
+  /** Starts "Sign in with Google / Microsoft". Resolves with the page to open; tab sets up the email connection when the browser comes back. */
+  emailSignIn: (provider: MailProvider) => call<string>("email_sign_in", { provider }),
+  emailSignOut: () => call<void>("email_sign_out"),
+  mcpRemove: (id: string) => call<void>("mcp_remove", { id }),
+  mcpSetEnabled: (id: string, enabled: boolean) => call<void>("mcp_set_enabled", { id, enabled }),
+  /** Whether its work fills the queue, and what it watches (for recipes that ask). */
+  mcpSetQueue: (id: string, on: boolean, query: string | null) => call<void>("mcp_set_queue", { id, on, query }),
+  /** A server's tools with the person's choices; `refresh` asks the server again. */
+  mcpTools: (id: string, refresh: boolean) => call<McpTool[]>("mcp_tools", { id, refresh }),
+  /** Allowed, ask or off for one tool; null goes back to the default. */
+  mcpSetTool: (id: string, tool: string, policy: ToolPolicy | null) => call<void>("mcp_set_tool", { id, tool, policy }),
+  /** Where each connection stands for tab cloud jobs (asks the hub which cloud sign-ins it keeps). */
+  mcpCloudStates: () => call<McpCloudState[]>("mcp_cloud_states"),
+  /** "Allow in cloud" for a connection. Resolves with the tab cloud sign-in page to open, when it needs one. */
+  mcpSetCloud: (id: string, on: boolean) => call<string | null>("mcp_set_cloud", { id, on }),
+  /** Starts a connection's sign-in for tab cloud (a grant of its own). Resolves with the page to open. */
+  mcpCloudSignIn: (id: string) => call<string>("mcp_cloud_sign_in", { id }),
+  /** Allowed or off for one tool in cloud jobs; null goes back to the default. */
+  mcpSetCloudTool: (id: string, tool: string, policy: ToolPolicy | null) => call<void>("mcp_set_cloud_tool", { id, tool, policy }),
+  /** Recent cloud jobs that needed a connection or tool they didn't have. */
+  cloudJobGaps: () => call<JobGaps[]>("cloud_job_gaps"),
+  /** MCP servers set up in Claude Code, with what tab already has marked. */
+  mcpImportScan: () => call<McpImportCandidate[]>("mcp_import_scan"),
+  /** Copies the chosen Claude Code servers (by key) into tab. */
+  mcpImport: (keys: string[]) => call<McpImportResult[]>("mcp_import", { keys }),
+  /** Sets where a connection runs and saves the config. Rejects with a CloudFailure. */
+  connectionRunsOn: (connection: string, runsOn: RunsOn) => call<TabConfig>("connection_runs_on", { connection, runsOn }),
+  /** The hub's cloud runner. Rejects with a CloudFailure. */
+  cloudRunnerStatus: async () => decode(RunnerStatusSchema, await call<ArrayBuffer>("cloud_runner_status")),
+  /** Starts the hub's cloud runner now. Rejects with a CloudFailure. */
+  cloudRunnerWake: async () => decode(RunnerStatusSchema, await call<ArrayBuffer>("cloud_runner_wake")),
+  /** Names (never values) of the secrets the cloud hub keeps for its runner. Rejects with a CloudFailure. */
+  cloudSecretNames: () => call<string[]>("cloud_secret_names"),
+  /** Stores, or with null removes, a harness key (`harness/<id>/<ENV>`) or git access (`git/token`). Rejects with a CloudFailure. */
+  cloudSecretSet: (name: string, value: string | null) => call<string[]>("cloud_secret_set", { name, value }),
   storageClean: () => call<Swept>("storage_clean"),
   /** One checkout, or every one when no repo is given. */
   storageRemoveCheckouts: (repo?: string, number?: number) =>
@@ -135,6 +287,10 @@ export const api = {
   depsTypes: (repo: string, number: number) => call<[string, string][]>("deps_types", { repo, number }),
   workflowsList: () => call<Workflow[]>("workflows_list"),
   workflowTemplates: () => call<Workflow[]>("workflow_templates"),
+  modelFamilies: () => call<ModelFamily[]>("model_families_list"),
+  modelFamilySave: (family: ModelFamily) => call<ModelFamily[]>("model_family_save", { family }),
+  /** Deletes the person's family, or resets a built-in one. */
+  modelFamilyDelete: (id: string) => call<ModelFamily[]>("model_family_delete", { id }),
   workflowValidate: (workflow: Workflow) => call<Issue[]>("workflow_validate", { workflow }),
   workflowSave: (workflow: Workflow) => call<{ workflow: Workflow; issues: Issue[] }>("workflow_save", { workflow }),
   workflowSetEnabled: (id: string, enabled: boolean, allowDestructive?: boolean, allowCommands?: boolean) =>
@@ -142,6 +298,26 @@ export const api = {
   workflowDelete: (id: string) => call<void>("workflow_delete", { id }),
   workflowRuns: (workflowId: string | null, limit = 50) => call<WorkflowRun[]>("workflow_runs", { workflowId, limit }),
   workflowRun: (workflow: Workflow, itemId: string | null, dryRun: boolean) => call<WorkflowRun>("workflow_run", { workflow, itemId, dryRun }),
+  /** One workflow's stats for the last `days` days (7 or 30) and the span before; days break at the local midnight. */
+  workflowInsights: (workflowId: string, days: number) =>
+    call<WorkflowInsights>("workflow_insights", { workflowId, days, utcOffsetMinutes: -new Date().getTimezoneOffset() }),
+  /** Every workflow's stats and health with hub-wide totals, this window and the one before. */
+  workflowFactory: (days: number) => call<WorkflowFactory>("workflow_factory", { days, utcOffsetMinutes: -new Date().getTimezoneOffset() }),
+  /** Each item's workflow status, for the queue rows. */
+  workflowActivity: () => call<ItemWorkflowStatus[]>("workflow_activity"),
+  /** An item's workflow runs, newest first, with what each links to. */
+  itemWorkflowRuns: (itemId: string) => call<RunView[]>("item_workflow_runs", { itemId }),
+  workflowRunView: (runId: string) => call<RunView | null>("workflow_run_view", { runId }),
+  /** Your answer to a run blocked on a step: approve that step for this run only, or decline and end it. */
+  workflowRunAnswer: (runId: string, approve: boolean) => call<WorkflowRun>("workflow_run_answer", { runId, approve }),
+  /** Runs a failed run again; the new run's `rerun_of` names this one. */
+  workflowRerun: (runId: string) => call<WorkflowRun>("workflow_rerun", { runId }),
+  /** What could make a workflow cheaper or steadier, from its runs over the last `days` days. */
+  workflowSuggestions: (workflowId: string, days: number) =>
+    call<Suggestion[]>("workflow_suggestions", { workflowId, days, utcOffsetMinutes: -new Date().getTimezoneOffset() }),
+  /** The chat of a workflow job's agent. */
+  jobChatOpen: (jobId: string) => call<Chat>("job_chat_open", { jobId }),
+  jobChatSend: (jobId: string, text: string) => call<Session>("job_chat_send", { jobId, text }),
   workflowChatOpen: (workflowId: string | null) => call<Chat>("workflow_chat_open", { workflowId }),
   workflowChatSend: (text: string, open: Workflow | null) => call<Session>("workflow_chat_send", { text, open }),
   browserOpen: (id: string, url: string, bounds: Bounds) => call<void>("browser_open", { id, url, bounds }),
@@ -179,11 +355,25 @@ export async function onGhCode(cb: (c: GhLoginCode) => void): Promise<() => void
   return listen<GhLoginCode>("tab://gh-code", (e) => cb(e.payload));
 }
 
+/** A remote MCP sign-in finished in the browser (or failed). */
+export async function onMcpSignIn(cb: (e: McpSignInEvent) => void): Promise<() => void> {
+  if (!inTauri) return mockApi.onMcpSignIn(cb);
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<McpSignInEvent>("tab://mcp-sign-in", (e) => cb(e.payload));
+}
+
 /** Download progress while `appUpdateInstall` runs. */
 export async function onAppUpdateProgress(cb: (p: AppUpdateProgress) => void): Promise<() => void> {
   if (!inTauri) return mockApi.onAppUpdate(cb);
   const { listen } = await import("@tauri-apps/api/event");
   return listen<AppUpdateProgress>("tab://app-update", (e) => cb(e.payload));
+}
+
+/** `[done, total]` changes while `hubMoveToCloud` runs. */
+export async function onHubMove(cb: (p: [number, number]) => void): Promise<() => void> {
+  if (!inTauri) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<[number, number]>("tab://hub-move", (e) => cb(e.payload));
 }
 
 /** Lines the agent's updater prints while `agentUpgrade` runs. */

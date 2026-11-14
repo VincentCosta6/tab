@@ -43,13 +43,30 @@ export function NewChat({ onStarted, project: filtered }: { onStarted: (itemId: 
     }
   };
 
+  // `!command` runs in the work folder and starts the task with its output.
+  const shell = async (command: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const { item, session } = await api.chatShell(null, command, project);
+      qc.setQueryData(keys.item(item.id), item);
+      qc.setQueryData<Chat>(keys.chat(item.id), { session, messages: [], approvals: [], running: false });
+      qc.invalidateQueries({ queryKey: keys.chat(item.id) });
+      qc.invalidateQueries({ queryKey: keys.allItems });
+      onStarted(item.id);
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  };
+
   return (
     <div className={cx("new-chat", tint.className)} style={tint.style}>
       <div className="new-chat-hero">
         <TabMark size={40} />
         <h2>What should tab work on?</h2>
       </div>
-      <Composer chat={busy ? { session: null, messages: [], approvals: [], running: true } : undefined} onSend={send} placeholder="Describe a task, paste a link, or ask about your queue…"
+      <Composer chat={busy ? { session: null, messages: [], approvals: [], running: true } : undefined} onSend={send} onShell={shell} placeholder="Describe a task, paste a link, or ask about your queue…"
         autoFocus
         extra={<span className="composer-project"><ProjectPicker value={project} onChange={setProject} compact /></span>}
       />

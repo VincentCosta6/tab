@@ -1,0 +1,67 @@
+/* Making a workflow better: suggestions in Insights, a failure group's
+   actions, a message prepared for the assistant, a draft from a
+   suggestion, and an agent step's time and spend in a run. Tokens only. */
+
+/* Suggestions */
+.ins-suggestions { display: grid; gap: var(--space-2); }
+.ins-suggestion {
+  display: flex; gap: var(--space-3); align-items: flex-start; padding: var(--space-3);
+  border: 1px solid var(--border); border-left: 3px solid var(--tone-fg); border-radius: var(--radius-md); background: var(--bg);
+}
+.ins-suggestion-icon { width: 26px; height: 26px; flex: none; display: grid; place-items: center; border-radius: 50%; background: var(--tone-bg); color: var(--tone-fg); }
+.ins-suggestion-body { flex: 1; min-width: 0; display: grid; gap: 6px; }
+.ins-suggestion-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px var(--space-2); }
+.ins-suggestion-head strong { font-size: var(--text-sm); font-weight: 600; color: var(--fg); }
+.ins-suggestion-step { font-size: var(--text-xs); }
+.ins-suggestion-why { margin: 0; font-size: var(--text-sm); color: var(--fg-muted); line-height: 1.45; }
+.ins-facts { display: flex; flex-wrap: wrap; gap: 6px; }
+.ins-fact { display: inline-grid; gap: 1px; padding: 4px var(--space-2); border-radius: var(--radius-md); background: var(--bg-sunken); min-width: 0; }
+.ins-fact-label { font-size: 10.5px; color: var(--fg-subtle); }
+.ins-fact strong { font-size: var(--text-sm); font-weight: 600; font-variant-numeric: tabular-nums; color: var(--fg); }
+.ins-fact strong .subtle { font-weight: 400; font-size: var(--text-xs); }
+.ins-suggestion-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: 2px; }
+.ins-suggestion-note { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-xs); }
+
+/* A failure group's actions */
+.ins-failure-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--space-1); }
+.ins-failure-note { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: var(--text-xs); color: var(--fg-muted); }
+.ins-failure-note:not(.text-danger) svg { color: var(--tone-success-fg); }
+
+/* A message ready for the assistant */
+.wf-prepared {
+  display: grid; gap: var(--space-2); margin: var(--space-2) 0; padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--tone-accent-fg); border-radius: var(--radius-md); background: var(--tone-accent-bg);
+}
+.wf-prepared-head { display: flex; align-items: center; gap: 6px; color: var(--tone-accent-fg); min-width: 0; }
+.wf-prepared-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); color: var(--fg); }
+.wf-prepared-text {
+  margin: 0; max-height: 180px; overflow: auto; padding: var(--space-2); border-radius: var(--radius-sm);
+  background: var(--bg-raised); border: 1px solid var(--border); font-family: var(--font-mono); font-size: 11px; line-height: 1.45;
+  white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg);
+}
+.wf-prepared-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.wf-prepared-actions .subtle { flex: 1; min-width: 160px; font-size: var(--text-xs); }
+
+/* A draft from a suggestion */
+.wf-draft-note { display: flex; align-items: center; gap: var(--space-2); padding: 6px var(--space-4); background: var(--tone-accent-bg); color: var(--fg); font-size: var(--text-sm); border-bottom: 1px solid var(--border); }
+.wf-draft-note > svg { color: var(--tone-accent-fg); flex: none; }
+.wf-draft-note > span { flex: 1; min-width: 0; }
+
+/* An agent step in a run */
+.wf-run-step-label { font-size: var(--text-xs); color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.wf-step-metrics { display: grid; gap: 6px; padding-top: 4px; }
+.wf-step-metrics-times { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); margin: 0; }
+.wf-step-metrics-times div { min-width: 0; }
+.wf-step-metrics-times dt { display: flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--fg-subtle); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wf-step-metrics-times dt i { width: 8px; height: 8px; border-radius: 2px; flex: none; display: inline-block; }
+.wf-step-metrics-times dd { margin: 1px 0 0; font-size: var(--text-sm); font-weight: 600; font-variant-numeric: tabular-nums; }
+.wf-step-metrics-meta { display: flex; flex-wrap: wrap; gap: 4px var(--space-3); font-size: var(--text-xs); color: var(--fg-muted); }
+.wf-step-metrics-meta > span:not(.badge) { display: inline-flex; align-items: center; gap: 4px; }
+
+/* Re-runs */
+.wf-run-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.wf-run-actions:empty { display: none; }
+.wf-rerun { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.wf-rerun-done { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-sm); }
+.wf-rerun-error { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-xs); }
+.wf-run-body > p.wf-rerun-of { display: flex; align-items: center; gap: 5px; font-size: var(--text-sm); color: var(--fg-muted); }

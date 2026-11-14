@@ -15,6 +15,9 @@ use tab_store::HubStore;
 use tab_store::mem::MemStore;
 use tab_store::sqlite::SqliteStore;
 
+mod common;
+use common::do_like;
+
 const KINDS: &[&str] = &["item", "note"];
 const IDS: &[&str] = &["1", "2", "3", "a", "b"];
 const NODES: &[&str] = &[
@@ -110,16 +113,21 @@ fn observe<S: HubStore>(s: &S) -> String {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
-    /// SQLite behaves exactly like the in-memory reference.
+    /// SQLite, on rusqlite and as a Durable Object hands it over, behaves
+    /// exactly like the in-memory reference.
     #[test]
     fn backends_agree(batches in batches()) {
         let mut mem = MemStore::new();
         let mut lite = SqliteStore::in_memory().unwrap();
+        let mut cloud = do_like::store();
         for (i, batch) in batches.iter().enumerate() {
             let a = mem.apply("dev", batch, t(i as i64)).map_err(|e| e.to_string());
             let b = lite.apply("dev", batch, t(i as i64)).map_err(|e| e.to_string());
-            prop_assert_eq!(a, b);
+            let c = cloud.apply("dev", batch, t(i as i64)).map_err(|e| e.to_string());
+            prop_assert_eq!(&a, &b);
+            prop_assert_eq!(a, c);
             prop_assert_eq!(observe(&mem), observe(&lite));
+            prop_assert_eq!(observe(&mem), observe(&cloud));
         }
     }
 
@@ -168,6 +176,7 @@ proptest! {
     fn lease_invariants(steps in prop::collection::vec(lease_step(), 1..60)) {
         let mut mem = MemStore::new();
         let mut lite = SqliteStore::in_memory().unwrap();
+        let mut cloud = do_like::store();
         let mut now = 0;
         let mut holder: std::collections::HashMap<&str, (String, u64, DateTime<Utc>)> = Default::default();
         let mut top: std::collections::HashMap<&str, u64> = Default::default();
@@ -176,7 +185,9 @@ proptest! {
                 LeaseStep::Claim(k, h, ttl) => {
                     let a = mem.claim_lease(k, h, Duration::seconds(ttl), t(now)).unwrap();
                     let b = lite.claim_lease(k, h, Duration::seconds(ttl), t(now)).unwrap();
+                    let c = cloud.claim_lease(k, h, Duration::seconds(ttl), t(now)).unwrap();
                     prop_assert_eq!(&a, &b);
+                    prop_assert_eq!(&a, &c);
                     let l = a.lease();
                     let live = holder.get(k).filter(|(_, _, until)| t(now) < *until);
                     match (&a, live) {
@@ -202,6 +213,7 @@ proptest! {
                 LeaseStep::Release(k, h) => {
                     let a = mem.release_lease(k, h, t(now)).unwrap();
                     prop_assert_eq!(a, lite.release_lease(k, h, t(now)).unwrap());
+                    prop_assert_eq!(a, cloud.release_lease(k, h, t(now)).unwrap());
                     let expected = holder
                         .get(k)
                         .is_some_and(|(who, _, until)| who == h && t(now) < *until);
@@ -213,6 +225,7 @@ proptest! {
                 LeaseStep::Expire => {
                     let a = mem.expire_leases(t(now)).unwrap();
                     prop_assert_eq!(&a, &lite.expire_leases(t(now)).unwrap());
+                    prop_assert_eq!(&a, &cloud.expire_leases(t(now)).unwrap());
                     for l in &a {
                         prop_assert!(l.expires_at <= t(now));
                         holder.remove(l.key.as_str());

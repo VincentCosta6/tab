@@ -13,7 +13,7 @@ use tokio::process::Child;
 use super::proxy;
 
 /// Called before spawning.
-pub(super) fn prepare(cmd: &mut tokio::process::Command) {
+pub(crate) fn prepare(cmd: &mut tokio::process::Command) {
     #[cfg(unix)]
     cmd.process_group(0);
     #[cfg(not(unix))]
@@ -31,7 +31,7 @@ pub struct Guarded {
 }
 
 impl Guarded {
-    pub(super) fn new(child: Child, proxy: Option<proxy::Handle>) -> Self {
+    pub(crate) fn new(child: Child, proxy: Option<proxy::Handle>) -> Self {
         #[cfg(unix)]
         let pgid = child.id().map(|p| p as i32);
         #[cfg(windows)]

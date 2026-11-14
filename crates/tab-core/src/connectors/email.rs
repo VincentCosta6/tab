@@ -24,7 +24,6 @@ use chrono::{DateTime, TimeZone, Utc};
 use futures_util::TryStreamExt;
 use mail_parser::{Address, HeaderValue, Message, MessageParser};
 use serde_json::json;
-use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_rustls::rustls;
@@ -37,7 +36,7 @@ use crate::model::{
     FieldType, IncomingEvent, KindInfo, QueueItem, SettingField, SettingKind, Tone,
 };
 
-type Imap = Session<TlsStream<TcpStream>>;
+type Imap = Session<TlsStream<crate::net::Stream>>;
 
 const MAX_BODY: usize = 4000;
 /// Bigger messages come in with headers only.
@@ -127,7 +126,7 @@ impl ConnectorFactory for EmailFactory {
             settings: vec![
                 setting("host", "IMAP server", SettingKind::Text, "For MXroute, the server name from your welcome email, e.g. heracles.mxrouting.net.", true),
                 setting("username", "Email address", SettingKind::Text, "", true),
-                setting("password", "Password", SettingKind::Secret, "Your mailbox password, or an app password if your host uses them.", true),
+                setting("password", "Password", SettingKind::Secret, "Your mailbox password, or an app password if your host uses them. Not needed when you sign in with Google or Microsoft.", true),
                 setting("port", "Port", SettingKind::Number, "993 (IMAP over TLS) unless your host says otherwise.", false),
                 setting("folders", "Folders", SettingKind::Text, "Comma separated. Defaults to INBOX. Spam folders are never read.", false),
                 setting("bulk", "Newsletters and automated mail", SettingKind::Text, "\"rules\" (default): import, rank with rules only. \"skip\": don't import. \"ai\": let the AI layer read them too.", false),
@@ -169,12 +168,21 @@ pub enum BulkMode {
     Ai,
 }
 
+/// How the connection signs in to IMAP.
+#[derive(Debug, Clone)]
+enum Auth {
+    Password(String),
+    /// "Sign in with Google / Microsoft" ([`crate::mail_oauth`]): XOAUTH2
+    /// with a token from the vault. Set by the sign-in as `auth`.
+    OAuth(crate::mail_oauth::Provider),
+}
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     host: String,
     port: u16,
     username: String,
-    password: String,
+    auth: Auth,
     folders: Vec<String>,
     bulk: BulkMode,
     spam_score: f64,
@@ -203,10 +211,14 @@ impl Settings {
                 .and_then(|p| u16::try_from(p).ok())
                 .unwrap_or(993),
             username: need("username", "email address")?,
-            password: cfg
-                .str("password")
-                .map(str::to_string)
-                .ok_or_else(|| anyhow::anyhow!("Add your password to connect email."))?,
+            auth: match cfg.str("auth").and_then(crate::mail_oauth::Provider::parse) {
+                Some(p) => Auth::OAuth(p),
+                None => Auth::Password(
+                    cfg.str("password")
+                        .map(str::to_string)
+                        .ok_or_else(|| anyhow::anyhow!("Add your password to connect email."))?,
+                ),
+            },
             folders: if folders.is_empty() {
                 vec!["INBOX".into()]
             } else {
@@ -265,8 +277,9 @@ async fn open(
     host: &str,
     port: u16,
     wait: Duration,
-) -> anyhow::Result<async_imap::Client<TlsStream<TcpStream>>> {
-    let tcp = tokio::time::timeout(wait, TcpStream::connect((host, port)))
+) -> anyhow::Result<async_imap::Client<TlsStream<crate::net::Stream>>> {
+    // Through the company proxy when one is set (see crate::net).
+    let tcp = tokio::time::timeout(wait, crate::net::connect(host, port, true))
         .await
         .map_err(|_| anyhow::anyhow!("{host} didn't answer on port {port}"))??;
     let name = rustls::pki_types::ServerName::try_from(host.to_string())?;
@@ -286,11 +299,17 @@ async fn open(
 }
 
 async fn connect(s: &Settings) -> anyhow::Result<Imap> {
-    open(&s.host, s.port, Duration::from_secs(20))
-        .await?
-        .login(&s.username, &s.password)
-        .await
-        .map_err(|(e, _)| anyhow::anyhow!("Signing in to {} failed: {e}", s.host))
+    let client = open(&s.host, s.port, Duration::from_secs(20)).await?;
+    match &s.auth {
+        Auth::Password(password) => client.login(&s.username, password).await,
+        Auth::OAuth(p) => {
+            let (user, token) = crate::mail_oauth::access_token(*p).await?;
+            client
+                .authenticate("XOAUTH2", crate::mail_oauth::XOAuth2 { user, token })
+                .await
+        }
+    }
+    .map_err(|(e, _)| anyhow::anyhow!("Signing in to {} failed: {e}", s.host))
 }
 
 /// Signs in with saved settings and reports what tab will read, for the
@@ -378,7 +397,11 @@ fn known_provider(
         return Some((
             "Google",
             Some("imap.gmail.com".into()),
-            "Gmail needs IMAP turned on and an app password (Google Account → Security → App passwords). Your normal password won't work.",
+            if crate::mail_oauth::Provider::Google.available() {
+                "Gmail: ask the person to press \"Sign in with Google\" in Connections → Email; no password needed. Otherwise it needs IMAP on and an app password (Google Account → Security → App passwords)."
+            } else {
+                "Gmail needs IMAP turned on and an app password (Google Account → Security → App passwords). Your normal password won't work."
+            },
         ));
     }
     if any(".outlook.com")
@@ -389,7 +412,11 @@ fn known_provider(
         return Some((
             "Microsoft",
             Some("outlook.office365.com".into()),
-            "Microsoft turned off password sign-in for IMAP on most accounts, so this may fail. If it does, tab needs OAuth for Outlook, which it doesn't have yet.",
+            if crate::mail_oauth::Provider::Microsoft.available() {
+                "Microsoft turned off password sign-in for IMAP: ask the person to press \"Sign in with Microsoft\" in Connections → Email instead of typing a password."
+            } else {
+                "Microsoft turned off password sign-in for IMAP on most accounts, so this may fail. This build of tab can't sign in with Microsoft yet."
+            },
         ));
     }
     if any(".icloud.com") || domain == "icloud.com" || domain == "me.com" {
@@ -661,7 +688,7 @@ pub fn sort_message(
         None => "direct",
     };
     let subject = m.subject().unwrap_or("(no subject)").trim().to_string();
-    let mut body = m.body_text(0).map(|b| b.into_owned()).unwrap_or_default();
+    let mut body = body_text(&m);
     // Drop quoted replies below the new text.
     if let Some(i) = body.find("\nOn ").filter(|i| {
         body[*i + 1..]
@@ -898,6 +925,103 @@ pub fn open_url(
         ));
     }
     Some(base)
+}
+
+/// How far back a project's email resource reads, and how many messages.
+const SELECTION_DAYS: i64 = 365;
+
+/// The messages an email resource stands for, as documents for the
+/// project's index: `label:<name>` reads that folder (Gmail labels are
+/// folders over IMAP), `from:<address>` that sender's mail in the folders
+/// the connection reads. Newest first, at most `limit`.
+pub async fn read_selection(
+    cfg: &ConnectorConfig,
+    selector: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<crate::knowledge::chunk::Doc>> {
+    let s = Settings::from_config(cfg)?;
+    let (folders, query) = if let Some(label) = selector.strip_prefix("label:") {
+        let label = label.trim();
+        anyhow::ensure!(!label.is_empty(), "which label?");
+        (vec![label.to_string()], String::new())
+    } else if let Some(from) = selector.strip_prefix("from:") {
+        let from = from.trim();
+        anyhow::ensure!(
+            !from.is_empty() && !from.contains(['"', '\\', '\r', '\n']),
+            "that isn't an email address"
+        );
+        (s.folders.clone(), format!(" FROM \"{from}\""))
+    } else {
+        anyhow::bail!("an email resource is label:<name> or from:<address>, not {selector:?}");
+    };
+    let since = (Utc::now() - chrono::Duration::days(SELECTION_DAYS)).format("%d-%b-%Y");
+    let mut imap = connect(&s).await?;
+    let mut docs = Vec::new();
+    for folder in &folders {
+        if let Err(e) = imap.examine(folder).await {
+            anyhow::bail!("couldn't open {folder}: {e}");
+        }
+        let mut uids: Vec<u32> = imap
+            .uid_search(format!("SINCE {since}{query}"))
+            .await?
+            .into_iter()
+            .collect();
+        uids.sort_unstable();
+        let uids = &uids[uids.len().saturating_sub(limit)..];
+        if uids.is_empty() {
+            continue;
+        }
+        let set = uids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let small: Vec<u32> = imap
+            .uid_fetch(&set, "(UID RFC822.SIZE)")
+            .await?
+            .try_filter_map(|f| async move {
+                Ok(f.uid.filter(|_| f.size.unwrap_or(0) <= MAX_FETCH_BYTES))
+            })
+            .try_collect()
+            .await?;
+        for uid in small.into_iter().rev() {
+            let fetched: Vec<async_imap::types::Fetch> = imap
+                .uid_fetch(uid.to_string(), "(UID BODY.PEEK[])")
+                .await?
+                .try_collect()
+                .await?;
+            let Some(raw) = fetched.iter().find_map(|f| f.body()) else {
+                continue;
+            };
+            let Some(m) = MessageParser::new().parse(raw) else {
+                continue;
+            };
+            let subject = m.subject().unwrap_or("(no subject)").to_string();
+            let sender = m
+                .from()
+                .and_then(|a| a.first())
+                .map(|p| match (p.name(), p.address()) {
+                    (Some(n), Some(e)) => format!("{n} <{e}>"),
+                    (n, e) => n.or(e).unwrap_or_default().to_string(),
+                })
+                .unwrap_or_default();
+            let date = m.date().map(|d| d.to_rfc3339()).unwrap_or_default();
+            let body = body_text(&m);
+            let mid = m.message_id().unwrap_or_default().to_string();
+            docs.push(crate::knowledge::chunk::Doc {
+                title: subject.clone(),
+                source: open_url(s.webmail_url.as_deref(), &s.host, folder, uid, &mid)
+                    .or_else(|| (!mid.is_empty()).then(|| format!("mid:{mid}"))),
+                text: format!(
+                    "From: {sender}\nDate: {date}\nSubject: {subject}\n\n{}",
+                    body.trim()
+                ),
+            });
+        }
+    }
+    let _ = imap.logout().await;
+    docs.truncate(limit);
+    Ok(docs)
 }
 
 impl EmailConnector {
@@ -1142,8 +1266,39 @@ impl Connector for EmailConnector {
     }
 }
 
+/// A message's text for the ranker and agents: its plain-text part, or,
+/// for HTML-only mail, the HTML as Markdown (mail-parser's own conversion
+/// drops links, tables and lists).
+fn body_text(m: &mail_parser::Message) -> String {
+    let html_only = m.text_part(0).is_some_and(|p| p.is_text_html());
+    if html_only
+        && let Some(md) = m
+            .body_html(0)
+            .and_then(|h| crate::knowledge::extract::html_to_markdown(&h))
+    {
+        return md;
+    }
+    m.body_text(0).map(|b| b.into_owned()).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn html_only_mail_reads_as_markdown() {
+        let raw = b"From: a@b.c\r\nSubject: x\r\nContent-Type: text/html\r\n\r\n<p>Ship it: <a href=\"https://x.dev/pr/1\">PR 1</a></p><ul><li>one</li><li>two</li></ul>";
+        let m = mail_parser::MessageParser::default()
+            .parse(&raw[..])
+            .unwrap();
+        let body = super::body_text(&m);
+        assert!(body.contains("- one\n- two"), "{body}");
+        let plain = b"From: a@b.c\r\nSubject: x\r\n\r\nJust text";
+        let m = mail_parser::MessageParser::default()
+            .parse(&plain[..])
+            .unwrap();
+        assert_eq!(super::body_text(&m).trim(), "Just text");
+    }
+
     use super::*;
 
     fn settings(bulk: BulkMode) -> Settings {
@@ -1151,7 +1306,7 @@ mod tests {
             host: "mail.example.com".into(),
             port: 993,
             username: "vince@example.com".into(),
-            password: "x".into(),
+            auth: Auth::Password("x".into()),
             folders: vec!["INBOX".into()],
             bulk,
             spam_score: 5.0,
@@ -1171,6 +1326,27 @@ mod tests {
             Sorted::Keep(e) => format!("{} ai={}", e.kind, e.metadata["ai"]),
             Sorted::Skip(why) => format!("skip: {why}"),
         }
+    }
+
+    #[test]
+    fn signs_in_with_a_password_or_google_microsoft() {
+        let mut cfg = ConnectorConfig::on();
+        cfg.settings.insert("host".into(), "imap.gmail.com".into());
+        cfg.settings
+            .insert("username".into(), "me@gmail.com".into());
+        let e = Settings::from_config(&cfg).unwrap_err().to_string();
+        assert!(e.contains("password"), "{e}");
+        cfg.settings.insert("auth".into(), "google".into());
+        assert!(matches!(
+            Settings::from_config(&cfg).unwrap().auth,
+            Auth::OAuth(crate::mail_oauth::Provider::Google)
+        ));
+        cfg.settings.insert("auth".into(), "".into());
+        cfg.settings.insert("password".into(), "pw".into());
+        assert!(matches!(
+            Settings::from_config(&cfg).unwrap().auth,
+            Auth::Password(_)
+        ));
     }
 
     #[test]

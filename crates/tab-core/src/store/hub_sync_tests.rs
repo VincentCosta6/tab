@@ -96,6 +96,22 @@ fn populate(s: &Store) -> String {
     s.item_set_project(&item.id, Some(&p.id), now()).unwrap();
     s.note_save(&p.id, "Plan", "Ship Friday", "me", None, &[], now())
         .unwrap();
+    s.project_set_profile(&p.id, Some("The launch."), None, now())
+        .unwrap();
+    s.repo_save(&p.id, "acme/launch", None, None, "me", now())
+        .unwrap();
+    s.resource_save(
+        &p.id,
+        &crate::store::ResourceInput {
+            kind: "website".into(),
+            title: "acme.dev".into(),
+            url: Some("https://acme.dev".into()),
+            ..Default::default()
+        },
+        "me",
+        now(),
+    )
+    .unwrap();
     s.context_add(
         &item.id,
         &NewContext {
@@ -126,6 +142,8 @@ fn every_synced_table_round_trips_through_the_outbox() {
         "items",
         "projects",
         "project_notes",
+        "project_repos",
+        "project_resources",
         "item_context",
         "entities",
         "item_entities",
@@ -495,4 +513,199 @@ fn step_lists_and_questions_sync_with_their_input() {
         .map(|r| serde_json::from_str(r["meta"].as_str().unwrap()).unwrap())
         .collect();
     assert_eq!(metas, [todos, ask, steps]);
+}
+
+#[test]
+fn hub_page_counts_only_synced_tables_and_they_arrive_on_the_other_copy() {
+    for (_, table) in SYNCED_SUMMARY {
+        assert!(
+            SYNCED.iter().any(|(t, _)| t == table),
+            "{table} is listed as synced on the Hub page but isn't in SYNCED"
+        );
+    }
+    let (a, b) = (store(), store());
+    populate(&a);
+    sync(&a, &b);
+    let count = |s: &Store, what: &str| {
+        s.hub_synced_counts()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.what == what)
+            .unwrap()
+            .count
+    };
+    for what in ["Queue items", "Projects", "Project notes", "Workflows"] {
+        assert!(count(&a, what) > 0, "{what}");
+        assert_eq!(count(&a, what), count(&b, what), "{what}");
+    }
+}
+
+fn later(minutes: i64) -> DateTime<Utc> {
+    now() + chrono::Duration::minutes(minutes)
+}
+
+fn state(s: &Store, id: &str) -> ItemState {
+    s.get(id).unwrap().unwrap().state
+}
+
+/// An item brought in on a device, with no graph links so its id can be
+/// changed to one from before ids were shared.
+fn legacy_item(s: &Store, id: &str) {
+    let e = IncomingEvent {
+        entities: vec![],
+        ..event("1", "Review login")
+    };
+    let item = inserted(s.upsert(&e, now()).unwrap());
+    s.conn
+        .lock()
+        .unwrap()
+        .execute("UPDATE items SET id = ?2 WHERE id = ?1", [&item.id, id])
+        .unwrap();
+}
+
+#[test]
+fn the_same_thing_gets_the_same_id_on_every_device() {
+    let (a, b) = (store(), store());
+    let on_a = inserted(a.upsert(&event("1", "Review login"), now()).unwrap());
+    let on_b = inserted(b.upsert(&event("1", "Review login"), now()).unwrap());
+    assert_eq!(on_a.id, on_b.id);
+    assert_eq!(on_a.id, crate::store::items::item_id("github", "1"));
+    assert_ne!(on_a.id, crate::store::items::item_id("github", "2"));
+    assert_ne!(on_a.id, crate::store::items::item_id("gitlab", "1"));
+}
+
+#[test]
+fn done_elsewhere_survives_a_device_bringing_the_item_in_late() {
+    let (a, b) = (store(), store());
+    let item = inserted(a.upsert(&event("1", "Review login"), now()).unwrap());
+    a.set_state(&item.id, ItemState::Done, None, later(60))
+        .unwrap();
+    // b polls before it has synced, so it brings the item in as new.
+    b.upsert(&event("1", "Review login"), later(90)).unwrap();
+    // a's Done reaches the hub first, then b's arrival.
+    sync(&a, &b);
+    sync(&b, &a);
+    assert_eq!(state(&a, &item.id), ItemState::Done);
+    // a's state won, so it goes back to the hub for b.
+    assert_eq!(sync(&a, &b), 1);
+    assert_eq!(state(&b, &item.id), ItemState::Done);
+    assert_eq!(a.hub_outbox_len().unwrap() + b.hub_outbox_len().unwrap(), 0);
+    assert_eq!(dump(&a), dump(&b));
+}
+
+#[test]
+fn a_later_reopen_still_wins() {
+    let (a, b) = (store(), store());
+    let item = inserted(a.upsert(&event("1", "Review login"), now()).unwrap());
+    a.set_state(&item.id, ItemState::Done, None, later(10))
+        .unwrap();
+    sync(&a, &b);
+    b.set_state(&item.id, ItemState::Open, None, later(20))
+        .unwrap();
+    sync(&b, &a);
+    assert_eq!(state(&a, &item.id), ItemState::Open);
+    assert_eq!(a.hub_outbox_len().unwrap(), 0);
+}
+
+#[test]
+fn done_survives_an_older_twin_from_before_ids_were_shared() {
+    let (a, b) = (store(), store());
+    legacy_item(&a, "legacy-a");
+    a.set_state("legacy-a", ItemState::Done, None, later(60))
+        .unwrap();
+    legacy_item(&b, "legacy-b");
+    // b's open twin lands after a's Done, so its row wins but a's state stays.
+    sync(&b, &a);
+    assert_eq!(a.get("legacy-a").unwrap(), None);
+    assert_eq!(state(&a, "legacy-b"), ItemState::Done);
+    sync(&a, &b);
+    assert_eq!(state(&b, "legacy-b"), ItemState::Done);
+    assert_eq!(dump(&a), dump(&b));
+}
+
+#[test]
+fn rows_from_older_apps_without_state_at_merge_by_their_times() {
+    let a = store();
+    let item = inserted(a.upsert(&event("1", "Review login"), now()).unwrap());
+    a.set_state(&item.id, ItemState::Done, None, later(60))
+        .unwrap();
+    a.hub_outbox_done(i64::MAX).unwrap();
+    let mut row = a
+        .hub_row("items", &json!([item.id]).to_string())
+        .unwrap()
+        .unwrap();
+    row.as_object_mut().unwrap().remove("state_at");
+    row["state"] = json!("open");
+    let key = json!([item.id]).to_string();
+
+    // Brought in fresh on the older device: open since it arrived.
+    row["updated_at"] = row["created_at"].clone();
+    a.hub_apply_remote(&[("items".into(), key.clone(), Some(row.clone()))])
+        .unwrap();
+    assert_eq!(state(&a, &item.id), ItemState::Done);
+    assert_eq!(a.hub_outbox_len().unwrap(), 1);
+    a.hub_outbox_done(i64::MAX).unwrap();
+
+    // Reopened there after the Done: the reopen wins.
+    row["updated_at"] = json!(crate::store::ts(later(90)));
+    a.hub_apply_remote(&[("items".into(), key, Some(row))])
+        .unwrap();
+    assert_eq!(state(&a, &item.id), ItemState::Open);
+}
+
+#[test]
+fn devices_sharing_a_hub_roll_up_the_same_rows_without_echoing_them() {
+    use crate::workflow::rollups::{Maintained, maintain};
+    use crate::workflow::{Run, RunStatus};
+    let (a, b) = (store(), store());
+    let w = a
+        .workflow_save(&crate::workflow::templates().remove(0), "me", now())
+        .unwrap();
+    for n in 0..40i64 {
+        let at = now() - chrono::Duration::hours(20 * n + 3);
+        a.workflow_run_insert(&Run {
+            id: format!("r{n}"),
+            workflow_id: w.id.clone(),
+            workflow_name: w.name.clone(),
+            version: 1,
+            status: if n % 3 == 0 {
+                RunStatus::Failed
+            } else {
+                RunStatus::Succeeded
+            },
+            dry_run: false,
+            trigger: "t".into(),
+            trigger_key: None,
+            item_id: None,
+            chain: vec![],
+            steps: vec![],
+            error: None,
+            started_at: at,
+            finished_at: Some(at + chrono::Duration::seconds(30)),
+            runner: String::new(),
+            resume: None,
+            rerun_of: None,
+            started_by: None,
+            caused_by: None,
+            approved: vec![],
+        })
+        .unwrap();
+    }
+    // Both hold the runs; b rolls up first, then a, then they swap rows.
+    sync(&a, &b);
+    let from_b = maintain(&b, now()).unwrap();
+    let from_a = maintain(&a, now()).unwrap();
+    assert!(from_a.written > 0);
+    assert_eq!(from_a, from_b);
+    sync(&a, &b);
+    sync(&b, &a);
+    assert_eq!(dump(&a), dump(&b));
+    assert!(dump(&a).iter().any(|(t, _)| t == "workflow_rollups"));
+    // Neither has anything left to write.
+    assert_eq!(maintain(&a, now()).unwrap(), Maintained::default());
+    assert_eq!(maintain(&b, now()).unwrap(), Maintained::default());
+    assert_eq!(
+        (a.hub_outbox_len().unwrap(), b.hub_outbox_len().unwrap()),
+        (0, 0)
+    );
 }

@@ -1,7 +1,10 @@
 // App-wide lookups many modules need: connectors and kind metadata.
 
 import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "./api";
 import { useConnectors } from "./hooks";
+import { keys } from "./query";
 import type { ConnectorInfo, KindInfo, Tone } from "./types";
 
 interface AppData {
@@ -20,15 +23,21 @@ const appLabels: Record<string, { label: string; icon: string }> = {
   email: { label: "Email", icon: "gmail" },
   meeting: { label: "Meetings", icon: "zoom" },
   jira: { label: "Jira", icon: "jira" },
+  linear: { label: "Linear", icon: "linear" },
+  notion: { label: "Notion", icon: "notion" },
+  sentry: { label: "Sentry", icon: "sentry" },
   agent: { label: "Agents", icon: "bot" },
 };
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const { data: connectors = [] } = useConnectors();
+  // MCP connections' kinds (Linear issues, …) come from the catalog.
+  const { data: catalog = [] } = useQuery({ queryKey: keys.mcpCatalog, queryFn: api.mcpCatalog, staleTime: Infinity });
 
   const value = useMemo<AppData>(() => {
     const kinds = new Map<string, KindInfo>();
     for (const c of connectors) for (const k of c.kinds) kinds.set(k.kind, k);
+    for (const e of catalog) for (const k of e.kinds ?? []) kinds.set(k.kind, k);
     const kind = (k: string): KindInfo => {
       const hit = kinds.get(k);
       if (hit) return hit;
@@ -39,7 +48,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
     const apps = Object.entries(appLabels).map(([id, v]) => ({ id, ...v }));
     return { connectors, kind, apps };
-  }, [connectors]);
+  }, [connectors, catalog]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

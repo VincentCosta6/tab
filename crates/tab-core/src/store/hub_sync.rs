@@ -42,8 +42,16 @@ pub const SYNCED: &[(&str, &[&str])] = &[
     ("items", &["id"]),
     ("sessions", &["id"]),
     ("session_messages", &["uid"]),
+    ("session_segments", &["id"]),
     ("project_notes", &["id"]),
+    ("project_repos", &["id"]),
+    ("project_resources", &["id"]),
+    ("vault_devices", &["id"]),
+    ("vault_generations", &["id"]),
+    ("vault_keys", &["id"]),
+    ("vault_audit", &["id"]),
     ("item_context", &["id"]),
+    ("item_links", &["src", "dst", "kind"]),
     ("entities", &["id"]),
     ("entity_blocks", &["kind", "key"]),
     ("item_entities", &["item_id", "entity_id", "rel"]),
@@ -52,6 +60,11 @@ pub const SYNCED: &[(&str, &[&str])] = &[
     ("workflows", &["id"]),
     ("workflow_versions", &["workflow_id", "version"]),
     ("workflow_runs", &["id"]),
+    ("workflow_rollups", &["workflow_id", "version", "day"]),
+    ("jobs", &["id"]),
+    ("runners", &["id"]),
+    ("cloud_connections", &["id"]),
+    ("model_families", &["id"]),
 ];
 
 /// Columns that only mean something in this copy, so they aren't sent and
@@ -99,6 +112,24 @@ const NEW_TABLES_BASELINE: &[&str] = &[
     "workflow_versions",
     "workflow_runs",
 ];
+
+/// What the Hub page lists as synced: a label and the table it counts.
+pub const SYNCED_SUMMARY: &[(&str, &str)] = &[
+    ("Queue items", "items"),
+    ("Projects", "projects"),
+    ("Project notes", "project_notes"),
+    ("Project resources", "project_resources"),
+    ("Chats", "sessions"),
+    ("Knowledge graph", "entities"),
+    ("Workflows", "workflows"),
+];
+
+/// One line of [`Store::hub_synced_counts`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SyncedCount {
+    pub what: &'static str,
+    pub count: u64,
+}
 
 /// One row to send to the hub: its current contents, or `None` if it's gone.
 #[derive(Debug, Clone, PartialEq)]
@@ -359,6 +390,22 @@ impl Store {
         Ok(())
     }
 
+    /// How many of each kind of thing this copy holds, for the Hub page, so
+    /// people can see that projects, notes and the graph sync along with the
+    /// queue. Every table counted here is in [`SYNCED`].
+    pub fn hub_synced_counts(&self) -> anyhow::Result<Vec<SyncedCount>> {
+        let conn = self.conn.lock().unwrap();
+        SYNCED_SUMMARY
+            .iter()
+            .map(|(what, table)| {
+                let count = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                    r.get::<_, i64>(0)
+                })? as u64;
+                Ok(SyncedCount { what, count })
+            })
+            .collect()
+    }
+
     pub fn hub_outbox_len(&self) -> anyhow::Result<u64> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.query_row("SELECT COUNT(*) FROM hub_outbox", [], |r| {
@@ -402,6 +449,10 @@ impl Store {
                     continue;
                 }
                 let sp = tx.savepoint()?;
+                let ours = match (table.as_str(), row) {
+                    ("items", Some(row)) => item_states_here(&sp, key, row)?,
+                    _ => vec![],
+                };
                 let mut wrote = write_row(&sp, table, pk, key, row.as_ref());
                 if wrote.as_ref().is_err_and(is_unique_conflict) {
                     // Another row here has the same natural key (the same
@@ -411,6 +462,9 @@ impl Store {
                     // the same one.
                     wrote = drop_twins(&sp, table, pk, key, row.as_ref())
                         .and_then(|_| write_row(&sp, table, pk, key, row.as_ref()));
+                }
+                if let (Ok(()), Some(row)) = (&wrote, row.as_ref().filter(|_| table == "items")) {
+                    wrote = merge_item_state(&sp, key, row, ours);
                 }
                 match wrote {
                     Ok(()) => {
@@ -548,6 +602,110 @@ fn drop_twins(
                 cols.len() + 1
             ),
             params_from_iter(args),
+        )?;
+    }
+    Ok(())
+}
+
+/// When an item's state changed, what to, and until when if snoozed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ItemStateAt {
+    at: String,
+    state: String,
+    snoozed_until: Option<String>,
+}
+
+impl ItemStateAt {
+    /// `state_at` is missing on rows from before it existed (or from older
+    /// apps): an item open since it arrived counts as opened when its
+    /// activity happened, anything else as of its last update.
+    fn new(
+        state: String,
+        snoozed_until: Option<String>,
+        state_at: Option<String>,
+        [occurred_at, created_at, updated_at]: [String; 3],
+    ) -> Self {
+        let at = state_at.unwrap_or(if state == "open" && updated_at == created_at {
+            occurred_at
+        } else {
+            updated_at
+        });
+        Self {
+            at,
+            state,
+            snoozed_until,
+        }
+    }
+
+    fn of_row(row: &Value) -> Self {
+        let text = |c: &str| row.get(c).and_then(Value::as_str).map(str::to_string);
+        Self::new(
+            text("state").unwrap_or_else(|| "open".into()),
+            text("snoozed_until"),
+            text("state_at"),
+            ["occurred_at", "created_at", "updated_at"].map(|c| text(c).unwrap_or_default()),
+        )
+    }
+}
+
+/// The states this copy has for the item in `row`: its own row, and a twin
+/// with the same source and external id (from before ids were shared).
+fn item_states_here(
+    conn: &rusqlite::Connection,
+    key: &str,
+    row: &Value,
+) -> anyhow::Result<Vec<ItemStateAt>> {
+    let id = serde_json::from_str::<Vec<Value>>(key)?
+        .first()
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_default();
+    let text = |c: &str| row.get(c).and_then(Value::as_str).unwrap_or_default();
+    Ok(conn
+        .prepare_cached(
+            "SELECT state, snoozed_until, state_at, occurred_at, created_at, updated_at FROM items
+             WHERE id = ?1 OR (source = ?2 AND external_id = ?3)",
+        )?
+        .query_map(
+            rusqlite::params![id, text("source"), text("external_id")],
+            |r| {
+                Ok(ItemStateAt::new(
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    [r.get(3)?, r.get(4)?, r.get(5)?],
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Keeps the newest state of an item the hub just sent over, rather than
+/// whatever the newest row says: a device that brought the item in before
+/// it synced would otherwise reopen something marked done elsewhere. When
+/// this copy's state wins, it goes back to the hub so the others get it.
+/// A tie goes to the hub's row, as rows do, so every device keeps the same.
+fn merge_item_state(
+    conn: &rusqlite::Connection,
+    key: &str,
+    row: &Value,
+    ours: Vec<ItemStateAt>,
+) -> anyhow::Result<()> {
+    let theirs = ItemStateAt::of_row(row);
+    // Timestamps are all RFC 3339 in UTC with milliseconds, so they sort as text.
+    let best = ours.into_iter().fold(
+        theirs.clone(),
+        |best, s| if s.at > best.at { s } else { best },
+    );
+    let id: Vec<Value> = serde_json::from_str(key)?;
+    conn.execute(
+        "UPDATE items SET state = ?2, snoozed_until = ?3, state_at = ?4 WHERE id = ?1",
+        rusqlite::params![to_sql(&id[0]), best.state, best.snoozed_until, best.at],
+    )?;
+    if best != theirs {
+        conn.execute(
+            "INSERT INTO hub_outbox (tbl, pk) VALUES ('items', ?1)",
+            [key],
         )?;
     }
     Ok(())

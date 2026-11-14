@@ -279,6 +279,33 @@ pub struct QueueItem {
     /// The project the person put this in, if any.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// The task this is a follow-up of. While that one is open, this shows
+    /// under it in the queue rather than as a row of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// Tasks not done yet that have to be done before this one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+}
+
+/// How one task relates to another (see [`QueueItem::parent_id`] and
+/// [`QueueItem::blocked_by`]).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkKind {
+    /// `src` is a follow-up of `dst`.
+    Followup,
+    /// `src` has to be done before `dst`.
+    Blocks,
+}
+
+impl LinkKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LinkKind::Followup => "followup",
+            LinkKind::Blocks => "blocks",
+        }
+    }
 }
 
 /// A group of work the person defines: chats started in it belong to it.
@@ -290,8 +317,97 @@ pub struct Project {
     pub color: String,
     /// Icon name from the design system.
     pub icon: String,
+    /// What the project is and does, in a few sentences.
+    #[serde(default)]
+    pub about: String,
+    /// How to work in it: conventions, do's and don'ts, who to ask.
+    #[serde(default)]
+    pub rules: String,
+    /// The coordinator wakes on queue changes and checks hourly.
+    #[serde(default = "yes")]
+    pub coordinator_watch: bool,
+    /// Weekday morning brief at this local time (`HH:MM`), `""` for none.
+    #[serde(default = "default_brief")]
+    pub coordinator_brief: String,
+    /// The coordinator's chat compacts when a turn ends above this many
+    /// tokens of context; 0 never.
+    #[serde(default = "default_compact_at")]
+    pub compact_at: i64,
     pub created_at: DateTime<Utc>,
 }
+
+fn yes() -> bool {
+    true
+}
+
+fn default_brief() -> String {
+    "08:00".into()
+}
+
+pub const DEFAULT_COMPACT_AT: i64 = 200_000;
+
+fn default_compact_at() -> i64 {
+    DEFAULT_COMPACT_AT
+}
+
+/// A repo a project's work happens in, so agents know where to work.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectRepo {
+    pub id: String,
+    pub project_id: String,
+    /// `owner/name`, or a URL for repos that aren't on GitHub.
+    pub repo: String,
+    /// Where it's checked out, if known.
+    pub path: Option<String>,
+    /// What the repo is for in this project.
+    pub note: String,
+    /// `agent` or `user`.
+    pub added_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Something a project knows besides its repos: a website, a document,
+/// email by label or sender, a service (a Cloudflare project, Stripe), each
+/// with who may read it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectResource {
+    pub id: String,
+    pub project_id: String,
+    /// `website`, `file`, `email`, `service`, `link` or `note`.
+    pub kind: String,
+    pub title: String,
+    /// The link; for email the label or sender; for a file its hub hash.
+    pub url: Option<String>,
+    /// What it's for; for a note, its text.
+    pub note: String,
+    /// `all`, `coordinator` or `vault`: who may read it.
+    pub access: String,
+    /// Kind-specific choices (crawl depth, schedule, what agents may do).
+    pub options: serde_json::Value,
+    /// `pending`, `indexed`, `live`, `link_only`, `failed` or `needs_sign_in`.
+    pub status: String,
+    pub chunks: i64,
+    pub pinned: bool,
+    /// `agent` or `user`.
+    pub added_by: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// When this device last read it into the index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_at: Option<DateTime<Utc>>,
+    /// Why the last read failed, on this device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_error: Option<String>,
+    /// When an agent's search last returned a piece of it, on this device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Who may read a project resource, lowest first.
+pub const RESOURCE_ACCESS: [&str; 3] = ["all", "coordinator", "vault"];
+/// The kinds of project resource.
+pub const RESOURCE_KINDS: [&str; 6] = ["website", "file", "email", "service", "link", "note"];
 
 /// A durable fact about a project, left by an agent or the person, so the
 /// next chat starts with it. One note per topic: writing a topic again
@@ -333,10 +449,18 @@ pub struct UserProfile {
 pub enum ConnectorStatus {
     Disabled,
     Starting,
-    Running { last_sync: Option<DateTime<Utc>> },
-    RateLimited { until: DateTime<Utc> },
-    Error { message: String },
+    Running {
+        last_sync: Option<DateTime<Utc>>,
+    },
+    RateLimited {
+        until: DateTime<Utc>,
+    },
+    Error {
+        message: String,
+    },
     Stopped,
+    /// Set to run in tab cloud, so this app doesn't run it.
+    InCloud,
 }
 
 /// How the UI should show items of one kind.
@@ -638,6 +762,36 @@ pub struct DoneGuard {
     pub url: Option<String>,
 }
 
+/// Who has the next move on something in an item's Context.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingOn {
+    /// The person: review it, fix it, merge it, reply.
+    You,
+    /// Someone or something else: reviewers, CI, the other side of a thread.
+    Others,
+    /// Nobody: it's finished at the source.
+    Nobody,
+}
+
+/// Where something in an item's Context stands, in the connector's words,
+/// so a task's row can say "Changes requested" or "Merged" instead of only
+/// what its agent is doing. Any connector can report one for its links.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextStatus {
+    /// The connector that reported it.
+    pub source: String,
+    /// A pill's worth: "In review", "Changes requested", "Merged".
+    pub label: String,
+    /// What it's about and why, for a tooltip: "acme/api#12: Fix the badge".
+    pub detail: Option<String>,
+    pub tone: Tone,
+    pub waiting_on: WaitingOn,
+    /// Finished at the source (merged, closed, resolved).
+    pub finished: bool,
+    pub url: Option<String>,
+}
+
 /// Everything known around an item, rolled up for the chat view.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ItemContext {
@@ -654,6 +808,10 @@ pub enum AgentKind {
     /// `opencode`, as the app and the store spell it.
     #[serde(rename = "opencode", alias = "open_code")]
     OpenCode,
+    /// OpenAI's Codex CLI.
+    Codex,
+    /// Pi, the minimal coding agent.
+    Pi,
 }
 
 impl AgentKind {
@@ -661,14 +819,24 @@ impl AgentKind {
         match self {
             AgentKind::ClaudeCode => "claude_code",
             AgentKind::OpenCode => "opencode",
+            AgentKind::Codex => "codex",
+            AgentKind::Pi => "pi",
         }
     }
+    /// Every harness tab has an adapter for, in the order it suggests them.
+    pub const ALL: [AgentKind; 4] = [
+        AgentKind::ClaudeCode,
+        AgentKind::OpenCode,
+        AgentKind::Codex,
+        AgentKind::Pi,
+    ];
+    /// From [`Self::as_str`]. Anything unknown (a harness from a newer app)
+    /// reads as Claude Code.
     pub fn parse(s: &str) -> Self {
-        if s == "opencode" {
-            AgentKind::OpenCode
-        } else {
-            AgentKind::ClaudeCode
-        }
+        Self::ALL
+            .into_iter()
+            .find(|k| k.as_str() == s)
+            .unwrap_or(AgentKind::ClaudeCode)
     }
 }
 
@@ -721,6 +889,19 @@ pub struct Session {
     /// Other devices watch and steer it through the hub.
     #[serde(default)]
     pub device: Option<String>,
+    /// The model this chat runs on, set when its first message is sent:
+    /// `""` for the harness's default, `None` for older chats that follow
+    /// tab's default.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// When it last became its task's chat: created, or picked again with
+    /// `/resume`. A task shows the chat opened last.
+    #[serde(default)]
+    pub opened_at: Option<DateTime<Utc>>,
+    /// The permission mode this chat runs in, set when its first message
+    /// is sent; `None` for older chats, which follow tab's default.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

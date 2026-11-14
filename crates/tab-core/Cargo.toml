@@ -20,6 +20,7 @@ tracing.workspace = true
 uuid.workspace = true
 tab-domain = { path = "../tab-domain" }
 tab-protocol = { path = "../tab-protocol" }
+prost = "0.14"
 prost-types = "0.14"
 tab-store = { path = "../tab-store", features = ["sqlite", "fs"] }
 tab-hub = { path = "../tab-hub" }
@@ -46,13 +47,56 @@ webpki-roots = "1"
 mail-parser = "0.11"
 sqlite-vec = "0.1.6"
 model2vec-rs = { version = "0.4", default-features = false, features = ["fancy-regex", "local-only"] }
+# Project resources' text (crate::knowledge): docx/xlsx are zipped XML.
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+quick-xml = "0.42"
+pdf-extract = "0.12"
+url = "2"
+# The end-to-end encrypted vault (crate::e2e).
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+getrandom = "0.3"
+zeroize = "1"
+bip39 = { version = "2", default-features = false, features = ["std"] }
+
+# Zed's crates come from git, pinned to one commit (never a branch), with
+# default features off. deny.toml allows this repository only, and checks the
+# license of everything they pull in; see CLAUDE.md before adding another.
+# HTML email and web pages as Markdown, for the ranker and agent context.
+html_to_markdown = { git = "https://github.com/zed-industries/zed", rev = "78f5d7446c55f6c1aa9b66e8111f6b3f4625ebb0", default-features = false }
+# HTTP CONNECT and SOCKS5 through a company proxy, for connections reqwest
+# doesn't make (IMAP, the hub socket, the sandbox's egress proxy).
+proxy_handshake = { git = "https://github.com/zed-industries/zed", rev = "78f5d7446c55f6c1aa9b66e8111f6b3f4625ebb0", default-features = false, features = ["tokio"] }
+# Agent Client Protocol messages (agents::acp). Types only: tab runs the
+# process and the JSON-RPC itself, under its sandbox.
+agent-client-protocol-schema = { version = "1.17", default-features = false }
+# Language server messages (crate::lsp).
+lsp-types = "0.97"
+# A terminal emulator's screen, for turning command output (colours, `\r`
+# progress bars, cursor moves) into the text a person would have seen.
+alacritty_terminal = { version = "0.26", default-features = false }
+
+# The cloud hub's sync socket.
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# Windows Hello before the vault opens (e2e::presence).
+windows = { version = "0.62", features = ["Security_Credentials_UI", "Foundation"] }
+
+# MCP sign-ins (see remote_mcp::vault).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+# Touch ID before the vault opens (e2e::presence).
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSError"] }
+objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "LAContext", "LAError", "block2"] }
+block2 = "0.6"
 
 [dev-dependencies]
-tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tokio = { workspace = true, features = ["test-util"] }

@@ -199,6 +199,32 @@ export function loadProject(key: string, files: string[], read: (paths: string[]
   return job;
 }
 
+// A loaded repository is the review's biggest cost: every file is a model,
+// mirrored into the TypeScript worker (eager sync). Keep it while a review is
+// open, and for a while after so switching tabs doesn't reload it, then free it.
+const UNLOAD_AFTER = 2 * 60_000;
+let holders = 0;
+let unloadTimer: number | undefined;
+
+/** Keeps the loaded project while the caller is mounted. Returns the release. */
+export function holdProject(): () => void {
+  holders++;
+  clearTimeout(unloadTimer);
+  return () => {
+    if (--holders === 0) unloadTimer = window.setTimeout(unloadProject, UNLOAD_AFTER);
+  };
+}
+
+/** Drops every model no editor shows (the project and opened files) and the library types. */
+function unloadProject() {
+  if (holders) return;
+  set(null);
+  running = null;
+  loaded.clear();
+  for (const m of monaco.editor.getModels()) if (!m.isAttachedToEditor()) m.dispose();
+  setLibraryTypes([]);
+}
+
 type Opener = (path: string, line?: number, column?: number) => void;
 let opener: Opener | null = null;
 /** Go to definition into another file opens it as a tab in the workspace. */

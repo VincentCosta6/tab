@@ -16,7 +16,8 @@ use std::sync::Arc;
 use crate::config::ConnectorConfig;
 use crate::gateway::Gateway;
 use crate::model::{
-    Block, ConnectorDescriptor, ConnectorStatus, DoneGuard, IncomingEvent, ItemContext, QueueItem,
+    Block, ConnectorDescriptor, ConnectorStatus, ContextStatus, DoneGuard, IncomingEvent,
+    ItemContext, QueueItem,
 };
 
 /// Describes a connector type and builds instances of it from settings.
@@ -62,6 +63,16 @@ pub trait Connector: Send + Sync + 'static {
     ///
     /// Keep it quick and cached; the engine gives up on slow answers.
     async fn done_guards(&self, _ctx: &ItemContext) -> anyhow::Result<Vec<DoneGuard>> {
+        Ok(Vec::new())
+    }
+
+    /// Where the things this connector knows about in an item's Context
+    /// stand (GitHub: "Changes requested" on the task's PR). Like
+    /// [`Self::done_guards`], asked of every connector with the item's
+    /// Context; connectors with nothing to say keep the default.
+    ///
+    /// Keep it quick and cached; the engine gives up on slow answers.
+    async fn context_status(&self, _ctx: &ItemContext) -> anyhow::Result<Vec<ContextStatus>> {
         Ok(Vec::new())
     }
 

@@ -44,6 +44,8 @@
   --tone-neutral-bg: #efeff1;
   --tone-accent-fg: #4f46e5;
   --tone-accent-bg: #ecebfd;
+  --tone-merged-fg: #8250df;
+  --tone-merged-bg: #fbefff;
   --tone-info-fg: #0369a1;
   --tone-info-bg: #e3f2fb;
   --tone-success-fg: #15803d;
@@ -57,6 +59,15 @@
   --urgency-today: var(--tone-warning-fg);
   --urgency-this_week: var(--tone-info-fg);
   --urgency-whenever: var(--fg-subtle);
+
+  /* Chart fills (outcomes and interventions). Darker than the text tones
+     so marks read on both surfaces; checked for colour-blind separation. */
+  --chart-ok: #15803d;
+  --chart-attended: #4f46e5;
+  --chart-failed: #c2261d;
+  --chart-planned: #0284c7;
+  --chart-unplanned: #d97706;
+  --chart-track: #e8e8ec;
 
   color-scheme: light;
 }
@@ -81,6 +92,8 @@
     --tone-neutral-bg: #232327;
     --tone-accent-fg: #a5b4fc;
     --tone-accent-bg: #25264a;
+    --tone-merged-fg: #ab7df8;
+    --tone-merged-bg: #2a1d42;
     --tone-info-fg: #7dd3fc;
     --tone-info-bg: #0f2a3a;
     --tone-success-fg: #86efac;
@@ -89,6 +102,13 @@
     --tone-warning-bg: #32250c;
     --tone-danger-fg: #fca5a5;
     --tone-danger-bg: #3a1513;
+
+    --chart-ok: #16a34a;
+    --chart-attended: #6366f1;
+    --chart-failed: #ef4444;
+    --chart-planned: #0284c7;
+    --chart-unplanned: #d97706;
+    --chart-track: #26262b;
 
     color-scheme: dark;
   }

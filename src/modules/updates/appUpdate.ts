@@ -1,5 +1,5 @@
-// tab's own updates: the hourly check, and installing what it found. The nav
-// card and Settings → Updates share this, so an install started in one shows
+// tab's own updates: the hourly check, and installing what it found. The
+// Settings badge and Settings → Updates share this, so an install started in one shows
 // its progress in the other.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";

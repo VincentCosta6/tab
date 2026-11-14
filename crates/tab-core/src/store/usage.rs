@@ -30,6 +30,19 @@ pub struct PlanWindow {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One stored turn's spend, as a chat's runner reads it back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnUsage {
+    pub at: DateTime<Utc>,
+    pub agent: String,
+    pub model: Option<String>,
+    /// 'subscription', 'api' or 'unknown'.
+    pub billing: String,
+    pub cost_usd: f64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UsageSummary {
     pub today_usd: f64,
@@ -68,6 +81,45 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// What one chat spent, oldest turn first.
+    pub fn usage_for_session(&self, session_id: &str) -> anyhow::Result<Vec<TurnUsage>> {
+        let conn = self.conn();
+        let rows = conn
+            .prepare(
+                "SELECT at, agent, model, billing, cost_usd, input_tokens, output_tokens
+                 FROM agent_usage WHERE session_id = ?1 ORDER BY id",
+            )?
+            .query_map([session_id], |r| {
+                Ok(TurnUsage {
+                    at: parse_ts(&r.get::<_, String>(0)?)?,
+                    agent: r.get(1)?,
+                    model: r.get(2)?,
+                    billing: r.get(3)?,
+                    cost_usd: r.get(4)?,
+                    input_tokens: r.get(5)?,
+                    output_tokens: r.get(6)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Whether anything but chat `session_id` used the Claude plan since
+    /// `since` (another chat, or the ranker).
+    pub fn plan_used_elsewhere(
+        &self,
+        session_id: &str,
+        since: DateTime<Utc>,
+    ) -> anyhow::Result<bool> {
+        let n: i64 = self.conn().query_row(
+            "SELECT COUNT(*) FROM agent_usage
+             WHERE billing = 'subscription' AND at >= ?1 AND session_id IS NOT ?2",
+            params![ts(since), session_id],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
     }
 
     pub fn plan_window_set(&self, w: &PlanWindow) -> anyhow::Result<()> {
@@ -178,5 +230,53 @@ mod tests {
             .unwrap();
         }
         assert_eq!(s.plan_windows().unwrap()[0].utilization, Some(0.81));
+    }
+
+    #[test]
+    fn a_chats_turns_read_back_in_order_and_other_plan_use_shows() {
+        let s = Store::in_memory().unwrap();
+        let t0 = Utc::now() - chrono::Duration::minutes(10);
+        let add = |session: Option<&str>, billing: &'static str, cost: f64, at| {
+            s.usage_add(
+                &NewUsage {
+                    purpose: "agent",
+                    session_id: session.map(str::to_string),
+                    agent: "claude_code".into(),
+                    model: Some("claude-opus-5-5".into()),
+                    billing,
+                    cost_usd: cost,
+                    input_tokens: 100,
+                    output_tokens: 10,
+                },
+                at,
+            )
+            .unwrap()
+        };
+        add(Some("job"), "subscription", 0.5, t0);
+        add(
+            Some("job"),
+            "subscription",
+            0.25,
+            t0 + chrono::Duration::minutes(1),
+        );
+        add(Some("other"), "api", 1.0, t0 + chrono::Duration::minutes(2));
+        let rows = s.usage_for_session("job").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].cost_usd, 0.25);
+        assert_eq!(rows[0].billing, "subscription");
+        // An API-key chat doesn't touch the plan.
+        assert!(!s.plan_used_elsewhere("job", t0).unwrap());
+        // The ranker on the plan does.
+        add(
+            None,
+            "subscription",
+            0.01,
+            t0 + chrono::Duration::minutes(3),
+        );
+        assert!(s.plan_used_elsewhere("job", t0).unwrap());
+        assert!(
+            !s.plan_used_elsewhere("job", t0 + chrono::Duration::minutes(4))
+                .unwrap()
+        );
     }
 }

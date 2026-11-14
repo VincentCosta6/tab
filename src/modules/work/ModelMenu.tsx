@@ -39,6 +39,7 @@ export function ModelMenu({
   variant = "bar",
   defaultLabel,
   title = "Model",
+  openSignal,
 }: {
   value: ModelPick | null;
   onChange: (pick: ModelPick) => void;
@@ -50,6 +51,8 @@ export function ModelMenu({
   /** What "Default model" means for a harness, shown under it. */
   defaultLabel?: (h: Harness) => string | null;
   title?: string;
+  /** Opens the menu each time it changes (the composer's `/model`). */
+  openSignal?: number;
 }) {
   const { data: harnesses = [] } = useHarnesses();
   const { data: models = [] } = useModels();
@@ -66,6 +69,7 @@ export function ModelMenu({
     return () => window.removeEventListener("mousedown", close);
   }, [open]);
   useEffect(() => setQ(""), [open]);
+  useEffect(() => void (openSignal && setOpen(true)), [openSignal]);
 
   const shown = harnesses.filter((h) => (installed.has(h.id) || models.some((m) => m.agent === h.id) || h.id === value?.agent) && (!only || only.includes(h.id)));
   const rows: Row[] = [

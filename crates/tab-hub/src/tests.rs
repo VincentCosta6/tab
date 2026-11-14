@@ -715,3 +715,168 @@ fn file_cleanup_pages_through_many_files() {
     assert_eq!(gone.len(), 1200);
     assert_eq!(blobs.stats().unwrap().files, 0);
 }
+
+#[test]
+fn importing_moves_a_hub_over_the_wire() {
+    // The desktop's hub, with some history.
+    let mut local = SqliteStore::in_memory().unwrap();
+    history(&mut local);
+    let log = local.changes_since(0, 100).unwrap();
+    let page = |from: usize, to: usize| {
+        Req::Import(pb::Import {
+            changes: log[from..to].iter().map(Into::into).collect(),
+        })
+    };
+
+    let mut cloud = Hub::new(SqliteStore::in_memory().unwrap(), "cloud", t(0));
+    cloud.connect(MAC, "", t(0));
+    cloud.connect(PHONE, "", t(0));
+    send(&mut cloud, MAC, 1, hello("mac", 0), t(9));
+    send(&mut cloud, PHONE, 1, hello("phone", 0), t(9));
+
+    // A page that doesn't start at 1 is refused.
+    let h = send(&mut cloud, MAC, 2, page(1, 3), t(9));
+    assert!(matches!(body(&h), Res::Error(e) if e.code == pb::error::Code::Conflict as i32));
+
+    // Two pages, in order, keep every seq, author and time, and are pushed
+    // to the phone like any write.
+    let h = send(&mut cloud, MAC, 3, page(0, 2), t(9));
+    assert!(matches!(body(&h), Res::Imported(i) if i.head == 2), "{h:?}");
+    assert!(
+        matches!(&h.push, Some(p) if matches!(&p.body, Some(Res::Changes(c)) if c.changes.len() == 2))
+    );
+    // Only the importing connection may carry on.
+    let h = send(&mut cloud, PHONE, 2, page(2, log.len()), t(9));
+    assert!(matches!(body(&h), Res::Error(e) if e.code == pb::error::Code::Conflict as i32));
+    // Skipping ahead is refused, and writes nothing.
+    let h = send(&mut cloud, MAC, 4, page(3, log.len()), t(9));
+    assert!(
+        matches!(body(&h), Res::Error(e) if e.message.contains("expected change 3")),
+        "{h:?}"
+    );
+    let h = send(&mut cloud, MAC, 5, page(2, log.len()), t(9));
+    assert!(matches!(body(&h), Res::Imported(i) if i.head == log.len() as u64));
+    assert_eq!(cloud.store().changes_since(0, 100).unwrap(), log);
+    assert_eq!(
+        cloud.store().search("three", 5).unwrap(),
+        local.search("three", 5).unwrap()
+    );
+
+    // A hub that's in use can't be imported into, even by a new connection
+    // from the same device.
+    cloud.connect(3, "", t(10));
+    send(&mut cloud, 3, 1, hello("mac", 0), t(10));
+    let h = send(&mut cloud, 3, 2, page(0, 1), t(10));
+    assert!(matches!(body(&h), Res::Error(e) if e.message.contains("already has")));
+}
+
+// ---- Who a device is ----
+
+/// Where the host says who is calling, a device id belongs to the first
+/// user to say hello as it: someone else can't take it over and publish
+/// into its sessions or hold its leases.
+#[test]
+fn device_ids_belong_to_the_user_who_said_them_first() {
+    let mut hub = Hub::new(MemStore::new(), "cloud", t(0));
+    hub.connect_as(MAC, "", Some("alice"), None, t(0));
+    assert!(matches!(
+        body(&send(&mut hub, MAC, 1, hello("mac", 0), t(0))),
+        Res::Welcome(_)
+    ));
+    send(
+        &mut hub,
+        MAC,
+        2,
+        Req::Apply(pb::Apply {
+            ops: vec![session_row("s1", "mac")],
+        }),
+        t(1),
+    );
+    assert_eq!(
+        hub.device_owners().get("mac").map(String::as_str),
+        Some("alice")
+    );
+
+    // Bob says he's the mac: refused, so he can't publish as it.
+    hub.connect_as(PHONE, "", Some("bob"), None, t(2));
+    let (code, msg) = error(&send(&mut hub, PHONE, 1, hello("mac", 0), t(2)));
+    assert_eq!(code, pb::error::Code::Conflict as i32);
+    assert!(msg.contains("someone else"), "{msg}");
+    let (_, msg) = error(&send(&mut hub, PHONE, 2, publish("s1", json!({})), t(2)));
+    assert!(msg.contains("hello"), "{msg}");
+
+    // Alice again, on another socket: still hers. After a restart the host
+    // restores who owns what.
+    hub.connect_as(LAPTOP, "", Some("alice"), None, t(3));
+    assert!(matches!(
+        body(&send(&mut hub, LAPTOP, 1, hello("mac", 0), t(3))),
+        Res::Welcome(_)
+    ));
+    let mut fresh = Hub::new(MemStore::new(), "cloud", t(4));
+    for (d, u) in hub.device_owners() {
+        fresh.bind_device(d, u);
+    }
+    fresh.connect_as(PHONE, "", Some("bob"), None, t(4));
+    assert!(
+        error(&send(&mut fresh, PHONE, 1, hello("mac", 0), t(4)))
+            .1
+            .contains("someone else")
+    );
+
+    // Without a verified user (the desktop's own hub), ids are as before.
+    let mut local = Hub::new(MemStore::new(), "local", t(0));
+    local.connect(MAC, "", t(0));
+    assert!(matches!(
+        body(&send(&mut local, MAC, 1, hello("mac", 0), t(0))),
+        Res::Welcome(_)
+    ));
+    assert!(local.device_owners().is_empty());
+}
+
+/// The cloud runner says hello only as the device id its hub gave it, and
+/// nobody else can say that id.
+#[test]
+fn a_runner_is_pinned_to_its_own_device_id() {
+    let runner = runner_device("hub1");
+    let mut hub = Hub::new(MemStore::new(), "cloud", t(0));
+    hub.connect_as(MAC, "", Some("runner"), Some(&runner), t(0));
+    let (_, msg) = error(&send(&mut hub, MAC, 1, hello("mac", 0), t(0)));
+    assert!(msg.contains(&runner), "{msg}");
+    assert!(matches!(
+        body(&send(&mut hub, MAC, 2, hello(&runner, 0), t(0))),
+        Res::Welcome(_)
+    ));
+    hub.connect_as(PHONE, "", Some("alice"), None, t(0));
+    let (_, msg) = error(&send(&mut hub, PHONE, 1, hello("runner-other", 0), t(0)));
+    assert!(msg.contains("runner"), "{msg}");
+}
+
+/// Live events and steering are capped, so one client can't flood every
+/// watcher.
+#[test]
+fn live_bodies_are_capped() {
+    let mut hub = live_hub(MemStore::new());
+    let big = vec![b'x'; MAX_LIVE_BYTES + 1];
+    let h = send(
+        &mut hub,
+        MAC,
+        9,
+        Req::Publish(pb::Publish {
+            session: "s1".into(),
+            event_json: big.clone(),
+        }),
+        t(2),
+    );
+    assert_eq!(error(&h).0, pb::error::Code::BadRequest as i32);
+    let h = send(
+        &mut hub,
+        PHONE,
+        9,
+        Req::Steer(pb::Steer {
+            session: "s1".into(),
+            body_json: big,
+        }),
+        t(2),
+    );
+    assert_eq!(error(&h).0, pb::error::Code::BadRequest as i32);
+}

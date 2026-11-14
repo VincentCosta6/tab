@@ -9,13 +9,15 @@ import { cx } from "./design/components";
 import { ErrorBoundary } from "./design/ErrorBoundary";
 import { AppProvider, useApp } from "./lib/app-context";
 import { useAgentActivity, useConfig } from "./lib/hooks";
+import { setHere } from "./lib/nav";
 import { QueryProvider } from "./lib/query";
 import { Onboarding } from "./modules/onboarding/Onboarding";
 import { tabs } from "./modules/registry";
 import { UsageMeter } from "./modules/usage/UsageMeter";
-import { Updater } from "./modules/updates/Updater";
-import { AppUpdater } from "./modules/updates/AppUpdater";
+import { DoneOffer } from "./modules/work/DoneOffer";
+import { UpdatesBadge } from "./modules/updates/UpdatesBadge";
 import { openSettings } from "./modules/settings/SettingsTab";
+import { AppHeader } from "./modules/shell/AppHeader";
 
 export default function App() {
   return (
@@ -44,9 +46,17 @@ function Shell() {
 
   useEffect(() => {
     const work = () => setActive("work");
+    const show = (e: Event) => setActive((e as CustomEvent<string>).detail);
     window.addEventListener("tab:open-item", work);
-    return () => window.removeEventListener("tab:open-item", work);
+    window.addEventListener("tab:show", show);
+    return () => {
+      window.removeEventListener("tab:open-item", work);
+      window.removeEventListener("tab:show", show);
+    };
   }, []);
+
+  // So a view opened from a link knows where to go back to.
+  useEffect(() => setHere({ tab: tab.id }), [tab.id]);
 
   // GitHub PR links open in Reviews while that tab is available.
   const reviews = visible.some((t) => t.id === "reviews");
@@ -85,6 +95,7 @@ function Shell() {
       <span className="nav-icon">
         {t.id === "work" ? <TabMark size={22} /> : <Icon name={t.icon} size={18} />}
         {t.id === "work" && <AgentBadge />}
+        {t.id === "settings" && <UpdatesBadge onOpen={() => openSettings("updates")} />}
       </span>
       <span>{t.label}</span>
     </button>
@@ -93,22 +104,24 @@ function Shell() {
   const Active = tab.component;
   return (
     <div className="shell">
+      <AppHeader title={tab.label} icon={tab.icon} />
       <nav className="nav">
         <div className="nav-group">{visible.filter((t) => !t.footer).map(navButton)}</div>
         <div className="nav-group nav-footer">
-          <AppUpdater />
-          <Updater />
           <UsageMeter onSettings={() => openSettings("agents")} />
           {visible.filter((t) => t.footer).map(navButton)}
         </div>
       </nav>
       <main className="main">
-        <ErrorBoundary key={tab.id} label={tab.label}>
-          <Active />
-        </ErrorBoundary>
+        <div className="main-body">
+          <ErrorBoundary key={tab.id} label={tab.label}>
+            <Active />
+          </ErrorBoundary>
+        </div>
       </main>
       <BrowserDock />
       <DropOverlay />
+      <DoneOffer />
       {onboarding && <Onboarding onClose={() => setOnboarding(false)} />}
     </div>
   );

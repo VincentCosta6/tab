@@ -31,43 +31,29 @@
           "help": "Reads and plans, changes nothing"
         }
       ],
-      "external_server": false,
       "budget_cap": true
     },
     "model_hint": "e.g. sonnet or opus",
-    "small_model": "claude-haiku-5-5",
-    "models": [
-      {
-        "id": "claude-opus-5-5",
-        "label": "Opus 5.5",
-        "common": true
-      },
-      {
-        "id": "claude-sonnet-5-5",
-        "label": "Sonnet 5.5",
-        "common": true
-      },
-      {
-        "id": "claude-haiku-5-5",
-        "label": "Haiku 5.5",
-        "common": true
-      },
-      {
-        "id": "claude-fable-5-1",
-        "label": "Fable 5.1",
-        "common": true
-      },
-      {
-        "id": "claude-opus-5",
-        "label": "Opus 5"
-      },
-      {
-        "id": "claude-opus-4-8",
-        "label": "Opus 4.8"
-      }
-    ],
-    "list_models": null,
-    "common_models": [],
+    "small_model": "haiku",
+    "list_models": {
+      "args": [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose"
+      ],
+      "stdin": [
+        "{\"type\":\"control_request\",\"request_id\":\"tab_models\",\"request\":{\"subtype\":\"initialize\"}}"
+      ],
+      "format": "claude_initialize"
+    },
+    "families": {
+      "fast": "haiku",
+      "balanced": "sonnet",
+      "deep": "opus"
+    },
     "install": {
       "npm": "@anthropic-ai/claude-code",
       "unix": "curl -fsSL https://claude.ai/install.sh | bash",
@@ -91,28 +77,25 @@
       "brand": "opencode"
     },
     "command": "opencode",
-    "pitch": "Open source and works with any model provider. tab starts its server and streams every session.",
+    "pitch": "Open source and works with any model provider. tab runs it over the Agent Client Protocol.",
     "capabilities": {
       "strict": true,
       "permission_modes": [],
-      "external_server": true,
       "budget_cap": false
     },
     "model_hint": "provider/model, e.g. anthropic/claude-sonnet-5-5",
     "small_model": null,
-    "models": [],
     "list_models": {
       "args": [
         "models"
       ],
       "format": "provider_slash_model_lines"
     },
-    "common_models": [
-      "anthropic/claude-opus-5-5",
-      "anthropic/claude-sonnet-5-5",
-      "anthropic/claude-haiku-5-5",
-      "anthropic/claude-fable-5-1"
-    ],
+    "families": {
+      "fast": "anthropic/claude-haiku-5-5",
+      "balanced": "anthropic/claude-sonnet-5-5",
+      "deep": "anthropic/claude-opus-5-5"
+    },
     "install": {
       "npm": "opencode-ai",
       "unix": "curl -fsSL https://opencode.ai/install | bash",
@@ -127,6 +110,126 @@
     "bin_dirs": [
       ".opencode/bin",
       ".local/bin"
+    ],
+    "acp": {
+      "command": null,
+      "args": [
+        "acp"
+      ],
+      "env": {},
+      "strict_args": [],
+      "strict_env": {
+        "OPENCODE_DISABLE_CLAUDE_CODE": "1"
+      },
+      "mcp_tool_name": "{server}_{tool}",
+      "adapter": null,
+      "preview": false
+    }
+  },
+  {
+    "id": "codex",
+    "name": "Codex",
+    "icon": {
+      "brand": null,
+      "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><rect x=\"1.5\" y=\"3\" width=\"21\" height=\"18\" rx=\"4.5\" fill=\"none\" stroke=\"#8b8b93\" stroke-width=\"2\"/><path d=\"M6.5 9l3.5 3-3.5 3\" fill=\"none\" stroke=\"#8b8b93\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M12.5 15.5h5\" stroke=\"#8b8b93\" stroke-width=\"2\" stroke-linecap=\"round\"/></svg>"
+    },
+    "command": "codex",
+    "pitch": "OpenAI's coding agent. tab runs the Codex CLI with your ChatGPT sign-in or API key and streams each turn.",
+    "capabilities": {
+      "strict": true,
+      "permission_modes": [],
+      "budget_cap": false
+    },
+    "model_hint": "e.g. gpt-6-sol",
+    "small_model": null,
+    "list_models": {
+      "args": [
+        "app-server"
+      ],
+      "stdin": [
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"tab\",\"version\":\"0\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"model/list\",\"params\":{}}"
+      ],
+      "format": "codex_model_list"
+    },
+    "families": {
+      "fast": "gpt-6-luna",
+      "balanced": "gpt-6-sol",
+      "deep": "gpt-6.1-sol"
+    },
+    "install": {
+      "npm": "@openai/codex",
+      "unix": null,
+      "windows": null
+    },
+    "upgrade": {
+      "winget": null,
+      "npm": "npm install -g @openai/codex@latest",
+      "brew": "brew upgrade codex",
+      "native": null
+    },
+    "bin_dirs": [
+      ".local/bin",
+      ".codex/bin"
+    ],
+    "acp": {
+      "command": "codex-acp",
+      "args": [],
+      "env": {},
+      "strict_args": [],
+      "strict_env": {},
+      "strict": false,
+      "mcp_tool_name": "mcp.{server}.{tool}",
+      "adapter": {
+        "npm": "@agentclientprotocol/codex-acp",
+        "repo": "https://github.com/agentclientprotocol/codex-acp",
+        "license": "Apache-2.0"
+      },
+      "preview": true
+    }
+  },
+  {
+    "id": "pi",
+    "name": "Pi",
+    "icon": {
+      "brand": null,
+      "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><rect x=\"1.5\" y=\"1.5\" width=\"21\" height=\"21\" rx=\"5\" fill=\"none\" stroke=\"#8b8b93\" stroke-width=\"2\"/><path d=\"M6.5 8h11M9.5 8v9M14.5 8v7.5c0 1 .6 1.5 1.5 1.5h1\" fill=\"none\" stroke=\"#8b8b93\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+    },
+    "command": "pi",
+    "pitch": "A small, open source agent that works with most model providers. tab runs it one turn at a time and keeps each chat as a Pi session.",
+    "capabilities": {
+      "strict": true,
+      "permission_modes": [],
+      "budget_cap": false
+    },
+    "model_hint": "provider/model, e.g. anthropic/claude-sonnet-5-5",
+    "small_model": null,
+    "list_models": {
+      "args": [
+        "--list-models"
+      ],
+      "format": "provider_model_table"
+    },
+    "families": {
+      "fast": "anthropic/claude-haiku-5-5",
+      "balanced": "anthropic/claude-sonnet-5-5",
+      "deep": "anthropic/claude-opus-5-5"
+    },
+    "install": {
+      "npm": "@earendil-works/pi-coding-agent",
+      "unix": "curl -fsSL https://pi.dev/install.sh | sh",
+      "windows": "irm https://pi.dev/install.ps1 | iex"
+    },
+    "upgrade": {
+      "winget": null,
+      "npm": "npm install -g @earendil-works/pi-coding-agent@latest",
+      "brew": null,
+      "native": "pi update"
+    },
+    "bin_dirs": [
+      ".local/bin",
+      ".pi/bin"
     ]
   }
 ]

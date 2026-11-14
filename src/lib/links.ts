@@ -1,9 +1,12 @@
 // Links open in tab first. A link a module has its own view for (a GitHub
 // PR) opens that view; otherwise a link to something in the queue opens that
-// item; anything else goes to the browser. Every in-app view keeps its own "Open on GitHub"
-// style button, and ⌘, Ctrl or Shift click always goes to the browser.
+// item; a link no connector previews opens in tab's own browser; anything
+// else (a Slack or Jira link a connector knows but has no view for) goes to
+// the system browser. Every in-app view keeps its own "Open on GitHub" style
+// button, and ⌘, Ctrl or Shift click always goes to the system browser.
 
-import { api, openUrl } from "./api";
+import { api, inTauri, openUrl } from "./api";
+import { openInTabBrowser } from "./browser";
 
 /**
  * What a connector says about a link it recognises (a GitHub PR, a Slack
@@ -86,7 +89,7 @@ export function openItem(id: string) {
 
 type Modifiers = { metaKey?: boolean; ctrlKey?: boolean; shiftKey?: boolean };
 
-/** Opens a link in tab when tab has a view for it, else in the browser. */
+/** Opens a link in tab when tab has a view for it, else in tab's browser or the system one. */
 export async function openLink(url: string, e?: Modifiers) {
   if (e && (e.metaKey || e.ctrlKey || e.shiftKey)) return openUrl(url);
   if (/^https?:\/\//i.test(url)) {
@@ -94,6 +97,8 @@ export async function openLink(url: string, e?: Modifiers) {
     if (link?.open?.()) return;
     const item = await api.itemByUrl(link?.canonical ?? url).catch(() => null);
     if (item) return openItem(item.id);
+    // The web build's browser is an iframe most sites refuse, so it keeps the system browser.
+    if (!link?.preview && inTauri) return openInTabBrowser(url);
   }
   return openUrl(url);
 }

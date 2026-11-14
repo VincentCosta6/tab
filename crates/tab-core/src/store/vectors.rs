@@ -1,6 +1,6 @@
 //! Vector search with sqlite-vec, in the same database file.
 //!
-//! Items and project notes are embedded in the background (see
+//! Items, project notes and pieces of project resources are embedded in the background (see
 //! `crate::embed`). Their vectors live in a `vec0` table whose width depends
 //! on the model, so it's created at runtime rather than by a migration;
 //! switching models drops and rebuilds it. Search fuses FTS5 keyword ranks
@@ -124,6 +124,20 @@ impl Store {
             key: format!("note:{id}"),
             text: format!("{topic}: {text}"),
         }));
+        // Pieces of project resources (their old vectors go when they're
+        // replaced; see store::knowledge).
+        let chunks: Vec<(String, i64, String, String)> = conn
+            .prepare(
+                "SELECT c.resource_id, c.n, c.title, c.text FROM resource_chunks c
+                 WHERE NOT EXISTS (SELECT 1 FROM doc_embeddings d WHERE d.doc = 'doc:res:' || c.resource_id || ':' || c.n)
+                 LIMIT ?1",
+            )?
+            .query_map([limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<_, _>>()?;
+        out.extend(chunks.into_iter().map(|(id, n, title, text)| Doc {
+            key: format!("doc:res:{id}:{n}"),
+            text: format!("{title}\n{text}"),
+        }));
         // Drop vectors whose item or note is gone.
         conn.execute_batch(
             "DELETE FROM doc_vec WHERE doc IN (SELECT doc FROM doc_embeddings d WHERE
@@ -165,7 +179,8 @@ impl Store {
         let conn = self.conn();
         let done: i64 = conn.query_row("SELECT COUNT(*) FROM doc_embeddings", [], |r| r.get(0))?;
         let total: i64 = conn.query_row(
-            "SELECT (SELECT COUNT(*) FROM items) + (SELECT COUNT(*) FROM project_notes)",
+            "SELECT (SELECT COUNT(*) FROM items) + (SELECT COUNT(*) FROM project_notes)
+                 + (SELECT COUNT(*) FROM resource_chunks)",
             [],
             |r| r.get(0),
         )?;
@@ -183,7 +198,7 @@ impl Store {
     }
 
     /// Nearest docs to `v`, closest first, as (doc key, cosine distance).
-    fn knn(&self, v: &[f32], k: usize) -> anyhow::Result<Vec<(String, f64)>> {
+    pub(super) fn knn(&self, v: &[f32], k: usize) -> anyhow::Result<Vec<(String, f64)>> {
         let conn = self.conn();
         let exists: bool = conn
             .query_row(

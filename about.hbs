@@ -1,0 +1,15 @@
+THIRD-PARTY SOFTWARE NOTICES
+
+tab includes the open source software below. Each component's license, and
+any NOTICE file it ships, follows its name.
+
+=== Rust crates ===
+{{#each licenses}}
+
+------------------------------------------------------------------------
+{{name}}
+Used by:{{#each used_by}} {{crate.name}} {{crate.version}}{{#unless @last}},{{/unless}}{{/each}}
+------------------------------------------------------------------------
+
+{{text}}
+{{/each}}

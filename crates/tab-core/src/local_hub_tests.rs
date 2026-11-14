@@ -37,6 +37,19 @@ fn add(store: &Store, id: &str, title: &str) -> QueueItem {
     }
 }
 
+/// An item under its own id, as devices gave them before ids were shared.
+fn add_legacy(store: &Store, id: &str, title: &str, legacy_id: &str) -> QueueItem {
+    let item = add(store, id, title);
+    store
+        .conn()
+        .execute(
+            "UPDATE items SET id = ?2 WHERE id = ?1",
+            [&item.id, legacy_id],
+        )
+        .unwrap();
+    store.get(legacy_id).unwrap().unwrap()
+}
+
 fn hub_item(hub: &LocalHub, id: &str) -> Option<serde_json::Value> {
     hub.hub
         .lock()
@@ -119,6 +132,33 @@ fn status_reports_this_process() {
     assert!(st.memory_bytes.unwrap_or(0) > 0, "{st:?}");
     assert!(st.path.ends_with("hub.db"));
     assert!(st.storage_bytes > 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_hub_waiting_for_tab_cloud_says_so() {
+    // After a restart on tab cloud, until it connects (offline, signed
+    // out), the status still names the cloud hub: it never looks like the
+    // work is only on this computer, so nothing offers to move it again.
+    let (hub, dir) = temp_hub("awaiting");
+    hub.expect_cloud("hub-1");
+    let st = hub.status().unwrap();
+    assert_eq!(st.cloud_hub.as_deref(), Some("hub-1"));
+    assert!(!st.cloud_connected);
+
+    // Moving back works without ever connecting, and then it's local.
+    // tab.db synced with the cloud before the restart.
+    let store = Store::open(&dir.join("tab.db")).unwrap();
+    store.hub_sync_install().unwrap();
+    let kept = add(&store, "1", "Kept here");
+    hub.move_to_local(&store).unwrap();
+    let st = hub.status().unwrap();
+    assert_eq!(st.cloud_hub, None);
+    assert_eq!(st.cloud_error, None);
+    assert!(
+        hub_item(&hub, &kept.id).is_some(),
+        "what was here is in hub.db"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -216,8 +256,12 @@ async fn another_device_syncs_both_ways() {
     .await
     .unwrap();
     assert!(matches!(next(&mut ws).await.body, Some(Res::Applied(_))));
-    // It lands in tab.db and the UI hears about it.
-    assert_eq!(store.get(&it.id).unwrap().unwrap().state, ItemState::Done);
+    // It lands in tab.db (sync runs on a blocking thread, so shortly) and
+    // the UI hears about it.
+    until("the phone's change", || {
+        store.get(&it.id).unwrap().unwrap().state == ItemState::Done
+    })
+    .await;
     let ev = tokio::time::timeout(Duration::from_secs(2), ui.recv())
         .await
         .unwrap()
@@ -280,9 +324,10 @@ fn joining_a_hub_with_data_takes_its_rows_and_adds_the_rest() {
     let shared = add(&first, "1", "Hub's title");
     hub.sync(&first).unwrap();
 
-    // The same notification, ingested here under its own id.
+    // The same notification, ingested here under its own id (before ids
+    // were shared).
     let other = Store::in_memory().unwrap();
-    let twin = add(&other, "1", "Local title");
+    let twin = add_legacy(&other, "1", "Local title", "legacy-1");
     assert_ne!(twin.id, shared.id);
     let only_here = add(&other, "9", "Only here");
     hub.introduce(&other).unwrap();
@@ -348,9 +393,9 @@ fn the_same_item_ingested_on_two_devices_ends_up_once() {
     let pc = Store::in_memory().unwrap();
     hub.introduce(&mac).unwrap();
     hub.introduce(&pc).unwrap();
-    let first = add(&mac, "42", "From the Mac");
+    let first = add_legacy(&mac, "42", "From the Mac", "legacy-mac");
     hub.sync(&mac).unwrap();
-    let second = add(&pc, "42", "From the PC");
+    let second = add_legacy(&pc, "42", "From the PC", "legacy-pc");
     hub.sync(&pc).unwrap();
     hub.sync(&mac).unwrap();
     hub.sync(&pc).unwrap();
@@ -368,6 +413,40 @@ fn the_same_item_ingested_on_two_devices_ends_up_once() {
         .collect();
     assert_eq!(on_mac.len(), 1, "{on_mac:?}");
     assert_eq!(on_mac, on_pc);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_same_item_brought_in_on_two_devices_shares_one_row_and_keeps_done() {
+    let (hub, dir) = temp_hub("shared-ids");
+    let mac = Store::in_memory().unwrap();
+    let pc = Store::in_memory().unwrap();
+    hub.introduce(&mac).unwrap();
+    hub.introduce(&pc).unwrap();
+    let item = add(&mac, "42", "From the Mac");
+    mac.set_state(
+        &item.id,
+        ItemState::Done,
+        None,
+        when() + chrono::Duration::hours(1),
+    )
+    .unwrap();
+    hub.sync(&mac).unwrap();
+    // The PC polls before it has synced and brings the same thing in.
+    assert_eq!(add(&pc, "42", "From the PC").id, item.id);
+    // Each device syncs again after a commit, as the app does. The Mac's
+    // Done wins over the PC's late arrival and goes back to the hub once;
+    // after that nothing is left to send.
+    for _ in 0..3 {
+        hub.sync(&mac).unwrap();
+        hub.sync(&pc).unwrap();
+    }
+
+    for store in [&mac, &pc] {
+        assert_eq!(store.get(&item.id).unwrap().unwrap().state, ItemState::Done);
+        assert_eq!(store.hub_outbox_len().unwrap(), 0);
+    }
+    assert_eq!(hub_item(&hub, &item.id).unwrap()["state"], "done");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -750,6 +829,7 @@ async fn this_app_watches_and_steers_a_session_another_device_runs() {
             answers: None,
         },
     )
+    .await
     .unwrap();
     let file = hub.file_put(b"diagram").unwrap();
     hub.steer_remote(
@@ -760,9 +840,11 @@ async fn this_app_watches_and_steers_a_session_another_device_runs() {
                 hash: file.hash.clone(),
                 name: "d.png".into(),
                 size: file.size,
+                path: None,
             }],
         },
     )
+    .await
     .unwrap();
     let mut got = vec![];
     while got.len() < 2 {
@@ -809,7 +891,10 @@ async fn steering_a_session_whose_device_is_away_says_so() {
         body: json!({ "id": "s1", "device": "device-desktop-at-home" }),
     }])
     .unwrap();
-    let e = hub.steer_remote("s1", &SteerCommand::Stop).unwrap_err();
+    let e = hub
+        .steer_remote("s1", &SteerCommand::Stop)
+        .await
+        .unwrap_err();
     assert!(e.to_string().contains("isn't connected"), "{e}");
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -845,7 +930,8 @@ async fn a_phone_watches_a_session_this_app_runs_and_answers_its_prompt() {
     })
     .await;
 
-    // The agent is part-way through a reply when the phone starts watching.
+    // The agent is part-way through a reply when the phone starts watching:
+    // its text stays here (the phone gets the reply with the transcript).
     let _ = events.send(EngineEvent::SessionDelta {
         session_id: session.id.clone(),
         text: "So far ".into(),
@@ -867,19 +953,6 @@ async fn a_phone_watches_a_session_this_app_runs_and_answers_its_prompt() {
         }
         _ => None,
     };
-    // It gets the text so far, then what streams after.
-    let first = loop {
-        if let Some(ev) = live(next(&mut phone).await) {
-            break ev;
-        }
-    };
-    assert_eq!(
-        first,
-        crate::live::LiveEvent::SessionDelta {
-            session_id: session.id.clone(),
-            text: "So far ".into()
-        }
-    );
 
     // The agent asks; the phone sees the prompt and answers it.
     let (a, sid) = (agents.clone(), session.id.clone());
@@ -888,10 +961,12 @@ async fn a_phone_watches_a_session_this_app_runs_and_answers_its_prompt() {
             .await
     });
     let approval = loop {
-        if let Some(crate::live::LiveEvent::ApprovalRequested { approval }) =
-            live(next(&mut phone).await)
-        {
-            break approval;
+        match live(next(&mut phone).await) {
+            Some(crate::live::LiveEvent::ApprovalRequested { approval }) => break approval,
+            Some(crate::live::LiveEvent::SessionDelta { .. }) => {
+                panic!("streamed text shouldn't leave this machine")
+            }
+            _ => {}
         }
     };
     let cmd = SteerCommand::Approval {
@@ -915,5 +990,465 @@ async fn a_phone_watches_a_session_this_app_runs_and_answers_its_prompt() {
         .expect("the answer should reach the agent")
         .unwrap();
     assert_eq!(decision, crate::agents::Decision::Allow);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A stand-in for tab cloud: tab's hub behind `/v1/hubs/{id}/sync`, and its
+/// files at `/v1/hubs/{id}/files`, the way the hub Durable Object serves
+/// them (minus accounts, and R2).
+async fn fake_cloud() -> (String, Arc<Mutex<tab_hub::Hub<SqliteStore>>>) {
+    use axum::extract::Path as UrlPath;
+    type Cloud = Arc<Mutex<tab_hub::Hub<SqliteStore>>>;
+    let hub: Cloud = Arc::new(Mutex::new(tab_hub::Hub::new(
+        SqliteStore::in_memory().unwrap(),
+        "cloud",
+        Utc::now(),
+    )));
+    /// Each open socket's outbox, for pushes and live frames.
+    type Sockets = Arc<Mutex<std::collections::HashMap<u64, mpsc::UnboundedSender<Vec<u8>>>>>;
+    async fn sync(
+        ws: WebSocketUpgrade,
+        headers: axum::http::HeaderMap,
+        UrlPath(_id): UrlPath<String>,
+        State((hub, next, sockets)): State<(Cloud, Arc<AtomicU64>, Sockets)>,
+    ) -> Response {
+        if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer t0k") {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        ws.on_upgrade(move |mut socket| async move {
+            let conn = next.fetch_add(1, Ordering::Relaxed);
+            let (tx, mut out) = mpsc::unbounded_channel::<Vec<u8>>();
+            sockets.lock().unwrap().insert(conn, tx);
+            hub.lock().unwrap().connect(conn, "", Utc::now());
+            loop {
+                let b = tokio::select! {
+                    m = socket.recv() => match m {
+                        Some(Ok(Message::Binary(b))) => b,
+                        _ => break,
+                    },
+                    f = out.recv() => {
+                        let Some(f) = f else { break };
+                        if socket.send(Message::Binary(f.into())).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let h = hub.lock().unwrap().handle_frame(conn, &b, Utc::now());
+                // Like the Durable Object: pushes to the others, live frames
+                // to the connections they're for.
+                {
+                    let socks = sockets.lock().unwrap();
+                    if let Some(p) = &h.push {
+                        let f = encode(p);
+                        for (c, s) in socks.iter().filter(|(c, _)| **c != conn) {
+                            let _ = (c, s.send(f.clone()));
+                        }
+                    }
+                    for (c, env) in &h.direct {
+                        if let Some(s) = socks.get(c) {
+                            let _ = s.send(encode(env));
+                        }
+                    }
+                }
+                if socket
+                    .send(Message::Binary(encode(&h.reply).into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            sockets.lock().unwrap().remove(&conn);
+            hub.lock().unwrap().disconnect(conn);
+        })
+    }
+    type Files = Arc<Mutex<tab_store::blob::MemBlobStore>>;
+    fn authed(headers: &axum::http::HeaderMap) -> bool {
+        headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer t0k")
+    }
+    async fn put_file(
+        headers: axum::http::HeaderMap,
+        State(files): State<Files>,
+        body: axum::body::Bytes,
+    ) -> Response {
+        use prost::Message as _;
+        if !authed(&headers) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        let m = files.lock().unwrap().put(&body, Utc::now()).unwrap();
+        tab_protocol::cloud::StoredFile {
+            hash: m.hash,
+            size: m.size,
+        }
+        .encode_to_vec()
+        .into_response()
+    }
+    async fn get_file(
+        headers: axum::http::HeaderMap,
+        UrlPath((_id, hex)): UrlPath<(String, String)>,
+        State(files): State<Files>,
+    ) -> Response {
+        if !authed(&headers) {
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+        let hash = tab_domain::blob::from_hex(&hex).unwrap_or_default();
+        match files.lock().unwrap().get(&hash).unwrap() {
+            Some(b) => b.into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+    let files = Router::new()
+        .route("/v1/hubs/{id}/files", axum::routing::put(put_file))
+        .route("/v1/hubs/{id}/files/{hex}", get(get_file))
+        .with_state(Files::default());
+    let sockets: Sockets = Default::default();
+    let app = Router::new()
+        .route("/v1/hubs/{id}/sync", get(sync))
+        .with_state((hub.clone(), Arc::new(AtomicU64::new(1)), sockets))
+        .merge(files);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (format!("http://{addr}"), hub)
+}
+
+fn link_to(api: &str) -> Arc<CloudLink> {
+    CloudLink::start(
+        crate::cloud_link::sync_url(api, "h1"),
+        "h1".into(),
+        Arc::new(|| Box::pin(async { Ok("t0k".to_string()) })),
+    )
+}
+
+/// Runs a blocking hub call off the runtime, as the app does.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(f).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn moving_to_the_cloud_keeps_history_syncs_from_then_on_and_can_come_back() {
+    let (api, cloud) = fake_cloud().await;
+
+    // This computer, with work in its own hub.
+    let (mac_hub, dir) = temp_hub("move-mac");
+    let mac = Arc::new(Store::in_memory().unwrap());
+    mac_hub.introduce(&mac).unwrap();
+    let a = add(&mac, "1", "Before the move");
+    mac_hub.sync(&mac).unwrap();
+    let local_log = mac_hub
+        .hub
+        .lock()
+        .unwrap()
+        .store()
+        .changes_since(0, 1000)
+        .unwrap();
+    assert!(!local_log.is_empty());
+
+    // Move: the cloud gets the same log, change for change.
+    let mut seen = vec![];
+    let (h, s, link) = (mac_hub.clone(), mac.clone(), link_to(&api));
+    let (outcome, seen) = blocking(move || {
+        let o = h.move_to_cloud(link, &s, |done, total| seen.push((done, total)));
+        (o, seen)
+    })
+    .await;
+    let n = local_log.len() as u64;
+    assert_eq!(outcome.unwrap(), MoveOutcome::Moved { changes: n });
+    assert_eq!(seen.last(), Some(&(n, n)));
+    assert_eq!(
+        cloud
+            .lock()
+            .unwrap()
+            .store()
+            .changes_since(0, 1000)
+            .unwrap(),
+        local_log
+    );
+
+    // From now on changes go to the cloud, and hub.db keeps its copy.
+    let b = add(&mac, "2", "After the move");
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    blocking(move || h.sync(&s)).await.unwrap();
+    let in_cloud = |id: &str| {
+        cloud
+            .lock()
+            .unwrap()
+            .store()
+            .get("items", &json!([id]).to_string())
+            .unwrap()
+    };
+    assert!(in_cloud(&b.id).is_some());
+    assert!(hub_item(&mac_hub, &b.id).is_none());
+
+    // A second computer that picks tab cloud joins the same hub and gets
+    // everything; its changes reach the first one.
+    let (pc_hub, dir2) = temp_hub("move-pc");
+    let pc = Arc::new(Store::in_memory().unwrap());
+    pc_hub.introduce(&pc).unwrap();
+    let (h, s, link) = (pc_hub.clone(), pc.clone(), link_to(&api));
+    let outcome = blocking(move || h.move_to_cloud(link, &s, |_, _| {}))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, MoveOutcome::Joined { .. }));
+    assert_eq!(title_in(&pc, &a.id).as_deref(), Some("Before the move"));
+    assert_eq!(title_in(&pc, &b.id).as_deref(), Some("After the move"));
+    pc.set_state(&a.id, ItemState::Done, None, when()).unwrap();
+    let (h, s) = (pc_hub.clone(), pc.clone());
+    blocking(move || h.sync(&s)).await.unwrap();
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    blocking(move || h.sync(&s)).await.unwrap();
+    assert_eq!(mac.get(&a.id).unwrap().unwrap().state, ItemState::Done);
+
+    // Moving again is refused.
+    let (h, s, link) = (mac_hub.clone(), mac.clone(), link_to(&api));
+    assert!(
+        blocking(move || h.move_to_cloud(link, &s, |_, _| {}))
+            .await
+            .is_err()
+    );
+
+    // Moving back: hub.db gets what changed in the cloud meanwhile, and
+    // from then on changes stay on this computer.
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    blocking(move || h.move_to_local(&s)).await.unwrap();
+    assert!(mac_hub.cloud_link().is_none());
+    assert!(hub_item(&mac_hub, &b.id).is_some());
+    assert_eq!(
+        hub_item(&mac_hub, &a.id).unwrap()["state"],
+        json!("done"),
+        "the newer change from the cloud wins over hub.db's older one"
+    );
+    let c = add(&mac, "3", "Back home");
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    blocking(move || h.sync(&s)).await.unwrap();
+    assert!(hub_item(&mac_hub, &c.id).is_some());
+    assert!(in_cloud(&c.id).is_none());
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    assert!(
+        blocking(move || h.move_to_local(&s)).await.is_err(),
+        "already local"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn files_reach_other_computers_through_the_cloud() {
+    let (api, _cloud) = fake_cloud().await;
+    let (mac_hub, dir) = temp_hub("files-mac");
+    let mac = Arc::new(Store::in_memory().unwrap());
+    mac_hub.introduce(&mac).unwrap();
+    let (h, s, link) = (mac_hub.clone(), mac.clone(), link_to(&api));
+    blocking(move || h.move_to_cloud(link, &s, |_, _| {}).map(|_| ()))
+        .await
+        .unwrap();
+
+    // The agent on this computer makes a screenshot and names it.
+    let shot = dir.join("work").join("shot.png");
+    std::fs::create_dir_all(shot.parent().unwrap()).unwrap();
+    std::fs::write(&shot, b"png from the mac").unwrap();
+    let agents = crate::agents::AgentHub::new(
+        mac.clone(),
+        broadcast::channel(16).0,
+        Default::default(),
+        dir.join("agents"),
+    );
+    mac_hub.attach_agents(agents.clone());
+    // In the chat's own folder: replies only share files from there (and
+    // the project's repos, code folders and attachments).
+    let work = dir.join("work").display().to_string();
+    let chat = mac
+        .session_create(
+            None,
+            crate::model::AgentKind::ClaudeCode,
+            "Shots",
+            &work,
+            Utc::now(),
+        )
+        .unwrap();
+    let text = format!("Here: `{}`", shot.display());
+    agents.post(
+        &chat.id,
+        "assistant",
+        "text",
+        &text,
+        serde_json::Value::Null,
+    );
+    let hash = tab_domain::blob::hash(b"png from the mac");
+    let (h, s) = (mac_hub.clone(), mac.clone());
+    blocking(move || h.sync(&s)).await.unwrap();
+
+    // Another computer gets the chat, and the file behind the path.
+    let (pc_hub, dir2) = temp_hub("files-pc");
+    let pc = Arc::new(Store::in_memory().unwrap());
+    pc_hub.introduce(&pc).unwrap();
+    let (h, s, link) = (pc_hub.clone(), pc.clone(), link_to(&api));
+    blocking(move || h.move_to_cloud(link, &s, |_, _| {}).map(|_| ()))
+        .await
+        .unwrap();
+    let path = shot.display().to_string();
+    let file = pc
+        .named_file(&path)
+        .unwrap()
+        .expect("the reply recorded the file");
+    assert_eq!(file.hash, hash);
+    let (h, d, f) = (pc_hub.clone(), dir2.join("attachments"), file.clone());
+    let local = blocking(move || h.file_materialize(&d, &f.hash, &f.name))
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(local).unwrap(), b"png from the mac");
+
+    // A file the cloud doesn't have fails rather than hangs.
+    let (h, d) = (pc_hub.clone(), dir2.join("attachments"));
+    let missing = tab_domain::blob::hash(b"nowhere");
+    assert!(
+        blocking(move || h.file_materialize(&d, &missing, "x.png"))
+            .await
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
+/// Two computers on one cloud hub: the one that didn't start a chat watches
+/// it and steers it, through the cloud rather than its own hub.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn computers_on_one_cloud_hub_watch_and_steer_each_others_chats() {
+    let (api, _cloud) = fake_cloud().await;
+
+    // The Mac moves to tab cloud; the PC joins it.
+    let (mac_hub, dir) = temp_hub("cloud-live-mac");
+    let mac = Arc::new(Store::in_memory().unwrap());
+    mac_hub.introduce(&mac).unwrap();
+    let (h, s, link) = (mac_hub.clone(), mac.clone(), link_to(&api));
+    blocking(move || h.move_to_cloud(link, &s, |_, _| {}))
+        .await
+        .unwrap();
+    // What the cloud sends the Mac lands in its inbox (the live loop isn't
+    // running, so the test reads it).
+    let mut mac_inbox = mac_hub.inbox_rx.lock().unwrap().take().unwrap();
+
+    let (pc_hub, dir2) = temp_hub("cloud-live-pc");
+    let pc = Arc::new(Store::in_memory().unwrap());
+    pc_hub.introduce(&pc).unwrap();
+    // The PC's app is running (as when someone moves from Settings).
+    let (events, mut ui) = broadcast::channel(64);
+    pc_hub.follow(pc.clone(), events);
+    let (h, s, link) = (pc_hub.clone(), pc.clone(), link_to(&api));
+    blocking(move || h.move_to_cloud(link, &s, |_, _| {}))
+        .await
+        .unwrap();
+
+    // A chat the Mac runs, mid-turn, syncs to the PC.
+    let sid = "s-mac";
+    let session = Op::Put {
+        kind: "sessions".into(),
+        id: json!([sid]).to_string(),
+        body: json!({
+            "id": sid, "item_id": null, "agent": "claude_code", "agent_session_id": null,
+            "title": "On the Mac", "status": "working", "cwd": "/w",
+            "created_at": "2027-01-15T08:00:00.000Z", "updated_at": "2027-01-15T08:00:00.000Z",
+            "key": null, "brief": null, "device": mac.device_id().unwrap(),
+        }),
+    };
+    let h = mac_hub.clone();
+    blocking(move || h.apply(&[session])).await.unwrap();
+    until("the Mac's chat to reach the PC", || {
+        pc.session_get(sid).unwrap().is_some()
+    })
+    .await;
+
+    // The PC watches it through the cloud, and the Mac is told.
+    pc_hub.rewatch(&pc);
+    let watched = loop {
+        let env = tokio::time::timeout(Duration::from_secs(3), mac_inbox.recv())
+            .await
+            .expect("the Mac should hear it's watched")
+            .unwrap();
+        if let Some(Res::Watched(w)) = env.body {
+            break w;
+        }
+    };
+    assert_eq!((watched.session.as_str(), watched.watchers), (sid, 1));
+    assert!(mac_hub.note_watched(&watched));
+    assert!(mac_hub.watched(sid));
+
+    // What the Mac streams shows up on the PC.
+    mac_hub.publish(&crate::live::LiveEvent::SessionDelta {
+        session_id: sid.into(),
+        text: "Reading the".into(),
+    });
+    loop {
+        let ev = tokio::time::timeout(Duration::from_secs(3), ui.recv())
+            .await
+            .expect("the Mac's reply should stream to the PC")
+            .unwrap();
+        if let EngineEvent::SessionDelta { session_id, text } = ev {
+            assert_eq!((session_id.as_str(), text.as_str()), (sid, "Reading the"));
+            break;
+        }
+    }
+
+    // A message typed on the PC reaches the Mac.
+    let n = pc_hub
+        .steer_remote(
+            sid,
+            &SteerCommand::Message {
+                text: "also check the tests".into(),
+                files: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    let steered = loop {
+        let env = tokio::time::timeout(Duration::from_secs(3), mac_inbox.recv())
+            .await
+            .expect("the steer should reach the Mac")
+            .unwrap();
+        if let Some(Res::Steered(s)) = env.body {
+            break s;
+        }
+    };
+    assert_eq!(steered.session, sid);
+    assert!(matches!(
+        serde_json::from_slice::<SteerCommand>(&steered.body_json).unwrap(),
+        SteerCommand::Message { text, .. } if text == "also check the tests"
+    ));
+
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
+#[tokio::test]
+async fn projects_from_the_hub_refresh_the_ui() {
+    let (hub, dir) = temp_hub("projects");
+    let store = Arc::new(Store::in_memory().unwrap());
+    let p = store
+        .project_save(Some("p1"), "Billing", "blue", "folder", when())
+        .unwrap();
+    let n = store
+        .note_save(&p.id, "deploys", "Fridays", "agent", None, &[], when())
+        .unwrap();
+    let (events, mut ui) = broadcast::channel(16);
+    hub.follow(store.clone(), events);
+    hub.announce(
+        &store,
+        &[
+            ("projects".into(), json!([p.id]).to_string()),
+            ("project_notes".into(), json!([n.id]).to_string()),
+            ("project_notes".into(), json!(["gone"]).to_string()),
+        ],
+    );
+    let mut ids = vec![];
+    while let Ok(ev) = ui.try_recv() {
+        if let EngineEvent::ProjectChanged { project_id } = ev {
+            ids.push(project_id);
+        }
+    }
+    // One refresh for the project, however many of its rows came, and one
+    // for every project when a deleted note no longer says whose it was.
+    assert_eq!(ids, vec![String::new(), p.id.clone()]);
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -8,11 +8,18 @@
 //! * `tab_search`, `tab_get_item`: read the queue.
 //! * `tab_add_found`: file something relevant under the item's Found section.
 //! * `tab_attach_context`: attach a queue item (or link) as Context.
-//! * `tab_create_task`: create a tab task, optionally scheduled.
+//! * `tab_create_task`: create a tab task, optionally scheduled. From a
+//!   chat on a task, the new one is linked both ways (each in the other's
+//!   Context), and `start_agent` can put an agent on it right away.
+//!   The new task is a follow-up of the chat's task, so the queue shows it
+//!   under that one, and `after` orders it behind other tasks.
+//! * `tab_link_tasks`: order tasks (what has to be done first) and nest or
+//!   un-nest follow-ups.
 //! * `tab_graph_search`, `tab_graph_expand`: the knowledge graph (repos,
 //!   people, tickets, projects) and the items around each node.
-//! * `tab_project`, `tab_project_note`: a project's overview, and durable
-//!   notes agents leave for the next chat.
+//! * `tab_project`, `tab_project_note`, `tab_project_update`,
+//!   `tab_project_repo`: a project's overview (what it is, its rules, repos,
+//!   notes and recent work), and what agents keep current for the next chat.
 //! * `tab_list_connections`, `tab_find_email_server`, `tab_configure_connection`,
 //!   `tab_ask_for_secret`, `tab_test_connection`: the setup assistant. Agents
 //!   fill in everything but secrets; secrets go through a card in the chat
@@ -20,7 +27,23 @@
 //! * `tab_list_actions`, `tab_list_workflows`, `tab_save_workflow`,
 //!   `tab_test_workflow`: build workflows. Agents draft and dry-run them;
 //!   only the person turns one on.
+//! * `tab_run_workflow`, `tab_get_workflow_run`: start a workflow the
+//!   person turned on, and follow the run. Every guardrail applies; a
+//!   blocked step waits for the person, never for an agent.
+//! * `tab_workflow_stats`, `tab_workflow_failures`: how a workflow is
+//!   doing (rates, time, spend, models, what fails) and what's suggested,
+//!   so the builder's assistant and coordinators can improve it.
+//! * `tab_vault_search`, `tab_vault_get` (a project's coordinator) and
+//!   `tab_vault_request` (its other threads): the end-to-end encrypted
+//!   vault ([`crate::e2e`]), listed only to chats the person drives on the
+//!   device holding its key. Values are masked unless the person releases
+//!   them on a card in the chat.
 //! * `approve`: Claude Code's `--permission-prompt-tool`; asks the person.
+//!
+//! It also fronts the remote MCP servers the person connected
+//! ([`crate::remote_mcp`]): `/mcp/<id>` forwards a chat's requests with the
+//! sign-in added and each tool's allowed / ask / off choice applied, and
+//! `/oauth/callback` is where the browser comes back after signing in.
 
 use std::sync::Arc;
 
@@ -38,8 +61,8 @@ use crate::config::ConnectorConfig;
 use crate::engine::EngineEvent;
 use crate::model::Session;
 use crate::model::{
-    ConnectorInfo, ContextSection, Entity, ItemState, NewContext, NewTask, Preview, Project,
-    ProjectNote, QueueItem, SettingKind,
+    Change, ConnectorInfo, ContextSection, Entity, ItemState, LinkKind, NewContext, NewTask,
+    Preview, Project, ProjectNote, ProjectRepo, ProjectResource, QueueItem, SettingKind,
 };
 use crate::sandbox::broker;
 use crate::store::{AuditEntry, Store};
@@ -85,6 +108,16 @@ pub trait EngineAccess: Send + Sync + 'static {
     async fn pages_changed(&self, connector: &str, pages: &[String]) {
         crate::connectors::forget_pages(connector, pages);
     }
+    /// Saves the person's choice for one tool of a remote MCP server
+    /// ("Always allow" in a chat).
+    async fn set_remote_tool_policy(
+        &self,
+        _server: &str,
+        _tool: &str,
+        _policy: crate::remote_mcp::ToolPolicy,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("connections can't be changed from here")
+    }
     /// Dry-runs a workflow, on an item if given. Nothing changes.
     async fn dry_run_workflow(
         &self,
@@ -92,6 +125,15 @@ pub trait EngineAccess: Send + Sync + 'static {
         _item_id: Option<String>,
     ) -> anyhow::Result<Run> {
         anyhow::bail!("workflows can't be tested from here")
+    }
+    /// Starts an enabled workflow for real, for the agent chat `session`.
+    async fn run_workflow_for_agent(
+        &self,
+        _workflow_id: String,
+        _item_id: Option<String>,
+        _session: Option<String>,
+    ) -> anyhow::Result<workflow::runtime::AgentRun> {
+        anyhow::bail!("workflows can't be run from here")
     }
 }
 
@@ -114,11 +156,17 @@ pub async fn serve(server: Arc<McpServer>, port: u16) -> anyhow::Result<String> 
     }
     let listener = listener.ok_or_else(|| anyhow::anyhow!("no free port for the MCP server"))?;
     let url = format!("http://{}/mcp", listener.local_addr()?);
+    server
+        .hub
+        .remote_mcp()
+        .set_loopback(&format!("http://{}", listener.local_addr()?));
     let app = Router::new()
         .route(
             "/mcp",
             post(handle).get(|| async { StatusCode::METHOD_NOT_ALLOWED }),
         )
+        .route("/mcp/{server}", axum::routing::any(handle_remote))
+        .route("/oauth/callback", axum::routing::get(handle_oauth_callback))
         .route("/cli", post(handle_cli))
         .route(
             "/git/{session}/{connector}/{*rest}",
@@ -151,19 +199,23 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 /// tab's own token: the person's MCP clients, from Settings.
 fn authed(s: &McpServer, headers: &HeaderMap) -> bool {
-    bearer(headers).is_some_and(|t| !s.token.is_empty() && t == s.token)
+    bearer(headers).is_some_and(|t| !s.token.is_empty() && crate::hub_tls::same_secret(t, &s.token))
 }
 
 /// This chat's own token.
 fn authed_chat(s: &McpServer, headers: &HeaderMap, session: &str) -> bool {
     !s.token.is_empty()
         && !session.is_empty()
-        && bearer(headers).is_some_and(|t| t == chat_token(&s.token, session))
+        && bearer(headers)
+            .is_some_and(|t| crate::hub_tls::same_secret(t, &chat_token(&s.token, session)))
 }
 
 /// `tab __tab_cli`: a chat's `gh` or `git` command, run by tab with the
 /// connection's token (see [`crate::sandbox::broker`]).
 async fn handle_cli(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: String) -> Response {
+    if s.hub.remote_mcp().in_cloud() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let id = headers
         .get("x-tab-session")
         .and_then(|v| v.to_str().ok())
@@ -185,6 +237,377 @@ async fn handle_cli(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: S
     };
     let reply = s.run_cli(&session, req).await;
     axum::Json(reply).into_response()
+}
+
+/// Headers a chat's MCP client sends that the remote server needs too.
+const REMOTE_REQUEST_HEADERS: [&str; 5] = [
+    "content-type",
+    "accept",
+    "mcp-session-id",
+    "mcp-protocol-version",
+    "last-event-id",
+];
+
+/// A chat's request to a remote MCP server the person connected. tab adds
+/// the sign-in, so the agent never holds it, and applies the person's
+/// choice for each tool: off tools aren't listed and can't be called, and
+/// "ask" tools wait for the person in the chat.
+async fn handle_remote(
+    State(s): State<Arc<McpServer>>,
+    axum::extract::Path(server): axum::extract::Path<String>,
+    method: axum::http::Method,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let id = headers
+        .get("x-tab-session")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if !authed_chat(&s, &headers, &id) {
+        return (StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
+    }
+    let Some(session) = s.store.session_get(&id).ok().flatten() else {
+        return (StatusCode::FORBIDDEN, "only tab's chats can use this").into_response();
+    };
+    let remote = s.hub.remote_mcp().clone();
+    // On a computer, only chats the person drives. A cloud runner only runs
+    // jobs, and gets only what the person allowed in the cloud column.
+    if !remote.in_cloud() && s.hub.policy(&session).trust != crate::sandbox::Trust::Person {
+        return (
+            StatusCode::FORBIDDEN,
+            "connected MCP servers are only for chats you drive",
+        )
+            .into_response();
+    }
+    if remote.in_cloud()
+        && let Some(e) = remote.stand_in(&server)
+    {
+        return handle_elsewhere(&remote, &session.id, &e, &method, &body);
+    }
+    if !remote.usable().contains(&server) {
+        return (StatusCode::NOT_FOUND, "that MCP server isn't connected").into_response();
+    }
+
+    // `Some(first page)` when the request lists tools.
+    let mut lists_tools = None;
+    if method == axum::http::Method::POST {
+        let Ok(req) = serde_json::from_slice::<Value>(&body) else {
+            return json_response(rpc_error(Value::Null, -32700, "parse error"));
+        };
+        let reqs: Vec<&Value> = match &req {
+            Value::Array(a) => a.iter().collect(),
+            v => vec![v],
+        };
+        for r in reqs {
+            match r["method"].as_str() {
+                Some("tools/list") => lists_tools = Some(r["params"]["cursor"].is_null()),
+                Some("tools/call") => {
+                    let tool = r["params"]["name"].as_str().unwrap_or_default();
+                    if let Some(why) = s
+                        .check_remote_tool(&session, &server, tool, &r["params"]["arguments"])
+                        .await
+                    {
+                        return json_response(json!({
+                            "jsonrpc": "2.0",
+                            "id": r["id"],
+                            "result": { "content": [{ "type": "text", "text": why }], "isError": true }
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if remote.is_local(&server) {
+        return handle_local(&s, &remote, &server, &method, &body).await;
+    }
+
+    let forward: Vec<(String, String)> = REMOTE_REQUEST_HEADERS
+        .iter()
+        .filter_map(|h| {
+            let v = headers.get(*h)?.to_str().ok()?;
+            Some((h.to_string(), v.to_string()))
+        })
+        .collect();
+    let Ok(m) = reqwest::Method::from_bytes(method.as_str().as_bytes()) else {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    };
+    let r = match remote
+        .send(
+            &server,
+            m,
+            &forward,
+            (!body.is_empty()).then(|| body.clone()),
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // A sign-in that stopped working shows in Connections, and in
+            // the cloud, on the job.
+            if remote.in_cloud() && remote.get(&server).is_some_and(|c| c.sign_in) {
+                remote.note_gap(
+                    &session.id,
+                    tab_domain::runner::CloudGap {
+                        connection: server.clone(),
+                        name: remote.get(&server).map(|c| c.name).unwrap_or_default(),
+                        tool: None,
+                        why: tab_domain::runner::GapKind::SignIn,
+                    },
+                );
+            }
+            let _ = s.events.send(EngineEvent::ConfigChanged);
+            return (StatusCode::BAD_GATEWAY, e.to_string()).into_response();
+        }
+    };
+    let status = StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let ct = crate::remote_mcp::content_type(r.headers());
+    let mut out = Response::builder().status(status);
+    for h in ["content-type", "mcp-session-id", "cache-control"] {
+        if let Some(v) = r.headers().get(h).and_then(|v| v.to_str().ok()) {
+            out = out.header(h, v);
+        }
+    }
+    let body = match lists_tools {
+        Some(first_page) if status.is_success() => {
+            let text = r.text().await.unwrap_or_default();
+            for m in crate::remote_mcp::messages(&ct, &text) {
+                if let Some(t) = m["result"]["tools"].as_array() {
+                    remote.saw_tools(&server, t, first_page);
+                }
+            }
+            axum::body::Body::from(crate::remote_mcp::rewrite(&ct, &text, |v| {
+                if let Some(t) = v["result"]["tools"].as_array_mut() {
+                    t.retain(|t| !remote.hidden(&server, t["name"].as_str().unwrap_or_default()));
+                }
+            }))
+        }
+        _ => axum::body::Body::from_stream(r.bytes_stream()),
+    };
+    out.body(body)
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
+/// A chat's request to a local server tab runs (an imported `npx …`
+/// server): each message goes to the process over stdio, and the replies
+/// come back as plain JSON. Tool choices were already checked.
+async fn handle_local(
+    s: &McpServer,
+    remote: &crate::remote_mcp::RemoteMcp,
+    server: &str,
+    method: &axum::http::Method,
+    body: &[u8],
+) -> Response {
+    match *method {
+        axum::http::Method::POST => {}
+        // No session to end: the process is shared and stays up.
+        axum::http::Method::DELETE => return StatusCode::OK.into_response(),
+        _ => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
+    }
+    let Ok(req) = serde_json::from_slice::<Value>(body) else {
+        return json_response(rpc_error(Value::Null, -32700, "parse error"));
+    };
+    let (batch, msgs) = match req {
+        Value::Array(a) => (true, a),
+        v => (false, vec![v]),
+    };
+    let mut out = Vec::new();
+    for m in &msgs {
+        match remote.forward_local(server, m).await {
+            Ok(Some(mut r)) => {
+                if m["method"] == "tools/list"
+                    && let Some(t) = r["result"]["tools"].as_array_mut()
+                {
+                    remote.saw_tools(server, t, m["params"]["cursor"].is_null());
+                    t.retain(|t| !remote.hidden(server, t["name"].as_str().unwrap_or_default()));
+                }
+                out.push(r);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = s.events.send(EngineEvent::ConfigChanged);
+                if let Some(id) = m.get("id").filter(|v| !v.is_null()) {
+                    out.push(rpc_error(id.clone(), -32603, &e.to_string()));
+                }
+            }
+        }
+    }
+    replies(batch, out)
+}
+
+fn replies(batch: bool, mut out: Vec<Value>) -> Response {
+    match (batch, out.len()) {
+        (_, 0) => StatusCode::ACCEPTED.into_response(),
+        (false, _) => json_response(out.remove(0)),
+        (true, _) => json_response(Value::Array(out)),
+    }
+}
+
+/// The one tool a cloud job sees for a connection the person has on a
+/// computer but not in tab cloud.
+pub const REQUEST_ACCESS: &str = "request_access";
+
+/// On a cloud runner, a connection the person has on a computer but not
+/// here: tab answers for it with one tool, so a job that needs it can say
+/// so, and the person gets a one-click fix ("Allow in cloud").
+fn handle_elsewhere(
+    remote: &crate::remote_mcp::RemoteMcp,
+    session: &str,
+    e: &crate::remote_mcp::Elsewhere,
+    method: &axum::http::Method,
+    body: &[u8],
+) -> Response {
+    use tab_domain::runner::{CloudGap, GapKind};
+    match *method {
+        axum::http::Method::POST => {}
+        axum::http::Method::DELETE => return StatusCode::OK.into_response(),
+        _ => return StatusCode::METHOD_NOT_ALLOWED.into_response(),
+    }
+    let Ok(req) = serde_json::from_slice::<Value>(body) else {
+        return json_response(rpc_error(Value::Null, -32700, "parse error"));
+    };
+    let (batch, msgs) = match req {
+        Value::Array(a) => (true, a),
+        v => (false, vec![v]),
+    };
+    let why = match e.why {
+        GapKind::OnlyOnComputer => format!(
+            "{} only works on the person's computer, so tab cloud jobs can't use it.",
+            e.name
+        ),
+        GapKind::SignIn => format!(
+            "{} is allowed in tab cloud jobs, but its sign-in for tab cloud needs redoing.",
+            e.name
+        ),
+        _ => format!(
+            "{} is connected on the person's computer but isn't allowed in tab cloud jobs yet.",
+            e.name
+        ),
+    };
+    let mut out = Vec::new();
+    for m in &msgs {
+        let id = m.get("id").filter(|v| !v.is_null()).cloned();
+        let Some(id) = id else {
+            continue; // a notification
+        };
+        let result = match m["method"].as_str().unwrap_or_default() {
+            "initialize" => json!({
+                "protocolVersion": m["params"]["protocolVersion"]
+                    .as_str()
+                    .unwrap_or(crate::remote_mcp::PROTOCOL_VERSION),
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": e.id, "version": "tab" },
+            }),
+            "ping" => json!({}),
+            "tools/list" => json!({ "tools": [{
+                "name": REQUEST_ACCESS,
+                "description": format!(
+                    "{why} Its tools aren't here. Call this if the task needs {}: tab will ask the person to allow it. Then finish what you can without it.",
+                    e.name
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "need": { "type": "string", "description": "What you needed it for, in a few words." } },
+                },
+                "annotations": { "readOnlyHint": true },
+            }] }),
+            "tools/call" if m["params"]["name"] == REQUEST_ACCESS => {
+                remote.note_gap(
+                    session,
+                    CloudGap {
+                        connection: e.id.clone(),
+                        name: e.name.clone(),
+                        tool: None,
+                        why: e.why,
+                    },
+                );
+                json!({ "content": [{ "type": "text", "text": format!(
+                    "Noted. tab will show the person a way to fix it ({why}) Finish what you can without {}, and end by saying what's left that needs it.",
+                    e.name
+                ) }] })
+            }
+            "tools/call" => {
+                out.push(rpc_error(id, -32602, "unknown tool"));
+                continue;
+            }
+            _ => {
+                out.push(rpc_error(id, -32601, "method not found"));
+                continue;
+            }
+        };
+        out.push(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+    }
+    replies(batch, out)
+}
+
+/// Where the browser lands after signing in to a remote MCP server.
+async fn handle_oauth_callback(
+    State(s): State<Arc<McpServer>>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    use crate::account::{html_escape, page};
+    let error = q
+        .get("error_description")
+        .or_else(|| q.get("error"))
+        .map(String::as_str);
+    let state = q.get("state").map(String::as_str).unwrap_or_default();
+    if crate::mail_oauth::is_pending(state) {
+        let result = finish_mail_sign_in(&s, state, q.get("code").map(String::as_str), error).await;
+        let _ = s.events.send(EngineEvent::ConfigChanged);
+        let html = match result {
+            Ok(address) => page(
+                &format!("Signed in as {}", html_escape(&address)),
+                "tab is reading your mail now. You can close this tab and go back to tab.",
+            ),
+            Err(e) => page("Sign-in didn't finish", &html_escape(&e.to_string())),
+        };
+        return ([("content-type", "text/html; charset=utf-8")], html).into_response();
+    }
+    let result = s
+        .hub
+        .remote_mcp()
+        .finish_sign_in(state, q.get("code").map(String::as_str), error)
+        .await;
+    let _ = s.events.send(EngineEvent::ConfigChanged);
+    let html = match result {
+        Ok(name) => page(
+            &format!("Connected to {}", html_escape(&name)),
+            "You can close this tab and go back to tab.",
+        ),
+        Err(e) => page("Sign-in didn't finish", &html_escape(&e.to_string())),
+    };
+    ([("content-type", "text/html; charset=utf-8")], html).into_response()
+}
+
+/// Keeps an email sign-in and points the email connection at it: the
+/// provider's IMAP server, the address that signed in, no password.
+async fn finish_mail_sign_in(
+    s: &McpServer,
+    state: &str,
+    code: Option<&str>,
+    error: Option<&str>,
+) -> anyhow::Result<String> {
+    let signed = crate::mail_oauth::finish(state, code, error).await?;
+    let mut cfg = s
+        .engine
+        .connector_config("email")
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let set = |cfg: &mut ConnectorConfig, k: &str, v: Value| {
+        cfg.settings.insert(k.into(), v);
+    };
+    set(&mut cfg, "auth", signed.provider.id().into());
+    set(&mut cfg, "host", signed.provider.imap_host().into());
+    set(&mut cfg, "port", 993.into());
+    set(&mut cfg, "username", signed.address.clone().into());
+    cfg.settings.remove("password");
+    cfg.enabled = true;
+    s.engine.save_connector("email", cfg).await?;
+    Ok(signed.address)
 }
 
 fn upstream_client() -> &'static reqwest::Client {
@@ -209,6 +632,9 @@ async fn handle_git(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Response {
+    if s.hub.remote_mcp().in_cloud() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !authed_chat(&s, &headers, &session) {
         return (StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
     }
@@ -282,6 +708,11 @@ async fn handle_git(
                 (CliEffect::Write, format!("create {}", u.short()))
             } else if fast_forward(&session.cwd, &u.old, &u.new).await {
                 (CliEffect::Write, format!("update {}", u.short()))
+            } else if own_branch(&s.store, &session.id, &repo, u) {
+                (
+                    CliEffect::Write,
+                    format!("force-update {} (its own branch)", u.short()),
+                )
             } else {
                 (
                     CliEffect::Destructive,
@@ -397,6 +828,9 @@ async fn handle_git(
             started,
             (!ok).then(|| status.to_string()),
         );
+        if ok {
+            remember_branches(&s.store, &session.id, &repo, &pushed);
+        }
         if ok && !pushed.is_empty() {
             let change = tab_domain::CliChange {
                 connector: tool.connector.clone(),
@@ -432,6 +866,39 @@ async fn handle_git(
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
+/// Whether a chat may rewrite this branch without asking: it created the
+/// branch, and the branch is still at the commit the chat last pushed, so
+/// nobody else's commits would be lost.
+fn own_branch(store: &Store, session: &str, repo: &str, u: &broker::RefUpdate) -> bool {
+    u.name.starts_with("refs/heads/")
+        && matches!(
+            store.session_branch_head(session, repo, &u.name),
+            Ok(Some(head)) if head == u.old
+        )
+}
+
+/// After a push goes through, tracks the branches the chat created and
+/// what it last pushed to them.
+fn remember_branches(store: &Store, session: &str, repo: &str, pushed: &[broker::RefUpdate]) {
+    for u in pushed.iter().filter(|u| u.name.starts_with("refs/heads/")) {
+        let r = if u.deletes() {
+            store.session_branch_forget(session, repo, &u.name)
+        } else if u.creates()
+            || matches!(
+                store.session_branch_head(session, repo, &u.name),
+                Ok(Some(_))
+            )
+        {
+            store.session_branch_set(session, repo, &u.name, &u.new)
+        } else {
+            Ok(())
+        };
+        if let Err(e) = r {
+            tracing::warn!("couldn't record pushed branch {}: {e}", u.name);
+        }
+    }
+}
+
 /// Whether `new` keeps `old`'s history (a fast-forward). GitHub doesn't
 /// have the new commits before the push, so this asks the chat's checkout,
 /// which does. When it can't tell, the push counts as a force push and the
@@ -460,6 +927,10 @@ async fn fast_forward(cwd: &str, old: &str, new: &str) -> bool {
 }
 
 async fn handle(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: String) -> Response {
+    // A cloud runner fronts only the connections the person allowed there.
+    if s.hub.remote_mcp().in_cloud() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let session = headers
         .get("x-tab-session")
         .and_then(|v| v.to_str().ok())
@@ -504,6 +975,55 @@ fn text(t: impl Into<String>) -> Value {
     json!({ "content": [{ "type": "text", "text": t.into() }] })
 }
 
+/// A run as an agent sees it: where it stands, each step's result, and
+/// what happens next in words.
+fn agent_run_json(run: &Run, repeat: bool) -> Value {
+    use workflow::RunStatus;
+    let next = match run.status {
+        RunStatus::Blocked => {
+            "A step needs the person's OK. Tell them; they approve or decline it on the item or in the Workflows tab. You can't approve it."
+        }
+        RunStatus::Waiting => {
+            "Waiting on an agent step; check again later with tab_get_workflow_run."
+        }
+        RunStatus::Running => "Still running; check again with tab_get_workflow_run.",
+        RunStatus::Throttled => "Held back by a rate limit; it didn't run.",
+        RunStatus::LoopStopped => {
+            "Refused: it would have looped, or the chain of workflows got too long."
+        }
+        _ => "",
+    };
+    json!({
+        "run_id": run.id,
+        "workflow": run.workflow_name,
+        "status": run.status,
+        "already_started": repeat.then_some(true),
+        "item_id": run.item_id,
+        "error": run.error,
+        "next": (!next.is_empty()).then_some(next),
+        "steps": run.steps.iter().map(|s| json!({
+            "id": s.id, "status": s.status, "error": s.error, "output": s.output,
+        })).collect::<Vec<_>>(),
+        "started": run.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        "finished": run.finished_at.map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+    })
+}
+
+/// A list of ids, from a JSON array or a single string.
+fn ids(v: &Value) -> Vec<String> {
+    match v {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect(),
+        _ => vec![],
+    }
+    .into_iter()
+    .filter(|s| !s.trim().is_empty())
+    .collect()
+}
+
 fn brief(i: &QueueItem) -> Value {
     json!({
         "id": i.id,
@@ -516,6 +1036,8 @@ fn brief(i: &QueueItem) -> Value {
         "state": i.state,
         "urgency": i.ranking.as_ref().map(|r| r.urgency),
         "score": i.ranking.as_ref().map(|r| r.score),
+        "follow_up_of": i.parent_id,
+        "after": (!i.blocked_by.is_empty()).then_some(&i.blocked_by),
     })
 }
 
@@ -530,6 +1052,14 @@ fn note_json(n: &ProjectNote) -> Value {
     })
 }
 
+fn resource_json(r: &ProjectResource) -> Value {
+    json!({ "kind": r.kind, "title": r.title, "url": r.url, "note": r.note, "access": r.access, "pinned": r.pinned })
+}
+
+fn repo_json(r: &ProjectRepo) -> Value {
+    json!({ "repo": r.repo, "path": r.path, "note": r.note, "by": r.added_by })
+}
+
 /// The tools an agent needs in most chats. Claude Code keeps MCP tools
 /// behind ToolSearch, where the model only sees their names and rarely
 /// loads them; these are marked to load up front so it reaches for them.
@@ -540,6 +1070,13 @@ const ALWAYS_LOAD: &[&str] = &[
     "tab_get_item",
     "tab_attach_context",
     "tab_add_found",
+    // Projects: agents read a project's context and keep it current.
+    "tab_project",
+    "tab_project_note",
+    "tab_project_update",
+    "tab_project_repo",
+    "tab_set_project",
+    "tab_graph_search",
 ];
 
 /// Marks each tool for Claude Code: `anthropic/alwaysLoad` for the ones in
@@ -556,7 +1093,7 @@ pub fn tools() -> Value {
     json!([
         {
             "name": "tab_steps",
-            "description": "Show the person your plan as a step list pinned to the bottom of the chat, each with its status. Call it before starting work that takes more than a couple of tool calls, then again whenever a step starts or finishes; each call replaces the whole list. Keep one step in_progress at a time. List the whole job up front so the person can see how much is left. Each step is a short outcome in plain words (\"Find where Done is handled\", \"Open a PR\"), never a command, tool name or file path.",
+            "description": "Show the person your plan as a step list at the end of the chat, each with its status. Call it before starting work that takes more than a couple of tool calls, then again whenever a step starts or finishes; each call replaces the whole list. Keep one step in_progress at a time. List every step to the finished result up front (not just the one you're on) so the person can see how much is left. Each step is a short outcome in plain words (\"Find where Done is handled\", \"Open a PR\"), never a command, tool name or file path.",
             "inputSchema": { "type": "object", "properties": {
                 "steps": { "type": "array", "items": { "type": "object", "properties": {
                     "title": { "type": "string", "description": "What the step does, e.g. \"Find where the chat scrolls\"." },
@@ -566,7 +1103,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_search",
-            "description": "Search the person's work (Slack, GitHub, email, meetings, Jira, tab tasks) by keyword and by meaning, so both exact names and paraphrases match. Narrow it to a time window and/or a project for more relevant results; if a window finds too little it widens automatically (say so if you rely on older results). Also returns project notes that match. Returns items with ids you can attach or read.",
+            "description": "Search the person's work (Slack, GitHub, email, meetings, Jira, tab tasks) by keyword and by meaning, so both exact names and paraphrases match. Narrow it to a time window and/or a project for more relevant results; if a window finds too little it widens automatically (say so if you rely on older results). Also returns project notes that match, and passages from what projects know (their websites, files, email labels, notes and repo docs) under `resources`, each with its source: cite the source when you use one. Returns items with ids you can attach or read.",
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string", "description": "Words or a short description of what you're looking for." },
                 "within_days": { "type": "integer", "minimum": 1, "description": "Only things from the last N days. Start small (7 or 30) for recent work." },
@@ -610,15 +1147,28 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_create_task",
-            "description": "Create a task in tab's queue, optionally scheduled for later.",
+            "description": "Create a task in tab's queue, optionally scheduled for later. Only when the person asks for it, or for one concrete thing that has to happen and can't be done now; otherwise list possible follow-ups in your reply. From a chat on a task, the new task is a follow-up of it: it shows under this task in the queue, and each is in the other's Context. For work in phases, pass `after` so later phases wait for earlier ones.",
             "inputSchema": { "type": "object", "properties": {
                 "title": { "type": "string" },
-                "body": { "type": "string" },
+                "body": { "type": "string", "description": "What to do and why, with what the next agent needs: the repo, files, PRs, decisions made. Markdown: short paragraphs, lists, `code`, links; it is shown rendered as the task's details." },
                 "priority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
                 "due_in_minutes": { "type": "integer", "minimum": 1 },
                 "url": { "type": "string" },
-                "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." }
+                "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." },
+                "link": { "type": "boolean", "description": "Make it a follow-up of this chat's task (default true)." },
+                "after": { "type": "array", "items": { "type": "string" }, "description": "Ids of tasks that have to be done before this one, e.g. the previous phase." },
+                "start_agent": { "type": "string", "description": "Only when the person asks for it: start an agent on the new task now, with this as its first message. Not for scheduled tasks." }
             }, "required": ["title"] }
+        },
+        {
+            "name": "tab_link_tasks",
+            "description": "Order tasks and nest follow-ups. `after` lists tasks that have to be done before this one (like Jira's \"is blocked by\"); the queue shows it as waiting until they're done. `follow_up_of` nests it under another task, or \"none\" takes it out.",
+            "inputSchema": { "type": "object", "properties": {
+                "item_id": { "type": "string", "description": "The task to change. Defaults to this session's task." },
+                "after": { "type": "array", "items": { "type": "string" }, "description": "Tasks to finish before this one." },
+                "not_after": { "type": "array", "items": { "type": "string" }, "description": "Tasks this one no longer waits for." },
+                "follow_up_of": { "type": "string", "description": "Task id to nest it under, or \"none\"." }
+            } }
         },
         {
             "name": "tab_graph_search",
@@ -641,11 +1191,31 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_project",
-            "description": "A project's overview: its notes, the repos, people and tickets its work is about, and its recent items. Defaults to this chat's project; with no project, lists them all.",
+            "description": "A project's overview: what it is, its rules, the repos its work happens in (and where they're checked out), its notes, the repos, people and tickets its items are about, and its recent items. Read it at the start of work in a project and whenever you need to know where to work or how. Defaults to this chat's project; with no project, lists them all.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "Project name or id." },
                 "within_days": { "type": "integer", "minimum": 1, "description": "Only count activity from the last N days, so what is connected now shows first. Leave out for all time." }
             } }
+        },
+        {
+            "name": "tab_project_update",
+            "description": "Write what a project is about or its rules, for every future chat in it. `about`: what the project is and does, in a few sentences. `rules`: how to work in it (conventions, branches, what not to touch, who to ask), as short lines. Each replaces the whole field, so read tab_project first and keep what's still true. Record rules the person states or the repo documents; don't invent them.",
+            "inputSchema": { "type": "object", "properties": {
+                "about": { "type": "string" },
+                "rules": { "type": "string" },
+                "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." }
+            } }
+        },
+        {
+            "name": "tab_project_repo",
+            "description": "Add a repo the project's work happens in, update it, or remove it, so future chats know where to work. Add one when you work in a repo for this project that isn't listed yet. Saving the same repo again updates its path or note.",
+            "inputSchema": { "type": "object", "properties": {
+                "repo": { "type": "string", "description": "owner/name, a GitHub URL, or another repo URL." },
+                "path": { "type": "string", "description": "Where it's checked out on this machine, if you know." },
+                "note": { "type": "string", "description": "What the repo is for in this project, in one line." },
+                "remove": { "type": "boolean", "description": "Remove it from the project instead." },
+                "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." }
+            }, "required": ["repo"] }
         },
         {
             "name": "tab_set_project",
@@ -657,10 +1227,10 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_project_note",
-            "description": "Save a durable fact about a project for future chats: how it deploys, who owns what, where something lives, a decision and why. One note per topic: writing a topic again replaces it. Cite the items it came from. Every future chat in the project reads these, so never note one-off events (a sign-in, a verification, a receipt, a code), credentials, codes, or personal account details. To put an item in a project, use tab_set_project instead.",
+            "description": "Rarely needed. Save a fact every future chat in the project needs that it can't get from the repo: where it's checked out and how to set up a working copy, a non-obvious way to build, test or deploy, an environment limit or gotcha, who owns what, a decision and why that the code doesn't show. Never a summary of what you built or how a feature works, file maps, PR changelogs, task status, one-off events, credentials or personal details: git and the code already hold those. The project's steward reviews each note and may rewrite, merge or turn it down; if it does, accept that and carry on. One note per topic: writing a topic again replaces it. To put an item in a project, use tab_set_project instead.",
             "inputSchema": { "type": "object", "properties": {
                 "topic": { "type": "string", "description": "A short, stable topic, e.g. \"deploys\", \"owners\", \"staging env\"." },
-                "text": { "type": "string", "description": "The fact, in one to three sentences." },
+                "text": { "type": "string", "description": "The fact, in one or two sentences." },
                 "source_item_ids": { "type": "array", "items": { "type": "string" } },
                 "project": { "type": "string", "description": "Project name or id. Defaults to this chat's project." },
                 "delete": { "type": "boolean", "description": "Remove the note on this topic instead, e.g. when it's no longer true." }
@@ -718,7 +1288,7 @@ pub fn tools() -> Value {
         },
         {
             "name": "tab_save_workflow",
-            "description": "Create or update a workflow from its JSON definition. Pass id to update one. It is checked first (actions exist, required inputs are set, templates only read earlier steps, it can't loop with other workflows) and not saved if anything is wrong; fix what it says and try again. It's always saved turned off: the person reviews it in the Workflows tab and turns it on. Missing inputs get the action's defaults.\n\nShape: {\"name\", \"description\", \"trigger\": {\"type\":\"item\",\"changes\":[\"ingested\"],\"sources\":[\"github\"],\"kinds\":[\"github.review_requested\"],\"when\":[conditions]} | {\"type\":\"signal\",\"name\"} | {\"type\":\"schedule\",\"every_minutes\"} | {\"type\":\"manual\"}, \"steps\": [{\"id\":\"pr\",\"type\":\"action\",\"connector\":\"github\",\"action\":\"pr.get\",\"input\":{...},\"when\":[conditions]}, {\"id\":\"small\",\"type\":\"filter\",\"conditions\":[...]}, {\"id\":\"vals\",\"type\":\"set\",\"values\":{...}}, {\"id\":\"tell\",\"type\":\"emit\",\"signal\":\"name\",\"payload\":{...}}, {\"id\":\"test\",\"type\":\"command\",\"program\":\"cargo\",\"args\":[\"test\"],\"folder\":\"\",\"network\":[\"crates.io\",\"*.crates.io\"],\"env\":{},\"image\":\"\",\"timeout_secs\":600}], \"limits\": {\"max_runs_per_hour\":30,\"cooldown_minutes\":0}}. A condition is {\"field\":\"item.kind\",\"op\":\"equals|not_equals|contains|not_contains|starts_with|matches|in|gt|lt|exists|missing\",\"value\":...}. Changes: ingested, updated, ranked, snoozed, woke, done, reopened. Templates: {{item.title}}, {{item.metadata.repo}}, {{item.score}}, {{steps.<id>.<output>}}, {{signal.<key>}}, {{now}}.",
+            "description": "Create or update a workflow from its JSON definition. Pass id to update one. It is checked first (actions exist, required inputs are set, templates only read earlier steps, it can't loop with other workflows) and not saved if anything is wrong; fix what it says and try again. It's always saved turned off: the person reviews it in the Workflows tab and turns it on. Missing inputs get the action's defaults.\n\nShape: {\"name\", \"description\", \"trigger\": {\"type\":\"item\",\"changes\":[\"ingested\"],\"sources\":[\"github\"],\"kinds\":[\"github.review_requested\"],\"when\":[conditions]} | {\"type\":\"signal\",\"name\"} | {\"type\":\"schedule\",\"every_minutes\"} | {\"type\":\"manual\"}, \"steps\": [{\"id\":\"pr\",\"type\":\"action\",\"connector\":\"github\",\"action\":\"pr.get\",\"input\":{...},\"when\":[conditions]}, {\"id\":\"small\",\"type\":\"filter\",\"conditions\":[...]}, {\"id\":\"vals\",\"type\":\"set\",\"values\":{...}}, {\"id\":\"tell\",\"type\":\"emit\",\"signal\":\"name\",\"payload\":{...}}, {\"id\":\"test\",\"type\":\"command\",\"program\":\"cargo\",\"args\":[\"test\"],\"folder\":\"\",\"network\":[\"crates.io\",\"*.crates.io\"],\"env\":{},\"image\":\"\",\"timeout_secs\":600}, {\"id\":\"fix\",\"type\":\"agent\",\"prompt\":\"...\",\"repo\":\"owner/name\",\"family\":\"balanced\"}], \"limits\": {\"max_runs_per_hour\":30,\"cooldown_minutes\":0,\"monthly_cap_usd\":0,\"monthly_cap_plan_tokens\":0}}. The monthly caps hold new runs back once the workflow's spend this UTC calendar month reaches them: monthly_cap_usd is dollars billed through API keys, monthly_cap_plan_tokens is subscription tokens (input plus output; never converted to dollars); 0 means no cap and neither may be negative. You may set or lower a cap in a draft. A condition is {\"field\":\"item.kind\",\"op\":\"equals|not_equals|contains|not_contains|starts_with|matches|in|gt|lt|exists|missing\",\"value\":...}. Changes: ingested, updated, ranked, snoozed, woke, done, reopened. Templates: {{item.title}}, {{item.metadata.repo}}, {{item.score}}, {{steps.<id>.<output>}}, {{signal.<key>}}, {{now}}. An agent step runs on a model family from tab_list_actions (family), or on one harness and model (harness, model), which win when set.",
             "inputSchema": { "type": "object", "properties": {
                 "workflow": { "type": "object", "description": "The workflow definition. Include id to update." }
             }, "required": ["workflow"] }
@@ -733,6 +1303,37 @@ pub fn tools() -> Value {
             } }
         },
         {
+            "name": "tab_run_workflow",
+            "description": "Run one of the person's workflows for real, now, on a queue item if given, and wait for it. Only workflows the person turned on can run (tab_list_workflows says which). Every guardrail applies: hourly limits, loops (a workflow can't start itself again through you), and destructive or command steps stay blocked unless the person allowed them on that workflow. A blocked step waits for the person's OK in tab; you can't give it. Asking again for the same workflow and item within 10 minutes returns the run already started. Use tab_test_workflow first if you only want to see what it would do.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow_id": { "type": "string" },
+                "item_id": { "type": "string", "description": "The item to run it on, from tab_search. Optional." }
+            }, "required": ["workflow_id"] }
+        },
+        {
+            "name": "tab_get_workflow_run",
+            "description": "A workflow run's status and each step's result, by run id (from tab_run_workflow or tab_list_workflows). Statuses: running, waiting (on an agent step), succeeded, stopped (a filter ended it, or the person declined a step), failed, blocked (a step waits for the person's OK), throttled, loop_stopped.",
+            "inputSchema": { "type": "object", "properties": {
+                "run_id": { "type": "string" }
+            }, "required": ["run_id"] }
+        },
+        {
+            "name": "tab_workflow_stats",
+            "description": "How a workflow is doing over the last days: runs and rates (0 to 1, over runs that did work; runs the person declined at an approval and runs held back by limits are counted apart), each step's time (p50/p95 ms; agent steps split into queue, work and waiting on the person), failures, interventions and spend (API keys in dollars; subscriptions as tokens and plan share, never dollars), agent models compared per step, versions, and deterministic suggestions (a cheaper or stronger model family, more time, a higher hourly limit, a placement, approvals always granted). Use it before proposing a change to a workflow.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow_id": { "type": "string" },
+                "days": { "type": "integer", "description": "1 to 30, default 7." }
+            }, "required": ["workflow_id"] }
+        },
+        {
+            "name": "tab_workflow_failures",
+            "description": "What fails in a workflow over the last days: failures grouped by step and error (numbers and ids taken out), most frequent first, each with its count, first and last time, and the latest run it happened in (read that run with tab_get_workflow_run to see the step's input, output and error). Also the run counts and suggestions.",
+            "inputSchema": { "type": "object", "properties": {
+                "workflow_id": { "type": "string" },
+                "days": { "type": "integer", "description": "1 to 30, default 7." }
+            }, "required": ["workflow_id"] }
+        },
+        {
             "name": "approve",
             "description": "Permission prompt: asks the person in tab whether a tool call may run.",
             "inputSchema": { "type": "object", "properties": {
@@ -745,11 +1346,51 @@ pub fn tools() -> Value {
 }
 
 /// Labels of required settings that have no value yet.
+/// The vault's tools: search and read for a project's coordinator, ask
+/// for fields for its other threads (see [`McpServer::vault_role`]).
+fn vault_tools(coordinator: bool) -> Value {
+    if coordinator {
+        json!([
+            {
+                "name": "tab_vault_search",
+                "description": "Search the project's end-to-end encrypted vault (EIN, tax returns, bank details, IDs, contracts). Returns entries with their field names and masked values (•••• 6789) and, for files, the best passage with numbers masked. Only you, the coordinator, can search it. If it's locked, the person is asked to unlock it.",
+                "inputSchema": { "type": "object", "properties": {
+                    "query": { "type": "string", "description": "What you're looking for, e.g. \"EIN\" or \"2024 tax return\". Empty lists every entry." }
+                } }
+            },
+            {
+                "name": "tab_vault_get",
+                "description": "Read one vault entry. Values are masked unless you name them in `reveal`, which asks the person to release them to you (\"file\" releases a file's text). Ask for only what the task needs, and don't repeat released values in your reply unless the person asked for them.",
+                "inputSchema": { "type": "object", "properties": {
+                    "id": { "type": "string", "description": "The entry id from tab_vault_search." },
+                    "reveal": { "type": "array", "items": { "type": "string" }, "description": "Field names to see in full, or \"file\"." },
+                    "why": { "type": "string", "description": "What you need them for, shown to the person." }
+                }, "required": ["id"] }
+            }
+        ])
+    } else {
+        json!([{
+            "name": "tab_vault_request",
+            "description": "Ask the person for fields from the project's encrypted vault (e.g. EIN, bank routing number), with why you need them. They see an approval card; if they approve, the values are in this tool's result only. Don't save them anywhere or repeat them beyond what the task needs.",
+            "inputSchema": { "type": "object", "properties": {
+                "fields": { "type": "array", "items": { "type": "string" }, "description": "Field names, e.g. [\"EIN\", \"State tax ID\"]." },
+                "why": { "type": "string", "description": "What you need them for, shown to the person." }
+            }, "required": ["fields", "why"] }
+        }])
+    }
+}
+
+/// Who in a chat may use the vault, and for which project.
+struct VaultRole {
+    project_id: String,
+    coordinator: bool,
+}
+
 fn missing_required(info: &ConnectorInfo, cfg: &ConnectorConfig) -> Vec<String> {
     info.descriptor
         .settings
         .iter()
-        .filter(|f| f.required)
+        .filter(|f| f.required && !cfg.covered_by_sign_in(&f.key))
         .filter(|f| match cfg.settings.get(&f.key) {
             None | Some(Value::Null) => true,
             Some(Value::String(s)) => s.trim().is_empty(),
@@ -760,6 +1401,79 @@ fn missing_required(info: &ConnectorInfo, cfg: &ConnectorConfig) -> Vec<String> 
 }
 
 impl McpServer {
+    /// Why a chat may not call a remote MCP tool, after asking the person
+    /// when that's their choice. `None` lets it through.
+    async fn check_remote_tool(
+        &self,
+        session: &Session,
+        server: &str,
+        tool: &str,
+        args: &Value,
+    ) -> Option<String> {
+        use crate::remote_mcp::ToolPolicy;
+        let remote = self.hub.remote_mcp();
+        let name = remote
+            .get(server)
+            .map(|c| c.name)
+            .unwrap_or_else(|| server.to_string());
+        let mut policy = remote.policy(server, tool);
+        // A project's coordinator asks before anything that sends, merges,
+        // deploys or refunds, whatever other chats may do.
+        if policy == ToolPolicy::Allow
+            && self.coordinator_of(Some(&session.id)).is_some()
+            && crate::agents::coordinator::needs_person(tool)
+        {
+            policy = ToolPolicy::Ask;
+        }
+        match policy {
+            ToolPolicy::Allow => None,
+            // Nobody can answer in the cloud (approvals stay on the runner).
+            ToolPolicy::Off | ToolPolicy::Ask if remote.in_cloud() => {
+                remote.note_gap(
+                    &session.id,
+                    tab_domain::runner::CloudGap {
+                        connection: server.to_string(),
+                        name: name.clone(),
+                        tool: Some(tool.to_string()),
+                        why: tab_domain::runner::GapKind::ToolOff,
+                    },
+                );
+                Some(format!(
+                    "{tool} isn't allowed in tab cloud jobs yet, so it didn't run. tab will show the person a one-click way to allow it. Don't try it another way: finish what you can, and end by saying what you'd have done with {tool}."
+                ))
+            }
+            ToolPolicy::Off => Some(format!(
+                "{tool} is turned off for agents in tab (Connections → {name}). Don't try it another way; tell the person what you wanted to do."
+            )),
+            ToolPolicy::Ask => {
+                let full = format!("mcp__{server}__{tool}");
+                let summary = format!("{name}: {}", summarize_tool(&full, args));
+                match self
+                    .hub
+                    .request_approval(&session.id, &full, summary, args.clone())
+                    .await
+                {
+                    Decision::Allow | Decision::Answer(_) => None,
+                    Decision::AllowAlways => {
+                        if let Err(e) = self
+                            .engine
+                            .set_remote_tool_policy(server, tool, ToolPolicy::Allow)
+                            .await
+                        {
+                            tracing::warn!(server, tool, error = %e, "couldn't save always-allow");
+                        }
+                        None
+                    }
+                    Decision::Deny(why) => Some(if why.trim().is_empty() {
+                        "The person declined this.".into()
+                    } else {
+                        why
+                    }),
+                }
+            }
+        }
+    }
+
     /// Connector types with their actions. Falls back to the registry, not
     /// installed, when the engine can't say.
     async fn catalog(&self) -> Vec<ConnectorInfo> {
@@ -828,10 +1542,21 @@ impl McpServer {
                 "protocolVersion": params["protocolVersion"].as_str().unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "tab", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "tab is the person's work queue. Search it, read items, file what you find under Found, attach context and create tasks, and set up connections (email, GitHub, ...) for the person. When the person mentions something you don't recognise, call tab_graph_search before asking them. Leave durable facts about a project with tab_project_note."
+                "instructions": "tab is the person's work queue. Search it, read items, file what you find under Found, attach context and create tasks, and set up connections (email, GitHub, ...) for the person. When the person mentions something you don't recognise, call tab_graph_search before asking them. Project notes (tab_project_note) are rare and reviewed: only facts every future chat needs that the repo doesn't already say."
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": with_load_hints(tools()) })),
+            "tools/list" => {
+                let mut list = tools();
+                if let (Some(role), Some(all)) = (self.vault_role(session), list.as_array_mut()) {
+                    all.extend(
+                        vault_tools(role.coordinator)
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                }
+                Ok(json!({ "tools": with_load_hints(list) }))
+            }
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or_default();
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -850,6 +1575,272 @@ impl McpServer {
         })
     }
 
+    /// Whether a chat may use the vault: a chat the person drives, run on
+    /// this device (which holds the key), in a project. Its coordinator
+    /// searches and reads; other threads ask for fields. Never a cloud job
+    /// or a chat another device runs.
+    fn vault_role(&self, session: Option<&str>) -> Option<VaultRole> {
+        self.hub.vault()?;
+        if self.hub.remote_mcp().in_cloud() {
+            return None;
+        }
+        let s = self.store.session_get(session?).ok()??;
+        if self.hub.policy(&s).trust != crate::sandbox::Trust::Person || !self.hub.runs_here(&s) {
+            return None;
+        }
+        if let Some(p) = self.coordinator_of(Some(&s.id)) {
+            return Some(VaultRole {
+                project_id: p,
+                coordinator: true,
+            });
+        }
+        let project_id = s
+            .item_id
+            .as_deref()
+            .and_then(|i| self.store.get(i).ok().flatten())
+            .and_then(|i| i.project_id)?;
+        Some(VaultRole {
+            project_id,
+            coordinator: false,
+        })
+    }
+
+    /// Asks the person on the card in the chat. `Ok` when they allowed it.
+    async fn vault_ask(&self, session: &str, summary: String, input: Value) -> anyhow::Result<()> {
+        match self
+            .hub
+            .request_approval(session, "tab_vault", summary, input)
+            .await
+        {
+            Decision::Allow | Decision::AllowAlways | Decision::Answer(_) => Ok(()),
+            Decision::Deny(why) => anyhow::bail!(if why.trim().is_empty() {
+                "The person declined. Don't ask again for the same thing in this turn.".to_string()
+            } else {
+                format!("The person declined: {why}")
+            }),
+        }
+    }
+
+    /// The vault, opened: if it's locked, the person is asked to unlock it.
+    async fn vault_open(&self, session: &str, what: &str) -> anyhow::Result<Arc<crate::e2e::E2e>> {
+        let v = self
+            .hub
+            .vault()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("the vault isn't available here"))?;
+        if !v.is_open() {
+            self.vault_ask(
+                session,
+                format!("Unlock the vault to {what}"),
+                json!({ "kind": "unlock", "what": what }),
+            )
+            .await?;
+            anyhow::ensure!(
+                v.is_open(),
+                "The vault is still locked (it opens on this device, with Touch ID or Windows Hello). Tell the person you need it unlocked."
+            );
+        }
+        Ok(v)
+    }
+
+    async fn vault_call(
+        &self,
+        session: &str,
+        role: VaultRole,
+        name: &str,
+        args: &Value,
+    ) -> anyhow::Result<Value> {
+        let project = &role.project_id;
+        let list = |k: &str| -> Vec<String> {
+            args[k]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let why = args["why"].as_str().unwrap_or_default().trim().to_string();
+        let who = crate::e2e::Reader {
+            actor: if role.coordinator {
+                "coordinator"
+            } else {
+                "thread"
+            },
+            session_id: Some(session),
+        };
+        match name {
+            "tab_vault_search" if role.coordinator => {
+                let v = self
+                    .vault_open(session, "let the coordinator search it")
+                    .await?;
+                let hits = v.search(project, args["query"].as_str().unwrap_or_default(), &who)?;
+                Ok(text(serde_json::to_string_pretty(&json!({
+                    "entries": hits,
+                    "note": "Values are masked. tab_vault_get with reveal asks the person to release one to you.",
+                }))?))
+            }
+            "tab_vault_get" if role.coordinator => {
+                let id = args["id"].as_str().unwrap_or_default();
+                let reveal = list("reveal");
+                let v = self
+                    .vault_open(session, "let the coordinator read it")
+                    .await?;
+                if !reveal.is_empty() {
+                    let (e, _) = v.get(project, id, &[], &who)?;
+                    let fields: Vec<Value> = e
+                        .fields
+                        .iter()
+                        .filter(|f| reveal.iter().any(|r| r.eq_ignore_ascii_case(&f.label)))
+                        .map(|f| json!({ "label": f.label, "masked": f.masked }))
+                        .collect();
+                    let names: Vec<String> = reveal
+                        .iter()
+                        .map(|r| {
+                            if r == "file" {
+                                "the file's text".into()
+                            } else {
+                                r.clone()
+                            }
+                        })
+                        .collect();
+                    self.vault_ask(
+                        session,
+                        format!("Show {} from {} to the coordinator", names.join(", "), e.title),
+                        json!({ "kind": "release", "entry": e.title, "fields": fields, "file": reveal.iter().any(|r| r == "file"), "why": why }),
+                    )
+                    .await
+                    .inspect_err(|_| {
+                        let _ = v.audit("deny", &who, Some(project), Some(id), Some(json!({ "fields": reveal, "why": why })));
+                    })?;
+                    v.audit(
+                        "approve",
+                        &crate::e2e::Reader {
+                            actor: "person",
+                            session_id: Some(session),
+                        },
+                        Some(project),
+                        Some(id),
+                        Some(json!({ "fields": reveal, "why": why })),
+                    )?;
+                }
+                let (e, file_text) = v.get(project, id, &reveal, &who)?;
+                let mut out = json!({ "entry": e });
+                if let Some(t) = file_text {
+                    out["file_text"] = json!(t);
+                }
+                if !reveal.is_empty() {
+                    out["note"] = json!(
+                        "Released for this task only: don't repeat these values unless the person asked for them. The saved chat shows them masked."
+                    );
+                }
+                Ok(text(serde_json::to_string_pretty(&out)?))
+            }
+            "tab_vault_request" if !role.coordinator => {
+                let fields = list("fields");
+                anyhow::ensure!(!fields.is_empty(), "name the fields you need");
+                anyhow::ensure!(!why.is_empty(), "say why you need them; the person sees it");
+                let v = self
+                    .hub
+                    .vault()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("the vault isn't available here"))?;
+                v.audit(
+                    "request",
+                    &who,
+                    Some(project),
+                    None,
+                    Some(json!({ "fields": fields, "why": why })),
+                )?;
+                self.vault_ask(
+                    session,
+                    format!("Share {} from the vault with this chat", fields.join(", ")),
+                    json!({ "kind": "request", "fields": fields, "why": why }),
+                )
+                .await
+                .inspect_err(|_| {
+                    let _ = v.audit(
+                        "deny",
+                        &who,
+                        Some(project),
+                        None,
+                        Some(json!({ "fields": fields, "why": why })),
+                    );
+                })?;
+                anyhow::ensure!(
+                    v.is_open(),
+                    "The person allowed it, but the vault is still locked on this device, so nothing was shared. Tell them."
+                );
+                v.audit(
+                    "approve",
+                    &crate::e2e::Reader {
+                        actor: "person",
+                        session_id: Some(session),
+                    },
+                    Some(project),
+                    None,
+                    Some(json!({ "fields": fields, "why": why })),
+                )?;
+                let mut shared = Vec::new();
+                for (entry, labels) in v.find_fields(project, &fields)? {
+                    let (e, _) = v.get(project, &entry.id, &labels, &who)?;
+                    for f in e.fields.into_iter().filter(|f| f.value.is_some()) {
+                        shared
+                            .push(json!({ "entry": e.title, "field": f.label, "value": f.value }));
+                    }
+                }
+                let missing: Vec<&String> = fields
+                    .iter()
+                    .filter(|w| {
+                        !shared.iter().any(|s| {
+                            crate::e2e::label_matches(w, s["field"].as_str().unwrap_or_default())
+                                || crate::e2e::label_matches(
+                                    w,
+                                    s["entry"].as_str().unwrap_or_default(),
+                                )
+                        })
+                    })
+                    .collect();
+                Ok(text(serde_json::to_string_pretty(&json!({
+                    "shared": shared,
+                    "not_in_vault": missing,
+                    "note": "For this task only: don't save these anywhere or repeat them beyond what the task needs. The saved chat shows them masked.",
+                }))?))
+            }
+            _ => anyhow::bail!("{name} isn't available in this chat"),
+        }
+    }
+
+    /// Whether this chat may start agents on new tasks: one the person
+    /// drives, on a task the person made. An agent's own follow-ups can't
+    /// start more agents, so one ask can't fan out without end.
+    fn may_start_agents(&self, session: Option<&str>) -> anyhow::Result<()> {
+        let s = session
+            .and_then(|id| self.store.session_get(id).ok().flatten())
+            .ok_or_else(|| anyhow::anyhow!("only a tab chat can start agents"))?;
+        anyhow::ensure!(
+            self.hub.policy(&s).trust == crate::sandbox::Trust::Person,
+            "only chats the person drives can start agents"
+        );
+        anyhow::ensure!(
+            self.hub.config().kind.is_some(),
+            "no agent is set up yet (Settings → Agent)"
+        );
+        let by_agent = s
+            .item_id
+            .as_deref()
+            .and_then(|i| self.store.get(i).ok().flatten())
+            .is_some_and(|i| i.event.metadata["created_by"] == "agent");
+        anyhow::ensure!(
+            !by_agent,
+            "this chat is on a task an agent created, so it can't start more agents; create the task and the person can start it"
+        );
+        Ok(())
+    }
+
     fn session_item(&self, session: Option<&str>, args: &Value) -> anyhow::Result<String> {
         if let Some(i) = args["item_id"].as_str().filter(|s| !s.is_empty()) {
             return Ok(i.to_string());
@@ -858,6 +1849,25 @@ impl McpServer {
             .and_then(|s| self.store.session_get(s).ok().flatten())
             .and_then(|s| s.item_id)
             .ok_or_else(|| anyhow::anyhow!("pass item_id: this session is not tied to a task"))
+    }
+
+    /// The project whose coordinator this session is, from the session's own
+    /// key (`coordinator:<project id>`), which agents can't set.
+    fn coordinator_of(&self, session: Option<&str>) -> Option<String> {
+        let key = self.store.session_key(session?).ok().flatten()?;
+        key.strip_prefix(crate::agents::COORDINATOR_KEY_PREFIX)
+            .map(str::to_string)
+    }
+
+    /// The most a session may read of `project_id`'s resources: its
+    /// coordinator reads `coordinator` resources too, every other chat only
+    /// `all`. Vault entries are only read through the vault's own tools.
+    fn resource_access(&self, session: Option<&str>, project_id: &str) -> &'static str {
+        if self.coordinator_of(session).as_deref() == Some(project_id) {
+            "coordinator"
+        } else {
+            "all"
+        }
     }
 
     /// The project named in `project`, else the session's task's project.
@@ -873,7 +1883,8 @@ impl McpServer {
             .session_item(session, &json!({}))
             .ok()
             .and_then(|id| self.store.get(&id).ok().flatten())
-            .and_then(|i| i.project_id);
+            .and_then(|i| i.project_id)
+            .or_else(|| self.coordinator_of(session));
         Ok(match pid {
             Some(p) => self.store.project_find(&p)?,
             None => None,
@@ -1016,12 +2027,30 @@ impl McpServer {
                 .filter(|v| !v.trim().is_empty())
                 .map(str::to_string)
         };
+        if name.starts_with("tab_vault_") {
+            let role = self.vault_role(session).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the vault is only for a project's own chats on the computer that holds its key"
+                )
+            })?;
+            return self
+                .vault_call(session.unwrap_or_default(), role, name, &args)
+                .await;
+        }
         match name {
             "tab_steps" => {
                 let steps = args["steps"]
                     .as_array()
                     .ok_or_else(|| anyhow::anyhow!("steps must be a list"))?;
                 let done = steps.iter().filter(|t| t["status"] == "completed").count();
+                // One unfinished step is a status line, not a plan: ask for the rest.
+                if steps.len() == 1 && done == 0 {
+                    return Ok(text(
+                        "Shown to the person: 1 step. That's only the step you're on; call tab_steps again \
+                         with every step to the finished result (e.g. find it, fix it, check it), so the \
+                         person can see the whole plan.",
+                    ));
+                }
                 Ok(text(format!(
                     "Shown to the person: {done} of {} steps done.",
                     steps.len()
@@ -1080,6 +2109,14 @@ impl McpServer {
                     Some(v) => self.store.notes_near(v, 3)?,
                     None => Vec::new(),
                 };
+                // What projects know, as far as this session may read: a
+                // project's coordinator reads its coordinator-only resources
+                // too (from the session's own key, never an argument).
+                let reader = crate::store::Reader {
+                    coordinator_of: self.coordinator_of(session),
+                    project: scope.project_id.clone(),
+                };
+                let passages = self.store.chunks_search(&q, qv.as_deref(), &reader, 5)?;
                 let mut out = json!({
                     "items": items.iter().map(brief).collect::<Vec<_>>(),
                     "search": self.store.index_status().summary(),
@@ -1090,13 +2127,40 @@ impl McpServer {
                         None => "all time".into(),
                     });
                 }
+                let names: std::collections::HashMap<String, String> =
+                    if notes.is_empty() && passages.is_empty() {
+                        Default::default()
+                    } else {
+                        self.store
+                            .projects()?
+                            .into_iter()
+                            .map(|p| (p.id, p.name))
+                            .collect()
+                    };
+                if !passages.is_empty() {
+                    let used: Vec<&str> = passages.iter().map(|h| h.resource_id.as_str()).collect();
+                    self.store.knowledge_mark_used(&used, now)?;
+                    out["resources"] = json!(
+                        passages
+                            .iter()
+                            .map(|h| {
+                                let mut v = json!({
+                                    "resource": h.resource,
+                                    "kind": h.kind,
+                                    "project": names.get(&h.project_id),
+                                    "title": h.title,
+                                    "source": h.source,
+                                    "text": h.text,
+                                });
+                                if h.access != "all" {
+                                    v["access"] = json!(h.access);
+                                }
+                                v
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                }
                 if !notes.is_empty() {
-                    let names: std::collections::HashMap<String, String> = self
-                        .store
-                        .projects()?
-                        .into_iter()
-                        .map(|p| (p.id, p.name))
-                        .collect();
                     out["project_notes"] = json!(
                         notes
                             .iter()
@@ -1126,6 +2190,7 @@ impl McpServer {
                         "section": c.section, "title": c.title, "url": c.url,
                         "summary": c.summary, "item": c.ref_item.as_deref().map(brief),
                     })).collect::<Vec<_>>(),
+                    "followups": self.store.followups(&id)?.iter().map(brief).collect::<Vec<_>>(),
                     "related": ctx.related.iter().map(brief).collect::<Vec<_>>(),
                     "timeline": self.store.activity_for(&id, 60)?.iter().map(|a| json!({
                         "when": a.at.format("%Y-%m-%d %H:%M UTC").to_string(),
@@ -1230,6 +2295,33 @@ impl McpServer {
                 let due_at = args["due_in_minutes"]
                     .as_i64()
                     .map(|m| Utc::now() + chrono::Duration::minutes(m.max(1)));
+                let start = s("start_agent").filter(|p| !p.trim().is_empty());
+                // Checked before anything is created, so a refusal leaves no task behind.
+                if start.is_some() {
+                    anyhow::ensure!(
+                        due_at.is_none(),
+                        "start_agent is for tasks to do now; a scheduled task waits for its time"
+                    );
+                    self.may_start_agents(session)?;
+                }
+                // A coordinator tab woke on its own may be acting on outside
+                // content (a bug report, an email): the person says whether an
+                // agent starts. Declined, the task is still created.
+                let mut start = start;
+                if let (Some(sid), Some(p)) = (session, start.as_ref())
+                    && self.hub.is_woken(sid)
+                {
+                    let title = s("title").unwrap_or_default();
+                    let summary = format!("Start an agent on \"{title}\"");
+                    let input = json!({ "title": title, "start_agent": p });
+                    if let Decision::Deny(_) = self
+                        .hub
+                        .request_approval(sid, "tab_create_task", summary, input)
+                        .await
+                    {
+                        start = None;
+                    }
+                }
                 // Follow-ups land in the same project as the chat's task.
                 let project_id = self.project_arg(session, &args)?.map(|p| p.id);
                 let item = self
@@ -1245,10 +2337,86 @@ impl McpServer {
                         auto_title: false,
                     })
                     .await?;
-                Ok(text(format!(
-                    "Created task {} ({})",
-                    item.id, item.event.kind
-                )))
+                let mut said = format!("Created task {} ({})", item.id, item.event.kind);
+                let parent = self.session_item(session, &json!({})).ok();
+                if args["link"] != false
+                    && let Some(parent) = parent.as_deref().filter(|p| *p != item.id)
+                {
+                    let parent_title = self
+                        .store
+                        .get(parent)?
+                        .map(|p| p.event.title)
+                        .unwrap_or_else(|| "The task it came from".into());
+                    for (on, other, title) in [
+                        (parent, item.id.as_str(), item.event.title.clone()),
+                        (item.id.as_str(), parent, parent_title),
+                    ] {
+                        self.store.context_add(
+                            on,
+                            &NewContext {
+                                section: ContextSection::Context,
+                                ref_item_id: Some(other.to_string()),
+                                url: None,
+                                title,
+                                summary: None,
+                                added_by: "agent".into(),
+                            },
+                            Utc::now(),
+                        )?;
+                    }
+                    self.store
+                        .link_add(&item.id, parent, LinkKind::Followup, Utc::now())?;
+                    said.push_str(", as a follow-up of this task (each is in the other's Context)");
+                }
+                let after = ids(&args["after"]);
+                for first in &after {
+                    self.store
+                        .link_add(first, &item.id, LinkKind::Blocks, Utc::now())?;
+                }
+                if !after.is_empty() {
+                    said.push_str(&format!(", after {}", after.join(", ")));
+                }
+                // The queue got the task before its links; show it in place.
+                if let Some(linked) = self.store.get(&item.id)?.filter(|i| *i != item) {
+                    let _ = self.events.send(EngineEvent::ItemChanged {
+                        change: Change::Updated,
+                        item: linked,
+                    });
+                }
+                if let Some(prompt) = start {
+                    let chat = self.hub.session_for_item(&item.id)?;
+                    self.hub.send(&chat.id, &prompt)?;
+                    said.push_str(&format!(", and started an agent on it (chat {})", chat.id));
+                }
+                Ok(text(said))
+            }
+            "tab_link_tasks" => {
+                let id = self.session_item(session, &args)?;
+                let now = Utc::now();
+                for first in ids(&args["after"]) {
+                    self.store.link_add(&first, &id, LinkKind::Blocks, now)?;
+                }
+                for first in ids(&args["not_after"]) {
+                    self.store.link_remove(&first, &id, LinkKind::Blocks)?;
+                }
+                match s("follow_up_of").as_deref() {
+                    None => {}
+                    Some("none") => {
+                        if let Some(p) = self.store.get(&id)?.and_then(|i| i.parent_id) {
+                            self.store.link_remove(&id, &p, LinkKind::Followup)?;
+                        }
+                    }
+                    Some(p) => self.store.link_add(&id, p, LinkKind::Followup, now)?,
+                }
+                let item = self
+                    .store
+                    .get(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("no item {id}"))?;
+                let _ = self.events.send(EngineEvent::ItemChanged {
+                    change: Change::Updated,
+                    item: item.clone(),
+                });
+                Ok(text(serde_json::to_string_pretty(&brief(&item))?))
             }
             "tab_graph_search" => {
                 let since = args["within_days"]
@@ -1333,8 +2501,13 @@ impl McpServer {
                 };
                 Ok(text(serde_json::to_string_pretty(&json!({
                     "project": { "id": p.id, "name": p.name },
+                    "about": p.about,
+                    "rules": p.rules,
+                    "repos": self.store.project_repos(&p.id)?.iter().map(repo_json).collect::<Vec<_>>(),
+                    "resources": self.store.project_resources(&p.id, self.resource_access(session, &p.id))?
+                        .iter().map(resource_json).collect::<Vec<_>>(),
                     "notes": self.store.project_notes(&p.id)?.iter().map(note_json).collect::<Vec<_>>(),
-                    "about": self.store.project_entities(&p.id, since, 15)?.iter()
+                    "items_are_about": self.store.project_entities(&p.id, since, 15)?.iter()
                         .map(|(e, n)| json!({ "entity_id": e.id, "kind": e.kind, "label": e.label, "items_in_project": n }))
                         .collect::<Vec<_>>(),
                     "recent_items": self.store.project_items(&p.id, since, 15)?.iter().map(brief).collect::<Vec<_>>(),
@@ -1368,6 +2541,67 @@ impl McpServer {
                     Some(p) => format!("Moved \"{}\" into {}.", item.event.title, p.name),
                     None => format!("Took \"{}\" out of its project.", item.event.title),
                 }))
+            }
+            "tab_project_update" => {
+                let p = self.project_arg(session, &args)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "this chat isn't in a project; pass project (a name from tab_project)"
+                    )
+                })?;
+                let (about, rules) = (args["about"].as_str(), args["rules"].as_str());
+                anyhow::ensure!(
+                    about.is_some() || rules.is_some(),
+                    "pass about, rules or both"
+                );
+                self.store
+                    .project_set_profile(&p.id, about, rules, Utc::now())?;
+                let _ = self.events.send(EngineEvent::ProjectChanged {
+                    project_id: p.id.clone(),
+                });
+                let what = match (about.is_some(), rules.is_some()) {
+                    (true, true) => "about and rules",
+                    (true, false) => "about",
+                    _ => "rules",
+                };
+                Ok(text(format!("Saved {}'s {what}.", p.name)))
+            }
+            "tab_project_repo" => {
+                let repo = s("repo").ok_or_else(|| anyhow::anyhow!("repo is required"))?;
+                let p = self.project_arg(session, &args)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "this chat isn't in a project; pass project (a name from tab_project)"
+                    )
+                })?;
+                let msg = if args["remove"].as_bool().unwrap_or(false) {
+                    if !self.store.repo_delete(&p.id, &repo)? {
+                        return Ok(text(format!("{} doesn't list {repo}.", p.name)));
+                    }
+                    format!("Removed {repo} from {}.", p.name)
+                } else {
+                    // A repo's path opens it to the project's chats, so it
+                    // can't be the home folder or anything else that wide.
+                    if let Some(path) = args["path"].as_str().map(str::trim)
+                        && std::path::Path::new(path).is_absolute()
+                        && crate::sandbox::current().too_wide(std::path::Path::new(path))
+                    {
+                        anyhow::bail!(
+                            "{path} is too wide to be a repo's checkout (it holds your home folder, tab's own files or credentials); give the repo's own folder"
+                        );
+                    }
+                    let r = self.store.repo_save(
+                        &p.id,
+                        &repo,
+                        args["path"].as_str(),
+                        args["note"].as_str(),
+                        "agent",
+                        Utc::now(),
+                    )?;
+                    format!("{} lists {}.", p.name, r.repo)
+                };
+                let _ = self.events.send(EngineEvent::ProjectChanged {
+                    project_id: p.id.clone(),
+                });
+                Ok(text(msg))
             }
             "tab_project_note" => {
                 let topic = s("topic").ok_or_else(|| anyhow::anyhow!("topic is required"))?;
@@ -1403,22 +2637,89 @@ impl McpServer {
                             .collect()
                     })
                     .unwrap_or_default();
-                let n = self.store.note_save(
-                    &p.id,
-                    &topic,
-                    &body,
-                    "agent",
-                    session,
-                    &sources,
-                    Utc::now(),
-                )?;
+                // Every future chat reads these, so the project's steward
+                // judges each one before it's kept.
+                let task_item = session
+                    .and_then(|s| self.store.session_get(s).ok().flatten())
+                    .and_then(|s| s.item_id)
+                    .and_then(|i| self.store.get(&i).ok().flatten());
+                let proposal = crate::agents::steward::Proposal {
+                    topic: &topic,
+                    text: &body,
+                    task: task_item.as_ref().map(|i| i.event.title.as_str()),
+                };
+                let verdict = match crate::agents::steward::review(&self.hub, &p, proposal, session)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "the project steward couldn't review a note");
+                        return Ok(text(format!(
+                            "Not saved: {}'s steward couldn't review the note ({e}). Notes are optional; \
+                                 carry on without it.",
+                            p.name
+                        )));
+                    }
+                };
+                let now = Utc::now();
+                let (asked_topic, asked) = (topic.clone(), body.clone());
+                let (topic, body, reason, retired) = match verdict {
+                    // No agent set up to review it (e.g. an outside MCP
+                    // client before onboarding): keep it as written.
+                    None => (topic, body, None, vec![]),
+                    Some(v) if !v.saves() => {
+                        if let Some(i) = &task_item {
+                            let _ = self.store.activity_add(
+                                &i.id,
+                                now,
+                                "note_rejected",
+                                &format!("Steward turned down a note on “{topic}”"),
+                                Some("steward"),
+                                json!({ "project_id": p.id, "topic": topic, "text": body, "reason": v.reason }),
+                            );
+                        }
+                        return Ok(text(format!(
+                            "Not saved: {}'s steward turned it down. {} Don't propose it again in other words.",
+                            p.name, v.reason
+                        )));
+                    }
+                    Some(v) => (v.topic, v.text, Some(v.reason), v.retire),
+                };
+                let n = self
+                    .store
+                    .note_save(&p.id, &topic, &body, "agent", session, &sources, now)?;
+                let notes = self.store.project_notes(&p.id)?;
+                for t in &retired {
+                    if let Some(old) = notes.iter().find(|o| &o.topic == t) {
+                        self.store.note_delete(&old.id)?;
+                    }
+                }
+                if let Some(i) = &task_item {
+                    let _ = self.store.activity_add(
+                        &i.id,
+                        now,
+                        "note_saved",
+                        &format!("Saved a note on “{}”", n.topic),
+                        Some(if reason.is_some() { "steward" } else { "agent" }),
+                        json!({ "project_id": p.id, "topic": n.topic, "text": n.text, "reason": reason, "retired": retired }),
+                    );
+                }
                 let _ = self.events.send(EngineEvent::ProjectChanged {
                     project_id: p.id.clone(),
                 });
-                Ok(text(format!(
-                    "Saved the \"{}\" note on {}.",
-                    n.topic, p.name
-                )))
+                let mut msg = format!("Saved the \"{}\" note on {}", n.topic, p.name);
+                if n.text != asked.trim() || !n.topic.eq_ignore_ascii_case(asked_topic.trim()) {
+                    msg.push_str(&format!(", as the steward rewrote it: {}", n.text));
+                } else {
+                    msg.push('.');
+                }
+                if !retired.is_empty() {
+                    msg.push_str(&format!(" Retired: {}.", retired.join(", ")));
+                }
+                if let Some(r) = reason {
+                    msg.push_str(&format!(" ({r})"));
+                }
+                Ok(text(msg))
             }
             "tab_list_connections" => {
                 let mut out = Vec::new();
@@ -1602,9 +2903,16 @@ impl McpServer {
                         })
                     })
                     .collect();
+                let families: Vec<Value> = self
+                    .store
+                    .model_families()?
+                    .into_iter()
+                    .map(|f| json!({ "id": f.id, "name": f.name, "candidates": f.candidates }))
+                    .collect();
                 Ok(text(serde_json::to_string_pretty(&json!({
                     "item_changes": changes,
                     "connections": connections,
+                    "model_families": families,
                     "templates": {
                         "item": "The item that started the run: item.id, item.title, item.body, item.kind, item.source, item.actor, item.context, item.url, item.score, item.urgency, item.state, item.metadata.<key> (GitHub: repo, number, reason, subject_type; email: folder, uid).",
                         "steps": "steps.<step id>.<output key> for an earlier step's output.",
@@ -1647,7 +2955,9 @@ impl McpServer {
                     anyhow::bail!("no workflow {}; leave id out to create one", w.id);
                 }
                 let catalog = self.catalog().await;
-                let (w, issues) = workflow::prepare_save(w, SavedBy::Agent, &catalog, &saved);
+                let families = self.store.model_family_ids()?;
+                let (w, issues) =
+                    workflow::prepare_save(w, SavedBy::Agent, &catalog, &saved, &families);
                 let errors: Vec<_> = issues.iter().filter(|i| i.error).collect();
                 if !errors.is_empty() {
                     let list: Vec<String> = errors
@@ -1712,6 +3022,42 @@ impl McpServer {
                     "steps": run.steps,
                 }))?))
             }
+            "tab_run_workflow" => {
+                let id = s("workflow_id").ok_or_else(|| anyhow::anyhow!("pass workflow_id"))?;
+                let started = self
+                    .engine
+                    .run_workflow_for_agent(
+                        id,
+                        s("item_id"),
+                        session.filter(|s| !s.is_empty()).map(str::to_string),
+                    )
+                    .await?;
+                Ok(text(serde_json::to_string_pretty(&agent_run_json(
+                    &started.run,
+                    started.repeat,
+                ))?))
+            }
+            "tab_get_workflow_run" => {
+                let id = s("run_id").ok_or_else(|| anyhow::anyhow!("pass run_id"))?;
+                let run = self
+                    .store
+                    .workflow_run_get(&id)?
+                    .ok_or_else(|| anyhow::anyhow!("no run {id}"))?;
+                Ok(text(serde_json::to_string_pretty(&agent_run_json(
+                    &run, false,
+                ))?))
+            }
+            "tab_workflow_stats" | "tab_workflow_failures" => {
+                let id = s("workflow_id").ok_or_else(|| anyhow::anyhow!("pass workflow_id"))?;
+                let days = args["days"].as_u64().unwrap_or(7).clamp(1, 30) as u32;
+                let r = workflow::suggest_store::report(&self.store, &id, days, 0, Utc::now())?;
+                let out = if name == "tab_workflow_stats" {
+                    workflow::suggest_store::stats_json(&r)
+                } else {
+                    workflow::suggest_store::failures_json(&r)
+                };
+                Ok(text(serde_json::to_string(&out)?))
+            }
             _ => anyhow::bail!("unknown tool {name}"),
         }
     }
@@ -1740,6 +3086,7 @@ mod tests {
                 kind: "tab.task".into(),
                 title: t.title,
                 occurred_at: Utc::now(),
+                metadata: json!({ "created_by": t.created_by }),
                 ..Default::default()
             };
             match self.0.upsert(&e, Utc::now())? {
@@ -1805,7 +3152,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 21);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 28);
         let always: Vec<&str> = list["result"]["tools"]
             .as_array()
             .unwrap()
@@ -1988,6 +3335,165 @@ mod tests {
         assert!(bad.is_err());
     }
 
+    /// Coordinator-only resources reach the project's coordinator, and no
+    /// other chat: not one in the project, not one naming the project.
+    #[tokio::test]
+    async fn only_the_coordinator_reads_coordinator_resources() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let server = McpServer {
+            store: store.clone(),
+            hub,
+            engine: Arc::new(Connections(Default::default())),
+            events,
+            token: "t".into(),
+        };
+        let now = Utc::now();
+        let p = store
+            .project_save(None, "Shop", "#7c5cff", "store", now)
+            .unwrap();
+        for (title, access) in [("Public site", "all"), ("Billing inbox", "coordinator")] {
+            store
+                .resource_save(
+                    &p.id,
+                    &crate::store::ResourceInput {
+                        kind: "link".into(),
+                        title: title.into(),
+                        url: Some(format!("https://x/{access}")),
+                        access: Some(access.into()),
+                        ..Default::default()
+                    },
+                    "user",
+                    now,
+                )
+                .unwrap();
+        }
+        // Their contents, as indexing leaves them.
+        for r in store.project_resources(&p.id, "coordinator").unwrap() {
+            let t = crate::store::IndexTarget {
+                id: r.id.clone(),
+                project_id: p.id.clone(),
+                kind: r.kind.clone(),
+                title: r.title.clone(),
+                url: r.url.clone(),
+                note: String::new(),
+                access: r.access.clone(),
+                options: json!({}),
+                version: crate::store::ts(r.updated_at),
+                path: None,
+            };
+            let piece = crate::knowledge::chunk::Piece {
+                title: format!("{} page", r.title),
+                source: r.url.clone(),
+                text: format!("Refund handling, as the {} says", r.title),
+            };
+            store.knowledge_put(&t, "f", &[piece], None, now).unwrap();
+        }
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let coordinator = store
+            .session_create_keyed(
+                &crate::agents::coordinator::key(&p.id),
+                AgentKind::ClaudeCode,
+                "Coordinator",
+                &dir,
+                now,
+            )
+            .unwrap();
+        let crate::store::Upsert::Inserted(task) = store
+            .upsert(
+                &crate::model::IncomingEvent {
+                    source: "tab".into(),
+                    external_id: "reply".into(),
+                    kind: "tab.task".into(),
+                    title: "Reply".into(),
+                    occurred_at: now,
+                    ..Default::default()
+                },
+                now,
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        store.item_set_project(&task.id, Some(&p.id), now).unwrap();
+        let worker = store
+            .session_create(Some(&task.id), AgentKind::ClaudeCode, "Reply", &dir, now)
+            .unwrap();
+        let other = store
+            .session_create_keyed(
+                "coordinator:someone-else",
+                AgentKind::ClaudeCode,
+                "Other",
+                &dir,
+                now,
+            )
+            .unwrap();
+
+        let seen = |text: String| (text.contains("Public site"), text.contains("Billing inbox"));
+        let call = |id: String, args: Value| {
+            let server = &server;
+            async move {
+                server.call(Some(&id), "tab_project", args).await.unwrap()["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            }
+        };
+        assert_eq!(
+            seen(call(coordinator.id.clone(), json!({})).await),
+            (true, true)
+        );
+        assert_eq!(
+            seen(call(worker.id.clone(), json!({})).await),
+            (true, false)
+        );
+        assert_eq!(
+            seen(call(worker.id.clone(), json!({"project":"Shop"})).await),
+            (true, false)
+        );
+        assert_eq!(
+            seen(call(other.id.clone(), json!({"project":"Shop"})).await),
+            (true, false)
+        );
+
+        // Search returns their passages by the same rule, with sources.
+        let search = |id: String| {
+            let server = &server;
+            async move {
+                let out = server
+                    .call(Some(&id), "tab_search", json!({"query": "refund handling"}))
+                    .await
+                    .unwrap();
+                let v: Value =
+                    serde_json::from_str(out["content"][0]["text"].as_str().unwrap()).unwrap();
+                v["resources"].clone()
+            }
+        };
+        let mine = search(coordinator.id.clone()).await;
+        assert_eq!(mine.as_array().unwrap().len(), 2);
+        assert!(
+            mine.as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["access"] == "coordinator"
+                    && r["source"] == "https://x/coordinator"
+                    && r["project"] == "Shop")
+        );
+        for id in [worker.id.clone(), other.id.clone()] {
+            let theirs = search(id).await;
+            assert_eq!(theirs.as_array().unwrap().len(), 1);
+            assert_eq!(theirs[0]["resource"], "Public site");
+        }
+        let used = store.project_resources(&p.id, "coordinator").unwrap();
+        assert!(used.iter().all(|r| r.last_used_at.is_some()));
+    }
+
     #[tokio::test]
     async fn agents_search_the_graph_and_leave_project_notes() {
         use crate::model::{EntityRef, IncomingEvent};
@@ -2099,6 +3605,36 @@ mod tests {
         );
         // The next chat in the project starts with the notes.
         assert!(server.hub.system_prompt(&session).contains("Fridays"));
+
+        // About, rules and repos: written by agents, read back by tab_project.
+        out(server
+            .call(
+                Some(&session.id),
+                "tab_project_update",
+                json!({"about":"The billing site.","rules":"- PRs against main."}),
+            )
+            .await);
+        out(server
+            .call(Some(&session.id), "tab_project_repo", json!({"repo":"https://github.com/acme/billing","path":"/src/billing","note":"The site"}))
+            .await);
+        let overview = out(server
+            .call(Some(&session.id), "tab_project", json!({}))
+            .await);
+        assert!(
+            overview.contains("The billing site.")
+                && overview.contains("PRs against main")
+                && overview.contains("\"acme/billing\"")
+                && overview.contains("/src/billing"),
+            "{overview}"
+        );
+        out(server
+            .call(
+                Some(&session.id),
+                "tab_project_repo",
+                json!({"repo":"acme/billing","remove":true}),
+            )
+            .await);
+        assert!(store.project_repos(&p.id).unwrap().is_empty());
         out(server
             .call(
                 Some(&session.id),
@@ -2266,6 +3802,50 @@ mod tests {
             .unwrap();
         assert_eq!((r.code, r.stdout_text()), (0, String::new()));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn chats_may_rewrite_only_branches_they_created_and_alone_pushed_to() {
+        let store = Store::in_memory().unwrap();
+        let mk = || {
+            store
+                .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+                .unwrap()
+                .id
+        };
+        let (me, other) = (mk(), mk());
+        let up = |old: &str, new: &str, name: &str| broker::RefUpdate {
+            old: old.repeat(40),
+            new: new.repeat(40),
+            name: name.into(),
+        };
+        let mine = "refs/heads/mine";
+
+        // A branch someone else made isn't the chat's, even after it pushes to it.
+        remember_branches(&store, &me, "o/r", &[up("1", "2", "refs/heads/main")]);
+        assert!(!own_branch(
+            &store,
+            &me,
+            "o/r",
+            &up("2", "3", "refs/heads/main")
+        ));
+
+        // One it created is, for that chat and repo only.
+        remember_branches(&store, &me, "o/r", &[up("0", "a", mine)]);
+        assert!(own_branch(&store, &me, "O/R", &up("a", "b", mine)));
+        assert!(!own_branch(&store, &other, "o/r", &up("a", "b", mine)));
+        assert!(!own_branch(&store, &me, "o/other", &up("a", "b", mine)));
+
+        // It follows the chat's own pushes, force pushes included.
+        remember_branches(&store, &me, "o/r", &[up("a", "b", mine)]);
+        assert!(own_branch(&store, &me, "o/r", &up("b", "c", mine)));
+
+        // Someone else pushed since (the branch isn't where the chat left it): ask.
+        assert!(!own_branch(&store, &me, "o/r", &up("d", "c", mine)));
+
+        // Deleting it forgets it.
+        remember_branches(&store, &me, "o/r", &[up("b", "0", mine)]);
+        assert!(!own_branch(&store, &me, "o/r", &up("b", "c", mine)));
     }
 
     #[tokio::test]
@@ -2491,5 +4071,1173 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("could loop"), "{err}");
         assert_eq!(store.workflows().unwrap().len(), 1);
+    }
+
+    /// A remote MCP server that wants a sign-in, with its own authorization
+    /// server: tab signs in (discovery, registration, PKCE, the browser's
+    /// callback), then forwards a chat's requests with the token, refreshes
+    /// it when the server stops taking it, and applies each tool's choice.
+    #[tokio::test]
+    async fn fronts_a_local_server_tab_runs() {
+        use crate::remote_mcp::{LocalCommand, RemoteMcpConfig, Secrets, ToolPolicy};
+        let Ok(node) = which::which("node") else {
+            eprintln!("no node; skipping");
+            return;
+        };
+        let script = r#"
+const rl = require('readline').createInterface({ input: process.stdin });
+rl.on('line', (l) => {
+  const m = JSON.parse(l);
+  const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
+  if (m.method === 'initialize') out({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'notes' } } });
+  else if (m.method === 'tools/list') out({ jsonrpc: '2.0', id: m.id, result: { tools: [{ name: 'read_note', annotations: { readOnlyHint: true } }, { name: 'delete_note' }] } });
+  else if (m.method === 'tools/call') out({ jsonrpc: '2.0', id: m.id, result: { content: [{ type: 'text', text: 'note:' + process.env.NOTES_KEY } ] } });
+});
+"#;
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let dir = std::env::temp_dir().join(format!("tab-local-mcp-{}", uuid::Uuid::new_v4()));
+        let hub = AgentHub::new(store.clone(), events.clone(), AgentConfig::default(), dir);
+        let server = Arc::new(McpServer {
+            store: store.clone(),
+            hub: hub.clone(),
+            engine: Arc::new(NoEngine(store.clone())),
+            events,
+            token: "secret".into(),
+        });
+        let url = serve(server, 48_400).await.unwrap();
+        let remote = hub.remote_mcp().clone();
+        remote
+            .set_secrets(
+                "notes",
+                &Secrets {
+                    env: [("NOTES_KEY".to_string(), "k".to_string())].into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        remote.set_servers(std::collections::BTreeMap::from([(
+            "notes".to_string(),
+            RemoteMcpConfig {
+                name: "Notes".into(),
+                enabled: true,
+                command: Some(LocalCommand {
+                    command: node.display().to_string(),
+                    args: vec!["-e".into(), script.into()],
+                    env: vec!["NOTES_KEY".into()],
+                    cwd: None,
+                }),
+                tools: [("delete_note".to_string(), ToolPolicy::Off)].into(),
+                ..Default::default()
+            },
+        )]));
+        // Nothing to sign in to: ready right away.
+        assert_eq!(remote.usable(), ["notes"]);
+        let session = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let token = chat_token("secret", &session.id);
+        let client = reqwest::Client::new();
+        let call = |body: Value| {
+            client
+                .post(format!("{url}/notes"))
+                .bearer_auth(&token)
+                .header("x-tab-session", &session.id)
+                .json(&body)
+                .send()
+        };
+        let v: Value =
+            call(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+        assert_eq!(v["result"]["serverInfo"]["name"], "notes");
+        let r = call(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 202);
+        // Off tools aren't listed.
+        let v: Value = call(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["result"]["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(remote.tool_views("notes").len(), 2);
+        // The key from the vault reaches the process.
+        let v: Value = call(json!({ "jsonrpc": "2.0", "id": "c", "method": "tools/call", "params": { "name": "read_note", "arguments": {} } }))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["id"], "c");
+        assert_eq!(v["result"]["content"][0]["text"], "note:k");
+        // Off: refused before it reaches the process.
+        let v: Value = call(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "delete_note", "arguments": {} } }))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["result"]["isError"], true);
+        remote.forget("notes");
+        assert!(remote.secrets("notes").is_empty());
+    }
+
+    #[tokio::test]
+    async fn fronts_a_remote_mcp_server_with_its_sign_in() {
+        use crate::remote_mcp::{RemoteMcpConfig, ToolPolicy};
+        use std::collections::HashMap;
+
+        #[derive(Clone)]
+        struct Fake {
+            base: Arc<std::sync::Mutex<String>>,
+            /// The access token the server takes right now.
+            valid: Arc<std::sync::Mutex<String>>,
+            refreshed: Arc<std::sync::atomic::AtomicUsize>,
+            verifier_seen: Arc<std::sync::Mutex<Option<String>>>,
+        }
+        let fake = Fake {
+            base: Default::default(),
+            valid: Arc::new(std::sync::Mutex::new("tok-1".into())),
+            refreshed: Default::default(),
+            verifier_seen: Default::default(),
+        };
+        async fn mcp(State(f): State<Fake>, headers: HeaderMap, body: String) -> Response {
+            let base = f.base.lock().unwrap().clone();
+            let good = format!("Bearer {}", f.valid.lock().unwrap());
+            if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some(good.as_str()) {
+                let challenge = format!(
+                    "Bearer resource_metadata=\"{base}/.well-known/oauth-protected-resource/mcp\", scope=\"read write\""
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [("www-authenticate", challenge)],
+                    "",
+                )
+                    .into_response();
+            }
+            let req: Value = serde_json::from_str(&body).unwrap();
+            let id = req["id"].clone();
+            match req["method"].as_str().unwrap_or_default() {
+                "initialize" => (
+                    [
+                        ("mcp-session-id", "up-1"),
+                        ("content-type", "application/json"),
+                    ],
+                    json!({ "jsonrpc": "2.0", "id": id, "result": {
+                        "protocolVersion": "2025-06-18", "capabilities": {},
+                        "serverInfo": { "name": "Things" } } })
+                    .to_string(),
+                )
+                    .into_response(),
+                "tools/list" => {
+                    assert_eq!(
+                        headers.get("mcp-session-id").and_then(|v| v.to_str().ok()),
+                        Some("up-1")
+                    );
+                    let tools = json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": [
+                        { "name": "list_things", "annotations": { "readOnlyHint": true } },
+                        { "name": "make_thing" },
+                        { "name": "drop_thing" },
+                    ] } });
+                    (
+                        [("content-type", "text/event-stream")],
+                        format!("event: message\ndata: {tools}\n\n"),
+                    )
+                        .into_response()
+                }
+                "tools/call" => json_response(json!({ "jsonrpc": "2.0", "id": id, "result": {
+                    "content": [{ "type": "text", "text": format!("did {}", req["params"]["name"].as_str().unwrap()) }] } })),
+                _ => StatusCode::ACCEPTED.into_response(),
+            }
+        }
+        let app = Router::new()
+            .route("/mcp", post(mcp))
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                axum::routing::get(|State(f): State<Fake>| async move {
+                    let base = f.base.lock().unwrap().clone();
+                    axum::Json(json!({ "resource": format!("{base}/mcp"), "authorization_servers": [base] }))
+                }),
+            )
+            .route(
+                "/.well-known/oauth-authorization-server",
+                axum::routing::get(|State(f): State<Fake>| async move {
+                    let b = f.base.lock().unwrap().clone();
+                    axum::Json(json!({
+                        "issuer": b, "authorization_endpoint": format!("{b}/authorize"),
+                        "token_endpoint": format!("{b}/token"), "registration_endpoint": format!("{b}/register"),
+                        "code_challenge_methods_supported": ["S256"] }))
+                }),
+            )
+            .route(
+                "/register",
+                post(|axum::Json(v): axum::Json<Value>| async move {
+                    assert_eq!(v["token_endpoint_auth_method"], "none");
+                    assert!(v["redirect_uris"][0].as_str().unwrap().ends_with("/oauth/callback"));
+                    axum::Json(json!({ "client_id": "cid" }))
+                }),
+            )
+            .route(
+                "/token",
+                post(|State(f): State<Fake>, body: String| async move {
+                    let form: HashMap<String, String> = reqwest::Url::parse(&format!("http://x/?{body}"))
+                        .unwrap()
+                        .query_pairs()
+                        .into_owned()
+                        .collect();
+                    assert_eq!(form["client_id"], "cid");
+                    assert!(form["resource"].ends_with("/mcp"));
+                    match form["grant_type"].as_str() {
+                        "authorization_code" => {
+                            assert_eq!(form["code"], "code-1");
+                            *f.verifier_seen.lock().unwrap() = Some(form["code_verifier"].clone());
+                            axum::Json(json!({ "access_token": "tok-1", "refresh_token": "r1", "expires_in": 3600 }))
+                        }
+                        _ => {
+                            assert_eq!(form["refresh_token"], "r1");
+                            f.refreshed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            axum::Json(json!({ "access_token": "tok-2", "expires_in": 3600 }))
+                        }
+                    }
+                }),
+            )
+            .with_state(fake.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        *fake.base.lock().unwrap() = base.clone();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, mut rx) = tokio::sync::broadcast::channel(64);
+        let dir = std::env::temp_dir().join(format!("tab-remote-mcp-{}", uuid::Uuid::new_v4()));
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            dir.clone(),
+        );
+        let server = Arc::new(McpServer {
+            store: store.clone(),
+            hub: hub.clone(),
+            engine: Arc::new(NoEngine(store.clone())),
+            events,
+            token: "secret".into(),
+        });
+        let url = serve(server, 48_300).await.unwrap();
+        let remote = hub.remote_mcp().clone();
+        remote.set_servers(std::collections::BTreeMap::from([(
+            "things".to_string(),
+            RemoteMcpConfig {
+                name: "Things".into(),
+                url: format!("{base}/mcp"),
+                enabled: true,
+                sign_in: true,
+                catalog: None,
+                tools: std::collections::BTreeMap::from([(
+                    "drop_thing".to_string(),
+                    ToolPolicy::Off,
+                )]),
+                ..Default::default()
+            },
+        )]));
+        assert!(remote.usable().is_empty());
+        hub.set_mcp(crate::agents::McpEndpoint {
+            url: url.clone(),
+            token: "secret".into(),
+        });
+        let session = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        // Not signed in: chats don't get it.
+        assert!(hub.remote_servers(crate::sandbox::Trust::Person).is_empty());
+
+        // Sign in: tab finds the authorization server and registers itself.
+        let authorize = remote.begin_sign_in("things").await.unwrap();
+        let au = reqwest::Url::parse(&authorize).unwrap();
+        assert!(authorize.starts_with(&format!("{base}/authorize?")));
+        let q: HashMap<_, _> = au.query_pairs().into_owned().collect();
+        assert_eq!(q["client_id"], "cid");
+        assert_eq!(q["scope"], "read write");
+        let callback = reqwest::Url::parse(&q["redirect_uri"]).unwrap();
+        // The browser comes back with a code.
+        let page = reqwest::get(format!("{callback}?state={}&code=code-1", q["state"]))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(page.contains("Connected to Things"), "{page}");
+        assert!(
+            fake.verifier_seen
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|v| v.len() >= 43)
+        );
+        // The same link can't be used twice.
+        let again = reqwest::get(format!("{callback}?state={}&code=code-1", q["state"]))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(again.contains("didn't finish"), "{again}");
+        assert_eq!(remote.usable(), ["things"]);
+        assert_eq!(
+            hub.remote_servers(crate::sandbox::Trust::Person),
+            [("things".to_string(), format!("{url}/things"))]
+        );
+        // Review chats and jobs never get it.
+        assert!(hub.remote_servers(crate::sandbox::Trust::Agent).is_empty());
+
+        let client = reqwest::Client::new();
+        let token = chat_token("secret", &session.id);
+        let call = |body: Value, token: String| {
+            client
+                .post(format!("{url}/things"))
+                .bearer_auth(token)
+                .header("x-tab-session", &session.id)
+                .header("accept", "application/json, text/event-stream")
+                .json(&body)
+                .send()
+        };
+        // Another chat's token doesn't work.
+        let r = call(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
+            "nope".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), 401);
+
+        let r = call(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+            token.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()["mcp-session-id"], "up-1");
+
+        // Off tools aren't listed; the stream stays a stream.
+        let r = client
+            .post(format!("{url}/things"))
+            .bearer_auth(&token)
+            .header("x-tab-session", &session.id)
+            .header("mcp-session-id", "up-1")
+            .json(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            r.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream")
+        );
+        let msgs = crate::remote_mcp::messages("text/event-stream", &r.text().await.unwrap());
+        let names: Vec<&str> = msgs[0]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["list_things", "make_thing"]);
+
+        let tool = |name: &str| json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": name, "arguments": {} } });
+        // Off: refused without reaching the server.
+        let v: Value = call(tool("drop_thing"), token.clone())
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["result"]["isError"], true);
+        assert!(
+            v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("turned off")
+        );
+        // Read-only: runs.
+        let r = call(tool("list_things"), token.clone())
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(r.contains("did list_things"), "{r}");
+
+        // The server stops taking the token: tab refreshes and retries once.
+        *fake.valid.lock().unwrap() = "tok-2".into();
+        let r = call(tool("list_things"), token.clone())
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(r.contains("did list_things"), "{r}");
+        assert_eq!(fake.refreshed.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Anything else asks the person first.
+        let pending = call(tool("make_thing"), token.clone());
+        let approve = async {
+            loop {
+                if let EngineEvent::ApprovalRequested { approval } = rx.recv().await.unwrap() {
+                    assert_eq!(approval.tool, "mcp__things__make_thing");
+                    assert!(
+                        approval.summary.starts_with("Things: "),
+                        "{}",
+                        approval.summary
+                    );
+                    hub.resolve_approval(&approval.id, Decision::Deny("not now".into()));
+                    break;
+                }
+            }
+        };
+        let (r, _) = tokio::join!(pending, approve);
+        let v: Value = r.unwrap().json().await.unwrap();
+        assert_eq!(v["result"]["isError"], true);
+        assert_eq!(v["result"]["content"][0]["text"], "not now");
+
+        // On a cloud runner: jobs get it, with the cloud column, and a
+        // stand-in for a connection that's only on a computer.
+        use tab_domain::runner::{CloudGap, GapKind};
+        remote.set_in_cloud(true);
+        remote.set_elsewhere(vec![crate::remote_mcp::Elsewhere {
+            id: "linear".into(),
+            name: "Linear".into(),
+            why: GapKind::NotInCloud,
+        }]);
+        let job = store
+            .session_create_keyed("job:j1", AgentKind::ClaudeCode, "job", ".", Utc::now())
+            .unwrap();
+        assert_eq!(hub.policy(&job).trust, crate::sandbox::Trust::Agent);
+        assert_eq!(
+            hub.remote_servers(crate::sandbox::Trust::Agent),
+            [
+                ("things".to_string(), format!("{url}/things")),
+                ("linear".to_string(), format!("{url}/linear")),
+            ]
+        );
+        let job_token = chat_token("secret", &job.id);
+        let job_call = |server: &str, body: Value| {
+            client
+                .post(format!("{url}/{server}"))
+                .bearer_auth(&job_token)
+                .header("x-tab-session", &job.id)
+                .header("mcp-session-id", "up-1")
+                .header("accept", "application/json, text/event-stream")
+                .json(&body)
+                .send()
+        };
+        // A write that's off only by default stays listed, so a job can say
+        // it needed it; the one the person turned off is hidden.
+        let r = job_call(
+            "things",
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        )
+        .await
+        .unwrap();
+        let msgs = crate::remote_mcp::messages("text/event-stream", &r.text().await.unwrap());
+        let names: Vec<&str> = msgs[0]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["list_things", "make_thing"]);
+        // Off in the cloud: refused without asking (nobody would answer),
+        // and noted for the job.
+        let v: Value = job_call("things", tool("make_thing"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["result"]["isError"], true);
+        assert!(
+            v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("isn't allowed in tab cloud jobs"),
+            "{v}"
+        );
+        // Reads run.
+        let r = job_call("things", tool("list_things"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(r.contains("did list_things"), "{r}");
+        // The stand-in: one tool, which notes what the job needed.
+        let v: Value = job_call(
+            "linear",
+            json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/list" }),
+        )
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert_eq!(v["result"]["tools"][0]["name"], REQUEST_ACCESS);
+        let v: Value = job_call(
+            "linear",
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": REQUEST_ACCESS, "arguments": { "need": "file an issue" } } }),
+        )
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        assert!(
+            v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Noted.")
+        );
+        assert_eq!(
+            hub.take_gaps(&job.id),
+            [
+                CloudGap {
+                    connection: "things".into(),
+                    name: "Things".into(),
+                    tool: Some("make_thing".into()),
+                    why: GapKind::ToolOff,
+                },
+                CloudGap {
+                    connection: "linear".into(),
+                    name: "Linear".into(),
+                    tool: None,
+                    why: GapKind::NotInCloud,
+                },
+            ]
+        );
+        assert!(hub.take_gaps(&job.id).is_empty(), "taken once");
+        // Allowed in the cloud column: it runs.
+        let mut allowed = remote.get("things").unwrap();
+        allowed
+            .cloud_tools
+            .insert("make_thing".into(), ToolPolicy::Allow);
+        remote.set_servers(std::collections::BTreeMap::from([(
+            "things".to_string(),
+            allowed.clone(),
+        )]));
+        let r = job_call("things", tool("make_thing"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(r.contains("did make_thing"), "{r}");
+        // A refresh here goes back to the hub (servers rotate tokens).
+        let saved = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let s2 = saved.clone();
+        remote.set_on_saved(Arc::new(move |id: &str, json: &str| {
+            s2.lock().unwrap().push((id.to_string(), json.to_string()));
+        }));
+        remote.token("things", true).await.unwrap();
+        let saved = saved.lock().unwrap().clone();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0, "things");
+        assert!(saved[0].1.contains("tok-2"));
+        // tab's own tools aren't on a cloud runner.
+        let r = client
+            .post(&url)
+            .bearer_auth("secret")
+            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 404);
+        // Signed out here: a stand-in that says to sign in again.
+        remote.sign_out("things");
+        assert_eq!(
+            remote.stand_in("things").map(|e| e.why),
+            Some(GapKind::SignIn)
+        );
+        remote.set_in_cloud(false);
+        assert!(remote.stand_in("things").is_none());
+
+        // Signed out: chats lose it.
+        assert!(remote.usable().is_empty());
+        let r = call(tool("list_things"), token).await.unwrap();
+        assert_eq!(r.status(), 404);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A follow-up from a chat is linked with the chat's task both ways, and
+    /// starting an agent on it is refused where it isn't allowed, before
+    /// anything is created.
+    #[tokio::test]
+    async fn follow_ups_link_both_ways_and_guard_starting_agents() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let server = Arc::new(McpServer {
+            store: store.clone(),
+            hub: hub.clone(),
+            engine: Arc::new(NoEngine(store.clone())),
+            events,
+            token: "secret".into(),
+        });
+        let url = serve(server, 48_400).await.unwrap();
+        let parent = NoEngine(store.clone())
+            .create_task(NewTask {
+                title: "Build MCP connections".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let chat = store
+            .session_create(
+                Some(&parent.id),
+                AgentKind::ClaudeCode,
+                "t",
+                ".",
+                Utc::now(),
+            )
+            .unwrap();
+        let call = |args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tab_create_task","arguments":args}});
+        let text = |v: &Value| {
+            v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let tasks = || store.list(&[ItemState::Open]).unwrap().len();
+
+        let v = server_call(&url, &chat.id, call(json!({ "title": "Phase 2: import" }))).await;
+        let said = text(&v);
+        assert!(said.contains("as a follow-up of this task"), "{said}");
+        let child = said
+            .split_whitespace()
+            .nth(2)
+            .unwrap()
+            .trim_end_matches(',')
+            .to_string();
+        let on_parent = store.item_context(&parent.id).unwrap().unwrap().entries;
+        assert!(
+            on_parent
+                .iter()
+                .any(|e| e.ref_item.as_ref().is_some_and(|i| i.id == child)
+                    && e.section == ContextSection::Context)
+        );
+        let on_child = store.item_context(&child).unwrap().unwrap().entries;
+        assert!(
+            on_child
+                .iter()
+                .any(|e| e.ref_item.as_ref().is_some_and(|i| i.id == parent.id)
+                    && e.title == "Build MCP connections")
+        );
+        assert_eq!(
+            store.get(&child).unwrap().unwrap().parent_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+
+        // A later phase waits on the one before it, and can be reordered.
+        let v = server_call(
+            &url,
+            &chat.id,
+            call(json!({ "title": "Phase 3: sync", "after": [child] })),
+        )
+        .await;
+        let next = text(&v)
+            .split_whitespace()
+            .nth(2)
+            .unwrap()
+            .trim_end_matches(',')
+            .to_string();
+        assert_eq!(
+            store.get(&next).unwrap().unwrap().blocked_by,
+            [child.as_str()]
+        );
+        let link = |args: Value| json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tab_link_tasks","arguments":args}});
+        let v = server_call(
+            &url,
+            &chat.id,
+            link(json!({ "item_id": child, "after": [next] })),
+        )
+        .await;
+        assert!(
+            v["error"].is_object() || v["result"]["isError"] == true,
+            "a loop is refused: {v}"
+        );
+        server_call(
+            &url,
+            &chat.id,
+            link(json!({ "item_id": next, "not_after": [child], "follow_up_of": "none" })),
+        )
+        .await;
+        let next = store.get(&next).unwrap().unwrap();
+        assert!(next.blocked_by.is_empty() && next.parent_id.is_none());
+
+        // link: false leaves both alone.
+        let v = server_call(
+            &url,
+            &chat.id,
+            call(json!({ "title": "Unrelated", "link": false })),
+        )
+        .await;
+        assert!(!text(&v).contains("follow-up"));
+        // Phase 2 and phase 3.
+        assert_eq!(
+            store
+                .item_context(&parent.id)
+                .unwrap()
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+
+        let before = tasks();
+        // No agent set up: refused, and no task is made.
+        let v = server_call(
+            &url,
+            &chat.id,
+            call(json!({ "title": "Phase 3", "start_agent": "Go" })),
+        )
+        .await;
+        assert!(v.to_string().contains("no agent is set up"), "{v}");
+        // A scheduled task can't start now.
+        let v = server_call(
+            &url,
+            &chat.id,
+            call(json!({ "title": "Later", "due_in_minutes": 30, "start_agent": "Go" })),
+        )
+        .await;
+        assert!(v.to_string().contains("scheduled task waits"), "{v}");
+        assert_eq!(tasks(), before);
+
+        // A chat on an agent's own follow-up can't start more agents.
+        hub.set_config(AgentConfig {
+            kind: Some(AgentKind::ClaudeCode),
+            ..Default::default()
+        })
+        .await;
+        let child_chat = store
+            .session_create(Some(&child), AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let v = server_call(
+            &url,
+            &child_chat.id,
+            call(json!({ "title": "Deeper", "start_agent": "Go" })),
+        )
+        .await;
+        assert!(v.to_string().contains("task an agent created"), "{v}");
+        assert_eq!(tasks(), before);
+    }
+
+    #[tokio::test]
+    async fn only_the_coordinator_searches_the_vault_and_threads_ask() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let dir = std::env::temp_dir().join(format!("tab-mcp-vault-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vault = crate::e2e::E2e::for_tests(store.clone(), &dir, "laptop");
+        hub.set_vault(vault.clone());
+        let server = McpServer {
+            store: store.clone(),
+            hub: hub.clone(),
+            engine: Arc::new(Connections(Default::default())),
+            events: events.clone(),
+            token: "t".into(),
+        };
+        let now = Utc::now();
+        let p = store
+            .project_save(None, "Shop", "#7c5cff", "store", now)
+            .unwrap();
+        vault.create().await.unwrap();
+        vault
+            .save(
+                &p.id,
+                crate::e2e::EntryInput {
+                    id: None,
+                    title: "Company IDs".into(),
+                    note: String::new(),
+                    fields: vec![crate::e2e::FieldInput {
+                        label: "EIN".into(),
+                        value: Some("12-3456789".into()),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        let cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let coordinator = store
+            .session_create_keyed(
+                &crate::agents::coordinator::key(&p.id),
+                AgentKind::ClaudeCode,
+                "Coordinator",
+                &cwd,
+                now,
+            )
+            .unwrap();
+        let crate::store::Upsert::Inserted(task) = store
+            .upsert(
+                &IncomingEvent {
+                    source: "tab".into(),
+                    external_id: "w9".into(),
+                    kind: "tab.task".into(),
+                    title: "Fill in the W-9".into(),
+                    occurred_at: now,
+                    ..Default::default()
+                },
+                now,
+            )
+            .unwrap()
+        else {
+            panic!()
+        };
+        store.item_set_project(&task.id, Some(&p.id), now).unwrap();
+        let worker = store
+            .session_create(Some(&task.id), AgentKind::ClaudeCode, "W-9", &cwd, now)
+            .unwrap();
+        let loose = store
+            .session_create(None, AgentKind::ClaudeCode, "Elsewhere", &cwd, now)
+            .unwrap();
+
+        let names = |session: &str| {
+            let server = &server;
+            let session = session.to_string();
+            async move {
+                let r = server
+                    .dispatch(
+                        Some(&session),
+                        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                    )
+                    .await
+                    .unwrap();
+                r["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|t| t["name"].as_str().map(str::to_string))
+                    .filter(|n| n.starts_with("tab_vault"))
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            names(&coordinator.id).await,
+            ["tab_vault_search", "tab_vault_get"]
+        );
+        assert_eq!(names(&worker.id).await, ["tab_vault_request"]);
+        assert!(names(&loose.id).await.is_empty());
+        assert!(
+            server
+                .call(
+                    Some(&worker.id),
+                    "tab_vault_search",
+                    json!({ "query": "ein" })
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            server
+                .call(
+                    Some(&loose.id),
+                    "tab_vault_request",
+                    json!({ "fields": ["EIN"], "why": "x" })
+                )
+                .await
+                .is_err()
+        );
+
+        // The coordinator sees it masked.
+        let found = server
+            .call(
+                Some(&coordinator.id),
+                "tab_vault_search",
+                json!({ "query": "EIN" }),
+            )
+            .await
+            .unwrap()
+            .to_string();
+        assert!(
+            found.contains("•••• 6789") && !found.contains("3456789"),
+            "{found}"
+        );
+
+        // A thread asks; the person approves on the card.
+        let mut rx = events.subscribe();
+        let answer = {
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Ok(EngineEvent::ApprovalRequested { approval }) = rx.recv().await {
+                        assert_eq!(approval.input["kind"], "request");
+                        assert!(!approval.input.to_string().contains("3456789"));
+                        hub.resolve_approval(&approval.id, Decision::Allow);
+                        break;
+                    }
+                }
+            })
+        };
+        let shared = server
+            .call(
+                Some(&worker.id),
+                "tab_vault_request",
+                json!({ "fields": ["ein"], "why": "the W-9" }),
+            )
+            .await
+            .unwrap()
+            .to_string();
+        answer.await.unwrap();
+        assert!(shared.contains("12-3456789"), "{shared}");
+        // What's stored and synced shows it masked.
+        let m = store
+            .message_add(
+                &worker.id,
+                "assistant",
+                "text",
+                "The EIN is 12-3456789.",
+                &Value::Null,
+                now,
+            )
+            .unwrap();
+        assert_eq!(m.content, "The EIN is •••• 6789.");
+
+        // Locked, and the person says no: nothing is shared.
+        vault.lock();
+        let mut rx = events.subscribe();
+        let answer = {
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Ok(EngineEvent::ApprovalRequested { approval }) = rx.recv().await {
+                        hub.resolve_approval(&approval.id, Decision::Deny(String::new()));
+                        break;
+                    }
+                }
+            })
+        };
+        let err = server
+            .call(
+                Some(&coordinator.id),
+                "tab_vault_search",
+                json!({ "query": "EIN" }),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        answer.await.unwrap();
+        assert!(err.contains("declined"), "{err}");
+        let log = vault.audit_log(None, 50).unwrap();
+        for a in ["search", "request", "approve", "reveal"] {
+            assert!(log.iter().any(|x| x.action == a), "no {a}");
+        }
+    }
+
+    /// What `tab_run_workflow` asked for: workflow, item, chat.
+    type Asked = (String, Option<String>, Option<String>);
+
+    /// Records what `tab_run_workflow` asked for; starts nothing.
+    struct Starts(Arc<Store>, std::sync::Mutex<Vec<Asked>>);
+
+    #[async_trait]
+    impl EngineAccess for Starts {
+        async fn create_task(&self, _t: NewTask) -> anyhow::Result<QueueItem> {
+            anyhow::bail!("not in this test")
+        }
+        async fn preview(&self, _id: &str) -> anyhow::Result<Preview> {
+            anyhow::bail!("not in this test")
+        }
+        async fn run_workflow_for_agent(
+            &self,
+            workflow_id: String,
+            item_id: Option<String>,
+            session: Option<String>,
+        ) -> anyhow::Result<workflow::runtime::AgentRun> {
+            self.1
+                .lock()
+                .unwrap()
+                .push((workflow_id.clone(), item_id.clone(), session.clone()));
+            let run: Run = serde_json::from_value(json!({
+                "id": "run-1", "workflow_id": workflow_id, "workflow_name": "Merge when green",
+                "version": 1, "status": "blocked", "dry_run": false, "trigger": "by an agent",
+                "trigger_key": null, "item_id": item_id, "chain": [], "steps": [],
+                "error": "Merge a pull request is destructive.", "started_at": Utc::now(),
+                "finished_at": Utc::now(), "started_by": session,
+                "resume": { "job": "", "step": 0, "ctx": {} },
+            }))?;
+            self.0.workflow_run_insert(&run)?;
+            Ok(workflow::runtime::AgentRun { run, repeat: false })
+        }
+    }
+
+    #[tokio::test]
+    async fn agents_start_workflows_as_their_chat_but_cant_approve_a_blocked_step() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let engine = Arc::new(Starts(store.clone(), Default::default()));
+        let server = McpServer {
+            store: store.clone(),
+            hub,
+            engine: engine.clone(),
+            events,
+            token: "t".into(),
+        };
+        let out = server
+            .call(
+                Some("chat-1"),
+                "tab_run_workflow",
+                json!({ "workflow_id": "w1", "item_id": "i1" }),
+            )
+            .await
+            .unwrap();
+        let said = out["content"][0]["text"].as_str().unwrap();
+        assert!(said.contains("\"status\": \"blocked\""), "{said}");
+        assert!(said.contains("You can't approve it"), "{said}");
+        assert_eq!(
+            engine.1.lock().unwrap().clone(),
+            [(
+                "w1".to_string(),
+                Some("i1".to_string()),
+                Some("chat-1".to_string())
+            )]
+        );
+        let got = server
+            .call(None, "tab_get_workflow_run", json!({ "run_id": "run-1" }))
+            .await
+            .unwrap();
+        assert!(
+            got["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("blocked")
+        );
+
+        // No tool answers a blocked run: that's a button in the app.
+        let names: Vec<String> = tools()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(names.contains(&"tab_run_workflow".to_string()));
+        assert!(names.contains(&"tab_get_workflow_run".to_string()));
+        for n in &names {
+            assert!(
+                !(n.contains("workflow")
+                    && (n.contains("approve") || n.contains("answer") || n.contains("allow"))),
+                "{n} could give a workflow the person's OK"
+            );
+        }
+        // Saving the workflow as an agent can't allow it either.
+        let _ = server
+            .call(
+                Some("chat-1"),
+                "tab_save_workflow",
+                json!({ "workflow": { "id": "w1", "allow_destructive": true } }),
+            )
+            .await;
+        let run = store.workflow_run_get("run-1").unwrap().unwrap();
+        assert!(run.awaiting_approval().is_some() && run.approved.is_empty());
+        assert!(
+            server
+                .call(None, "tab_get_workflow_run", json!({}))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn agents_read_how_a_workflow_is_doing_and_what_fails() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let server = McpServer {
+            store: store.clone(),
+            hub,
+            engine: Arc::new(Starts(store.clone(), Default::default())),
+            events,
+            token: "t".into(),
+        };
+        let w = store
+            .workflow_save(&workflow::templates()[0], "user", Utc::now())
+            .unwrap();
+        for (n, ok) in [(0, true), (1, false), (2, true)] {
+            let at = Utc::now() - chrono::Duration::minutes(n * 5 + 1);
+            let run: workflow::Run = serde_json::from_value(json!({
+                "id": format!("r{n}"), "workflow_id": w.id, "workflow_name": w.name, "version": 1,
+                "status": if ok { "succeeded" } else { "failed" }, "dry_run": false, "trigger": "t",
+                "trigger_key": null, "item_id": null, "chain": [], "error": null,
+                "steps": [{ "id": "snooze", "label": "Snooze", "status": if ok { "ok" } else { "failed" },
+                    "error": if ok { None } else { Some("Item 4411 is gone") }, "ms": 30 }],
+                "started_at": at, "finished_at": at,
+            }))
+            .unwrap();
+            store.workflow_run_insert(&run).unwrap();
+        }
+        let read = |v: Value| -> Value {
+            serde_json::from_str(v["content"][0]["text"].as_str().unwrap()).unwrap()
+        };
+        let stats = read(
+            server
+                .call(
+                    None,
+                    "tab_workflow_stats",
+                    json!({ "workflow_id": w.id, "days": 7 }),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(stats["runs"]["did_work"], 3);
+        assert_eq!(stats["rates"]["success"], 0.667);
+        assert_eq!(stats["steps"][0]["failed"], 1);
+        assert!(
+            stats["suggestions"].as_array().unwrap().is_empty(),
+            "too little to go on"
+        );
+        let failures = read(
+            server
+                .call(
+                    None,
+                    "tab_workflow_failures",
+                    json!({ "workflow_id": w.id }),
+                )
+                .await
+                .unwrap(),
+        );
+        assert_eq!(failures["days"], 7);
+        assert_eq!(failures["failure_groups"][0]["error"], "Item # is gone");
+        assert_eq!(failures["failure_groups"][0]["sample_run_id"], "r1");
+        assert!(
+            server
+                .call(None, "tab_workflow_stats", json!({ "workflow_id": "nope" }))
+                .await
+                .is_err()
+        );
     }
 }

@@ -22,6 +22,10 @@ pub struct FileRef {
     pub hash: String,
     pub name: String,
     pub size: u64,
+    /// For a file an agent's reply named: the path the reply says, which
+    /// other devices look the file up by (see [`crate::named_files`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// Where an attachment lives in a device's attachments folder:
@@ -59,6 +63,7 @@ pub fn file_ref(path: &Path) -> Option<FileRef> {
         hash,
         name: path.file_name()?.to_string_lossy().into_owned(),
         size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+        path: None,
     })
 }
 
@@ -126,8 +131,9 @@ fn trim_strings(v: &mut Value, max: usize) {
     }
 }
 
-/// A live event as watchers receive it: only what the person sees in a
-/// chat as it happens (streamed reply text, approval prompts). Tool calls
+/// A live event as watchers receive it: only what the person must act on
+/// as it happens (approval prompts). `SessionDelta` is still accepted from
+/// older apps that stream reply text. Tool calls
 /// and their output don't go live; the call's summary arrives with the
 /// synced transcript.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -142,10 +148,9 @@ impl LiveEvent {
     /// The engine events that go over the live channel, and their session.
     pub fn from_engine(e: &EngineEvent) -> Option<Self> {
         Some(match e {
-            EngineEvent::SessionDelta { session_id, text } => LiveEvent::SessionDelta {
-                session_id: session_id.clone(),
-                text: text.clone(),
-            },
+            // Reply text streams only on the machine running the agent: the
+            // chat shows a reply once it's whole, so other devices get it
+            // with the synced transcript instead of token by token.
             EngineEvent::ApprovalRequested { approval } => {
                 let mut approval = approval.clone();
                 trim_strings(&mut approval.input, MAX_LIVE_STRING);
@@ -201,7 +206,8 @@ mod tests {
             Some(FileRef {
                 hash: hash.clone(),
                 name: "shot 1.png".into(),
-                size: 9
+                size: 9,
+                path: None,
             })
         );
         // A pre-hub attachment folder isn't a hash.
@@ -240,16 +246,23 @@ mod tests {
     }
 
     #[test]
-    fn only_streamed_events_go_live() {
+    fn streamed_text_stays_on_this_machine() {
         let delta = EngineEvent::SessionDelta {
             session_id: "s".into(),
             text: "Hel".into(),
         };
-        let live = LiveEvent::from_engine(&delta).unwrap();
-        assert_eq!(live.session(), "s");
-        let json = serde_json::to_value(&live).unwrap();
-        assert_eq!(json, serde_json::to_value(&delta).unwrap());
+        assert!(LiveEvent::from_engine(&delta).is_none());
         assert!(LiveEvent::from_engine(&EngineEvent::ConfigChanged).is_none());
+        // An older app's streamed text still reads.
+        let old = LiveEvent::SessionDelta {
+            session_id: "s".into(),
+            text: "Hel".into(),
+        };
+        assert_eq!(old.session(), "s");
+        assert!(matches!(
+            old.into_engine(),
+            EngineEvent::SessionDelta { session_id, text } if session_id == "s" && text == "Hel"
+        ));
     }
 
     #[test]

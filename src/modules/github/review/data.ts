@@ -203,6 +203,37 @@ export function useFileText(src: Source | null, side: "base" | "head", path: str
   });
 }
 
+const IMAGE_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
+const imageType = (path: string) => IMAGE_TYPES[/\.([^./]+)$/.exec(path)?.[1].toLowerCase() ?? ""];
+
+/** Images the review shows as pictures rather than as text. */
+export const isReviewImage = (path: string) => !!imageType(path);
+
+/**
+ * An image at one side of the PR, as a URL for `<img>`, or null when that
+ * side has none (added, removed, or too big for the API to send).
+ */
+export function useFileImage(src: Source | null, side: "base" | "head", path: string | null, enabled = true) {
+  const sha = src ? (side === "base" ? src.baseSha : src.pr.head_sha) : "";
+  const q = useQuery({
+    queryKey: [...keys.file(src?.pr.repo ?? "", sha, path ?? ""), src?.ws ? "local" : "api", "bytes"],
+    queryFn: async (): Promise<ArrayBuffer | string> => {
+      const { pr, ws } = src!;
+      if (pr.sample) return sampleText(pr, side, path!);
+      return api.reviewFileBytes(pr.repo, sha, path!, !!ws);
+    },
+    enabled: !!src && !!path && enabled,
+    staleTime: Infinity,
+  });
+  const url = useMemo(() => {
+    const d = q.data;
+    if (!d || (typeof d === "string" ? !d : !d.byteLength)) return null;
+    return URL.createObjectURL(new Blob([d], { type: imageType(path ?? "") }));
+  }, [q.data, path]);
+  useEffect(() => () => { if (url) URL.revokeObjectURL(url); }, [url]);
+  return { url, loading: q.isLoading, error: q.error };
+}
+
 export function useSearch(src: Source | null, q: SearchQuery) {
   const sample = src?.pr.sample;
   return useQuery<SearchHit[]>({

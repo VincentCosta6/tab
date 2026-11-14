@@ -27,3 +27,4 @@ dist-ssr
 /target
 src-tauri/target
 src-tauri/gen/schemas
+/public/THIRD_PARTY_LICENSES.txt

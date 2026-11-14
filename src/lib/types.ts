@@ -1,6 +1,6 @@
 // Mirrors tab-core's model (crates/tab-core/src/model.rs). Keep in sync.
 
-export type Tone = "neutral" | "accent" | "info" | "success" | "warning" | "danger";
+export type Tone = "neutral" | "accent" | "merged" | "info" | "success" | "warning" | "danger";
 
 /** A one-word state for a card or pill, with an icon for tight spots. */
 export interface Status { label: string; tone: Tone; icon?: string }
@@ -64,6 +64,10 @@ export interface QueueItem {
   ranking: Ranking | null;
   snoozed_until: string | null;
   project_id?: string | null;
+  /** The task this is a follow-up of; it shows under that one while it's open. */
+  parent_id?: string | null;
+  /** Tasks not done yet that have to be done before this one. */
+  blocked_by?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -72,9 +76,15 @@ export interface QueueItem {
 /** One of your open pull requests, straight from GitHub. */
 export interface MyPull { repo: string; number: number; url: string; summary: LinkSummary }
 
-export interface LinkSummary { title: string; state: "open" | "draft" | "merged" | "closed" | ""; author: string | null; checks: "passing" | "failing" | "pending" | null; updated_at: string | null; merge_state?: string | null; review_decision?: string | null; open_threads?: number | null }
+export interface LinkSummary { title: string; state: "open" | "draft" | "merged" | "closed" | ""; author: string | null; checks: "passing" | "failing" | "pending" | null; updated_at: string | null; merge_state?: string | null; review_decision?: string | null; open_threads?: number | null; additions?: number | null; deletions?: number | null }
 
 /** A reason not to mark an item done yet, raised by a connector or by tab (`agent`). */
+/** Who has the next move on something in an item's Context. */
+export type WaitingOn = "you" | "others" | "nobody";
+
+/** Where something in an item's Context stands, from its connector ("Review PR", "Merged"). */
+export interface ContextStatus { source: string; label: string; detail: string | null; tone: Tone; waiting_on: WaitingOn; finished: boolean; url: string | null }
+
 export interface DoneGuard { source: string; level: "confirm" | "block"; title: string; detail: string | null; url: string | null }
 
 /** An item whose agent isn't idle. */
@@ -90,7 +100,132 @@ export type IndexStatus =
   | { state: "error"; model: string; message: string; retry_at: string };
 
 /** A group of work the person defines. Chats started in it belong to it. */
-export interface Project { id: string; name: string; color: string; icon: string; created_at: string }
+export interface Project {
+  id: string;
+  name: string;
+  color: string;
+  icon: string;
+  /** What the project is and does. */
+  about: string;
+  /** How to work in it. Agents follow these. */
+  rules: string;
+  /** The coordinator wakes on queue changes and checks hourly. */
+  coordinator_watch: boolean;
+  /** Weekday morning brief at this local time ("08:00"), "" for none. */
+  coordinator_brief: string;
+  /** The coordinator's chat compacts when a turn ends above this many tokens; 0 never. */
+  compact_at: number;
+  created_at: string;
+}
+
+/** A compacted stretch of the coordinator's chat, with what it carried forward. */
+export interface Segment {
+  id: string;
+  session_id: string;
+  project_id: string | null;
+  agent_session_id: string | null;
+  /** Markdown; the person can edit it. */
+  summary: string;
+  tokens: number;
+  messages: number;
+  reason: "auto" | "manual";
+  started_at: string;
+  ended_at: string;
+  updated_at: string;
+}
+
+/** A repo a project's work happens in. */
+export interface ProjectRepo {
+  id: string;
+  project_id: string;
+  /** owner/name, or a URL. */
+  repo: string;
+  /** Where it's checked out, if known. */
+  path: string | null;
+  note: string;
+  added_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ResourceKind = "website" | "file" | "email" | "service" | "link" | "note";
+/** Who may read a resource: every chat in the project, only its coordinator, or the end-to-end encrypted vault. */
+export type ResourceAccess = "all" | "coordinator" | "vault";
+
+/** Where this device stands with the end-to-end encrypted vault (`tab_core::e2e`). */
+export interface VaultStatus {
+  state: "none" | "no_access" | "asked" | "locked" | "open";
+  open_until: string | null;
+  device: VaultDevice;
+  devices: VaultDevice[];
+  /** How this device confirms it's you: "Touch ID", "Windows Hello", or null. */
+  presence: string | null;
+}
+export interface VaultDevice { id: string; name: string; state: "pending" | "active" | "removed" | "none"; code: string; this: boolean; approved_by: string | null; created_at: string }
+export interface VaultField { label: string; masked: string; value?: string }
+export interface VaultEntry {
+  id: string;
+  project_id: string;
+  kind: "note" | "file";
+  title: string;
+  note: string;
+  fields: VaultField[];
+  file?: { name: string; size: number };
+  created_at: string;
+  updated_at: string;
+}
+/** A field to save; leave `value` out to keep the one it has. */
+export interface VaultFieldInput { label: string; value?: string | null }
+export interface VaultEntryInput { id?: string; title: string; note: string; fields: VaultFieldInput[] }
+export interface VaultAudit {
+  id: string;
+  at: string;
+  device: string;
+  action: string;
+  actor: "person" | "coordinator" | "thread";
+  session_id: string | null;
+  project_id: string | null;
+  resource_id: string | null;
+  /** Opened only while the vault is. */
+  detail: { title?: string; fields?: string[]; why?: string; query?: string; results?: number; device?: string } | null;
+}
+
+/** Something a project knows besides its repos: a site, a document, email, a service. */
+export interface ProjectResource {
+  id: string;
+  project_id: string;
+  kind: ResourceKind;
+  title: string;
+  /** The link; for email the label or sender; for a file its hub hash. */
+  url: string | null;
+  /** What it's for; for a note, its text. */
+  note: string;
+  access: ResourceAccess;
+  options: Record<string, unknown>;
+  status: "pending" | "indexed" | "live" | "link_only" | "failed" | "needs_sign_in";
+  chunks: number;
+  pinned: boolean;
+  added_by: string;
+  created_at: string;
+  updated_at: string;
+  /** When this device last read it into the index. */
+  indexed_at?: string;
+  /** Why the last read failed, on this device. */
+  index_error?: string;
+  /** When an agent's search last returned a piece of it, on this device. */
+  last_used_at?: string;
+}
+
+export interface ResourceInput {
+  id?: string;
+  kind: ResourceKind;
+  title: string;
+  url: string | null;
+  note?: string;
+  access?: ResourceAccess;
+  options?: Record<string, unknown>;
+  pinned?: boolean;
+}
 
 /** A durable fact about a project, from an agent or the person. One per topic. */
 export interface ProjectNote {
@@ -117,7 +252,8 @@ export type ConnectorStatus =
   | { state: "running"; last_sync: string | null }
   | { state: "rate_limited"; until: string }
   | { state: "error"; message: string }
-  | { state: "stopped" };
+  | { state: "stopped" }
+  | { state: "in_cloud" };
 
 export interface RateLimitSpec { provider: string; resource: string; requests: number; per_seconds: number; burst: number; note: string }
 
@@ -165,23 +301,205 @@ export type StepKind =
   | {
       type: "command"; program: string; args: string[]; folder: string; network: string[];
       env: Record<string, unknown>; image: string; timeout_secs: number;
+    }
+  | {
+      /** Hands work to an agent on a runner (one of the person's computers, or tab cloud) and waits for it. */
+      type: "agent"; prompt: string; repo: string; harness: string; model: string;
+      /** A model family to run on, used when harness and model are empty. */
+      family?: string;
+      placement: Placement; deadline_minutes: number;
     };
 export type Step = { id: string; label: string; when: Condition[]; continue_on_error: boolean } & StepKind;
 
 export interface Workflow {
   id: string; name: string; description: string; enabled: boolean; allow_destructive: boolean; allow_commands?: boolean;
-  trigger: Trigger; steps: Step[]; limits: { max_runs_per_hour: number; cooldown_minutes: number };
+  trigger: Trigger; steps: Step[]; limits: WorkflowLimits;
   created_by: string; version: number; updated_at: string | null;
+}
+/** Mirrors `tab_domain::workflow::Limits`. The monthly caps are per UTC calendar month; 0 (or missing, from older apps) means no cap. */
+export interface WorkflowLimits {
+  max_runs_per_hour: number; cooldown_minutes: number;
+  /** API-key spend, in dollars. */
+  monthly_cap_usd?: number;
+  /** Subscription tokens (input and output), never priced. */
+  monthly_cap_plan_tokens?: number;
 }
 export interface Issue { at: string | null; error: boolean; message: string }
 
-export type RunStatus = "running" | "succeeded" | "stopped" | "failed" | "blocked" | "throttled" | "loop_stopped";
-export type StepStatus = "ok" | "skipped" | "stopped" | "failed" | "blocked" | "throttled" | "dry";
-export interface StepRun { id: string; label: string; status: StepStatus; input: unknown; output: unknown; error: string | null; ms: number }
+export type RunStatus = "running" | "waiting" | "succeeded" | "stopped" | "failed" | "blocked" | "throttled" | "loop_stopped";
+export type StepStatus = "ok" | "waiting" | "skipped" | "stopped" | "failed" | "blocked" | "throttled" | "dry";
+/** How an agent session is paid for: dollars through an API key, usage on a subscription. */
+export type Billing = "api" | "subscription" | "unknown";
+/** What an agent step took and spent (mirror tab_domain::workflow::StepMetrics). */
+export interface StepMetrics {
+  /** From the job being created to a runner claiming it. */
+  queue_ms: number;
+  /** From the claim to the result. */
+  work_ms: number;
+  /** Time inside `work_ms` spent waiting on the person. */
+  human_wait_ms: number;
+  billing: Billing;
+  /** Zero on a subscription, where nothing is billed per run. */
+  cost_usd: number;
+  /** On a subscription: the share of a plan window used, 0 to 1. */
+  plan_share: number;
+  input_tokens: number; output_tokens: number;
+  /** The family the step asked for; empty when it pinned a model. */
+  family: string; harness: string; model: string;
+  attempts: number;
+  /** Times the runner moved on to the family's next model. */
+  fallbacks: number;
+}
+export type InterventionKind = "approval" | "question" | "message" | "stopped" | "rerun";
+/** A time a person had to step in on a step. `approval` is planned (the workflow asks for it); the rest aren't. */
+export interface Intervention { kind: InterventionKind; at: string }
+export interface StepRun {
+  id: string; label: string; status: StepStatus; input: unknown; output: unknown; error: string | null; ms: number;
+  /** Agent steps only, once their job finished; absent on runs from before it was recorded. */
+  metrics?: StepMetrics | null;
+  interventions?: Intervention[];
+}
 export interface WorkflowRun {
   id: string; workflow_id: string; workflow_name: string; version: number; status: RunStatus; dry_run: boolean;
   trigger: string; trigger_key: string | null; item_id: string | null; chain: string[]; steps: StepRun[];
   error: string | null; started_at: string; finished_at: string | null;
+  /** The failed run a person ran again to get this one. */
+  rerun_of?: string | null;
+  /** The agent chat (session id) that started it. */
+  started_by?: string | null;
+  /** The run that led to this one, when known. */
+  caused_by?: string | null;
+  /** Steps the person approved on this run only. */
+  approved?: StepApproval[];
+}
+export interface StepApproval { step: string; input: unknown; at: string }
+
+// --- Workflows on queue items (mirror tab_domain::workflow::item_status and tab_core::workflow::items) ---
+
+/** An item's workflow state, most pressing first. */
+export type ItemWorkflowState = "waiting_for_you" | "running" | "waiting_on_agent" | "failed" | "held_back" | "done";
+export interface ItemWorkflowStatus {
+  item_id: string; state: ItemWorkflowState; run_id: string; workflow_id: string; workflow_name: string; at: string;
+  /** The agent chat waiting on you, when that's why. */
+  session?: string | null;
+  /** Other runs on the item that also show a state. */
+  more: number;
+}
+export interface RunAgentLink { step_id: string; job: string; session: string | null; status: SessionStatus | null; needs_you: boolean }
+export interface RunView {
+  run: WorkflowRun;
+  /** What the run shows on its item now. */
+  state: ItemWorkflowState | null;
+  agents: RunAgentLink[];
+  started_by: { session: string; title: string; item_id: string | null; job: string | null } | null;
+  /** `exact` is false when an item change linked them (the run of that workflow just before). */
+  caused_by: { id: string; workflow_name: string; item_id: string | null; exact: boolean } | null;
+  /** The step waiting for your OK, with what it would do. */
+  approval: { step_id: string; label: string; reason: string | null; input: unknown } | null;
+}
+
+// --- Workflow insights (mirror tab_domain::workflow::{stats, insights}) ---
+
+/** The middle and the slow end of a set of times, in ms. `n` 0 means the rest say nothing. */
+export interface Quantiles { n: number; p50: number; p95: number }
+/** What was spent. API-key sessions cost dollars; subscription sessions use plan tokens and allowance and never get a dollar figure. */
+export interface Spend {
+  cost_usd: number; input_tokens: number; output_tokens: number;
+  plan_input_tokens: number; plan_output_tokens: number;
+  /** Plan allowance used, as a sum of shares (0.5 is half a window). */
+  plan_share: number;
+}
+/** Run counts every breakdown shares. `runs` (runs that did work) is the denominator of every rate. */
+export interface RunCounts { runs: number; succeeded: number; unattended: number; failed: number; attended: number; unplanned: number }
+export interface StepStats {
+  id: string; label: string; runs: number; ok: number; failed: number; blocked: number; throttled: number; skipped: number;
+  ms: Quantiles; queue_ms: Quantiles; work_ms: Quantiles; human_wait_ms: Quantiles; spend: Spend;
+  interventions: number; unplanned_interventions: number; fallbacks: number;
+  /** Times the person OK'd it at an approval and it went ahead. */
+  approved?: number;
+  /** Times the person said no to it at an approval. */
+  declined?: number;
+}
+export interface ModelStats {
+  step_id: string; harness: string; model: string; family: string;
+  runs: number; ok: number; failed: number; unattended: number; work_ms: Quantiles; spend: Spend;
+}
+export interface VersionStats extends RunCounts { version: number; duration_ms: Quantiles; spend: Spend; first_run: string | null }
+export interface FailureGroup { step_id: string; label: string; error: string; count: number; first_seen: string; last_seen: string; sample_run: string }
+export interface DayStats extends RunCounts { day: string; duration_ms: Quantiles; spend: Spend }
+export interface WorkflowStats extends RunCounts {
+  in_progress: number; held_back: number; loop_stopped: number; duration_ms: Quantiles; spend: Spend;
+  /** Of `held_back`, refused by the workflow's own runs-per-hour limit (about one a busy hour). */
+  held_by_limit?: number;
+  /** The person said no at an approval: neither a success nor a failure, and left out of every rate. */
+  declined?: number;
+  steps: StepStats[]; models: ModelStats[]; versions: VersionStats[]; failures: FailureGroup[]; days: DayStats[];
+}
+export type WorkflowHealth = "unknown" | "healthy" | "degraded" | "failing";
+/** This UTC month's spend against a workflow's caps (`tab_domain::workflow::cap::CapUsage`); a cap of 0 means none. */
+export interface CapUsage { month: string | null; spend: Spend; cap_usd: number; cap_plan_tokens: number }
+/**
+ * Windows past 30 days (90, 365) break at UTC midnight and read days before the run log from daily rollups:
+ * counts, spend and days are exact, step timing approximate. `detail_from`, when set, is where failure groups
+ * and models start (they only come from the run log).
+ */
+export interface WorkflowInsights {
+  workflow_id: string; days: number; from: string; to: string; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats;
+  detail_from?: string | null; cap?: CapUsage | null;
+}
+
+// --- Suggestions (mirror tab_domain::workflow::suggest) ---
+
+export type SuggestionKind = "cheaper_model" | "stronger_model" | "more_time" | "rate_limit" | "placement" | "always_approved";
+/** One number behind a suggestion: `value` (of `of`, for a count). Rates are 0 to 1. */
+export interface SuggestionFact { label: string; value: number; of?: number | null; unit: "count" | "rate" | "ms" | "usd" | "tokens" }
+export interface Suggestion {
+  /** Stable for the same kind on the same step. */
+  id: string; kind: SuggestionKind;
+  /** The step it's about; absent for the whole workflow. */
+  step_id?: string | null;
+  title: string;
+  /** The evidence in words. */
+  because: string;
+  facts: SuggestionFact[];
+  /** The workflow with the change made, to load as an unsaved draft. Absent when there's only something to know (never one that allows destructive steps or commands). */
+  change?: Workflow | null;
+}
+export interface FactoryWorkflow { id: string; name: string; enabled: boolean; version: number; health: WorkflowHealth; stats: WorkflowStats; previous: WorkflowStats }
+/** `totals` are run-level only: their steps, models, versions and failures are empty. */
+export interface WorkflowFactory { days: number; from: string; to: string; totals: WorkflowStats; previous_totals: WorkflowStats; workflows: FactoryWorkflow[]; detail_from?: string | null }
+
+// --- Runners and jobs (mirror tab_domain::runner) ---
+
+/** Where a connection runs: on this computer, or in tab cloud on the hub's cloud runner. */
+export type RunsOn = "this_computer" | "cloud";
+/** Which runners may take an agent step's job. */
+export type Placement =
+  | { type: "anywhere" }
+  | { type: "computers" }
+  | { type: "cloud" }
+  | { type: "prefer_computer"; minutes: number };
+/** One harness and model a family may run on; an empty model is the harness's default. */
+export interface FamilyCandidate { harness: string; model: string }
+/** A named, ordered list of models an agent step can ask for. Tried in order. */
+export interface ModelFamily { id: string; name: string; candidates: FamilyCandidate[] }
+
+export interface Runner {
+  id: string; name: string; kind: "computer" | "cloud";
+  harnesses: string[]; repos: string[]; connections: string[];
+  seen_at: string | null; awake: boolean; this_app: boolean;
+}
+export type JobState =
+  | { state: "waiting" }
+  | { state: "running"; runner: string; token: number; started_at: string; session: string | null }
+  | { state: "done"; runner: string; result: { summary: string; branch: string | null; pr_url: string | null }; finished_at: string }
+  | { state: "failed"; error: string; finished_at: string };
+export interface Job {
+  id: string; run_id: string; step_id: string; workflow_id: string;
+  spec: { prompt: string; repo: string; harness: string; model: string; placement: Placement };
+  state: JobState; attempts: number; max_attempts: number; created_at: string; deadline: string;
+  /** What it needed in tab cloud and didn't have. */
+  missing?: CloudGap[];
 }
 
 export interface Activity { id: number; item_id: string; at: string; kind: string; title: string; by: string | null; detail: Record<string, unknown>; via: string | null }
@@ -235,7 +553,7 @@ export interface ContextEntry {
 export interface NewContext { section: ContextSection; ref_item_id?: string | null; url?: string | null; title: string; summary?: string | null; added_by: string }
 export interface ItemContext { item: QueueItem; entries: ContextEntry[]; related: QueueItem[] }
 
-export type AgentKind = "claude_code" | "opencode";
+export type AgentKind = "claude_code" | "opencode" | "codex" | "pi";
 export type SessionStatus = "idle" | "working" | "needs_input" | "monitoring" | "failed";
 export interface Session {
   id: string;
@@ -249,19 +567,31 @@ export interface Session {
   updated_at: string;
   /** The device that runs it. Other devices watch and steer it through the hub. */
   device?: string | null;
+  /** The model it runs on, set at its first message: "" for the harness's default, null for older chats that follow tab's. */
+  model?: string | null;
+  /** When it last became its task's chat (created, or picked with /resume). A task shows the chat opened last. */
+  opened_at?: string | null;
+  /** The permission mode this chat runs in; missing on older chats, which follow tab's default. */
+  permission_mode?: string | null;
 }
 export interface SessionMessage {
   id: number;
   session_id: string;
   role: "user" | "assistant" | "tool" | "system";
-  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request" | "suggestion";
+  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request" | "suggestion" | "note" | "wake" | "compacted" | "shell";
   content: string;
   meta: any;
   created_at: string;
 }
 export interface Approval { id: string; session_id: string; tool: string; summary: string; input: unknown }
 export interface Chat { session: Session | null; messages: SessionMessage[]; approvals: Approval[]; running: boolean }
+/** One of a task's chats, for /resume. */
+export interface ChatSummary { session: Session; first: string; messages: number; running: boolean }
 export interface ChatStarted { item: QueueItem; session: Session }
+/** What restoring files to before a message changes (or changed). */
+export interface RewoundFiles { files: string[]; insertions: number; deletions: number }
+/** A rewound chat, and the message it went back to, to edit and send again. */
+export interface ChatRewound { chat: Chat; text: string; attachments: string[]; files: RewoundFiles }
 export interface NewTask { title: string; body?: string | null; priority?: string | null; due_at?: string | null; url?: string | null; created_by: string }
 export interface GhStatus {
   installed: boolean;
@@ -327,16 +657,25 @@ export interface Harness {
   capabilities: {
     strict: boolean;
     permission_modes: { value: string; label: string; help?: string | null }[];
-    external_server: boolean;
     budget_cap: boolean;
   };
   model_hint: string;
   /** What background helpers use when no model is set; null is the harness's own default. */
   small_model: string | null;
+  /** Its model in each built-in model family. */
+  families?: Record<string, string>;
   install: { npm: string | null; unix: string | null; windows: string | null };
+  /** How to run it over the Agent Client Protocol, when its chats can go through it. */
+  acp?: { command: string | null; preview?: boolean; strict?: boolean; adapter: { npm: string | null; repo: string; license: string } | null } | null;
 }
 
 /** One model a harness can run. */
+/** Where a slash command comes from: Claude Code's own, a commands-folder file, a skill, or an MCP server's prompt. */
+export type SlashKind = "builtin" | "command" | "skill" | "mcp";
+/** A slash command as the agent described it when it last started. */
+export interface SlashCommand { name: string; description: string; /** What it takes, e.g. `[low|high] [<pr#>]`. */ argument_hint: string; aliases: string[]; kind: SlashKind }
+export interface Subagent { name: string; description: string }
+
 export interface ModelOption { agent: AgentKind; id: string; label: string; common: boolean }
 
 export interface Pressure {
@@ -487,12 +826,212 @@ export interface TabConfig {
     /** A decision model in place of Claude Haiku; an empty provider means Haiku. */
     decision?: DecisionConfig;
   };
-  connectors: Record<string, { enabled: boolean; settings: Record<string, unknown> }>;
+  connectors: Record<string, { enabled: boolean; settings: Record<string, unknown>; runs_on?: RunsOn }>;
   agent: AgentConfig;
   mcp: { port: number; token: string };
+  /** Remote MCP servers the person connected, by id. Mirrors tab_core::remote_mcp::RemoteMcpConfig. */
+  mcp_servers?: Record<string, McpServerConfig>;
   storage: { keep_days: number; max_gb: number | null };
   sandbox: SandboxConfig;
+  /** Where the hub runs. Mirrors tab_core::config::HubConfig. */
+  /** `cloud_hub`: the cloud hub this computer moved into (set by the move). */
+  hub?: { mode: HubMode; cloud_hub?: string };
   onboarded: boolean;
+}
+
+export type HubMode = "cloud" | "local";
+
+/** Allowed runs without asking, ask waits for the person in the chat, off hides the tool. */
+export type ToolPolicy = "allow" | "ask" | "off";
+
+/** An MCP server as the chat's agent saw it. Mirrors tab_core::agents::AgentMcpServer. */
+export interface AgentMcpServer {
+  name: string;
+  /** `connected`, `failed`, `needs-auth`, `pending`; absent from older agents. */
+  status: string | null;
+}
+
+export interface McpServerConfig {
+  name: string;
+  /** Empty for a local command. */
+  url: string;
+  enabled: boolean;
+  /** The server wants a sign-in (OAuth). */
+  sign_in: boolean;
+  catalog?: string;
+  tools?: Record<string, ToolPolicy>;
+  /** A local command tab runs as its child. */
+  command?: McpLocalCommand;
+  /** Header names sent with every request; values are in secure storage. */
+  headers?: string[];
+  /** Where it was imported from (Claude Code). */
+  imported_from?: string;
+  /** False when the person turned off filling the queue from it. */
+  queue?: boolean;
+  /** What the queue watches, for recipes that ask (Notion: a search). */
+  queue_query?: string;
+  /** The person allowed it in tab cloud jobs ("Allow in cloud"). */
+  cloud_jobs?: boolean;
+  /** The person's choice per tool in cloud jobs: allow or off (nobody can answer an ask there). */
+  cloud_tools?: Record<string, ToolPolicy>;
+}
+
+/** Where a connection stands for tab cloud jobs. Mirrors src-tauri's McpCloudState. */
+export interface McpCloudState {
+  id: string;
+  allowed: boolean;
+  /** off · ready · sign_in (needs its tab cloud sign-in) · cant_run (only works on a computer) · no_hub · unknown */
+  state: "off" | "ready" | "sign_in" | "cant_run" | "no_hub" | "unknown";
+  why: string | null;
+}
+
+/** Something a tab cloud job needed and didn't have. Mirrors tab_domain::runner::CloudGap. */
+export interface CloudGap {
+  connection: string;
+  name: string;
+  tool?: string | null;
+  why: "not_in_cloud" | "only_on_computer" | "tool_off" | "sign_in";
+}
+
+/** A cloud job that needed something. Mirrors src-tauri's JobGaps. */
+export interface JobGaps {
+  job_id: string; run_id: string; workflow_id: string; workflow_name: string; step_id: string;
+  item_id: string | null; missing: CloudGap[]; failed: boolean; finished_at: string | null;
+}
+
+/** Mirrors tab_core::remote_mcp::QueueState. */
+export interface McpQueueState {
+  on: boolean;
+  last_sync: string | null;
+  error: string | null;
+  /** Open things it found last time. */
+  found: number | null;
+}
+
+/** Mirrors tab_core::remote_mcp::LocalCommand. Env values are in secure storage. */
+export interface McpLocalCommand {
+  command: string;
+  args?: string[];
+  env?: string[];
+  cwd?: string;
+}
+
+/** Mirrors tab_core::remote_mcp::CloudFit. */
+export interface McpCloudFit {
+  /** Nothing ties it to this computer. */
+  portable: boolean;
+  why_not: string | null;
+  /** It sends a key, which would have to go to the hub. */
+  needs_key: boolean;
+}
+
+/** Mirrors tab_core::remote_mcp::RemoteMcpInfo. */
+export interface McpServerInfo extends McpServerConfig {
+  id: string;
+  /** Signed in (or no sign-in needed): agents get its tools. */
+  ready: boolean;
+  signed_in_at: string | null;
+  error: string | null;
+  tool_count: number | null;
+  cloud: McpCloudFit;
+  /** It has header or environment values in secure storage. */
+  keys: boolean;
+  /** Filling the queue from it; null when tab has no recipe for it (agent tools only). */
+  queue_sync: McpQueueState | null;
+}
+
+/** A server found in Claude Code. Mirrors tab_core::remote_mcp::import::Candidate. */
+export interface McpImportCandidate {
+  key: string;
+  name: string;
+  source: "user" | "project" | "repo" | "claude_ai";
+  path: string | null;
+  kind: "remote" | "remote_keys" | "local" | "claude_ai";
+  url: string | null;
+  command: string | null;
+  header_names: string[];
+  env_names: string[];
+  cloud: McpCloudFit;
+  catalog: string | null;
+  status: "new" | "changed" | "imported" | "unsupported";
+  existing: string | null;
+  id: string;
+  note: string | null;
+}
+
+export interface McpImportResult {
+  key: string;
+  id: string;
+  name: string;
+  /** It signs in with OAuth: sign in again in tab. */
+  sign_in: boolean;
+  error: string | null;
+}
+
+export interface McpCatalogEntry {
+  id: string;
+  name: string;
+  url: string;
+  description: string;
+  category: string;
+  color: string;
+  /** tab has a sync recipe for it, so its work fills the queue. */
+  fills_queue: boolean;
+  kinds: KindInfo[];
+  /** For recipes that watch a search the person picks: the placeholder. */
+  queue_query?: string;
+}
+
+export interface McpProbe {
+  url: string;
+  name: string | null;
+  sign_in: boolean;
+  id: string;
+}
+
+export interface McpTool {
+  name: string;
+  title: string | null;
+  description: string | null;
+  read_only: boolean;
+  policy: ToolPolicy;
+  /** The person picked `policy` (rather than the default). */
+  chosen: boolean;
+  /** The same in tab cloud jobs: reads allowed, writes off by default. */
+  cloud_policy: ToolPolicy;
+  cloud_chosen: boolean;
+}
+
+export interface McpSignInEvent {
+  id: string;
+  ok: boolean;
+  error: string | null;
+  /** It was the sign-in for tab cloud. */
+  cloud?: boolean;
+}
+
+export type MailProvider = "google" | "microsoft";
+
+/** "Sign in with Google / Microsoft" for email. Mirrors src-tauri's EmailSignInStatus. */
+export interface EmailSignInStatus {
+  /** `available` is false when this build has no OAuth client for it. */
+  providers: { id: MailProvider; name: string; available: boolean }[];
+  signed_in: { provider: MailProvider; address: string; signed_in_at: string } | null;
+}
+
+/** The signed-in tab account, without its tokens. Mirrors tab_core::account::AccountView. */
+export interface Account {
+  user_id: string;
+  email: string | null;
+  name: string | null;
+  avatar_url: string | null;
+  provider: "apple" | "google" | string;
+}
+
+/** Whether this build can sign in, and who's signed in. Mirrors tab_core::account::AccountStatus. */
+export interface AccountStatus {
+  configured: boolean;
+  account: Account | null;
 }
 
 export interface SandboxConfig {
@@ -503,11 +1042,15 @@ export interface SandboxConfig {
   container_runtime: string;
   /** Chats may use the person's SSH keys (for hosts tab doesn't sign in). */
   ssh_in_chats: boolean;
+  /** Only let agents into the folders they need (macOS and Linux). */
+  confine?: boolean;
+  /** Folders agents may use when `confine` is on. */
+  folders?: string[];
 }
 
 export interface SandboxStatus {
   enabled: boolean;
-  backend: "seatbelt" | "bubblewrap" | "unavailable";
+  backend: "seatbelt" | "bubblewrap" | "unavailable" | "inherited";
   enforced: boolean;
   summary: string;
   fix: string | null;
@@ -526,7 +1069,8 @@ export interface AgentConfig {
   titler?: TitlerConfig;
   /** Only tab's connections load in chats, never the person's own agent setup. On unless turned off. */
   strict?: boolean;
-  opencode_url: string | null;
+  /** Harnesses whose chats run through the Agent Client Protocol (a preview). */
+  acp?: string[];
   budget: BudgetConfig;
 }
 
@@ -571,6 +1115,9 @@ export interface CheckoutUsage { repo: string; number: number; last_used: string
 export interface StorageUsage { attachments: DirSize; sessions: DirSize; workspaces: DirSize; checkouts: CheckoutUsage[] }
 export interface Swept { removed: number; bytes: number }
 
+/** How moving to tab cloud went. Mirrors tab_core::local_hub::MoveOutcome. */
+export type MoveOutcome = { kind: "moved"; changes: number } | { kind: "joined"; head: number };
+
 /** Settings → Hub. Mirrors tab_core::local_hub::HubStatusView. */
 export interface HubConnection {
   id: number;
@@ -605,4 +1152,13 @@ export interface HubStatus {
   memory_bytes: number | null;
   cpus: number;
   pending: number;
+  /** The cloud hub this computer's work syncs with, once moved; the rest describes this computer's own hub. */
+  cloud_hub: string | null;
+  cloud_connected: boolean;
+  /** Why tab cloud couldn't be reached or synced with, while that's so. */
+  cloud_error?: string | null;
+  /** The last change of the hub in use (tab cloud once moved) this computer has. */
+  pulled_to: number;
+  /** What this computer holds that syncs, by kind. */
+  synced: { what: string; count: number }[];
 }

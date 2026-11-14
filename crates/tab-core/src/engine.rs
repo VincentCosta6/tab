@@ -21,8 +21,8 @@ use crate::connectors;
 use crate::gateway::Gateway;
 use crate::gateway::GatewayError;
 use crate::model::{
-    Approval, ConnectorInfo, ConnectorStatus, DoneGuard, GuardLevel, IncomingEvent, ItemState,
-    NewTask, Preview, QueueItem, Session, SessionMessage, SessionStatus,
+    Approval, ConnectorInfo, ConnectorStatus, ContextStatus, DoneGuard, GuardLevel, IncomingEvent,
+    ItemState, NewTask, Preview, QueueItem, Ranking, Session, SessionMessage, SessionStatus,
 };
 use crate::ranker::{Pipeline, Ranker};
 use crate::ratelimit;
@@ -114,27 +114,43 @@ pub struct Engine {
     /// Every known connector type with its initial status, for the Connections tab.
     pub infos: Vec<ConnectorInfo>,
     pub events: broadcast::Sender<EngineEvent>,
+    /// The hub's leases. Without a hub, leases kept in memory.
+    pub leases: Arc<dyn crate::leases::Leases>,
 }
 
 impl Engine {
+    /// Uses the hub's leases, so runners sharing the hub split the work.
+    pub fn with_leases(mut self, leases: Arc<dyn crate::leases::Leases>) -> Self {
+        self.leases = leases;
+        self
+    }
+
+    /// Adds a queue sync for every MCP connection tab has a recipe for
+    /// (see [`crate::remote_mcp::sync`]).
+    pub fn with_mcp(mut self, cfg: &TabConfig, remote: &Arc<crate::remote_mcp::RemoteMcp>) -> Self {
+        self.connectors
+            .extend(crate::remote_mcp::sync::build(cfg, remote, &self.gateway));
+        self
+    }
+
+    /// Lets the ranker answer through the person's agents (the decision
+    /// catalog's "Your agent"), which it can't without them.
+    pub fn with_agents(mut self, cfg: &TabConfig, agents: &Arc<crate::agents::AgentHub>) -> Self {
+        self.ranker = Arc::new(Pipeline::from_config(
+            cfg,
+            self.gateway.clone(),
+            self.store.clone(),
+            Some(agents.clone()),
+        ));
+        self
+    }
+
     /// Builds an engine from config: enabled connectors, ranking pipeline, connector infos.
     pub fn from_config(
         cfg: &TabConfig,
         store: Arc<Store>,
         gateway: Arc<Gateway>,
         events: broadcast::Sender<EngineEvent>,
-    ) -> Self {
-        Self::with_agents(cfg, store, gateway, events, None)
-    }
-
-    /// [`Engine::from_config`], with the person's agents for rankers that
-    /// answer through a harness.
-    pub fn with_agents(
-        cfg: &TabConfig,
-        store: Arc<Store>,
-        gateway: Arc<Gateway>,
-        events: broadcast::Sender<EngineEvent>,
-        agents: Option<Arc<crate::agents::AgentHub>>,
     ) -> Self {
         let (built, failed) = connectors::build_enabled(cfg, gateway.clone());
         let infos = connectors::registry()
@@ -149,6 +165,12 @@ impl Engine {
                     None if built.iter().any(|c| c.id() == descriptor.id) => {
                         ConnectorStatus::Starting
                     }
+                    None if cfg
+                        .connector(&descriptor.id)
+                        .is_some_and(|c| !c.runs_here()) =>
+                    {
+                        ConnectorStatus::InCloud
+                    }
                     None => ConnectorStatus::Disabled,
                 };
                 ConnectorInfo {
@@ -162,13 +184,10 @@ impl Engine {
         for f in connectors::registry() {
             gateway.declare_limits(&f.descriptor().rate_limits);
         }
-        let ranker = Arc::new(Pipeline::from_config(
-            cfg,
-            gateway.clone(),
-            store.clone(),
-            agents,
-        ));
+        let ranker = Arc::new(Pipeline::from_config(cfg, gateway.clone(), store.clone(), None));
+        let me = store.device_id().unwrap_or_else(|_| "this-computer".into());
         Self {
+            leases: crate::leases::InMemory::new(&me),
             store,
             gateway,
             ranker,
@@ -194,6 +213,7 @@ struct Core {
     rank_slots: Semaphore,
     connectors: HashMap<String, Arc<dyn Connector>>,
     infos: Arc<Mutex<Vec<ConnectorInfo>>>,
+    leases: Arc<dyn crate::leases::Leases>,
 }
 
 fn changed(core: &Core, change: Change, item: Option<QueueItem>) -> Option<QueueItem> {
@@ -269,6 +289,36 @@ impl Core {
                 .flatten(),
         );
         Ok(out)
+    }
+
+    /// Where the things in an item's Context stand, from every connector.
+    /// Like [`Self::done_guards`], a connector that errors or takes over 3s
+    /// is left out.
+    async fn context_status(&self, id: &str) -> anyhow::Result<Vec<ContextStatus>> {
+        let Some(ctx) = self.store.item_context(id)? else {
+            return Ok(Vec::new());
+        };
+        let asks = self.connectors.values().map(|c| {
+            let ctx = &ctx;
+            async move {
+                match tokio::time::timeout(Duration::from_secs(3), c.context_status(ctx)).await {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
+                        tracing::warn!(connector = c.id(), error = %e, "context_status failed");
+                        Vec::new()
+                    }
+                    Err(_) => {
+                        tracing::warn!(connector = c.id(), "context_status timed out");
+                        Vec::new()
+                    }
+                }
+            }
+        });
+        Ok(futures_util::future::join_all(asks)
+            .await
+            .into_iter()
+            .flatten()
+            .collect())
     }
 
     async fn mark_done(&self, id: &str, by: &str) -> anyhow::Result<Option<QueueItem>> {
@@ -440,7 +490,10 @@ impl Core {
             return;
         };
         match self.ranker.rank(&item).await {
-            Ok(ranking) => match self.store.set_ranking(&item.id, &ranking) {
+            Ok(mut ranking) => match self
+                .under_parent(&item.id, &mut ranking)
+                .and_then(|()| self.store.set_ranking(&item.id, &ranking))
+            {
                 Ok(Some(item)) => self.publish(Change::Ranked, item),
                 Ok(None) => {}
                 Err(e) => tracing::error!(error = %e, "saving ranking failed"),
@@ -449,6 +502,31 @@ impl Core {
                 tracing::warn!(item = %item.id, error = %e, "ranking failed; item stays unranked")
             }
         }
+    }
+
+    /// A follow-up never ranks above the open task it came from: ranked on
+    /// its own, a later phase can look more urgent than the work it builds on.
+    fn under_parent(&self, id: &str, ranking: &mut Ranking) -> anyhow::Result<()> {
+        // Read again: links are added just after a task is created.
+        let Some(parent) = self.store.get(id)?.and_then(|i| i.parent_id) else {
+            return Ok(());
+        };
+        let Some(parent) = self
+            .store
+            .get(&parent)?
+            .filter(|p| p.state != ItemState::Done)
+        else {
+            return Ok(());
+        };
+        if let Some(cap) = parent.ranking.filter(|p| p.score < ranking.score) {
+            ranking.score = cap.score;
+            ranking.urgency = cap.urgency;
+            ranking.reason = format!(
+                "Follow-up of \"{}\". {}",
+                parent.event.title, ranking.reason
+            );
+        }
+        Ok(())
     }
 
     /// Stores an event and ranks it. Shared by connectors and tab's own tasks.
@@ -582,10 +660,7 @@ impl Timeline {
         match e {
             EngineEvent::SessionChanged { session: s } => {
                 let Some(item) = &s.item_id else { return };
-                let agent = match s.agent {
-                    crate::model::AgentKind::ClaudeCode => "Claude Code",
-                    crate::model::AgentKind::OpenCode => "OpenCode",
-                };
+                let agent = crate::agents::catalog::harness(s.agent).name.as_str();
                 let before = self.sessions.insert(s.id.clone(), s.status);
                 let first = before.is_none()
                     && !self
@@ -630,17 +705,23 @@ impl Timeline {
             EngineEvent::WorkflowRun { run } if run.finished_at.is_some() && !run.dry_run => {
                 use crate::workflow::RunStatus;
                 let Some(item) = &run.item_id else { return };
+                let declined = run.status == RunStatus::Stopped
+                    && run
+                        .steps
+                        .last()
+                        .is_some_and(|s| s.status == crate::workflow::StepStatus::Blocked);
                 let outcome = match run.status {
+                    _ if declined => "was declined",
                     RunStatus::Succeeded => "ran",
                     RunStatus::Stopped => "stopped at a filter",
                     RunStatus::Failed => "failed",
                     RunStatus::Blocked => "is waiting for your OK",
                     RunStatus::Throttled => "was held back by a rate limit",
                     RunStatus::LoopStopped => "was stopped to prevent a loop",
-                    RunStatus::Running => return,
+                    RunStatus::Running | RunStatus::Waiting => return,
                 };
                 // A filter that didn't match on the first step is noise.
-                if run.status == RunStatus::Stopped && run.steps.len() <= 1 {
+                if run.status == RunStatus::Stopped && run.steps.len() <= 1 && !declined {
                     return;
                 }
                 self.core.note(
@@ -690,6 +771,9 @@ impl Host for WorkflowHost {
     }
     fn publish(&self, e: EngineEvent) {
         let _ = self.0.events.send(e);
+    }
+    fn leases(&self) -> Arc<dyn crate::leases::Leases> {
+        self.0.leases.clone()
     }
     async fn tab_action(
         &self,
@@ -792,11 +876,15 @@ impl Engine {
             rank_slots: Semaphore::new(MAX_CONCURRENT_RANKS),
             connectors: connector_map,
             infos: infos.clone(),
+            leases: self.leases,
         });
 
         // Workflows listen before anything can happen.
         let workflows = Runtime::new(Arc::new(WorkflowHost(core.clone())));
-        if let Err(e) = core.store.workflow_runs_abandon(Utc::now()) {
+        if let Err(e) = core
+            .store
+            .workflow_runs_abandon(&core.leases.holder(), Utc::now())
+        {
             tracing::warn!(error = %e, "couldn't close unfinished workflow runs");
         }
         {
@@ -935,12 +1023,11 @@ impl Engine {
                     if let Err(e) = timer.store.prune(Utc::now(), chrono::Duration::days(30)) {
                         tracing::error!(error = %e, "pruning failed");
                     }
-                    if let Err(e) = timer
-                        .store
-                        .workflow_runs_prune(Utc::now() - chrono::Duration::days(30))
+                    // Rolls up the run log's complete days before pruning it.
+                    if let Err(e) = crate::workflow::rollups::maintain(&timer.store, Utc::now())
                         .and_then(|_| timer.store.activity_prune())
                     {
-                        tracing::error!(error = %e, "pruning workflow runs failed");
+                        tracing::error!(error = %e, "rolling up and pruning workflow runs failed");
                     }
                 }
                 n += 1;
@@ -1022,6 +1109,24 @@ impl EngineHandle {
         self.core.done_guards(id).await
     }
 
+    /// Where the things in an item's Context stand ("In review", "Merged"),
+    /// as each connector sees them.
+    pub async fn context_status(&self, id: &str) -> anyhow::Result<Vec<ContextStatus>> {
+        self.core.context_status(id).await
+    }
+
+    /// [`Self::context_status`] for several items at once, for the queue.
+    /// Items with nothing to report, or whose lookup failed, are left out.
+    pub async fn context_statuses(&self, ids: &[String]) -> HashMap<String, Vec<ContextStatus>> {
+        let all =
+            futures_util::future::join_all(ids.iter().map(|id| self.core.context_status(id))).await;
+        ids.iter()
+            .zip(all)
+            .filter_map(|(id, s)| Some((id.clone(), s.ok()?)))
+            .filter(|(_, s)| !s.is_empty())
+            .collect()
+    }
+
     /// Marks an item done and lets its connector react (e.g. mark the GitHub thread read).
     pub async fn mark_done(&self, id: &str) -> anyhow::Result<Option<QueueItem>> {
         self.core.mark_done(id, "you").await
@@ -1091,6 +1196,41 @@ impl EngineHandle {
             None => None,
         };
         self.workflows.run_now(w, item, dry_run).await
+    }
+
+    /// Runs a failed run again, as the person asked; the new run notes
+    /// which one it re-runs.
+    pub async fn rerun_workflow(&self, run_id: &str) -> anyhow::Result<Run> {
+        self.workflows.rerun(run_id).await
+    }
+
+    /// Starts an enabled workflow for an agent (see
+    /// [`Runtime::run_for_agent`]), on an item if given.
+    pub async fn run_workflow_for_agent(
+        &self,
+        workflow_id: &str,
+        item_id: Option<&str>,
+        session: Option<&str>,
+    ) -> anyhow::Result<crate::workflow::runtime::AgentRun> {
+        let item = match item_id.filter(|i| !i.is_empty()) {
+            Some(id) => Some(
+                self.core
+                    .store
+                    .get(id)?
+                    .ok_or_else(|| anyhow::anyhow!("no item {id}"))?,
+            ),
+            None => None,
+        };
+        self.workflows
+            .run_for_agent(workflow_id, item, session, Utc::now())
+            .await
+    }
+
+    /// The person's answer to a run blocked on a step: approve that step on
+    /// that run and carry on, or decline and end it. Only for a person's
+    /// action in the app, never an agent's.
+    pub async fn answer_workflow_run(&self, run_id: &str, approve: bool) -> anyhow::Result<Run> {
+        self.workflows.answer_blocked(run_id, approve).await
     }
 
     /// Rich content for an item. Cached content is returned immediately,
@@ -1209,6 +1349,7 @@ mod tests {
             connectors: vec![Arc::new(OneShot)],
             infos: vec![],
             events,
+            leases: crate::leases::InMemory::new("test"),
         }
         .start();
 
@@ -1483,6 +1624,7 @@ mod tests {
             connectors: vec![acting.clone(), Arc::new(crate::connectors::TabConnector)],
             infos,
             events,
+            leases: crate::leases::InMemory::new("test"),
         }
         .start();
 
@@ -1601,6 +1743,7 @@ mod tests {
             connectors: vec![Arc::new(crate::connectors::TabConnector)],
             infos: Vec::new(),
             events,
+            leases: crate::leases::InMemory::new("test"),
         }
         .start();
         let step = |id: &str, kind: StepKind| Step {

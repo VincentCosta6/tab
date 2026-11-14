@@ -65,6 +65,7 @@ const MODEL_KEYS: &[&str] = &[
     "DEEPSEEK_",
     "XAI_",
     "OPENCODE_",
+    "CODEX_",
 ];
 
 /// The person's own git host token, so their chats can push and open PRs.

@@ -3,13 +3,28 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { keys } from "./query";
-import type { AgentActivity, Chat, ItemState, TabConfig } from "./types";
+import { hidePending } from "../modules/work/optimistic";
+import type { AgentActivity, Chat, ItemState, ItemWorkflowStatus, TabConfig } from "./types";
+
+/** Why `path` can't be a work folder, checked as the person types. */
+export function useFolderProblem(path: string | null | undefined) {
+  const p = (path ?? "").trim();
+  const { data } = useQuery({
+    queryKey: ["folder-problem", p],
+    queryFn: () => api.folderProblem(p),
+    enabled: !!p,
+    staleTime: 2000,
+  });
+  return p ? data ?? null : null;
+}
 
 export function useItems(state: ItemState, query: string) {
   return useQuery({
     queryKey: keys.items(state, query.trim()),
     queryFn: () => (query.trim() ? api.searchItems(query, [state]) : api.listItems([state])),
     placeholderData: (prev) => prev,
+    // Rows just marked done (or snoozed, reopened) stay out until it's saved.
+    select: hidePending(state),
   });
 }
 
@@ -82,6 +97,12 @@ export function useAgentActivity(): Map<string, AgentActivity> {
   return new Map(data.map((a) => [a.item_id, a]));
 }
 
+/** Each item's workflow status, like `useAgentActivity`. Kept live by run and session events. */
+export function useWorkflowActivity(): Map<string, ItemWorkflowStatus> {
+  const { data = [] } = useQuery({ queryKey: keys.workflowActivity, queryFn: api.workflowActivity, staleTime: 0, refetchInterval: 30_000 });
+  return new Map(data.map((s) => [s.item_id, s]));
+}
+
 /** Polls quickly while the index is busy, slowly otherwise. */
 export function useSearchIndex() {
   return useQuery({
@@ -98,6 +119,18 @@ export function useProjects() {
 
 export function useProjectNotes(projectId: string | null | undefined) {
   return useQuery({ queryKey: keys.notes(projectId ?? ""), queryFn: () => api.projectNotes(projectId!), enabled: !!projectId, staleTime: 0 });
+}
+
+export function useProjectRepos(projectId: string | null | undefined) {
+  return useQuery({ queryKey: keys.repos(projectId ?? ""), queryFn: () => api.projectRepos(projectId!), enabled: !!projectId, staleTime: 0 });
+}
+
+export function useProjectResources(projectId: string | null | undefined) {
+  return useQuery({ queryKey: keys.resources(projectId ?? ""), queryFn: () => api.projectResources(projectId!), enabled: !!projectId, staleTime: 0 });
+}
+
+export function useProjectItems(projectId: string | null | undefined) {
+  return useQuery({ queryKey: keys.projectItems(projectId ?? ""), queryFn: () => api.projectItems(projectId!), enabled: !!projectId, staleTime: 0 });
 }
 
 export function usePressure() {

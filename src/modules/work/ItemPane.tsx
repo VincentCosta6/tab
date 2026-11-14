@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, UrgencyLabel, cx } from "../../design/components";
 import { FlapTitle } from "../../design/FlapTitle";
@@ -8,29 +8,43 @@ import { SourceGlyph } from "../../design/brands";
 import { api } from "../../lib/api";
 import { useApp } from "../../lib/app-context";
 import { timeAgo, timeUntil } from "../../lib/format";
-import { useChat, useItem } from "../../lib/hooks";
+import { useChat, useItem, useWorkflowActivity } from "../../lib/hooks";
+import { isPinned, useThreadFiles } from "../../lib/threadFiles";
+import { offerDone } from "../../lib/nav";
 import { keys } from "../../lib/query";
 import type { QueueItem } from "../../lib/types";
+import { CloudGaps } from "../connections/CloudGaps";
 import { parsePullUrl } from "../github/pulls";
-import { ChatView, SandboxPill, StrictPill } from "./Chat";
+import { ChatView, DevicePill, SandboxPill, StrictPill } from "./Chat";
 import { ContextDrawer } from "./ContextDrawer";
 import { ContextRail } from "./ContextRail";
-import { confirmDone } from "./doneGuard";
+import { actOnItem, type ItemAction } from "./optimistic";
 import { ReadModeSwitch, Reader, useHasRich, useReadMode } from "./Reader";
 import { ProjectPicker, useProjectTint } from "./Projects";
 import { SnoozeMenu } from "./SnoozeMenu";
 import { Timeline } from "./Timeline";
+import { ItemWorkflows, WorkflowPill } from "./WorkflowStatus";
 
 const ReviewView = lazy(() => import("../github/review/Workspace"));
 
 /** An item: header and actions, its rolled-up context, and a chat with an agent about it. */
-export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: string, done?: boolean) => void; onSelect: (id: string) => void }) {
+export function ItemPane({ id, arrived, onAct, onSelect }: {
+  id: string;
+  /** Opened because the item before it was closed: it rises in. */
+  arrived?: boolean;
+  /** Done and Snooze go through Work, which animates the row out and opens the next item. */
+  onAct: (item: QueueItem, action: ItemAction) => void;
+  onSelect: (id: string) => void;
+}) {
   const { kind } = useApp();
   const qc = useQueryClient();
   const { data: item } = useItem(id);
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const { data: chat } = useChat(id);
+  const workflow = useWorkflowActivity().get(id);
+  const all = useThreadFiles(chat);
+  const files = useMemo(() => all.filter(isPinned), [all]);
   const [readMode, setReadMode] = useReadMode();
   const tint = useProjectTint(item?.project_id);
   const chatCount = chat?.messages.filter((m) => m.role === "user" || (m.role === "assistant" && m.kind === "text")).length ?? 0;
@@ -44,22 +58,17 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
 
   const pull = item ? parsePullUrl(item.url) : null;
 
-  const settle = (id: string, done = false) => {
-    onActed(id, done);
-    qc.invalidateQueries({ queryKey: keys.allItems });
-  };
-  const done = async (i: QueueItem) => {
-    if (!(await confirmDone(i))) return;
-    settle(i.id, true);
-    await api.markDone(i.id);
-  };
-  const snooze = async (i: QueueItem, minutes: number) => (setSnoozeOpen(false), settle(i.id), await api.snooze(i.id, minutes));
+  // Optimistic (see actOnItem): the pane and queue change before the engine
+  // answers. Done and Snooze go through Work so the row animates out and the
+  // next item opens; Reopen keeps this item open.
+  const done = (i: QueueItem) => onAct(i, "done");
+  const snooze = (i: QueueItem, minutes: number) => (setSnoozeOpen(false), onAct(i, { snooze: minutes }));
   const move = async (i: QueueItem, projectId: string | null) => {
     const next = await api.itemSetProject(i.id, projectId);
     if (next) qc.setQueryData(keys.item(i.id), next);
     qc.invalidateQueries({ queryKey: keys.allItems });
   };
-  const reopen = async (i: QueueItem) => (await api.reopen(i.id), qc.invalidateQueries({ queryKey: keys.allItems }));
+  const reopen = (i: QueueItem) => void actOnItem(qc, i, "reopen").catch((e) => console.warn("item action failed", e));
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -80,7 +89,13 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
     return (
       <div className="rv-takeover">
         <Suspense fallback={<div className="pane-loading"><div className="skeleton" /></div>}>
-          <ReviewView repo={pull.repo} number={pull.number} sample={item.source === "demo"} onBack={() => setReviewing(false)} />
+          <ReviewView
+            repo={pull.repo}
+            number={pull.number}
+            sample={item.source === "demo"}
+            onBack={() => setReviewing(false)}
+            onMerged={() => item.state !== "done" && offerDone({ itemId: item.id, message: "Pull request merged", icon: "git-merge", tone: "merged", back: { tab: "work", itemId: item.id } })}
+          />
         </Suspense>
       </div>
     );
@@ -88,40 +103,45 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
   const k = kind(item.kind);
   const r = item.ranking;
   return (
-    <div className={cx("item-pane", tint.className)} style={tint.style}>
+    <div className={cx("item-pane", tint.className, arrived && "arrived")} style={tint.style}>
       <header className="item-head">
-        <div className="item-head-main">
+        <div className="item-head-glyph">
           <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={34} />
-          <div className="item-head-text">
-            <ItemTitle item={item} />
-            <div className="item-meta">
+        </div>
+        <ItemTitle item={item} />
+        <div className="item-meta">
+              <ProjectPicker value={item.project_id ?? null} onChange={(p) => move(item, p)} compact />
               <Badge tone={k.tone}>{k.label}</Badge>
               {r && <UrgencyLabel urgency={r.urgency} />}
-              {item.actor && <span>{item.actor}</span>}
-              {item.context && <span>· {item.context}</span>}
-              <span>· {timeAgo(item.occurred_at)}</span>
+              {item.actor && <span className="item-who" title={item.actor}>{item.actor}</span>}
+              {item.context && <span className="item-where" title={item.context}>· {item.context}</span>}
+              <span className="item-when">· {timeAgo(item.occurred_at)}</span>
               {item.state === "snoozed" && item.snoozed_until && <Badge icon="clock">back in {timeUntil(item.snoozed_until)}</Badge>}
               {item.state === "done" && <Badge tone="success" icon="check">Done</Badge>}
+              {workflow && (
+                <button className="item-wf-pill" title="See the item's workflow runs" onClick={() => document.getElementById(`wf-runs-${item.id}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" })}>
+                  <WorkflowPill status={workflow} />
+                </button>
+              )}
             </div>
-          </div>
-        </div>
         <div className="item-actions">
-          <ProjectPicker value={item.project_id ?? null} onChange={(p) => move(item, p)} align="right" compact />
-          {pull && <Button size="sm" icon="code" shortcut="R" onClick={() => setReviewing(true)}>Review</Button>}
+          {pull && <Button size="sm" icon="code" shortcut="R" title="Review (R)" onClick={() => setReviewing(true)}>Review</Button>}
           {item.url && <OpenMenu url={item.url} onOpenInTab={pull ? () => setReviewing(true) : undefined} tabLabel="Open in tab (review)" />}
           {item.state !== "done" && (
             <span className="menu-anchor">
-              <Button size="sm" icon="clock" shortcut="S" onClick={() => setSnoozeOpen((v) => !v)}>Snooze</Button>
+              <Button size="sm" icon="clock" shortcut="S" title="Snooze (S)" onClick={() => setSnoozeOpen((v) => !v)}>Snooze</Button>
               {snoozeOpen && <SnoozeMenu style={{ right: 0 }} onPick={(m) => snooze(item, m)} onClose={() => setSnoozeOpen(false)} />}
             </span>
           )}
           {item.state === "done" ? (
-            <Button size="sm" icon="undo" shortcut="E" onClick={() => reopen(item)}>Reopen</Button>
+            <Button size="sm" icon="undo" shortcut="E" title="Reopen (E)" onClick={() => reopen(item)}>Reopen</Button>
           ) : (
-            <Button size="sm" variant="primary" icon="check" shortcut="E" onClick={() => done(item)}>Done</Button>
+            <Button size="sm" variant="primary" icon="check" shortcut="E" title="Done (E)" className="item-done" onClick={() => done(item)}>Done</Button>
           )}
         </div>
       </header>
+      <div className="item-cloud-gaps"><CloudGaps itemId={item.id} /></div>
+      <div id={`wf-runs-${item.id}`}><ItemWorkflows itemId={item.id} /></div>
       <ContextDrawer
         item={item}
         onSelect={onSelect}
@@ -136,6 +156,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
               ))}
             </div>
             <div className="pane-pills">
+              {chat?.session && <DevicePill session={chat.session} />}
               <SandboxPill />
               <StrictPill kind={chat?.session?.agent} />
             </div>
@@ -144,7 +165,7 @@ export function ItemPane({ id, onActed, onSelect }: { id: string; onActed: (id: 
         right={tab === "content" && <RichSwitch item={item} mode={readMode} onChange={setReadMode} />}
       />
       {/* A file opened from the chat takes the middle; the chat docks on its right. */}
-      <StageHost className="item-body">
+      <StageHost className="item-body" files={files}>
         <ChatView item={item} body={tab === "timeline" ? <Timeline itemId={item.id} /> : <Reader item={item} mode={readMode} />} showBody={tab !== "chat"} onSent={() => setTab("chat")} />
         <ContextRail key={item.id} item={item} onSelect={onSelect} />
       </StageHost>

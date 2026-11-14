@@ -109,6 +109,9 @@ pub struct Call {
     pub json: Option<serde_json::Value>,
     /// Cache GET responses for this long. `None` means never cache.
     pub cache_ttl: Option<Duration>,
+    /// Follow redirects (the default). Off, a 3xx comes back as is, so the
+    /// caller can check where it points first (the website crawler).
+    pub follow_redirects: bool,
 }
 
 impl Call {
@@ -129,6 +132,7 @@ impl Call {
             headers: Vec::new(),
             json: None,
             cache_ttl: None,
+            follow_redirects: true,
         }
     }
     pub fn get(provider: &str, connector: &str, purpose: &str, url: impl Into<String>) -> Self {
@@ -151,6 +155,10 @@ impl Call {
     }
     pub fn cache(mut self, ttl: Duration) -> Self {
         self.cache_ttl = Some(ttl);
+        self
+    }
+    pub fn no_redirects(mut self) -> Self {
+        self.follow_redirects = false;
         self
     }
 }
@@ -287,6 +295,8 @@ fn cache_key(provider: &str, method: &Method, url: &reqwest::Url) -> String {
 pub struct Gateway {
     store: Arc<Store>,
     client: reqwest::Client,
+    /// The same, without following redirects.
+    direct: reqwest::Client,
     /// Default headers per provider (auth, user agent), set by connectors.
     provider_headers: Mutex<HashMap<String, HeaderMap>>,
     limits: Mutex<HashMap<(String, String), RateLimitState>>,
@@ -301,9 +311,16 @@ impl Gateway {
             .user_agent("tab-desktop/0.1")
             .build()
             .expect("reqwest client");
+        let direct = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .user_agent("tab-desktop/0.1")
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("reqwest client");
         Self {
             store,
             client,
+            direct,
             provider_headers: Mutex::new(HashMap::new()),
             limits: Mutex::new(HashMap::new()),
             slots: Mutex::new(HashMap::new()),
@@ -482,13 +499,87 @@ impl Gateway {
         }
     }
 
+    /// Runs a call that doesn't go over plain HTTP from here (a tool call
+    /// to an MCP server, which [`crate::remote_mcp`] signs in and sends)
+    /// under the same budgets as [`Self::send`], and logs it. `call` says who
+    /// and why; its `url` is what to log. Nothing is cached.
+    pub async fn run<T>(
+        &self,
+        call: Call,
+        f: impl std::future::Future<Output = anyhow::Result<T>>,
+    ) -> Result<T, GatewayError> {
+        let started = Instant::now();
+        let resource = resource_for(&call.provider, &call.url);
+        let refused = match self.limiter.admit(
+            &call.provider,
+            resource,
+            current_priority(),
+            self.remote(&call.provider, resource),
+        ) {
+            Ok(()) => None,
+            Err(Refusal::Exhausted { until }) => Some(GatewayError::RateLimited {
+                provider: call.provider.clone(),
+                resource: resource.into(),
+                until,
+            }),
+            Err(Refusal::Deferred { reason, until }) => Some(GatewayError::Deferred {
+                provider: call.provider.clone(),
+                resource: resource.into(),
+                reason,
+                until,
+            }),
+        };
+        if let Some(err) = refused {
+            let outcome = match err {
+                GatewayError::RateLimited { .. } => Outcome::RateLimited,
+                _ => Outcome::Deferred,
+            };
+            self.audit(
+                &call,
+                &call.url,
+                outcome,
+                None,
+                started,
+                Some(err.to_string()),
+            );
+            return Err(err);
+        }
+        let slot = self.slot(&call.provider);
+        let _permit = slot
+            .acquire()
+            .await
+            .map_err(|e| GatewayError::Other(e.into()))?;
+        self.limiter.record(&call.provider, resource);
+        match f.await {
+            Ok(v) => {
+                self.audit(&call, &call.url, Outcome::Network, None, started, None);
+                Ok(v)
+            }
+            Err(e) => {
+                self.audit(
+                    &call,
+                    &call.url,
+                    Outcome::Error,
+                    None,
+                    started,
+                    Some(e.to_string()),
+                );
+                Err(GatewayError::Other(e))
+            }
+        }
+    }
+
     pub async fn send(&self, call: Call) -> Result<Response, GatewayError> {
         let started = Instant::now();
         let now = Utc::now();
         let resource = resource_for(&call.provider, &call.url);
 
-        let mut req = self
-            .client
+        let client = if call.follow_redirects {
+            &self.client
+        } else {
+            &self.direct
+        };
+        let mut req = client
             .request(call.method.clone(), &call.url)
             .query(&call.query);
         if let Some(h) = self.provider_headers.lock().unwrap().get(&call.provider) {
@@ -598,7 +689,7 @@ impl Gateway {
             .await
             .map_err(|e| GatewayError::Other(e.into()))?;
         self.limiter.record(&call.provider, resource);
-        let resp = match self.client.execute(req).await {
+        let resp = match client.execute(req).await {
             Ok(r) => r,
             Err(e) => {
                 let err = GatewayError::Network {
@@ -657,7 +748,8 @@ impl Gateway {
         }
 
         let body = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
+        let redirect = !call.follow_redirects && status.is_redirection();
+        if !status.is_success() && !redirect {
             let err = GatewayError::Http {
                 provider: call.provider.clone(),
                 status: status.as_u16(),

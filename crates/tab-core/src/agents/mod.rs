@@ -1,4 +1,5 @@
-//! Agent sessions: tab drives a coding agent (Claude Code or OpenCode) on
+//! Agent sessions: tab drives a coding agent (Claude Code, OpenCode, Codex
+//! or Pi) on
 //! behalf of a queue item and streams the conversation into the chat view.
 //!
 //! * One session per item. Chatting on an item reuses its latest session;
@@ -12,33 +13,44 @@
 //! * Agents reach back into tab through the MCP server ([`crate::mcp`]) to
 //!   search the queue, attach context, file what they find and create tasks.
 
+mod acp;
 pub mod catalog;
+pub use coordinator::COORDINATOR_KEY_PREFIX;
 mod claude;
+pub use claude::RewoundFiles;
+mod codex;
+pub mod coordinator;
 mod opencode;
+mod per_turn;
+mod pi;
+pub mod slash_args;
 mod small;
+pub mod steward;
 mod suggest;
 mod titler;
 
 pub use titler::DEFAULT_RULES as TITLER_DEFAULT_RULES;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::NewContext;
 use crate::config::AgentConfig;
 use crate::engine::EngineEvent;
-use crate::model::{AgentKind, Approval, ContextSection, Session, SessionStatus};
+use crate::model::{
+    AgentKind, Approval, ContextSection, ProjectNote, Session, SessionMessage, SessionStatus,
+};
 use crate::store::Store;
 
 /// How long an approval waits for the person before it is denied.
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+pub(crate) const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -49,7 +61,65 @@ pub enum Decision {
     Answer(serde_json::Value),
 }
 
+/// Where a slash command comes from, for grouping the `/` menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SlashKind {
+    /// Claude Code's own, bundled skills included.
+    Builtin,
+    /// A markdown file in a `commands` folder.
+    Command,
+    /// A skill, the person's or a plugin's.
+    #[default]
+    Skill,
+    /// A prompt an MCP server offers.
+    Mcp,
+}
+
+/// One slash command as the agent described it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlashCommand {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// What it takes, e.g. `[low|medium|high] [<pr#>]`.
+    #[serde(default)]
+    pub argument_hint: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub kind: SlashKind,
+}
+
+impl SlashCommand {
+    fn named(name: String) -> Self {
+        Self {
+            name,
+            description: String::new(),
+            argument_hint: String::new(),
+            aliases: Vec::new(),
+            kind: SlashKind::default(),
+        }
+    }
+}
+
+/// A subagent the agent can hand work to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subagent {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 /// Where agents reach tab's MCP server.
+/// One MCP server as the agent saw it at the start of a turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMcpServer {
+    pub name: String,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct McpEndpoint {
     pub url: String,
@@ -98,18 +168,51 @@ pub fn install_method(kind: AgentKind, path: &str) -> (&'static str, &'static st
     .unwrap_or(("unknown", ""))
 }
 
-/// The newest published version of an agent CLI, from npm. Cached for six
-/// hours; `None` when offline.
-pub async fn latest_version(kind: AgentKind) -> Option<String> {
-    use std::sync::{LazyLock, Mutex};
+/// The newest version of an agent CLI that its update command would
+/// install. A winget or Homebrew install updates from that package manager,
+/// which can be a few releases behind npm; comparing it with npm would offer
+/// an update that `winget upgrade` can't find. Everything else (npm, the
+/// agent's own updater) follows npm. Cached for six hours per install
+/// method; `None` when offline.
+pub async fn latest_version(
+    kind: AgentKind,
+    install: Option<&str>,
+    upgrade: Option<&str>,
+) -> Option<String> {
     use std::time::Instant;
-    static CACHE: LazyLock<Mutex<std::collections::HashMap<AgentKind, (Instant, String)>>> =
-        LazyLock::new(Default::default);
-    if let Some((at, v)) = CACHE.lock().unwrap().get(&kind)
+    let source: &'static str = match install {
+        Some("winget") => "winget",
+        Some("brew") => "brew",
+        _ => "npm",
+    };
+    let at_key = (kind, source);
+    if let Some((at, v)) = LATEST.lock().unwrap().get(&at_key)
         && at.elapsed() < Duration::from_secs(6 * 3600)
     {
         return Some(v.clone());
     }
+    let version = match source {
+        "winget" => winget_latest(upgrade?).await,
+        "brew" => brew_latest(upgrade?).await,
+        _ => npm_latest(kind).await,
+    }?;
+    LATEST
+        .lock()
+        .unwrap()
+        .insert(at_key, (Instant::now(), version.clone()));
+    Some(version)
+}
+
+type LatestCache = HashMap<(AgentKind, &'static str), (std::time::Instant, String)>;
+static LATEST: std::sync::LazyLock<Mutex<LatestCache>> = std::sync::LazyLock::new(Default::default);
+
+/// Forgets the newest versions looked up, so the next check asks again
+/// (after an update, say).
+pub fn forget_latest(kind: AgentKind) {
+    LATEST.lock().unwrap().retain(|(k, _), _| *k != kind);
+}
+
+async fn npm_latest(kind: AgentKind) -> Option<String> {
     let package = catalog::harness(kind).install.npm.as_deref()?;
     let v: serde_json::Value = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -122,32 +225,65 @@ pub async fn latest_version(kind: AgentKind) -> Option<String> {
         .json()
         .await
         .ok()?;
-    let version = v["version"].as_str()?.to_string();
-    CACHE
-        .lock()
-        .unwrap()
-        .insert(kind, (Instant::now(), version.clone()));
-    Some(version)
+    Some(v["version"].as_str()?.to_string())
 }
 
-/// Drops ANSI escape sequences from installer output.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            if chars.next_if_eq(&'[').is_some() {
-                for n in chars.by_ref() {
-                    if n.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(c);
-        }
+/// Runs a package manager's query and returns what it printed, if it worked.
+async fn query_output(program: &str, args: &[&str]) -> Option<String> {
+    let exe = which::which(program).ok()?;
+    let out = tokio::time::timeout(Duration::from_secs(20), command(&exe).args(args).output())
+        .await
+        .ok()?
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// What `winget upgrade <id>` would install: the package's newest version
+/// in winget's sources.
+async fn winget_latest(upgrade: &str) -> Option<String> {
+    let id = upgrade.split_whitespace().last()?;
+    let out = query_output(
+        "winget",
+        &[
+            "show",
+            "--id",
+            id,
+            "--exact",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ],
+    )
+    .await?;
+    winget_show_version(&out)
+}
+
+/// The `Version:` line of `winget show`.
+fn winget_show_version(out: &str) -> Option<String> {
+    out.lines()
+        .find_map(|l| l.trim().strip_prefix("Version:"))
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// What `brew upgrade [--cask] <name>` would install.
+async fn brew_latest(upgrade: &str) -> Option<String> {
+    let cask = upgrade.contains("--cask");
+    let name = upgrade.split_whitespace().last()?;
+    let mut args = vec!["info", "--json=v2"];
+    if cask {
+        args.push("--cask");
     }
-    out
+    args.push(name);
+    let v: serde_json::Value = serde_json::from_str(&query_output("brew", &args).await?).ok()?;
+    let version = if cask {
+        v["casks"][0]["version"].as_str()
+    } else {
+        v["formulae"][0]["versions"]["stable"].as_str()
+    }?;
+    // Casks can carry a build after a comma ("2.1.3,abc").
+    Some(version.split(',').next()?.to_string())
 }
 
 /// Runs the update command for the agent CLI at `path`, the same one tab shows
@@ -175,11 +311,28 @@ pub async fn run_upgrade(
     };
     let mut cmd = command(&exe);
     cmd.args(words);
-    if program == "winget" {
-        cmd.args(["--accept-source-agreements", "--accept-package-agreements"]);
+    let winget = program == "winget";
+    if winget {
+        cmd.args([
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+            "--disable-interactivity",
+        ]);
     }
-    run_streaming(cmd, cmdline, on_line).await
+    let r = run_streaming(cmd, cmdline, on_line).await;
+    // Whatever happened, the next check asks again rather than offering
+    // the same update from the cache.
+    forget_latest(kind);
+    match r {
+        // winget has nothing newer: it already has the newest winget offers.
+        Err(e) if winget && format!("{e}").contains(WINGET_NO_UPDATE) => Ok(()),
+        r => r,
+    }
 }
+
+/// `APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE`: `winget upgrade` found
+/// nothing newer. Rust prints the exit status in hex on Windows.
+const WINGET_NO_UPDATE: &str = "0x8a15002b";
 
 /// Installs `kind` the way its metadata says (npm when it's on PATH, else
 /// its installer script), passing each line it prints to `on_line`.
@@ -212,6 +365,35 @@ pub async fn run_install(
         c
     };
     run_streaming(cmd, &cmdline, on_line).await
+}
+
+/// Whether `kind`'s ACP adapter (codex-acp) is installed. `None` when the
+/// harness has no adapter program of its own.
+pub fn acp_adapter_installed(kind: AgentKind) -> Option<bool> {
+    let spec = catalog::harness(kind).acp.as_ref()?;
+    spec.adapter.as_ref()?;
+    Some(resolve(spec.command.as_deref()?).is_ok())
+}
+
+/// Installs `kind`'s ACP adapter with npm, passing each line it prints to
+/// `on_line`. Only adapters whose license tab allows have an entry (see
+/// `catalog::tests::every_acp_adapter_has_an_allowed_license`).
+pub async fn run_install_adapter(
+    kind: AgentKind,
+    on_line: impl Fn(String) + Send + Sync + 'static,
+) -> anyhow::Result<()> {
+    let h = catalog::harness(kind);
+    let pkg = h
+        .acp
+        .as_ref()
+        .and_then(|a| a.adapter.as_ref())
+        .and_then(|a| a.npm.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("{} has no ACP adapter to install.", h.name))?;
+    let npm = which::which("npm")
+        .map_err(|_| anyhow::anyhow!("`npm` isn't on PATH. Install Node.js, then try again."))?;
+    let mut c = command(&npm);
+    c.args(["install", "-g", pkg]);
+    run_streaming(c, &format!("npm install -g {pkg}"), on_line).await
 }
 
 /// Runs an installer or updater, a line of its output at a time.
@@ -249,14 +431,16 @@ async fn run_streaming(
                 }
                 pending.push_str(&String::from_utf8_lossy(&buf[..n]));
                 while let Some(i) = pending.find(['\r', '\n']) {
-                    let line = strip_ansi(&pending[..i]).trim().to_string();
+                    let line = crate::term::plain(&pending.as_bytes()[..i])
+                        .trim()
+                        .to_string();
                     pending.drain(..=i);
                     if !line.is_empty() {
                         let _ = tx.send(line);
                     }
                 }
             }
-            let line = strip_ansi(&pending).trim().to_string();
+            let line = crate::term::plain(pending.as_bytes()).trim().to_string();
             if !line.is_empty() {
                 let _ = tx.send(line);
             }
@@ -283,6 +467,11 @@ pub(crate) enum Steer {
     Message(String),
     /// Don't wait for the running tool: stop it and read what's queued now.
     Interrupt,
+    /// From tab, not the person: read like a message, but not one the
+    /// agent owes a reply to (see `claude::Unanswered`).
+    Reminder(String),
+    /// The person switched the chat's permission mode.
+    Mode(String),
 }
 
 pub struct AgentHub {
@@ -303,10 +492,25 @@ pub struct AgentHub {
     /// Messages that arrived after a turn stopped taking steering (its result
     /// is in, the process hasn't exited). They run as the next turn.
     followups: Mutex<HashMap<String, Vec<String>>>,
+    /// Chats whose running turn tab started on its own (a coordinator
+    /// woken by its monitor), with nobody reading along until the person
+    /// writes in it. Their tools are held tighter (see `crate::mcp`).
+    woken: Mutex<std::collections::HashSet<String>>,
     approvals: Mutex<HashMap<String, (Approval, oneshot::Sender<Decision>)>>,
-    /// OpenCode servers by chat id (see `opencode::server`).
-    opencode: tokio::sync::Mutex<HashMap<String, Arc<opencode::Server>>>,
+    /// Puts a file in the hub and returns its hash, once the hub is up, so
+    /// files a reply names reach other devices ([`crate::named_files`]).
+    file_sink: std::sync::OnceLock<FileSink>,
+    /// Chats under this folder work on code nobody here wrote (the cloud
+    /// runner's clones), so they get the review policy.
+    review_root: RwLock<Option<PathBuf>>,
+    /// Remote MCP servers the person connected (Linear, Notion, …).
+    remote: Arc<crate::remote_mcp::RemoteMcp>,
+    /// The end-to-end encrypted vault, on a computer (not a cloud runner).
+    vault: std::sync::OnceLock<Arc<crate::e2e::E2e>>,
 }
+
+/// See [`AgentHub::set_file_sink`].
+pub type FileSink = Arc<dyn Fn(&[u8]) -> anyhow::Result<String> + Send + Sync>;
 
 /// The checkout a dev build of tab runs from, so agents can be told not to
 /// edit it under the running app. None in release builds.
@@ -343,37 +547,39 @@ impl AgentHub {
         cfg: AgentConfig,
         dir: PathBuf,
     ) -> Arc<Self> {
+        let remote = crate::remote_mcp::RemoteMcp::new(dir.join("mcp-sign-ins"));
         Arc::new(Self {
             store,
             events,
             cfg: RwLock::new(cfg),
             mcp: RwLock::new(None),
+            remote,
             dir,
             running: Mutex::new(HashMap::new()),
             steering: Mutex::new(HashMap::new()),
             steering_rx: Mutex::new(HashMap::new()),
             followups: Mutex::new(HashMap::new()),
+            woken: Mutex::new(Default::default()),
             approvals: Mutex::new(HashMap::new()),
-            opencode: tokio::sync::Mutex::new(HashMap::new()),
+            file_sink: std::sync::OnceLock::new(),
+            vault: std::sync::OnceLock::new(),
+            review_root: RwLock::new(None),
         })
     }
 
-    pub async fn set_config(&self, cfg: AgentConfig) {
-        let changed = *self.cfg.read().unwrap() != cfg;
-        *self.cfg.write().unwrap() = cfg;
-        if changed {
-            for (_, old) in self.opencode.lock().await.drain() {
-                old.shutdown();
-            }
-        }
+    /// Where files an agent's reply names go, so other devices can show them.
+    pub fn set_file_sink(&self, sink: FileSink) {
+        let _ = self.file_sink.set(sink);
     }
 
-    /// Stops every OpenCode server; the next turn starts a fresh one with
-    /// the current sandbox settings.
-    pub async fn stop_opencode(&self) {
-        for (_, s) in self.opencode.lock().await.drain() {
-            s.shutdown();
-        }
+    /// Treats every chat under `root` as work on someone else's code: the
+    /// review policy, model keys only, no git host token.
+    pub fn review_under(&self, root: &Path) {
+        *self.review_root.write().unwrap() = Some(crate::sandbox::real(root));
+    }
+
+    pub async fn set_config(&self, cfg: AgentConfig) {
+        *self.cfg.write().unwrap() = cfg;
     }
 
     pub fn config(&self) -> AgentConfig {
@@ -411,12 +617,117 @@ impl AgentHub {
         .await
     }
 
+    /// The config a chat's turn runs with: tab's, on the chat's own model.
+    pub fn config_for(&self, session: &Session) -> AgentConfig {
+        let mut cfg = self.config();
+        if let Some(m) = &session.model {
+            cfg.set_model(session.agent, Some(m.clone()));
+        }
+        if let Some(m) = session.permission_mode.as_ref().filter(|m| !m.is_empty()) {
+            cfg.permission_mode = m.clone();
+        }
+        cfg
+    }
+
+    /// Switches one chat's permission mode. A Claude Code turn under way
+    /// switches at once, as Shift+Tab does in its terminal; otherwise it
+    /// applies from the next message. Other chats keep theirs.
+    pub fn set_session_mode(&self, session_id: &str, mode: &str) -> anyhow::Result<Session> {
+        let session = self
+            .store
+            .session_set_mode(session_id, mode)?
+            .ok_or_else(|| anyhow::anyhow!("no such session"))?;
+        // A coordinator always asks (see `claude::run_turn`).
+        let coordinator =
+            coordinator::project_of(self.store.session_key(session_id)?.as_deref()).is_some();
+        if session.agent == AgentKind::ClaudeCode
+            && !coordinator
+            && let Some(tx) = self.steering.lock().unwrap().get(session_id)
+        {
+            let _ = tx.send(Steer::Mode(mode.to_string()));
+        }
+        self.emit(EngineEvent::SessionChanged {
+            session: session.clone(),
+        });
+        Ok(session)
+    }
+
+    /// Switches one chat's model (`None` for the harness's default), from
+    /// its next message. Other chats keep theirs.
+    pub fn set_session_model(
+        &self,
+        session_id: &str,
+        model: Option<&str>,
+    ) -> anyhow::Result<Session> {
+        let session = self
+            .store
+            .session_set_model(session_id, model.unwrap_or(""))?
+            .ok_or_else(|| anyhow::anyhow!("no such session"))?;
+        self.emit(EngineEvent::SessionChanged {
+            session: session.clone(),
+        });
+        Ok(session)
+    }
+
     pub fn set_mcp(&self, endpoint: McpEndpoint) {
         *self.mcp.write().unwrap() = Some(endpoint);
     }
 
     pub(crate) fn mcp(&self) -> Option<McpEndpoint> {
         self.mcp.read().unwrap().clone()
+    }
+
+    /// Whether chats' `gh` and `git` go through tab's server. Not on a cloud
+    /// runner: it gives agents no git host token at all, and pushes jobs'
+    /// branches itself.
+    fn brokers(&self) -> bool {
+        self.mcp().is_some() && !self.remote.in_cloud()
+    }
+
+    /// Gives chats the vault (`crate::mcp` decides which may use it).
+    pub fn set_vault(&self, vault: Arc<crate::e2e::E2e>) {
+        let _ = self.vault.set(vault);
+    }
+
+    pub fn vault(&self) -> Option<&Arc<crate::e2e::E2e>> {
+        self.vault.get()
+    }
+
+    /// The remote MCP servers the person connected.
+    pub fn remote_mcp(&self) -> &Arc<crate::remote_mcp::RemoteMcp> {
+        &self.remote
+    }
+
+    /// What a job's chat needed in tab cloud and didn't have.
+    pub fn take_gaps(&self, session: &str) -> Vec<tab_domain::runner::CloudGap> {
+        self.remote.take_gaps(session)
+    }
+
+    /// Remote MCP servers a chat gets, as `(name, url)` on tab's MCP
+    /// server, which signs each request in. On a computer, only chats the
+    /// person drives: an agent reading someone else's code or mail could be
+    /// talked into acting as them. On a cloud runner, jobs get what the
+    /// person allowed in tab cloud (writes only when they said so), and a
+    /// stand-in for each connection that isn't there, so a job can say it
+    /// needed one.
+    pub(crate) fn remote_servers(&self, trust: crate::sandbox::Trust) -> Vec<(String, String)> {
+        let Some(mcp) = self.mcp() else {
+            return Vec::new();
+        };
+        let cloud = self.remote.in_cloud();
+        if trust != crate::sandbox::Trust::Person && !cloud {
+            return Vec::new();
+        }
+        let mut ids = self.remote.usable();
+        if cloud {
+            ids.extend(self.remote.stand_in_ids());
+        }
+        ids.into_iter()
+            .map(|id| {
+                let url = format!("{}/{id}", mcp.url.trim_end_matches('/'));
+                (id, url)
+            })
+            .collect()
     }
 
     pub(crate) fn emit(&self, e: EngineEvent) {
@@ -428,21 +739,125 @@ impl AgentHub {
         self.dir.join("attachments")
     }
 
-    /// The slash commands (built-ins, custom commands and skills) the agent
-    /// reported when it last started, for the composer's `/` menu.
-    pub fn slash_commands(&self) -> Vec<String> {
-        std::fs::read(self.dir.join("slash_commands.json"))
+    /// The slash commands (built-ins, custom commands, skills and MCP
+    /// prompts) a harness reported when it last started, for the composer's
+    /// `/` menu. Files from before descriptions were kept hold bare names.
+    pub fn slash_commands(&self, agent: AgentKind) -> Vec<SlashCommand> {
+        let Ok(b) = std::fs::read(self.slash_path(agent)) else {
+            return Vec::new();
+        };
+        serde_json::from_slice(&b)
+            .or_else(|_| {
+                serde_json::from_slice::<Vec<String>>(&b)
+                    .map(|names| names.into_iter().map(SlashCommand::named).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Claude Code's list keeps the name it had before each harness had one.
+    fn slash_path(&self, agent: AgentKind) -> PathBuf {
+        match agent {
+            AgentKind::ClaudeCode => self.dir.join("slash_commands.json"),
+            other => {
+                let name = serde_json::to_value(other)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                self.dir.join(format!("slash_commands.{name}.json"))
+            }
+        }
+    }
+
+    pub(crate) fn save_slash_commands(&self, agent: AgentKind, cmds: &[SlashCommand]) {
+        if cmds.is_empty() || self.slash_commands(agent) == cmds {
+            return;
+        }
+        if let Ok(b) = serde_json::to_vec(cmds) {
+            let _ = std::fs::write(self.slash_path(agent), b);
+        }
+    }
+
+    /// Adds commands the init line names that the saved list lacks (an agent
+    /// that didn't answer `initialize`), keeping what's known of the rest.
+    pub(crate) fn add_slash_names(&self, names: &[String], kind: impl Fn(&str) -> SlashKind) {
+        let mut cmds = self.slash_commands(AgentKind::ClaudeCode);
+        let known: HashSet<String> = cmds
+            .iter()
+            .flat_map(|c| std::iter::once(&c.name).chain(&c.aliases))
+            .cloned()
+            .collect();
+        for n in names.iter().filter(|n| !known.contains(*n)) {
+            cmds.push(SlashCommand {
+                kind: kind(n),
+                ..SlashCommand::named(n.clone())
+            });
+        }
+        self.save_slash_commands(AgentKind::ClaudeCode, &cmds);
+    }
+
+    /// The subagents the agent reported when it last started, for argument
+    /// completion in the `/` menu.
+    pub fn subagents(&self) -> Vec<Subagent> {
+        std::fs::read(self.dir.join("subagents.json"))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default()
     }
 
-    pub(crate) fn save_slash_commands(&self, names: &[String]) {
-        if names.is_empty() || self.slash_commands() == names {
+    pub(crate) fn save_subagents(&self, agents: &[Subagent]) {
+        if agents.is_empty() || self.subagents() == agents {
+            return;
+        }
+        if let Ok(b) = serde_json::to_vec(agents) {
+            let _ = std::fs::write(self.dir.join("subagents.json"), b);
+        }
+    }
+
+    /// The MCP servers a chat's agent reported when its last turn started,
+    /// with their status (`connected`, `failed`, `needs-auth`, `pending`),
+    /// for the composer's `/mcp` card.
+    pub fn agent_mcp(&self, session: &str) -> Vec<AgentMcpServer> {
+        std::fs::read(self.agent_mcp_path(session))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn save_agent_mcp(&self, session: &str, servers: &[AgentMcpServer]) {
+        if self.agent_mcp(session) == servers {
+            return;
+        }
+        let path = self.agent_mcp_path(session);
+        if let (Some(dir), Ok(b)) = (path.parent(), serde_json::to_vec(servers)) {
+            let _ = std::fs::create_dir_all(dir);
+            let _ = std::fs::write(path, b);
+        }
+    }
+
+    fn agent_mcp_path(&self, session: &str) -> PathBuf {
+        // Session ids are uuids; keep anything else out of the path.
+        let name: String = session
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        self.dir.join("agent_mcp").join(format!("{name}.json"))
+    }
+
+    /// claude.ai connectors (`claude.ai Linear`) the last chat that could
+    /// see them had.
+    pub fn claude_ai_connectors(&self) -> Vec<String> {
+        std::fs::read(self.dir.join("claude_ai_connectors.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn save_claude_ai_connectors(&self, names: &[String]) {
+        if self.claude_ai_connectors() == names {
             return;
         }
         if let Ok(b) = serde_json::to_vec(names) {
-            let _ = std::fs::write(self.dir.join("slash_commands.json"), b);
+            let _ = std::fs::write(self.dir.join("claude_ai_connectors.json"), b);
         }
     }
 
@@ -484,16 +899,36 @@ impl AgentHub {
 
     /// What a session's agent may touch. A chat about a pull request runs
     /// in tab's checkout of it, someone else's code, so it gets the review
-    /// policy; every other chat is the person's own.
+    /// policy, as does one under [`AgentHub::review_under`] and a workflow's
+    /// agent job (nobody is at the keyboard, and its prompt may carry text
+    /// from an item: it pushes through tab's broker, not with the person's
+    /// token); every other chat is the person's own.
     pub fn policy(&self, session: &Session) -> crate::sandbox::Policy {
         let sb = crate::sandbox::current();
         let cwd = crate::sandbox::real(Path::new(&session.cwd));
         let workspaces = crate::sandbox::real(&self.dir.join("workspaces"));
-        let mut p = if cwd.starts_with(&workspaces) {
+        let reviewed = self
+            .review_root
+            .read()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|r| cwd.starts_with(r));
+        let job = self
+            .store
+            .session_key(&session.id)
+            .ok()
+            .flatten()
+            .is_some_and(|k| k.starts_with("job:"));
+        let mut p = if cwd.starts_with(&workspaces) || reviewed || job {
             sb.review_policy(&cwd, Path::new(&self.workdir()))
         } else {
             sb.chat_policy()
         };
+        // A confined chat of the person's own may use its project's repos
+        // and their worktrees, wherever they're checked out.
+        if !p.confine.is_empty() && p.trust == crate::sandbox::Trust::Person {
+            p.open.extend(self.project_checkouts(session));
+        }
         // Other chats' folders hold their tokens: each chat sees only its own
         // (made now, so the sandbox can show it).
         let _ = self.session_dir(&session.id);
@@ -502,18 +937,49 @@ impl AgentHub {
             .push(crate::sandbox::real(&self.sessions_dir().join(&session.id)));
         // gh and git's network commands go through tab, which needs its
         // server to be up.
-        if self.mcp().is_some() {
-            sb.brokered(p)
-        } else {
-            p
+        if self.brokers() { sb.brokered(p) } else { p }
+    }
+
+    /// Where the chat's project's repos are checked out, with each one's
+    /// git worktrees. An agent can name a repo's path itself (the
+    /// `tab_project_repo` tool, or a record synced from another device) and
+    /// write a checkout's worktree list, so anything wider than a code
+    /// folder is left out ([`crate::sandbox::Sandbox::too_wide`]).
+    fn project_checkouts(&self, session: &Session) -> Vec<PathBuf> {
+        let sb = crate::sandbox::current();
+        let project = session
+            .item_id
+            .as_deref()
+            .and_then(|id| self.store.get(id).ok().flatten())
+            .and_then(|i| i.project_id);
+        let Some(project) = project else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for repo in self.store.project_repos(&project).unwrap_or_default() {
+            let Some(path) = repo.path.filter(|p| !p.trim().is_empty()) else {
+                continue;
+            };
+            let root = crate::sandbox::real(Path::new(&path));
+            if sb.too_wide(&root) {
+                tracing::warn!(path = %root.display(), "a project repo's path is too wide to open to agents");
+                continue;
+            }
+            out.extend(
+                crate::sandbox::worktrees(&root)
+                    .into_iter()
+                    .filter(|w| !sb.too_wide(w)),
+            );
+            out.push(root);
         }
+        out
     }
 
     /// Writes a chat's `gh` and `git` shims and points `cmd` at them, when
     /// the sandbox is on. Returns whether it did.
     pub(crate) fn add_shims(&self, session: &Session, cmd: &mut tokio::process::Command) -> bool {
         let sb = crate::sandbox::current();
-        let (Some(mcp), true) = (self.mcp(), sb.config().enabled) else {
+        let (Some(mcp), true) = (self.mcp(), sb.config().enabled && self.brokers()) else {
             return false;
         };
         let Ok(exe) = std::env::current_exe() else {
@@ -561,8 +1027,11 @@ impl AgentHub {
         role: &str,
         kind: &str,
         content: &str,
-        meta: serde_json::Value,
+        mut meta: serde_json::Value,
     ) {
+        if role == "assistant" && kind == "text" {
+            self.share_named_files(session_id, content, &mut meta);
+        }
         match self
             .store
             .message_add(session_id, role, kind, content, &meta, Utc::now())
@@ -570,6 +1039,64 @@ impl AgentHub {
             Ok(message) => self.emit(EngineEvent::SessionMessage { message }),
             Err(e) => tracing::error!(error = %e, "storing session message failed"),
         }
+    }
+
+    /// Which files a chat's replies may share to the hub. tab reads them
+    /// itself, outside the sandbox, so a reply naming a file mustn't reach
+    /// anything the agent couldn't: only files (links resolved) under the
+    /// chat's own folder, its project's repos, Settings' code folders or
+    /// the attachments folder, and nothing the chat's sandbox hides
+    /// (credentials, tab's own files, other chats' folders), wherever the
+    /// sandbox is enforced or not.
+    fn shareable(&self, session: &Session) -> Box<dyn Fn(&Path) -> bool> {
+        let sb = crate::sandbox::current();
+        let mut policy = self.policy(session);
+        let cwd = crate::sandbox::real(Path::new(&session.cwd));
+        let mut roots = Vec::new();
+        if !sb.too_wide(&cwd) {
+            roots.push(cwd);
+        }
+        roots.extend(self.project_checkouts(session));
+        if policy.trust == crate::sandbox::Trust::Person {
+            roots.extend(sb.code_folders());
+        }
+        roots.push(crate::sandbox::real(&self.attachments_dir()));
+        // The roots are what the agent may use (its own folder is opened
+        // when it starts); what's hidden inside them still wins.
+        policy.open.extend(roots.iter().cloned());
+        let secrets = sb.tab_secrets();
+        let sessions = crate::sandbox::real(&self.sessions_dir());
+        Box::new(move |p: &Path| {
+            roots.iter().any(|r| p.starts_with(r))
+                && !sb.too_wide(p)
+                && !p.starts_with(&sessions)
+                && !secrets.iter().any(|s| p.starts_with(s))
+                && policy.allows(p, crate::sandbox::Access::Read)
+        })
+    }
+
+    /// Puts the local files a reply names in the hub and records them in
+    /// its `files`, so a device that isn't this one can show them.
+    fn share_named_files(&self, session_id: &str, text: &str, meta: &mut serde_json::Value) {
+        let Some(sink) = self.file_sink.get() else {
+            return;
+        };
+        let Some(session) = self.store.session_get(session_id).ok().flatten() else {
+            return;
+        };
+        let cwd = Some(session.cwd.as_str());
+        if crate::named_files::paths_in_text(text, cwd).is_empty() {
+            return;
+        }
+        let shareable = self.shareable(&session);
+        let files = crate::named_files::share(text, cwd, |p| shareable(p), |b| sink(b));
+        if files.is_empty() {
+            return;
+        }
+        if !meta.is_object() {
+            *meta = serde_json::json!({});
+        }
+        meta["files"] = serde_json::to_value(files).unwrap_or_default();
     }
 
     pub(crate) fn delta(&self, session_id: &str, text: &str) {
@@ -600,6 +1127,12 @@ impl AgentHub {
         if let Some(s) = self.store.session_for_item(item_id)? {
             return Ok(s);
         }
+        self.session_new_for_item(item_id)
+    }
+
+    /// A fresh chat for an item (`/clear`), which becomes its current one.
+    /// Earlier chats stay, for `/resume`.
+    pub fn session_new_for_item(&self, item_id: &str) -> anyhow::Result<Session> {
         let item = self
             .store
             .get(item_id)?
@@ -656,8 +1189,20 @@ impl AgentHub {
         }
     }
 
+    /// Whether the chat's running turn was started by tab on its own, with
+    /// nobody reading along (see [`coordinator`]).
+    pub fn is_woken(&self, session_id: &str) -> bool {
+        self.woken.lock().unwrap().contains(session_id)
+    }
+
     pub fn is_running(&self, session_id: &str) -> bool {
         self.running.lock().unwrap().contains_key(session_id)
+    }
+
+    /// How many agent turns are running right now. The dev runner waits
+    /// for this to reach zero before it restarts the app.
+    pub fn running_count(&self) -> usize {
+        self.running.lock().unwrap().len()
     }
 
     /// Whether the running turn can take a message mid-flight.
@@ -670,6 +1215,14 @@ impl AgentHub {
     /// false when no live turn takes messages (it already finished).
     pub fn steer(&self, session_id: &str, text: &str) -> anyhow::Result<bool> {
         self.steer_with(session_id, text, &[])
+    }
+
+    /// Tells a running turn something from tab itself: read like a steering
+    /// message, but not shown in the chat as the person's.
+    pub(crate) fn remind(&self, session_id: &str, text: String) {
+        if let Some(tx) = self.steering.lock().unwrap().get(session_id) {
+            let _ = tx.send(Steer::Reminder(text));
+        }
     }
 
     /// [`Self::steer`] with files the person attached (paths in
@@ -687,7 +1240,9 @@ impl AgentHub {
             "message is empty"
         );
         self.check_attachments(attachments)?;
-        let prompt = with_attachments(text, attachments);
+        let prompt = self.with_shell(session_id, with_attachments(text, attachments));
+        // The person is here now.
+        self.woken.lock().unwrap().remove(session_id);
         let tx = self.steering.lock().unwrap().get(session_id).cloned();
         let sent = tx.is_some_and(|tx| tx.send(Steer::Message(prompt.clone())).is_ok());
         if !sent {
@@ -844,6 +1399,12 @@ impl AgentHub {
             "message is empty"
         );
         self.check_attachments(attachments)?;
+        if let Some(why) = crate::config::folder_problem(&session.cwd) {
+            anyhow::bail!(
+                "This chat starts in a folder tab can't use: {why} Recreate it, or set a work folder \
+                 that exists in Settings → Agents and start a new chat."
+            );
+        }
         if let Some(why) = self
             .config()
             .budget
@@ -851,6 +1412,28 @@ impl AgentHub {
         {
             anyhow::bail!(why);
         }
+        // And the permission mode.
+        let session = match session.permission_mode {
+            Some(_) => session,
+            None => {
+                let m = self.config().permission_mode;
+                self.store
+                    .session_set_mode(session_id, &m)?
+                    .ok_or_else(|| anyhow::anyhow!("no such session"))?
+            }
+        };
+        // A chat keeps the model it starts on, whatever other chats pick later.
+        let session = match session.model {
+            Some(_) => session,
+            None => {
+                let m = self
+                    .config()
+                    .model_for(session.agent)
+                    .unwrap_or("")
+                    .to_string();
+                self.set_session_model(session_id, Some(&m))?
+            }
+        };
         let cancel = CancellationToken::new();
         {
             let mut running = self.running.lock().unwrap();
@@ -861,15 +1444,28 @@ impl AgentHub {
             running.insert(session_id.into(), cancel.clone());
             self.steering_prepare(session_id);
         }
+        // Commands the person ran with `!` since their last message go first.
+        let prompt = self.with_shell(session_id, with_attachments(text, attachments));
+        // Claude Code keeps tab's id for the message, so a rewind can name it.
+        let uuid = (visible && session.agent == AgentKind::ClaudeCode)
+            .then(|| uuid::Uuid::new_v4().to_string());
         if visible {
-            let meta = if attachments.is_empty() {
+            let mut meta = serde_json::Map::new();
+            if !attachments.is_empty() {
+                // `files` names them in the hub, so other devices can show them.
+                meta.insert("attachments".into(), serde_json::json!(attachments));
+                meta.insert(
+                    "files".into(),
+                    serde_json::json!(crate::live::file_refs(attachments)),
+                );
+            }
+            if let Some(u) = &uuid {
+                meta.insert("agent_uuid".into(), serde_json::json!(u));
+            }
+            let meta = if meta.is_empty() {
                 serde_json::Value::Null
             } else {
-                // `files` names them in the hub, so other devices can show them.
-                serde_json::json!({
-                    "attachments": attachments,
-                    "files": crate::live::file_refs(attachments),
-                })
+                serde_json::Value::Object(meta)
             };
             self.post(session_id, "user", "text", text, meta);
             self.attach_pasted_links(session_id, text);
@@ -880,22 +1476,45 @@ impl AgentHub {
         self.update(session_id, Some(SessionStatus::Working), None);
 
         let hub = self.clone();
-        let prompt = with_attachments(text, attachments);
         tokio::spawn(async move {
             let system = hub.system_prompt(&session);
+            let cfg = hub.config_for(&session);
+            let strict = cfg.strict || hub.policy(&session).trust != crate::sandbox::Trust::Person;
+            let acp = acp::enabled(&cfg, session.agent, strict);
             let result = match session.agent {
+                _ if acp => acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await,
                 AgentKind::ClaudeCode => {
-                    claude::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
+                    claude::run_turn(
+                        &hub,
+                        &session,
+                        &prompt,
+                        &system,
+                        uuid.as_deref(),
+                        cancel.clone(),
+                    )
+                    .await
                 }
                 AgentKind::OpenCode => {
-                    opencode::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
+                    acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
+                }
+                AgentKind::Codex => {
+                    codex::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
+                }
+                AgentKind::Pi => {
+                    pi::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
                 }
             };
+            // Messages the person sent mid-turn that never reached the agent:
+            // still in the steering channel because the turn never opened it.
+            let mut unread = Vec::new();
             let followups = {
                 let mut running = hub.running.lock().unwrap();
                 running.remove(&session.id);
+                hub.woken.lock().unwrap().remove(&session.id);
                 hub.steering_close(&session.id);
-                hub.steering_rx.lock().unwrap().remove(&session.id);
+                if let Some(rx) = hub.steering_rx.lock().unwrap().remove(&session.id) {
+                    unread = drain_messages(rx);
+                }
                 hub.followups
                     .lock()
                     .unwrap()
@@ -934,6 +1553,8 @@ impl AgentHub {
                 Ok(()) => {
                     hub.mark_waiting_if_asked(&session.id);
                     suggest::spawn(hub.clone(), session.id.clone());
+                    // A coordinator that ran long starts its next turn fresh.
+                    coordinator::after_turn(hub.clone(), session.id.clone());
                 }
                 Err(e) => {
                     tracing::warn!(session = %session.id, error = %e, "agent turn failed");
@@ -944,7 +1565,35 @@ impl AgentHub {
                         &format!("{e:#}"),
                         serde_json::Value::Null,
                     );
-                    hub.update(&session.id, Some(SessionStatus::Failed), None);
+                    // The chat already shows what the person sent while the
+                    // turn ran, so don't drop it: give it to a fresh turn.
+                    unread.extend(followups);
+                    if unread.is_empty() {
+                        hub.update(&session.id, Some(SessionStatus::Failed), None);
+                    } else if cancel.is_cancelled() {
+                        hub.post(
+                            &session.id,
+                            "system",
+                            "note",
+                            UNDELIVERED,
+                            serde_json::Value::Null,
+                        );
+                        hub.update(&session.id, Some(SessionStatus::Failed), None);
+                    } else if let Err(e2) = hub.start_turn(
+                        &session.id,
+                        &after_failure(&format!("{e:#}"), &unread),
+                        false,
+                        &[],
+                    ) {
+                        hub.post(
+                            &session.id,
+                            "system",
+                            "error",
+                            &format!("{UNDELIVERED} ({e2:#})"),
+                            serde_json::Value::Null,
+                        );
+                        hub.update(&session.id, Some(SessionStatus::Failed), None);
+                    }
                 }
             }
         });
@@ -973,6 +1622,210 @@ impl AgentHub {
         if asked {
             self.update(session_id, Some(SessionStatus::NeedsInput), None);
         }
+    }
+
+    /// `text` with what the person ran with `!` since their last message
+    /// before it, as Claude Code's terminal shows the agent its bash mode.
+    fn with_shell(&self, session_id: &str, text: String) -> String {
+        let Ok(messages) = self.store.messages(session_id) else {
+            return text;
+        };
+        let ran = shell_since_last_message(&messages);
+        if ran.is_empty() {
+            return text;
+        }
+        format!("{ran}\n\n{text}")
+    }
+
+    /// Runs a command the person typed after `!` in the chat's folder, under
+    /// the chat's sandbox, and puts it and its output in the chat. The agent
+    /// sees both with the next message, and no turn starts.
+    pub async fn run_shell(&self, session_id: &str, command: &str) -> anyhow::Result<()> {
+        let command = command.trim();
+        anyhow::ensure!(!command.is_empty(), "type a command after !");
+        let session = self
+            .store
+            .session_get(session_id)?
+            .ok_or_else(|| anyhow::anyhow!("no such session"))?;
+        anyhow::ensure!(
+            self.runs_here(&session),
+            "this chat runs on another device; run the command there"
+        );
+        if let Some(why) = crate::config::folder_problem(&session.cwd) {
+            anyhow::bail!("This chat's folder can't be used: {why}");
+        }
+        let policy = self.policy(&session);
+        let (exe, args): (&str, Vec<std::ffi::OsString>) = if cfg!(windows) {
+            ("cmd", vec!["/C".into(), command.into()])
+        } else {
+            ("/bin/sh", vec!["-c".into(), command.into()])
+        };
+        let exe = if cfg!(windows) {
+            resolve(exe)?
+        } else {
+            PathBuf::from(exe)
+        };
+        let mut prepared = crate::sandbox::current()
+            .command(&exe, &args, Path::new(&session.cwd), &policy)
+            .await?;
+        self.add_shims(&session, &mut prepared.cmd);
+        prepared
+            .cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = prepared.spawn()?;
+        let mut stdout = child.stdout.take().expect("piped");
+        let mut stderr = child.stderr.take().expect("piped");
+        let run = async {
+            use tokio::io::AsyncReadExt;
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            let (a, b) = tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
+            a?;
+            b?;
+            let status = child.wait().await?;
+            anyhow::Ok((out, err, status))
+        };
+        let (output, code) = match tokio::time::timeout(SHELL_TIMEOUT, run).await {
+            Ok(out) => {
+                let (out, err, status) = out?;
+                // As the terminal would show it: colours and progress
+                // redraws resolved, not left in the text.
+                let mut text = crate::term::plain(&out);
+                let err = crate::term::plain(&err);
+                if !err.trim().is_empty() {
+                    if !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(&err);
+                }
+                (text, status.code())
+            }
+            Err(_) => (
+                format!("Stopped after {} seconds.", SHELL_TIMEOUT.as_secs()),
+                None,
+            ),
+        };
+        let output = cut_output(output.trim_end());
+        self.post(
+            session_id,
+            "system",
+            "shell",
+            command,
+            serde_json::json!({ "output": output, "exit_code": code }),
+        );
+        Ok(())
+    }
+
+    /// Takes the chat back to before one of the person's messages, as
+    /// Claude Code's rewind does: the conversation (the agent forgets that
+    /// message and what came after, and tab drops them from the chat), the
+    /// files the agent changed since, or both. Returns the message, so it
+    /// can be edited and sent again.
+    pub async fn rewind(
+        self: &Arc<Self>,
+        session_id: &str,
+        message_id: i64,
+        conversation: bool,
+        files: bool,
+    ) -> anyhow::Result<Rewound> {
+        anyhow::ensure!(conversation || files, "nothing to rewind");
+        let (session, messages, at) = self.rewind_target(session_id, message_id)?;
+        let m = &messages[at];
+        let uuid = m.meta["agent_uuid"].as_str().unwrap_or_default();
+        let resume = if conversation {
+            Some(rewind_point(&messages[..at])?)
+        } else {
+            None
+        };
+        let changed = if files {
+            claude::rewind_files(self, &session, uuid, false).await?
+        } else {
+            Default::default()
+        };
+        let quote = quote_message(&m.content);
+        if let Some(resume) = resume {
+            claude::set_rewind(&self.session_dir(session_id)?, &resume)?;
+            self.store.messages_delete_from(session_id, message_id)?;
+            let note = if files {
+                format!("Rewound the conversation and code to before “{quote}”.")
+            } else {
+                format!(
+                    "Rewound the conversation to before “{quote}”. Files were left as they are."
+                )
+            };
+            self.post(session_id, "system", "note", &note, serde_json::Value::Null);
+        } else {
+            let n = changed.files.len();
+            let note = format!(
+                "Restored {} to before “{quote}”. The conversation was left as it is.",
+                if n == 1 {
+                    "1 file".to_string()
+                } else {
+                    format!("{n} files")
+                }
+            );
+            self.post(session_id, "system", "note", &note, serde_json::Value::Null);
+        }
+        self.emit(EngineEvent::SessionChanged {
+            session: self.store.session_get(session_id)?.unwrap_or(session),
+        });
+        Ok(Rewound {
+            text: m.content.clone(),
+            attachments: m.meta["attachments"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.as_str().map(str::to_string))
+                .collect(),
+            files: changed,
+        })
+    }
+
+    /// What rewinding the files to before a message would change.
+    pub async fn rewind_preview(
+        self: &Arc<Self>,
+        session_id: &str,
+        message_id: i64,
+    ) -> anyhow::Result<claude::RewoundFiles> {
+        let (session, messages, at) = self.rewind_target(session_id, message_id)?;
+        let uuid = messages[at].meta["agent_uuid"].as_str().unwrap_or_default();
+        claude::rewind_files(self, &session, uuid, true).await
+    }
+
+    /// The chat, its messages and where the one to rewind to is, once it's
+    /// clear a rewind can happen.
+    fn rewind_target(
+        &self,
+        session_id: &str,
+        message_id: i64,
+    ) -> anyhow::Result<(Session, Vec<SessionMessage>, usize)> {
+        let session = self
+            .store
+            .session_get(session_id)?
+            .ok_or_else(|| anyhow::anyhow!("no such session"))?;
+        anyhow::ensure!(
+            session.agent == AgentKind::ClaudeCode,
+            "Rewind works in Claude Code chats only for now."
+        );
+        anyhow::ensure!(
+            self.runs_here(&session),
+            "This chat runs on another device; rewind it there."
+        );
+        anyhow::ensure!(
+            !self.is_running(session_id),
+            "The agent is still working. Stop it first, then rewind."
+        );
+        let messages = self.store.messages(session_id)?;
+        let at = messages
+            .iter()
+            .position(|m| m.id == message_id)
+            .ok_or_else(|| anyhow::anyhow!("that message is gone"))?;
+        anyhow::ensure!(
+            messages[at].role == "user" && messages[at].meta["agent_uuid"].is_string(),
+            "tab can't rewind to that message (it was sent mid-turn, or before tab kept checkpoints)."
+        );
+        Ok((session, messages, at))
     }
 
     pub fn stop(&self, session_id: &str) {
@@ -1044,6 +1897,23 @@ impl AgentHub {
         }
     }
 
+    /// Answers approval `id` only if it's one of `session_id`'s, for
+    /// answers that come from elsewhere (another device steering one
+    /// chat mustn't answer another chat's).
+    pub fn resolve_approval_in(&self, session_id: &str, id: &str, decision: Decision) -> bool {
+        let mut approvals = self.approvals.lock().unwrap();
+        if !approvals
+            .get(id)
+            .is_some_and(|(a, _)| a.session_id == session_id)
+        {
+            return false;
+        }
+        match approvals.remove(id) {
+            Some((_, tx)) => tx.send(decision).is_ok(),
+            None => false,
+        }
+    }
+
     pub fn pending_approvals(&self, session_id: &str) -> Vec<Approval> {
         self.approvals
             .lock()
@@ -1052,6 +1922,30 @@ impl AgentHub {
             .filter(|(a, _)| a.session_id == session_id)
             .map(|(a, _)| a.clone())
             .collect()
+    }
+
+    /// Closes `session_id`'s open approvals for `tool`: the agent's call
+    /// ended without them (Claude Code gave up waiting), so answering one
+    /// would reach nobody, and the chat shows the call's own card instead.
+    pub(crate) fn drop_tool_approvals(&self, session_id: &str, tool: &str) {
+        let stale: Vec<String> = {
+            let mut approvals = self.approvals.lock().unwrap();
+            let ids: Vec<String> = approvals
+                .iter()
+                .filter(|(_, (a, _))| a.session_id == session_id && a.tool == tool)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &ids {
+                approvals.remove(id);
+            }
+            ids
+        };
+        for id in stale {
+            self.emit(EngineEvent::ApprovalResolved {
+                session_id: session_id.into(),
+                id,
+            });
+        }
     }
 
     fn drop_approvals(&self, session_id: &str) {
@@ -1145,31 +2039,55 @@ impl AgentHub {
              - To ask the person to choose between options, use AskUserQuestion: tab shows the question \
              with buttons in the chat and returns their answers.\n\
              - Step list (required): whenever answering needs tools, your FIRST tool call is tab_steps with \
-             your plan as 2-6 short steps (the first in_progress, the rest pending). Write each step as an \
-             outcome in the person's words, e.g. 'Find where Done is handled', 'Fix the badge layout', \
-             'Open a PR': never a command, tool name, file path or flag. Cover the whole job from the start, \
-             so the list shows how much is left. Call tab_steps again each time a step finishes or the plan \
-             changes, and once at the end with every step completed. The person sees this list pinned under \
-             the chat instead of your raw tool calls, so never skip it. \
+             your plan as 2-6 short steps (the first in_progress, the rest pending). It is a plan, not a \
+             status line: list every step from now to the finished result for this turn (e.g. find it, \
+             fix it, check it, open a PR), not only the step you're on, and never reveal steps one at a \
+             time. Write each step as an outcome in the person's words, e.g. 'Find where Done is handled', \
+             'Fix the badge layout', 'Open a PR': never a command, tool name, file path or flag. Call \
+             tab_steps again each time a step finishes or the plan changes, and once at the end with every \
+             step completed. The person sees this list at the end of the chat instead of your raw tool \
+             calls, so never skip it. \
              Only a reply that needs no tools at all can go without it. If tab_steps isn't loaded, load it \
              with ToolSearch (select:mcp__tab__tab_steps).\n\
              - To show the person an image or a file (a screenshot you took, a PDF or report you wrote), \
              put its absolute path in backticks, like `/full/path/shot.png`: tab shows images inline and \
              other files as a card they can open. Don't just describe it; show it.\n\
-             - If the work splits into follow-ups, create them with tab_create_task.\n\
+             - A plan, design or architecture write-up longer than a few lines goes in a markdown file \
+             (in your working folder), named by its path in backticks: tab shows it as a card the person \
+             opens to read, and it travels with the chat. Keep the reply itself short.\n\
+             - Follow-ups: list possible next steps in your reply rather than filing them. Create tasks \
+             with tab_create_task only when the person asks, or for one concrete thing that must happen and \
+             can't be done now. Each becomes a follow-up of this task (it shows under it in the queue and \
+             is in its Context), so don't attach it again. Give each a body the next agent can start from, \
+             written in markdown (short paragraphs, lists, `code`, links): tab shows it rendered as the \
+             task's details. For work in phases or steps, pass `after` with the earlier task's id so it \
+             waits its turn; tab_link_tasks orders tasks that already exist. When the person asks for \
+             agents on them, pass start_agent with the first message.\n\
+             - Waiting on CI, a deploy or anything else slow: don't block on it with sleep or a --watch \
+             command in the foreground. If you can, start the wait in the background (e.g. \
+             run_in_background), say what you're waiting for and end your turn; tab shows the chat as \
+             Monitoring and you pick back up when it finishes.\n\
              - tab_search matches by keyword and by meaning. Give it a window (within_days, or since/until) \
              and project: \"current\" when the person means recent or this project's work; it widens on its \
              own if the window is too narrow.\n\
              - When the person mentions something you don't recognise (a project, a codename, a person, a \
              repo), call tab_graph_search before asking them: it searches everything tab knows and shows \
-             what's connected to it. tab_graph_expand follows one connection further. tab_project shows a \
-             whole project: its notes, what it's about and its recent work.\n\
-             - When you learn a durable fact about the project (how it deploys, who owns what, where things \
-             live, a decision and why), save it with tab_project_note under a short topic, citing the items \
-             it came from. Writing the same topic again replaces the note, so keep it current rather than \
-             adding new ones. Skip anything that's only true for this one task, and never note one-off \
-             events (sign-ins, verifications, receipts, codes), credentials or personal account details: \
-             every future chat reads these.\n\
+             what's connected to it. tab_graph_expand follows one connection further.\n\
+             - Projects: when this chat is in a project, call tab_project before starting work, and again \
+             whenever you need to know where to work or how. It returns what the project is, its rules (follow \
+             them), the repos its work happens in and where they're checked out, its notes and its recent work. \
+             Work in the listed repos rather than guessing. Any project can be read by name with tab_project.\n\
+             - Keep the project's context current for the next chat. When you work in a repo for the project \
+             that isn't listed, add it with tab_project_repo (with its local path if you know it). If the \
+             project has no description, or the person tells you what it is or how to work in it, write it with \
+             tab_project_update (about, rules); each replaces the whole field, so keep what's still true. \
+             Project notes are rare: every future chat reads them. Save one with tab_project_note only \
+             for a fact the next chat on an unrelated task would need and couldn't get from the repo (where \
+             it's checked out, a non-obvious way to build or deploy, an environment limit, who owns what, a \
+             decision and why). Never write up what you built or how a feature works, file maps, PR \
+             changelogs, task status, one-off events, credentials or personal details: the code and git \
+             hold those. The project's steward reviews each note and may rewrite or turn it down; accept \
+             its answer.\n\
              - When the person asks to link, file or move something into a project, use tab_set_project; \
              a note is not a link.\n\
              - When the person wants to connect a service (email, GitHub, ...), set it up for them: \
@@ -1183,6 +2101,9 @@ impl AgentHub {
              and opens them in a viewer on click. Screenshot it (a headless browser works, or the running \
              app) and embed the PNG rather than describing it or publishing a separate page. Say whether it \
              is a real screenshot or a mock.\n\
+             - The person can send messages while you work; they reach you between tool calls. Answer \
+             each one in visible reply text (not only in your thinking, which tab never shows them) \
+             before your next tool call, even if it's one line, then carry on.\n\
              Keep replies short; the person reads them in a side panel.\n",
         );
         if let Some(root) = dev_checkout() {
@@ -1200,12 +2121,15 @@ impl AgentHub {
                 "\nYou run in tab's sandbox. tab's own files, shell startup files and stored cloud and browser \
                  credentials are off limits, and in a pull request's checkout you can only change that checkout. \
                  A write that fails with \"Read-only file system\" or \"Operation not permitted\" on one of those \
-                 paths is the sandbox: tell the person what you needed instead of working around it.\n"
+                 paths is the sandbox: tell the person what you needed instead of working around it.\n\
+                 A sandbox can't be started inside this one, so Chrome and Chromium fail with \"sandbox \
+                 initialization failed\". Start them with --no-sandbox (Puppeteer: args: ['--no-sandbox']); \
+                 tab's sandbox still applies to the browser.\n"
             } else {
                 "\ntab's own files and stored credentials are off limits to your file tools. If an edit is refused \
                  for that reason, tell the person what you needed instead of working around it.\n"
             });
-            if sb.config().enabled && self.mcp().is_some() {
+            if sb.config().enabled && self.brokers() {
                 out.push_str(
                     "Use `gh` and `git` as usual: tab runs `gh` for you, and git reaches GitHub through tab, \
                      both signed in with the person's GitHub connection. There's no GitHub token in your \
@@ -1219,6 +2143,10 @@ impl AgentHub {
             out.push('\n');
             out.push_str(&brief);
             out.push('\n');
+        }
+        if let Ok(Some(summary)) = self.store.carried_forward(&session.id) {
+            out.push('\n');
+            out.push_str(&coordinator::carried_forward(&summary));
         }
         let Some(item_id) = &session.item_id else {
             return out;
@@ -1247,22 +2175,12 @@ impl AgentHub {
             .and_then(|p| self.store.project_find(p).ok().flatten())
         {
             out.push_str(&format!(
-                "Project: {} (call tab_project for its recent work)\n",
+                "Project: {} (call tab_project for what it is, its rules, repos and recent work)\n",
                 p.name
             ));
-            let notes = self.store.project_notes(&p.id).unwrap_or_default();
-            if !notes.is_empty() {
-                out.push_str("Project notes, from earlier chats:\n");
-                for n in notes.iter().take(20) {
-                    out.push_str(&format!(
-                        "- {} ({}, {}): {}\n",
-                        n.topic,
-                        n.added_by,
-                        n.updated_at.format("%Y-%m-%d"),
-                        n.text.chars().take(500).collect::<String>()
-                    ));
-                }
-            }
+            out.push_str(&notes_block(
+                &self.store.project_notes(&p.id).unwrap_or_default(),
+            ));
         }
         if let Some(b) = &e.body {
             out.push_str(&format!(
@@ -1300,11 +2218,6 @@ impl AgentHub {
         for c in self.running.lock().unwrap().values() {
             c.cancel();
         }
-        if let Ok(mut oc) = self.opencode.try_lock() {
-            for (_, s) in oc.drain() {
-                s.shutdown();
-            }
-        }
     }
 
     /// The configured agent: where it is, its version, the newest release
@@ -1314,7 +2227,7 @@ impl AgentHub {
         let kind = cfg.kind?;
         let mut p = probe(kind, cfg.command.as_deref()).await;
         if p.found {
-            p.latest = latest_version(kind).await;
+            p.latest = latest_version(kind, p.install.as_deref(), p.upgrade.as_deref()).await;
         }
         Some(p)
     }
@@ -1340,28 +2253,107 @@ impl AgentHub {
         Some(probe(cfg.kind?, cfg.command.as_deref()).await)
     }
 
-    /// Looks for both supported agents, for onboarding.
+    /// Looks for every harness tab can drive, in `harnesses.json` order, all
+    /// at once since each asks its CLI for a version. Each is looked up the
+    /// way chats start it: the app's PATH, then its install folders.
     pub async fn detect(&self) -> Vec<AgentProbe> {
         let cfg = self.config();
-        let mut out = Vec::new();
-        for kind in catalog::harnesses().iter().filter_map(|h| h.kind()) {
-            let custom = (cfg.kind == Some(kind))
-                .then(|| cfg.command.clone())
-                .flatten();
-            out.push(probe(kind, custom.as_deref()).await);
-        }
-        out
+        let probes = catalog::harnesses()
+            .iter()
+            .filter_map(|h| h.kind())
+            .map(|kind| {
+                let custom = (cfg.kind == Some(kind))
+                    .then(|| cfg.command.clone())
+                    .flatten();
+                async move { probe(kind, custom.as_deref()).await }
+            });
+        futures_util::future::join_all(probes).await
     }
 }
 
 /// The message as the agent sees it: the text, then the attached files to
 /// open.
+/// The longest a `!` command runs.
+const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// The most of a `!` command's output kept, from its start and its end.
+const SHELL_OUTPUT: usize = 16_000;
+
+/// A command's output cut to [`SHELL_OUTPUT`]: its start and its end, which
+/// is where errors and summaries are.
+fn cut_output(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= SHELL_OUTPUT {
+        return s.to_string();
+    }
+    let half = SHELL_OUTPUT / 2;
+    let head: String = chars[..half].iter().collect();
+    let tail: String = chars[chars.len() - half..].iter().collect();
+    format!(
+        "{head}\n… {} characters cut …\n{tail}",
+        chars.len() - SHELL_OUTPUT
+    )
+}
+
+/// The `!` commands since the person's last message, as Claude Code's
+/// terminal hands bash-mode input and output to the agent.
+fn shell_since_last_message(messages: &[SessionMessage]) -> String {
+    let start = messages
+        .iter()
+        .rposition(|m| m.role == "user" && m.kind == "text")
+        .map_or(0, |i| i + 1);
+    messages[start..]
+        .iter()
+        .filter(|m| m.kind == "shell")
+        .map(|m| {
+            format!(
+                "<bash-input>{}</bash-input>\n<bash-stdout>{}</bash-stdout>",
+                m.content,
+                m.meta["output"].as_str().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Where the conversation picks up when it's rewound to the message after
+/// `before`: the agent's last reply in them, or from nothing.
+fn rewind_point(before: &[SessionMessage]) -> anyhow::Result<claude::Rewind> {
+    let Some(last) = before.iter().rev().find(|m| m.kind == "result") else {
+        return Ok(claude::Rewind::Fresh);
+    };
+    match last.meta["agent_uuid"].as_str() {
+        Some(u) => Ok(claude::Rewind::At(u.to_string())),
+        None => anyhow::bail!(
+            "The turn before that message ran before tab kept checkpoints, so the conversation can't go back there. Code can still be restored."
+        ),
+    }
+}
+
+/// A message's first line, cut short, to name it in a note.
+fn quote_message(text: &str) -> String {
+    let first = text.lines().next().unwrap_or_default().trim();
+    if first.chars().count() > 60 {
+        first.chars().take(57).collect::<String>() + "…"
+    } else {
+        first.to_string()
+    }
+}
+
+/// What [`AgentHub::rewind`] took back.
+#[derive(Debug, Clone, Serialize)]
+pub struct Rewound {
+    /// The message rewound to, to edit and send again.
+    pub text: String,
+    pub attachments: Vec<String>,
+    pub files: claude::RewoundFiles,
+}
+
 fn with_attachments(text: &str, attachments: &[String]) -> String {
     if attachments.is_empty() {
         return text.to_string();
     }
     format!(
-        "{text}\n\nThe person attached {} (open each with your Read tool to see it):\n{}",
+        "{text}\n\nThe person attached {} (open each with your Read tool to see it; to change one, write the new version under the same file name in your working folder and name its path in your reply, and tab shows it in its place):\n{}",
         if attachments.len() == 1 {
             "a file"
         } else {
@@ -1386,6 +2378,16 @@ pub(crate) fn agent_exe(cfg: &AgentConfig, kind: AgentKind) -> anyhow::Result<Pa
         .command
         .as_deref()
         .filter(|c| !c.trim().is_empty() && cfg.kind == Some(kind));
+    find(kind, custom)
+}
+
+/// `custom`, else `kind`'s command on PATH, else where its installer puts
+/// it. A custom command that's just the default name (`claude`) is looked for
+/// in the install folders too.
+fn find(kind: AgentKind, custom: Option<&str>) -> anyhow::Result<PathBuf> {
+    let custom = custom
+        .map(str::trim)
+        .filter(|c| *c != default_command(kind));
     resolve(custom.unwrap_or(default_command(kind))).or_else(|e| {
         custom
             .is_none()
@@ -1420,15 +2422,8 @@ pub fn command(exe: &std::path::Path) -> tokio::process::Command {
 }
 
 async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
-    let name = custom.unwrap_or(default_command(kind));
-    let found = resolve(name).or_else(|e| {
-        // Just installed: the app's PATH may not have its folder yet.
-        custom
-            .is_none()
-            .then(|| catalog::installed_elsewhere(kind))
-            .flatten()
-            .ok_or(e)
-    });
+    // Just installed: the app's PATH may not have its folder yet.
+    let found = find(kind, custom);
     let mut p = AgentProbe {
         kind,
         found: false,
@@ -1469,6 +2464,37 @@ async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
     p
 }
 
+/// Notes shown in full at the start of a chat; the rest are named only.
+const NOTES_IN_PROMPT: usize = 12;
+
+/// The project's notes as a chat starts with them: the person's first, then
+/// the newest agent notes, each in full up to [`NOTES_IN_PROMPT`]. Any more
+/// are listed by topic so the agent knows to read them with tab_project.
+fn notes_block(notes: &[ProjectNote]) -> String {
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut ordered: Vec<&ProjectNote> = notes.iter().filter(|n| n.added_by != "agent").collect();
+    ordered.extend(notes.iter().filter(|n| n.added_by == "agent"));
+    let mut out = String::from("Project notes:\n");
+    for n in ordered.iter().take(NOTES_IN_PROMPT) {
+        let text: String = n.text.chars().take(steward::MAX_NOTE_CHARS + 1).collect();
+        out.push_str(&format!("- {}: {}\n", n.topic, text.trim()));
+    }
+    let rest: Vec<&str> = ordered
+        .iter()
+        .skip(NOTES_IN_PROMPT)
+        .map(|n| n.topic.as_str())
+        .collect();
+    if !rest.is_empty() {
+        out.push_str(&format!(
+            "More notes, in tab_project: {}\n",
+            rest.join(", ")
+        ));
+    }
+    out
+}
+
 /// Short, human summary of a tool call for an approval card.
 pub(crate) fn summarize_tool(tool: &str, input: &serde_json::Value) -> String {
     let s = |k: &str| input.get(k).and_then(|v| v.as_str());
@@ -1485,6 +2511,36 @@ pub(crate) fn summarize_tool(tool: &str, input: &serde_json::Value) -> String {
     }
 }
 
+/// Whether a tool call only waits on something outside the chat: watching
+/// CI or a deploy, a long sleep, a polling loop. The chat shows Monitoring
+/// while one runs, since the agent isn't doing anything itself.
+pub(crate) fn is_wait(tool: &str, input: &serde_json::Value) -> bool {
+    if tool != "Bash" || input["run_in_background"].as_bool() == Some(true) {
+        return false;
+    }
+    let Some(cmd) = input["command"].as_str() else {
+        return false;
+    };
+    let words: Vec<&str> = cmd
+        .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |w: &str| words.contains(&w);
+    let runs = |seq: [&str; 3]| words.windows(3).any(|w| w == seq);
+    let watch = runs(["gh", "run", "watch"]) || runs(["gh", "pr", "checks"]) && has("--watch");
+    let rollout = runs(["kubectl", "rollout", "status"]);
+    let polling = (has("until") || has("while")) && has("sleep");
+    // Only a long sleep: a short one is usually a pause between real steps.
+    let long_sleep = words.windows(2).any(|w| {
+        w[0] == "sleep"
+            && w[1]
+                .trim_end_matches('s')
+                .parse::<f64>()
+                .is_ok_and(|n| n >= 30.0)
+    });
+    watch || rollout || polling || long_sleep
+}
+
 /// Whether a reply ends by asking the person something: its last line
 /// (ignoring trailing markdown) ends with a question mark.
 fn ends_with_question(text: &str) -> bool {
@@ -1493,6 +2549,132 @@ fn ends_with_question(text: &str) -> bool {
         .rfind(|l| !l.is_empty() && !l.starts_with("```"))
         .map(|l| l.trim_end_matches(['*', '_', '`', ')', '"', '\'', ' ']))
         .is_some_and(|l| l.ends_with('?'))
+}
+
+/// Shown when what the person sent during a failed turn can't be passed on.
+const UNDELIVERED: &str = "The agent didn't get what you sent while it was working, because its turn failed. Send it again.";
+
+/// The person's messages left in a steering channel nobody read.
+fn drain_messages(mut rx: mpsc::UnboundedReceiver<Steer>) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(s) = rx.try_recv() {
+        if let Steer::Message(m) = s {
+            out.push(m);
+        }
+    }
+    out
+}
+
+/// The prompt for the turn after a failed one, carrying the messages the
+/// failed turn never read.
+fn after_failure(error: &str, messages: &[String]) -> String {
+    format!(
+        "Your last turn failed ({error}) before you read what the person sent while it ran. \
+         Their messages, in order:\n\n{}",
+        messages.join("\n\n")
+    )
+}
+
+#[cfg(test)]
+mod failed_turn_tests {
+    use super::{Steer, after_failure, drain_messages};
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn keeps_only_the_persons_messages_in_order() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(Steer::Message("first".into())).unwrap();
+        tx.send(Steer::Interrupt).unwrap();
+        tx.send(Steer::Reminder("from tab".into())).unwrap();
+        tx.send(Steer::Message("second".into())).unwrap();
+        drop(tx);
+        assert_eq!(drain_messages(rx), ["first", "second"]);
+    }
+
+    #[test]
+    fn prompt_names_the_error_and_carries_every_message() {
+        let p = after_failure("overloaded", &["a?".into(), "b".into()]);
+        assert!(p.contains("overloaded"));
+        assert!(p.ends_with("a?\n\nb"));
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::is_wait;
+    use serde_json::json;
+
+    fn bash(cmd: &str) -> bool {
+        is_wait("Bash", &json!({ "command": cmd }))
+    }
+
+    #[test]
+    fn spots_commands_that_only_wait() {
+        assert!(bash(
+            "sleep 20; gh pr checks 89 --repo o/r --watch --interval 15 2>&1 | tail -4"
+        ));
+        assert!(bash("gh run watch 123 --exit-status"));
+        assert!(bash("until curl -sf https://x; do sleep 5; done"));
+        assert!(bash("sleep 120"));
+        assert!(bash("kubectl rollout status deploy/web"));
+    }
+
+    #[test]
+    fn leaves_real_work_alone() {
+        assert!(!bash("gh pr checks 89"));
+        assert!(!bash("gh run view 123 --log-failed"));
+        assert!(!bash("sleep 2 && curl localhost:3000"));
+        assert!(!bash("cargo test --workspace"));
+        assert!(!bash("pnpm vitest --watch=false"));
+        assert!(!is_wait(
+            "Bash",
+            &json!({ "command": "gh run watch 1", "run_in_background": true })
+        ));
+        assert!(!is_wait("Read", &json!({ "file_path": "sleep 100" })));
+    }
+}
+
+#[cfg(test)]
+mod notes_tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn note(topic: &str, by: &str) -> ProjectNote {
+        ProjectNote {
+            id: topic.into(),
+            project_id: "p".into(),
+            topic: topic.into(),
+            text: format!("fact about {topic}"),
+            added_by: by.into(),
+            session_id: None,
+            sources: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn person_notes_lead_and_extras_are_named_only() {
+        assert_eq!(notes_block(&[]), "");
+        let mut notes: Vec<ProjectNote> = (0..NOTES_IN_PROMPT + 2)
+            .map(|i| note(&format!("a{i}"), "agent"))
+            .collect();
+        notes.push(note("owners", "user"));
+        let s = notes_block(&notes);
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(
+            lines[1], "- owners: fact about owners",
+            "the person's note comes first"
+        );
+        assert_eq!(lines.len(), 1 + NOTES_IN_PROMPT + 1);
+        assert!(
+            lines
+                .last()
+                .unwrap()
+                .starts_with("More notes, in tab_project: a11, a12, a13")
+        );
+        assert!(!s.contains("2026"), "no dates or authors");
+    }
 }
 
 #[cfg(test)]
@@ -1544,6 +2726,72 @@ mod keyed_tests {
                 .id,
             c.id
         );
+    }
+
+    /// A chat keeps its own model: picking one in another chat, or changing
+    /// tab's default, leaves it alone. Older chats follow the default.
+    #[tokio::test]
+    async fn chats_keep_their_own_model() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = broadcast::channel(16);
+        let mut cfg = AgentConfig {
+            kind: Some(AgentKind::ClaudeCode),
+            ..Default::default()
+        };
+        cfg.set_model(AgentKind::ClaudeCode, Some("opus".into()));
+        let hub = AgentHub::new(store.clone(), tx, cfg.clone(), std::env::temp_dir());
+        let a = hub.session_for_key("a", "A", "/a", "").unwrap();
+        let b = hub.session_for_key("b", "B", "/b", "").unwrap();
+        assert_eq!(
+            hub.config_for(&a).model_for(AgentKind::ClaudeCode),
+            Some("opus")
+        );
+
+        let a = hub.set_session_model(&a.id, Some("sonnet")).unwrap();
+        let b = hub.set_session_model(&b.id, None).unwrap();
+        cfg.set_model(AgentKind::ClaudeCode, Some("haiku".into()));
+        hub.set_config(cfg).await;
+        assert_eq!(
+            hub.config_for(&a).model_for(AgentKind::ClaudeCode),
+            Some("sonnet")
+        );
+        assert_eq!(hub.config_for(&b).model_for(AgentKind::ClaudeCode), None);
+        let older = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        assert_eq!(older.model, None);
+        assert_eq!(
+            hub.config_for(&older).model_for(AgentKind::ClaudeCode),
+            Some("haiku")
+        );
+    }
+
+    /// Agent jobs and chats on a cloud runner's clones work on text and
+    /// code nobody at the keyboard checked: the review policy, so no git
+    /// host token or credential reaches them.
+    #[test]
+    fn jobs_and_cloud_clones_get_the_review_policy() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = broadcast::channel(16);
+        let hub = AgentHub::new(
+            store.clone(),
+            tx,
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let now = chrono::Utc::now();
+        let cwd = std::env::temp_dir().join("tab-policy-repo");
+        let cwd_s = cwd.to_string_lossy().to_string();
+        let chat = store
+            .session_create(None, AgentKind::ClaudeCode, "Chat", &cwd_s, now)
+            .unwrap();
+        assert_eq!(hub.policy(&chat).trust, crate::sandbox::Trust::Person);
+        let job = store
+            .session_create_keyed("job:1", AgentKind::ClaudeCode, "Job", &cwd_s, now)
+            .unwrap();
+        assert_eq!(hub.policy(&job).trust, crate::sandbox::Trust::Agent);
+        hub.review_under(&std::env::temp_dir());
+        assert_eq!(hub.policy(&chat).trust, crate::sandbox::Trust::Agent);
     }
 
     #[tokio::test]
@@ -1645,6 +2893,19 @@ mod install_tests {
     use super::*;
 
     #[test]
+    fn winget_latest_reads_the_version_winget_offers() {
+        let out = "Found Claude Code [Anthropic.ClaudeCode]
+Version: 2.1.317
+Publisher: Anthropic PBC
+";
+        assert_eq!(winget_show_version(out).as_deref(), Some("2.1.317"));
+        assert_eq!(
+            winget_show_version("No package found matching input criteria."),
+            None
+        );
+    }
+
+    #[test]
     fn update_command_follows_how_claude_code_was_installed() {
         let cmd = |p| install_method(AgentKind::ClaudeCode, p).1;
         assert_eq!(
@@ -1666,6 +2927,122 @@ mod install_tests {
 
     #[test]
     fn installer_colour_codes_are_dropped() {
-        assert_eq!(strip_ansi("\u{1b}[32mDone\u{1b}[0m in 3s"), "Done in 3s");
+        assert_eq!(
+            crate::term::plain("\u{1b}[32mDone\u{1b}[0m in 3s".as_bytes()),
+            "Done in 3s"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rewind_tests {
+    use super::*;
+
+    fn msg(
+        id: i64,
+        role: &str,
+        kind: &str,
+        content: &str,
+        meta: serde_json::Value,
+    ) -> SessionMessage {
+        SessionMessage {
+            id,
+            session_id: "s".into(),
+            role: role.into(),
+            kind: kind.into(),
+            content: content.into(),
+            meta,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_rewind_resumes_after_the_reply_before_the_message() {
+        let null = serde_json::Value::Null;
+        assert_eq!(rewind_point(&[]).unwrap(), claude::Rewind::Fresh);
+        let turn = [
+            msg(
+                1,
+                "user",
+                "text",
+                "hi",
+                serde_json::json!({ "agent_uuid": "u1" }),
+            ),
+            msg(2, "assistant", "text", "hello", null.clone()),
+            msg(
+                3,
+                "system",
+                "result",
+                "",
+                serde_json::json!({ "agent_uuid": "a1" }),
+            ),
+        ];
+        assert_eq!(
+            rewind_point(&turn).unwrap(),
+            claude::Rewind::At("a1".into())
+        );
+        // A turn from before tab kept checkpoints can't be resumed at.
+        let old = [msg(1, "system", "result", "", null)];
+        assert!(rewind_point(&old).is_err());
+    }
+
+    #[test]
+    fn shell_commands_go_to_the_agent_with_the_next_message_only() {
+        let null = serde_json::Value::Null;
+        let ran = |id, cmd: &str, out: &str| {
+            msg(
+                id,
+                "system",
+                "shell",
+                cmd,
+                serde_json::json!({ "output": out }),
+            )
+        };
+        let messages = [
+            ran(1, "ls", "old"),
+            msg(2, "user", "text", "hi", null.clone()),
+            msg(3, "assistant", "text", "hello", null),
+            ran(4, "git status", "clean"),
+            ran(5, "pwd", "/r"),
+        ];
+        assert_eq!(
+            shell_since_last_message(&messages),
+            "<bash-input>git status</bash-input>\n<bash-stdout>clean</bash-stdout>\n<bash-input>pwd</bash-input>\n<bash-stdout>/r</bash-stdout>"
+        );
+        assert_eq!(shell_since_last_message(&messages[..3]), "");
+    }
+
+    #[test]
+    fn long_output_keeps_its_start_and_end() {
+        let long = format!("{}{}", "a".repeat(SHELL_OUTPUT), "b".repeat(100));
+        let cut = cut_output(&long);
+        assert!(cut.starts_with('a') && cut.ends_with('b') && cut.contains("100 characters cut"));
+        assert_eq!(cut_output("short"), "short");
+    }
+
+    #[test]
+    fn rewinding_drops_the_message_and_what_followed() {
+        let store = Store::in_memory().unwrap();
+        let s = store
+            .session_create(None, AgentKind::ClaudeCode, "t", ".", Utc::now())
+            .unwrap();
+        let null = serde_json::Value::Null;
+        let ids: Vec<i64> = ["one", "two", "three"]
+            .iter()
+            .map(|t| {
+                store
+                    .message_add(&s.id, "user", "text", t, &null, Utc::now())
+                    .unwrap()
+                    .id
+            })
+            .collect();
+        assert_eq!(store.messages_delete_from(&s.id, ids[1]).unwrap(), 2);
+        let left: Vec<_> = store
+            .messages(&s.id)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.content)
+            .collect();
+        assert_eq!(left, ["one"]);
     }
 }

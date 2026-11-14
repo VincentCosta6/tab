@@ -2,27 +2,86 @@
 // sample data closely enough to design against.
 
 import { NOT_HANDLED, withActions, workflowMock } from "./mock-workflows";
+import { queueRuns, queueWorkflowMock } from "./mock-queue-workflows";
 // The same harness metadata the app ships.
 import harnessData from "../../crates/tab-core/src/agents/harnesses.json";
 import decisionData from "../../crates/tab-core/src/decisions/decisions.json";
+import { create, toBinary } from "@bufbuild/protobuf";
+import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
+import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, RunnerState, RunnerStatusSchema, type HubStatus } from "./protocol/cloud";
 import type {
-  AgentKind, DecisionProvider, GhLoginCode, GhStatus, Harness, LspServer, ModelOption,
-  AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
-  Entity, GraphView, Project, ProjectNote, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
+  ChatSummary,
+  McpCatalogEntry, McpCloudState, JobGaps, McpImportCandidate, McpImportResult, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
+  EmailSignInStatus, MailProvider,
+  Account, AgentKind, DecisionProvider, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
+  AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
+  Entity, GraphView, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceInput, Segment, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
+  VaultAudit, VaultDevice, VaultEntry, VaultEntryInput, VaultStatus,
 } from "./types";
 
 const harnesses = harnessData as unknown as Harness[];
-let mockOpenCode = false;
+// `?agents=none` starts with no agent installed, `?agents=claude_code,codex` with those.
+const mockInstalled = new Set<AgentKind>(
+  ((typeof location !== "undefined" && new URLSearchParams(location.search).get("agents")) || "claude_code").split(",").filter((k) => k !== "none") as AgentKind[],
+);
+const mockOpenCode = () => mockInstalled.has("opencode");
+// ACP adapters installed (codex-acp); none to start with.
+const mockAdapters = new Set<AgentKind>();
+// What the harnesses report in the app (tab asks each one; see
+// agents/catalog.rs), as a sample.
 const mockModels = (): ModelOption[] => {
-  const claude = (harnessData[0].models as { id: string; label: string; common?: boolean }[]).map((m) => ({ agent: "claude_code" as AgentKind, id: m.id, label: m.label, common: !!m.common }));
-  if (!mockOpenCode) return claude;
-  const common = harnessData[1].common_models as string[];
+  const claude = [["claude-opus-5-5", "Opus 5.5", true], ["claude-fable-5-2", "Fable 5.2", true], ["claude-sonnet-5-5", "Sonnet 5.5", true], ["claude-haiku-5-5", "Haiku 5.5", true], ["claude-fable-5-1", "Fable 5.1", false], ["claude-opus-5", "Opus 5", false]]
+    .map(([id, label, common]) => ({ agent: "claude_code" as AgentKind, id: id as string, label: label as string, common: common as boolean }));
+  if (!mockOpenCode()) return mockInstalled.has("claude_code") ? claude : [];
   const oc = ["anthropic/claude-sonnet-5-5", "anthropic/claude-opus-5-5", "anthropic/claude-haiku-5-5", "openai/gpt-5.5", "openai/gpt-5.5-mini", "google/gemini-3-pro", "ollama/qwen3:32b", "openrouter/deepseek/deepseek-v4"]
-    .map((id) => ({ agent: "opencode" as AgentKind, id, label: id.slice(id.indexOf("/") + 1), common: common.includes(id) }));
-  return [...claude, ...oc];
+    .map((id) => ({ agent: "opencode" as AgentKind, id, label: id.slice(id.indexOf("/") + 1), common: false }));
+  return [...(mockInstalled.has("claude_code") ? claude : []), ...oc];
 };
 
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+
+// The vault, in memory. `?vault=none` starts without one, `?vault=locked` locked.
+const vaultStart = (typeof location !== "undefined" && new URLSearchParams(location.search).get("vault")) || "open";
+const vaultMask = (v: string) => (v.replace(/\s/g, "").length <= 4 ? "••••" : `•••• ${v.replace(/\s/g, "").slice(-4)}`);
+const mockVault = {
+  made: vaultStart !== "none",
+  openUntil: vaultStart === "open" ? Date.now() + 10 * 60_000 : 0,
+  devices: [
+    { id: "device-mac", name: "Vincent's MacBook Pro", state: "active", code: "482 913", this: true, approved_by: null, created_at: ago(60 * 24 * 30) },
+    { id: "device-pc", name: "DESKTOP-7Q2", state: "active", code: "105 337", this: false, approved_by: "Vincent's MacBook Pro", created_at: ago(60 * 24 * 12) },
+    { id: "device-new", name: "Vincent's iPad", state: "pending", code: "731 064", this: false, approved_by: null, created_at: ago(3) },
+  ] as VaultDevice[],
+  entries: [] as (Omit<VaultEntry, "fields"> & { fields: { label: string; value: string }[] })[],
+  audit: [] as VaultAudit[],
+};
+function vaultLog(action: string, actor: VaultAudit["actor"], detail: VaultAudit["detail"] = null, resource_id: string | null = null) {
+  mockVault.audit.unshift({ id: `va-${Date.now()}-${mockVault.audit.length}`, at: new Date().toISOString(), device: "Vincent's MacBook Pro", action, actor, session_id: null, project_id: null, resource_id, detail });
+}
+const vaultSeeded = new Set<string>();
+/** Sample entries the first time a project's vault is opened. */
+function vaultSeed(projectId: string) {
+  if (vaultSeeded.has(projectId) || vaultStart === "none") return;
+  vaultSeeded.add(projectId);
+  const at = ago(60 * 24 * 9);
+  mockVault.entries.push(
+    { id: `ve-ids-${projectId}`, project_id: projectId, kind: "note", title: "Company IDs", note: "From the IRS CP 575 letter and the state registration.", fields: [{ label: "EIN", value: "12-3456789" }, { label: "State tax ID", value: "CA 0451-2290" }, { label: "DUNS", value: "08-146-6849" }], created_at: at, updated_at: at },
+    { id: `ve-bank-${projectId}`, project_id: projectId, kind: "note", title: "Operating account (Mercury)", note: "", fields: [{ label: "Routing number", value: "084106768" }, { label: "Account number", value: "9800 1234 5521" }], created_at: at, updated_at: ago(60 * 30) },
+    { id: `ve-tax-${projectId}`, project_id: projectId, kind: "file", title: "2024 Form 1120.pdf", note: "", fields: [], file: { name: "2024 Form 1120.pdf", size: 412_000 }, created_at: ago(60 * 24 * 40), updated_at: ago(60 * 24 * 40) },
+  );
+  mockVault.audit.push(
+    { id: "va-s1", at: ago(14), device: "Vincent's MacBook Pro", action: "reveal", actor: "thread", session_id: "s-w9", project_id: projectId, resource_id: `ve-ids-${projectId}`, detail: { title: "Company IDs", fields: ["EIN"], why: "Filling in the W-9 for Acme's vendor portal" } },
+    { id: "va-s2", at: ago(15), device: "Vincent's MacBook Pro", action: "approve", actor: "person", session_id: "s-w9", project_id: projectId, resource_id: null, detail: { fields: ["EIN"], why: "Filling in the W-9 for Acme's vendor portal" } },
+    { id: "va-s3", at: ago(16), device: "Vincent's MacBook Pro", action: "request", actor: "thread", session_id: "s-w9", project_id: projectId, resource_id: null, detail: { fields: ["EIN"], why: "Filling in the W-9 for Acme's vendor portal" } },
+    { id: "va-s4", at: ago(95), device: "Vincent's MacBook Pro", action: "search", actor: "coordinator", session_id: "s-coord", project_id: projectId, resource_id: null, detail: { query: "estimated tax due", results: 1 } },
+    { id: "va-s5", at: ago(60 * 26), device: "DESKTOP-7Q2", action: "unlock", actor: "person", session_id: null, project_id: null, resource_id: null, detail: null },
+  );
+}
+const vaultOpen = () => mockVault.openUntil > Date.now();
+const vaultView = (e: (typeof mockVault.entries)[number]): VaultEntry => ({ ...e, fields: e.fields.map((f) => ({ label: f.label, masked: vaultMask(f.value) })) });
+function vaultMustBeOpen() {
+  if (!vaultOpen()) throw new Error("The vault is locked. Unlock it on this device first.");
+}
+
 
 type Seed = [kind: string, title: string, body: string, actor: string, context: string, url: string, min: number, score: number, base: number, reason: string];
 
@@ -65,6 +124,24 @@ let items: QueueItem[] = seeds.map(([kind, title, body, actor, context, url, min
   };
 });
 
+// A planning chat that split its work into phases: they fold under it, each
+// waiting on the one before.
+{
+  const task = (id: string, title: string, body: string, score: number, min: number, extra: Partial<QueueItem> = {}): QueueItem => ({
+    id, source: "tab", external_id: id, kind: "tab.task", title, body, url: null, actor: extra.parent_id ? "agent" : "you", context: "tab",
+    occurred_at: ago(min), blocks: [], entities: [], metadata: { created_by: extra.parent_id ? "agent" : "user" },
+    state: "open", snoozed_until: null, created_at: ago(min), updated_at: ago(min),
+    ranking: { score, base_score: score, ai_adjustment: null, urgency: urgency(score), reason: "A task", ranked_by: "rules", fired: [] },
+    ...extra,
+  });
+  items.push(
+    task("plan-hub", "Prototype project hub with resources and coordinator", "Design the hub, then build it in phases.", 52, 30),
+    task("plan-p2", "Projects phase 2: index project resources for search", "Builds on the prototype.", 52, 4, { parent_id: "plan-hub" }),
+    task("plan-p3", "Projects phase 3: coordinator monitoring and auto-compaction", "Builds on phase 2.", 47, 3, { parent_id: "plan-hub", blocked_by: ["plan-p2"] }),
+    task("plan-p4", "Projects phase 4: end-to-end encrypted vault", "Builds on phase 3.", 52, 2, { parent_id: "plan-hub", blocked_by: ["plan-p3"] }),
+  );
+}
+
 const base = { rate_limits: [], category: "built_in", features: [] as string[], builtin: false };
 const plainConnectors: ConnectorInfo[] = [
   { ...base, id: "tab", name: "tab", icon: "tab", builtin: true, description: "tab's own tasks and schedules. Anything you or an agent asks tab to do becomes a task here, with a priority, an optional due time, and its own agent session.", available: true, enabled: true, status: { state: "running", last_sync: ago(0) },
@@ -103,6 +180,14 @@ const plainConnectors: ConnectorInfo[] = [
       { kind: "email.direct", label: "Email", icon: "gmail", tone: "neutral" },
       { kind: "email.newsletter", label: "Newsletter", icon: "gmail", tone: "neutral" },
     ], settings: [] },
+  { ...base, id: "email", name: "Email (IMAP)", icon: "mail", category: "communication", description: "Mail from MXroute, Fastmail, iCloud or any IMAP host. Spam and newsletters are sorted with rules, not AI.", available: true, enabled: false, status: { state: "disabled" },
+    kinds: [{ kind: "email.direct", label: "Email", icon: "mail", tone: "info" }],
+    settings: [
+      { key: "host", label: "IMAP server", kind: "text", help: "For MXroute, the server name from your welcome email, e.g. heracles.mxrouting.net.", required: true },
+      { key: "username", label: "Email address", kind: "text", help: null, required: true },
+      { key: "password", label: "Password", kind: "secret", help: "Your mailbox password, or an app password if your host uses them. Not needed when you sign in with Google or Microsoft.", required: true },
+      { key: "port", label: "Port", kind: "number", help: "993 (IMAP over TLS) unless your host says otherwise.", required: false },
+    ] },
   { ...base, id: "zoom", name: "Zoom", icon: "zoom", category: "communication", description: "Action items assigned to you from meeting AI summaries.", available: false, enabled: false, status: { state: "disabled" },
     kinds: [{ kind: "meeting.action_item", label: "Meeting action item", icon: "zoom", tone: "accent" }], settings: [] },
   { ...base, id: "jira", name: "Jira", icon: "jira", category: "work", description: "Issues assigned to you, mentions, and status changes on work you own.", available: false, enabled: false, status: { state: "disabled" },
@@ -141,15 +226,40 @@ let config: TabConfig = {
   },
   connectors: { demo: { enabled: true, settings: {} }, tab: { enabled: true, settings: {} } },
   agent: {
-    budget: { daily_usd: 10, monthly_usd: null, per_turn_usd: null, ranker_plan_cap: 0.8 }, kind: "claude_code", command: null, model: null, workdir: "C:\\Users\\vince\\code", permission_mode: "auto", opencode_url: null, strict: true },
+    budget: { daily_usd: 10, monthly_usd: null, per_turn_usd: null, ranker_plan_cap: 0.8 }, kind: "claude_code", command: null, model: null, workdir: "C:\\Users\\vince\\code", permission_mode: "auto", strict: true },
   mcp: { port: 47821, token: "mock-token" },
   storage: { keep_days: 7, max_gb: 5 },
   sandbox: {
     enabled: true, protected: [], hidden: [], container_runtime: "", ssh_in_chats: true,
+    confine: true, folders: ["~/tmp", "~/src", "~/code", "~/dev", "~/Developer", "~/projects", "~/repos", "~/git", "~/work", "~/workspace"],
     lsp_domains: ["crates.io", "*.crates.io", "proxy.golang.org", "sum.golang.org", "pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com", "*.githubusercontent.com"],
   },
+  hub: { mode: "local" },
   onboarded: true,
 };
+// `?account=1` starts the browser mock signed in.
+let mockAccount: Account | null = typeof location !== "undefined" && new URLSearchParams(location.search).has("account")
+  ? { user_id: "mock-google", email: "you@gmail.com", name: "You", avatar_url: null, provider: "google" }
+  : null;
+
+let mockHub: HubStatus | null = null;
+let mockHubFailed = false;
+// `?hub=cloud` starts the browser mock as if this computer moved to tab cloud.
+let mockMoved = typeof location !== "undefined" && /^cloud/.test(new URLSearchParams(location.search).get("hub") ?? "");
+/** `?hub=cloud-offline`: moved, but tab cloud can't be reached. */
+const mockOffline = typeof location !== "undefined" && new URLSearchParams(location.search).get("hub") === "cloud-offline";
+let mockSecrets: string[] = ["harness/claude_code/ANTHROPIC_API_KEY"];
+const mockPlan = () => create(PlanSchema, { name: "trial", endsAt: timestampFromDate(new Date(Date.now() + 14 * 86400_000)), active: true });
+const mockCloudHub = (state: HubState): HubStatus =>
+  create(HubStatusSchema, {
+    hub: {
+      hubId: state === HubState.NONE ? "" : "5e7ecedf5a07a215de6ad0cc9d6ca7080b0e32c07931566c24ac88cdf129feee",
+      kind: HubKind.PERSONAL, role: Role.OWNER, state, region: state === HubState.NONE ? "" : "wnam",
+      readyAt: state === HubState.READY ? timestampNow() : undefined,
+    },
+    plan: mockPlan(),
+  });
+if (mockMoved) mockHub = mockCloudHub(HubState.READY);
 
 const listeners = new Set<(e: EngineEvent) => void>();
 const emit = (e: EngineEvent) => listeners.forEach((l) => l(e));
@@ -164,14 +274,36 @@ const setState = (id: string, state: ItemState, snoozed_until: string | null = n
 
 const connectors: ConnectorInfo[] = withActions(plainConnectors);
 
+const mockSlashCommands = [
+  { name: "code-review", description: "Review the current diff, or a PR number/branch/path target, for correctness bugs", argument_hint: "[low|medium|high|xhigh|max|ultra] [--fix] [--comment] [<pr#>|<branch>|<path>]", aliases: ["review"], kind: "builtin" },
+  { name: "compact", description: "Free up context by summarizing the conversation so far", argument_hint: "<optional custom summarization instructions>", aliases: [], kind: "builtin" },
+  { name: "context", description: "Show current context usage", argument_hint: "", aliases: [], kind: "builtin" },
+  { name: "init", description: "Initialize a new CLAUDE.md file with codebase documentation", argument_hint: "", aliases: [], kind: "builtin" },
+  { name: "effort", description: "Set effort level for model usage", argument_hint: "<low|medium|high|xhigh|max|auto>", aliases: [], kind: "builtin" },
+  { name: "security-review", description: "Complete a security review of the pending changes on the current branch", argument_hint: "", aliases: [], kind: "builtin" },
+  { name: "deploy", description: "Deploy a branch to staging", argument_hint: "<branch> [staging|production]", aliases: [], kind: "command" },
+  { name: "frontend-design", description: "Build distinctive, production-grade frontend interfaces", argument_hint: "", aliases: [], kind: "skill" },
+  { name: "pdf", description: "Read, fill and merge PDF files", argument_hint: "[<path>]", aliases: [], kind: "skill" },
+  { name: "mcp__docs__search", description: "Search the team docs (MCP)", argument_hint: "<query>", aliases: [], kind: "mcp" },
+];
+
 export const mockApi = {
   async invoke<T>(cmd: string, args: Record<string, any> = {}): Promise<T> {
     const r = await (async () => {
+      const qwf = queueWorkflowMock(cmd, args, { items: () => items, emit });
+      if (qwf !== NOT_HANDLED) return qwf;
       const wf = workflowMock(cmd, args, { items: () => items, connectors: () => connectors, emit });
+      if (cmd === "workflow_runs" && Array.isArray(wf) && !args.workflowId)
+        return [...wf, ...queueRuns(items)].sort((a, b) => b.started_at.localeCompare(a.started_at)).slice(0, args.limit ?? 50);
       if (wf !== NOT_HANDLED) return wf;
+      const mcp = mcpHandle(cmd, args);
+      if (mcp !== NOT_HANDLED) return mcp;
       switch (cmd) {
-        case "agent_slash_commands": return ["compact", "context", "cost", "init", "review", "pr-comments", "security-review", "release-notes", "frontend-design", "deploy"];
-        case "agent_activity": return sessions.filter((s) => s.item_id && s.status !== "idle").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));
+        case "agent_mcp_servers": return [{ name: "tab", status: "connected" }, ...mcpServersInfo().map((m) => ({ name: m.id, status: m.ready ? "connected" : "needs-auth" })), { name: "playwright", status: "failed" }];
+        case "agent_slash_commands": return args.agent === "claude_code" || !args.agent ? mockSlashCommands : args.agent === "opencode" ? [{ name: "init", description: "create/update AGENTS.md", argument_hint: "[arguments]", aliases: [], kind: "builtin" }, { name: "review", description: "review changes [commit|branch|pr], defaults to uncommitted", argument_hint: "[arguments]", aliases: [], kind: "builtin" }] : [];
+        case "agent_subagents": return [{ name: "Explore", description: "Read-only search agent" }, { name: "Plan", description: "Designs implementation plans" }];
+        case "slash_arg_values": return args.kind === "branch" ? ["main", "slash-menu-rich", "fix-hub-sync"] : ["src/", "crates/", "docs/", "README.md", "package.json"].map((p) => `${args.typed}${p}`);
+        case "agent_activity": return sessions.filter((s) => s.item_id && items.find((i) => i.id === s.item_id)?.state !== "done").map((s) => ({ item_id: s.item_id!, agent: s.agent, status: s.status, updated_at: s.updated_at }));
         case "graph_view": return mockGraph(args.projectId ?? null, args.days ?? null);
         case "graph_delete": {
           const g = mockGraph(null, null);
@@ -190,19 +322,120 @@ export const mockApi = {
           const hits = items.filter((i) => (entity.kind === "project" ? `project:${i.project_id}` === entity.key : i.entities.some((x) => x.key === entity.key)));
           return { entity, exclusive: entity.kind === "project" ? [] : exclusiveOf(entity, new Set(hits.map((i) => i.id))), connected: connected.slice(0, 12), items: hits.slice(0, 12), notes: notes.filter((n) => `project:${n.project_id}` === entity.key) };
         }
-        case "ask_chat_open": {
-          const session = sessions.find((s) => s.cwd === `ask:${args.projectId ?? "all"}`) ?? null;
+        case "coordinator_chat_open": {
+          const session = sessions.find((s) => s.cwd === `coordinator:${args.projectId}`) ?? null;
           return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: false } satisfies Chat;
         }
-        case "ask_chat_send": {
-          const key = `ask:${args.projectId ?? "all"}`;
+        case "coordinator_chat_send": {
+          const key = `coordinator:${args.projectId}`;
+          const project = projects.find((p) => p.id === args.projectId);
+          if (!project) throw new Error("That project was deleted.");
           let session = sessions.find((s) => s.cwd === key);
           if (!session) {
-            session = { id: `sess-${Date.now()}`, item_id: null, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: "Ask", status: "working", cwd: key, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+            session = { id: `sess-${Date.now()}`, item_id: null, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: `Coordinator · ${project.name}`, status: "working", cwd: key, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
             sessions.push(session);
           }
-          simulateAskTurn(session, String(args.text), args.focus ?? [], args.attachments ?? []);
+          simulateCoordinatorTurn(session, project, String(args.text), args.attachments ?? []);
           return session;
+        }
+        case "project_resources": return resources.filter((r) => r.project_id === args.projectId).sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.kind.localeCompare(b.kind) || a.title.localeCompare(b.title));
+        case "project_resource_save": {
+          const now = new Date().toISOString();
+          const r = args.resource as ResourceInput;
+          if (r.access === "vault") throw new Error("vault entries are added in the project's Vault, where they're encrypted on this device");
+          if (!r.title.trim()) throw new Error("a resource needs a title");
+          if (!r.url && r.kind !== "note") throw new Error(`a ${r.kind} needs a link`);
+          const old = resources.find((x) => x.project_id === args.projectId && (r.id ? x.id === r.id : x.kind === r.kind && x.url === r.url));
+          const fields = { kind: r.kind, title: r.title.trim(), url: r.url, note: r.note ?? "", access: r.access ?? "all", options: r.options ?? old?.options ?? {}, pinned: r.pinned ?? old?.pinned ?? false, updated_at: now };
+          if (old) return Object.assign(old, fields);
+          const fresh: ProjectResource = { id: `res-${Date.now()}`, project_id: args.projectId, status: r.kind === "note" ? "indexed" : r.kind === "service" ? "live" : "pending", chunks: 0, added_by: "user", created_at: now, ...fields };
+          resources.push(fresh);
+          return fresh;
+        }
+        case "project_file_add": {
+          const now = new Date().toISOString();
+          const name = String(args.name);
+          if (!/\.(pdf|docx|xlsx|md|mdx|markdown|txt|text|csv|tsv|json|html?|rst|org|ya?ml|toml|xml|log)$/i.test(name)) throw new Error(`tab can't read ${name} yet: add PDF, Word (.docx), Excel (.xlsx), markdown or text files`);
+          const fresh: ProjectResource = { id: `res-${Date.now()}`, project_id: args.projectId, kind: "file", title: name, url: `sha256:${Date.now().toString(16).padStart(64, "0")}`, note: "", access: args.access ?? "all", options: { name, size: (args.bytes as Uint8Array).length }, status: "pending", chunks: 0, pinned: false, added_by: "user", created_at: now, updated_at: now };
+          resources.push(fresh);
+          // Indexing happens in the background; pretend it finished.
+          setTimeout(() => Object.assign(fresh, { status: "indexed", chunks: Math.max(1, Math.round(fresh.options.size as number / 1200)), indexed_at: new Date().toISOString() }), 1500);
+          return fresh;
+        }
+        case "vault_status": {
+          const me = mockVault.devices.find((d) => d.this)!;
+          const st: VaultStatus = {
+            state: !mockVault.made ? "none" : vaultOpen() ? "open" : "locked",
+            open_until: vaultOpen() ? new Date(mockVault.openUntil).toISOString() : null,
+            device: me,
+            devices: mockVault.devices.filter((d) => d.state !== "removed"),
+            presence: "Touch ID",
+          };
+          return st;
+        }
+        case "vault_create": {
+          mockVault.made = true;
+          mockVault.openUntil = Date.now() + 10 * 60_000;
+          mockVault.devices = mockVault.devices.filter((d) => d.this);
+          vaultLog("create", "person");
+          return "abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual";
+        }
+        case "vault_unlock": await new Promise((r) => setTimeout(r, 400)); mockVault.openUntil = Date.now() + 10 * 60_000; vaultLog("unlock", "person"); return null;
+        case "vault_lock": mockVault.openUntil = 0; return null;
+        case "vault_ask": return "731 064";
+        case "vault_recover": mockVault.openUntil = Date.now() + 10 * 60_000; return null;
+        case "vault_approve": case "vault_deny": {
+          const d = mockVault.devices.find((x) => x.id === args.deviceId);
+          if (cmd === "vault_approve") vaultMustBeOpen();
+          if (d) Object.assign(d, cmd === "vault_approve" ? { state: "active", approved_by: "Vincent's MacBook Pro" } : { state: "removed" });
+          if (cmd === "vault_approve") vaultLog("device_approve", "person", { device: d?.name });
+          return null;
+        }
+        case "vault_remove_device": {
+          vaultMustBeOpen();
+          const d = mockVault.devices.find((x) => x.id === args.deviceId);
+          if (d) d.state = "removed";
+          vaultLog("device_remove", "person", { device: d?.name });
+          vaultLog("rotate", "person");
+          return null;
+        }
+        case "vault_entries": vaultMustBeOpen(); vaultSeed(args.projectId); return mockVault.entries.filter((e) => e.project_id === args.projectId).map(vaultView);
+        case "vault_entry_save": {
+          vaultMustBeOpen();
+          const input = args.entry as VaultEntryInput;
+          if (!input.title.trim()) throw new Error("a vault entry needs a name");
+          const now = new Date().toISOString();
+          const old = mockVault.entries.find((e) => e.id === input.id);
+          const fields = input.fields.filter((f) => f.label.trim()).map((f) => ({ label: f.label.trim(), value: f.value ?? old?.fields.find((o) => o.label === f.label)?.value ?? "" }));
+          if (old) Object.assign(old, { title: input.title, note: input.note, fields, updated_at: now });
+          const e = old ?? { id: `ve-${Date.now()}`, project_id: args.projectId, kind: "note" as const, title: input.title, note: input.note, fields, created_at: now, updated_at: now };
+          if (!old) mockVault.entries.push(e);
+          vaultLog(old ? "edit" : "add", "person", { title: e.title }, e.id);
+          return vaultView(e);
+        }
+        case "vault_file_add": {
+          vaultMustBeOpen();
+          const now = new Date().toISOString();
+          const name = String(args.name);
+          const e = { id: `ve-${Date.now()}`, project_id: args.projectId, kind: "file" as const, title: name, note: "", fields: [], file: { name, size: (args.bytes as Uint8Array).length }, created_at: now, updated_at: now };
+          mockVault.entries.push(e);
+          vaultLog("add", "person", { title: name }, e.id);
+          return vaultView(e);
+        }
+        case "vault_entry_delete": vaultMustBeOpen(); mockVault.entries = mockVault.entries.filter((e) => e.id !== args.id); vaultLog("delete", "person", null, args.id); return null;
+        case "vault_reveal": {
+          vaultMustBeOpen();
+          const v = mockVault.entries.find((e) => e.id === args.id)?.fields.find((f) => f.label === args.label)?.value ?? "";
+          vaultLog("reveal", "person", { fields: [args.label] }, args.id);
+          return v;
+        }
+        case "vault_file_export": vaultMustBeOpen(); return `~/Downloads/${mockVault.entries.find((e) => e.id === args.id)?.file?.name ?? "file"}`;
+        case "vault_audit": return mockVault.audit.map((a) => (vaultOpen() ? a : { ...a, detail: null }));
+        case "project_resource_reindex": return null;
+        case "project_resource_delete": {
+          const n = resources.length;
+          resources = resources.filter((r) => !(r.project_id === args.projectId && r.id === args.id));
+          return resources.length < n;
         }
         case "search_index_status": {
           const on = !!config.connectors.tab?.settings?.semantic_search;
@@ -215,7 +448,8 @@ export const mockApi = {
         }
         case "projects_list": return [...projects].sort((a, b) => a.name.localeCompare(b.name));
         case "project_save": {
-          const p: Project = { id: args.id ?? `p-${Date.now()}`, name: String(args.name).trim(), color: args.color, icon: args.icon, created_at: new Date().toISOString() };
+          const old = projects.find((x) => x.id === args.id);
+          const p: Project = { id: args.id ?? `p-${Date.now()}`, name: String(args.name).trim(), color: args.color, icon: args.icon, about: old?.about ?? "", rules: old?.rules ?? "", coordinator_watch: old?.coordinator_watch ?? true, coordinator_brief: old?.coordinator_brief ?? "08:00", compact_at: old?.compact_at ?? 200000, created_at: old?.created_at ?? new Date().toISOString() };
           if (!p.name) throw new Error("a project needs a name");
           projects = [...projects.filter((x) => x.id !== p.id), p];
           return p;
@@ -223,6 +457,7 @@ export const mockApi = {
         case "project_delete": {
           projects = projects.filter((x) => x.id !== args.id);
           notes = notes.filter((n) => n.project_id !== args.id);
+          repos = repos.filter((r) => r.project_id !== args.id);
           items = items.map((i) => (i.project_id === args.id ? { ...i, project_id: null } : i));
           return null;
         }
@@ -242,6 +477,69 @@ export const mockApi = {
           return i;
         }
         case "titler_default_rules": return "Name the thread the way a good engineer names a ticket: 3 to 7 words, at most 60 characters.";
+        case "coordinator_settings_save": {
+          const p = projects.find((x) => x.id === args.projectId);
+          if (!p) throw new Error("That project was deleted.");
+          if (args.watch != null) p.coordinator_watch = !!args.watch;
+          if (args.brief != null) p.coordinator_brief = String(args.brief).trim();
+          if (args.compactAt != null) p.compact_at = Math.max(0, Number(args.compactAt));
+          return { ...p };
+        }
+        case "coordinator_history": {
+          const session = sessions.find((s) => s.cwd === `coordinator:${args.projectId}`);
+          return session ? segments.filter((g) => g.session_id === session.id).sort((a, b) => b.ended_at.localeCompare(a.ended_at)) : [];
+        }
+        case "coordinator_segment": return segments.find((g) => g.id === args.segmentId) ?? null;
+        case "coordinator_segment_messages": {
+          const g = segments.find((x) => x.id === args.segmentId);
+          if (!g) return [];
+          const all = messages.filter((m) => m.session_id === g.session_id);
+          const end = all.findIndex((m) => m.kind === "compacted" && m.meta?.segment_id === g.id);
+          const start = all.slice(0, end).map((m) => m.kind).lastIndexOf("compacted");
+          return all.slice(start + 1, end);
+        }
+        case "coordinator_summary_save": {
+          const g = segments.find((x) => x.id === args.segmentId);
+          if (!g) throw new Error("That summary is gone.");
+          g.summary = String(args.summary).trim();
+          g.updated_at = new Date().toISOString();
+          return { ...g };
+        }
+        case "coordinator_compact": {
+          const session = sessions.find((s) => s.cwd === `coordinator:${args.projectId}`);
+          if (!session) throw new Error("The coordinator hasn't started yet.");
+          const all = messages.filter((m) => m.session_id === session.id);
+          const from = all.map((m) => m.kind).lastIndexOf("compacted") + 1;
+          const stretch = all.slice(from);
+          if (!stretch.some((m) => m.role === "assistant" && m.kind === "text")) throw new Error("there's nothing to compact yet");
+          const used = [...stretch].reverse().find((m) => m.kind === "result")?.meta?.context?.used ?? 0;
+          const now = new Date().toISOString();
+          const g: Segment = { id: `seg-${Date.now()}`, session_id: session.id, project_id: String(args.projectId), agent_session_id: session.agent_session_id, summary: "**Open:** Refund for Linear Ltd (waiting on you) · checkout deploy failing since the env rename\n**Decisions:** refunds over $100 need you\n**Watching:** 3 threads; trial cohort ends Nov 15", tokens: used, messages: stretch.length, reason: "manual", started_at: stretch[0]?.created_at ?? now, ended_at: now, updated_at: now };
+          segments.push(g);
+          session.agent_session_id = null;
+          post(session, "system", "compacted", "", { segment_id: g.id, tokens: used, messages: g.messages, reason: "manual", started_at: g.started_at });
+          return g;
+        }
+        case "project_set_profile": {
+          const p = projects.find((x) => x.id === args.id);
+          if (!p) return null;
+          if (args.about != null) p.about = String(args.about).trim();
+          if (args.rules != null) p.rules = String(args.rules).trim();
+          return { ...p };
+        }
+        case "project_repos": return repos.filter((r) => r.project_id === args.projectId).sort((a, b) => a.repo.localeCompare(b.repo));
+        case "project_repo_save": {
+          const now = new Date().toISOString();
+          const name = String(args.repo).trim().replace(/\.git$/, "").replace(/^(https?:\/\/)?github\.com\/|^git@github\.com:/, "");
+          if (!name) throw new Error("a repo needs a name or URL");
+          const old = repos.find((r) => r.project_id === args.projectId && r.repo.toLowerCase() === name.toLowerCase());
+          if (old) return Object.assign(old, { path: args.path ?? old.path, note: args.note ?? old.note, updated_at: now });
+          const r: ProjectRepo = { id: `r-${Date.now()}`, project_id: args.projectId, repo: name, path: args.path ?? null, note: args.note ?? "", added_by: "user", created_at: now, updated_at: now };
+          repos = [...repos, r];
+          return r;
+        }
+        case "project_repo_delete": repos = repos.filter((r) => !(r.project_id === args.projectId && (r.id === args.id || r.repo === args.id))); return null;
+        case "project_items": return items.filter((i) => i.project_id === args.projectId).sort((a, b) => Number(a.state === "done") - Number(b.state === "done") || b.occurred_at.localeCompare(a.occurred_at)).slice(0, 50);
         case "project_notes": return notes.filter((n) => n.project_id === args.projectId);
         case "project_note_save": {
           const now = new Date().toISOString();
@@ -257,12 +555,14 @@ export const mockApi = {
           return sorted(items.filter((i) => args.states.includes(i.state) && `${i.title} ${i.body} ${i.actor} ${i.context}`.toLowerCase().includes(q)));
         }
         case "github_link_summary":
+          if (args.what === "pull" && showcasePulls[`${args.repo}#${args.id}`]) return showcasePulls[`${args.repo}#${args.id}`];
           return args.what === "pull"
             ? { title: "Retry webhook deliveries with exponential backoff", state: "open", author: "dana-k", checks: "passing", updated_at: new Date(Date.now() - 3_600_000).toISOString(), merge_state: "blocked", review_decision: "review_required", open_threads: 2 }
             : { title: "Sample " + args.what, state: "open", author: "sam", checks: null, updated_at: null };
         case "start_dictation": throw "Dictation needs the desktop app.";
         case "attachment_save": return `${URL.createObjectURL(new Blob([args.bytes]))}#${args.name}`;
         case "file_open": return null;
+        case "file_stamps": return (args.paths as string[]).map(() => null);
         case "image_read": return await (await fetch(String(args.path))).arrayBuffer();
         case "file_read": return await (await fetch(String(args.path))).arrayBuffer();
         case "item_by_url": {
@@ -287,6 +587,7 @@ export const mockApi = {
           ] satisfies Block[]);
         }
         case "done_guards": return [];
+        case "context_status": return Object.fromEntries((args.ids as string[]).flatMap((id) => (mockContextStatus[id] ? [[id, mockContextStatus[id]]] : [])));
         case "mark_done": return setState(args.id, "done");
         case "snooze": return setState(args.id, "snoozed", new Date(Date.now() + args.minutes * 60_000).toISOString());
         case "reopen": return setState(args.id, "open");
@@ -334,15 +635,64 @@ export const mockApi = {
         }
         case "create_task": return createTask(args.task.title, args.task.body ?? null);
         case "chat_open": {
-          const session = sessions.find((s) => s.item_id === args.itemId) ?? null;
-          return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: false } satisfies Chat;
+          const session = chatsOf(args.itemId)[0] ?? null;
+          return { session, messages: session ? messages.filter((m) => m.session_id === session.id) : [], approvals: [], running: session?.status === "working" } satisfies Chat;
+        }
+        case "chat_clear": {
+          const item = items.find((i) => i.id === args.itemId)!;
+          const now = new Date().toISOString();
+          const session: Session = { id: `sess-${Date.now()}`, item_id: item.id, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: item.title, status: "idle", cwd: "~/code", created_at: now, updated_at: now, opened_at: now };
+          sessions.push(session);
+          emit({ type: "session_changed", session });
+          return { session, messages: [], approvals: [], running: false } satisfies Chat;
+        }
+        case "chat_list":
+          return chatsOf(args.itemId).map((session) => {
+            const own = messages.filter((m) => m.session_id === session.id && m.kind === "text");
+            return { session, first: own.find((m) => m.role === "user")?.content ?? "", messages: own.length, running: session.status === "working" } satisfies ChatSummary;
+          });
+        case "chat_resume": {
+          const session = sessions.find((s) => s.id === args.sessionId)!;
+          session.opened_at = new Date().toISOString();
+          emit({ type: "session_changed", session });
+          return { session, messages: messages.filter((m) => m.session_id === session.id), approvals: [], running: session.status === "working" } satisfies Chat;
+        }
+        case "chat_mentions": {
+          const all = ["src/", "src/modules/", "src/modules/work/", "src/modules/work/Chat.tsx", "src/modules/work/SlashPanels.tsx", "src/lib/api.ts", "crates/tab-core/src/agents/claude.rs", "README.md", "package.json"];
+          const q = String(args.query).toLowerCase();
+          const fuzzy = (p: string) => { let i = 0; for (const c of p.toLowerCase()) if (c === q[i]) i++; return i === q.length; };
+          return q ? all.filter(fuzzy) : all.filter((p) => !p.slice(0, -1).includes("/"));
+        }
+        case "chat_shell": {
+          const item = args.itemId ? items.find((i) => i.id === args.itemId)! : createTask(`!${args.command}`, null, args.projectId ?? null);
+          let session = chatsOf(item.id)[0];
+          if (!session) {
+            session = { id: `sess-${Date.now()}`, item_id: item.id, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: item.title, status: "idle", cwd: "~/code", created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+            sessions.push(session);
+          }
+          post(session, "system", "shell", String(args.command), { output: args.command === "git status" ? "On branch main\nnothing to commit, working tree clean" : `ran ${args.command}`, exit_code: 0 });
+          return { item, session };
+        }
+        case "chat_rewind_preview":
+          return { files: ["/Users/you/code/src/app.ts", "/Users/you/code/README.md"], insertions: 12, deletions: 3 };
+        case "chat_rewind": {
+          const session = sessions.find((s) => s.id === args.sessionId)!;
+          const m = messages.find((x) => x.id === args.messageId)!;
+          if (args.conversation) for (let i = messages.length - 1; i >= 0; i--) if (messages[i].session_id === session.id && messages[i].id >= m.id) messages.splice(i, 1);
+          post(session, "system", "note", args.conversation ? `Rewound the conversation to before “${m.content.split("\n")[0]}”.` : `Restored 2 files to before “${m.content.split("\n")[0]}”.`);
+          const chat: Chat = { session, messages: messages.filter((x) => x.session_id === session.id), approvals: [], running: false };
+          return { chat, text: m.content, attachments: m.meta?.attachments ?? [], files: { files: args.files ? ["/Users/you/code/src/app.ts"] : [], insertions: 12, deletions: 3 } };
         }
         case "chat_send": {
           const item = args.itemId ? items.find((i) => i.id === args.itemId)! : createTask(String(args.text).split("\n")[0].slice(0, 80), null, args.projectId ?? null);
-          let session = sessions.find((s) => s.item_id === item.id);
+          let session = chatsOf(item.id)[0];
           if (!session) {
             session = { id: `sess-${Date.now()}`, item_id: item.id, agent: config.agent.kind ?? "claude_code", agent_session_id: null, title: item.title, status: "working", cwd: "~/code", created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
             sessions.push(session);
+          }
+          if (session.model == null) {
+            const agent = config.agent;
+            session.model = agent.models?.[session.agent] ?? (agent.kind === session.agent ? agent.model : null) ?? "";
           }
           simulateTurn(session, item, String(args.text), args.attachments ?? []);
           return { item, session };
@@ -362,6 +712,12 @@ export const mockApi = {
           return session;
         }
         case "set_agent_mode": config = { ...config, agent: { ...config.agent, permission_mode: args.mode } }; return config;
+        case "set_session_mode": {
+          const session = sessions.find((s) => s.id === args.sessionId)!;
+          session.permission_mode = args.mode;
+          emit({ type: "session_changed", session: { ...session } });
+          return session;
+        }
         case "chat_stop": return null;
         case "chat_interrupt": return null;
         case "approval_resolve": return true;
@@ -383,12 +739,9 @@ export const mockApi = {
           mockAppUpdated = true;
           return undefined;
         }
-        case "detect_agents": return [
-          mockOpenCode
-            ? { kind: "opencode", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\opencode.cmd", version: "1.4.2", error: null }
-            : { kind: "opencode", found: false, path: null, version: null, error: "`opencode` was not found on PATH.", install_command: "npm install -g opencode-ai" },
-          { kind: "claude_code", found: true, path: "C:\\Users\\vince\\AppData\\Roaming\\npm\\claude.cmd", version: "2.1.318 (Claude Code)", error: null },
-        ];
+        case "detect_agents": return harnesses.map((h) => mockInstalled.has(h.id)
+          ? { kind: h.id, found: true, path: `/usr/local/bin/${h.command}`, version: h.id === "claude_code" ? "2.1.318 (Claude Code)" : "1.4.2", error: null }
+          : { kind: h.id, found: false, path: null, version: null, error: `\`${h.command}\` was not found on PATH.`, install_command: h.install.npm ? `npm install -g ${h.install.npm}` : h.install.unix });
         case "agent_harnesses": return harnesses;
         case "decision_providers": return (decisionData as unknown as DecisionProvider[]).map((p) => ({
           ...p,
@@ -397,10 +750,28 @@ export const mockApi = {
         }));
         case "agent_models": return mockModels();
         case "agent_install": {
-          const steps = ["npm install -g opencode-ai", "added 12 packages in 4s", "Installed OpenCode 1.4.2"];
+          const h = harnesses.find((x) => x.id === args.kind);
+          const steps = [`npm install -g ${h?.install.npm ?? h?.command}`, "added 12 packages in 4s", `Installed ${h?.name} 1.4.2`];
           for (const s of steps) { await new Promise((r) => setTimeout(r, 600)); upgradeListeners.forEach((l) => l(s)); }
-          if ((args.kind as AgentKind) === "opencode") mockOpenCode = true;
+          mockInstalled.add(args.kind as AgentKind);
           return undefined;
+        }
+        case "agent_acp_adapter": {
+          const h = harnesses.find((x) => x.id === args.kind);
+          return h?.acp?.adapter ? mockAdapters.has(args.kind as AgentKind) : null;
+        }
+        case "agent_install_adapter": {
+          const h = harnesses.find((x) => x.id === args.kind);
+          const steps = [`npm install -g ${h?.acp?.adapter?.npm}`, "added 3 packages in 2s"];
+          for (const s of steps) { await new Promise((r) => setTimeout(r, 600)); upgradeListeners.forEach((l) => l(s)); }
+          mockAdapters.add(args.kind as AgentKind);
+          return undefined;
+        }
+        case "set_session_model": {
+          const session = sessions.find((s) => s.id === args.sessionId)!;
+          session.model = args.model ?? "";
+          emit({ type: "session_changed", session: { ...session } });
+          return { ...session };
         }
         case "set_agent_model": {
           const agent: AgentKind = args.agent ?? config.agent.kind ?? "claude_code";
@@ -410,6 +781,7 @@ export const mockApi = {
           config = { ...config, agent: { ...config.agent, kind, models, model: kind ? models[kind] ?? null : null } };
           return config;
         }
+        case "folder_problem": return null;
         case "mcp_info": return { url: "http://127.0.0.1:47821/mcp", token: "mock-token" };
         case "github_pull": return samplePull(args.repo, args.number);
         case "storage_usage": return {
@@ -424,6 +796,40 @@ export const mockApi = {
           fix: "Workflow commands that name a container image run isolated in Docker or Podman.",
         };
         case "storage_clean": return { removed: 3, bytes: 2_200_000 };
+        case "account_status": return { configured: true, account: mockAccount };
+        case "account_sign_in": {
+          await new Promise((r) => setTimeout(r, 1200));
+          mockAccount = args.provider === "apple"
+            ? { user_id: "mock-apple", email: null, name: null, avatar_url: null, provider: "apple" }
+            : { user_id: "mock-google", email: "you@gmail.com", name: "You", avatar_url: null, provider: "google" };
+          return mockAccount;
+        }
+        case "account_cancel_sign_in": return null;
+        case "account_sign_out": mockAccount = null; mockHub = null; return null;
+        case "cloud_hub_status":
+          if (!mockAccount) throw { code: ErrorCode.UNAUTHENTICATED, message: "Sign in to use tab cloud." };
+          return toBinary(HubStatusSchema, mockHub ?? mockCloudHub(HubState.NONE));
+        case "cloud_hubs": {
+          if (!mockAccount) throw { code: ErrorCode.UNAUTHENTICATED, message: "Sign in to use tab cloud." };
+          const personal = (mockHub ?? mockCloudHub(HubState.NONE)).hub!;
+          const team = create(HubSchema, { hubId: "a1".repeat(32), kind: HubKind.TEAM, name: "Design team", role: Role.MEMBER, state: HubState.READY, region: "weur" });
+          return toBinary(HubListSchema, create(HubListSchema, { hubs: [personal, team], plan: mockPlan() }));
+        }
+        case "cloud_hub_set_up": {
+          if (!mockAccount) throw { code: ErrorCode.UNAUTHENTICATED, message: "Sign in to use tab cloud." };
+          // `?hub=fail` fails the first attempt, `?hub=plan` acts as if the trial ended.
+          const q = new URLSearchParams(location.search).get("hub");
+          await new Promise((r) => setTimeout(r, 2500));
+          if (q === "plan") throw { code: ErrorCode.PLAN_REQUIRED, message: "Your tab cloud trial has ended. Choose a plan at tabqueue.com to keep using it." };
+          if (q === "fail" && !mockHubFailed) {
+            mockHubFailed = true;
+            mockHub = mockCloudHub(HubState.FAILED);
+            mockHub.hub!.error = "tab couldn't finish setting up your hub. Try again in a moment.";
+          } else {
+            mockHub = mockCloudHub(HubState.READY);
+          }
+          return toBinary(HubStatusSchema, mockHub);
+        }
         case "hub_status": {
           const started = new Date(Date.now() - 3 * 3600_000).toISOString();
           return {
@@ -431,11 +837,45 @@ export const mockApi = {
             url: "wss://127.0.0.1:47850/hub", fingerprint: "sha256/3f1c9a0e5d7b2c48e6a1f0b9d3c7e2a5b8f4d1c6e9a2b7f0c3d8e5a1b6f9c2d4", http3: true, path: "C:\\Users\\vince\\AppData\\Roaming\\dev.tab.app\\hub.db",
             head: 18_422, records: 6_310, edges: 0, live_leases: 1, storage_bytes: 41_943_040, files: 38, file_bytes: 12_582_912,
             cpu_percent: 2.4 + Math.random() * 3, memory_bytes: 186_000_000 + Math.round(Math.random() * 4_000_000), cpus: 12, pending: 0,
+            cloud_hub: mockMoved ? "5e7ecedf5a07a215de6ad0cc9d6ca7080b0e32c07931566c24ac88cdf129feee" : null, ...(mockOffline && mockMoved
+              ? { cloud_connected: false, cloud_error: "HTTP error: 503 Service Unavailable", pending: 14 }
+              : { cloud_connected: mockMoved, cloud_error: null }),
+            pulled_to: 18_422,
+            synced: [{ what: "Queue items", count: 5_102 }, { what: "Chats", count: 812 }, { what: "Projects", count: 9 }, { what: "Notes", count: 41 }],
             connections: [
               { id: 0, device: "this-computer", client: "tab-desktop/0.1.0", address: "this app", connected_at: started, synced_to: 18_422, behind: 0, this_app: true },
               { id: 3, device: "pixel-8", client: "tab-mobile/0.1.0", address: "127.0.0.1:53122", connected_at: new Date(Date.now() - 600_000).toISOString(), synced_to: 18_410, behind: 12, this_app: false },
             ],
           };
+        }
+        case "hub_move_to_local": mockMoved = false; return 6_310;
+        case "hub_move_to_cloud": {
+          for (let done = 0; done <= 18_422; done += 6_000) await new Promise((r) => setTimeout(r, 300));
+          mockMoved = true;
+          return { kind: "moved", changes: 18_422 };
+        }
+        case "runners": {
+          const now = new Date().toISOString();
+          return [
+            { id: "this-computer", name: "This MacBook", kind: "computer", harnesses: ["claude_code", "codex"], repos: ["acme/api"], connections: ["github"], seen_at: now, awake: true, this_app: true },
+            { id: "desk-pc", name: "Desk PC", kind: "computer", harnesses: ["claude_code"], repos: [], connections: [], seen_at: new Date(Date.now() - 3 * 3600_000).toISOString(), awake: false, this_app: false },
+            ...(mockMoved ? [{ id: "cloud", name: "tab cloud", kind: "cloud", harnesses: ["claude_code", "opencode", "codex", "pi"], repos: [], connections: ["linear"], seen_at: now, awake: true, this_app: false }] : []),
+          ];
+        }
+        case "jobs_recent": return [];
+        case "cloud_runner_status":
+        case "cloud_runner_wake":
+          if (!mockMoved) throw { code: ErrorCode.NOT_FOUND, message: "This computer's work isn't in tab cloud yet." };
+          return toBinary(RunnerStatusSchema, create(RunnerStatusSchema, { state: RunnerState.RUNNING, seenAt: timestampNow(), detail: "Polling 1 connection." }));
+        case "cloud_secret_names": return mockSecrets;
+        case "cloud_secret_set":
+          mockSecrets = mockSecrets.filter((n) => n !== args.name).concat(args.value ? [args.name as string] : []);
+          return mockSecrets;
+        case "connection_runs_on": {
+          if (args.runsOn === "cloud" && !mockMoved) throw { code: ErrorCode.BAD_REQUEST, message: "Move your hub to tab cloud first (Settings → Hub), then a connection can run there." };
+          const c = config.connectors[args.connection as string];
+          if (c) config = { ...config, connectors: { ...config.connectors, [args.connection as string]: { ...c, runs_on: args.runsOn as "cloud" | "this_computer" } } };
+          return config;
         }
         case "storage_remove_checkouts": {
           const gone = mockCheckouts.filter((c) => !args.repo || (c.repo === args.repo && c.number === args.number));
@@ -498,6 +938,10 @@ export const mockApi = {
     ghCodeListeners.add(cb);
     return () => void ghCodeListeners.delete(cb);
   },
+  onMcpSignIn(cb: (e: McpSignInEvent) => void) {
+    mcpSignInListeners.add(cb);
+    return () => void mcpSignInListeners.delete(cb);
+  },
 };
 
 let mockCheckouts = [
@@ -515,6 +959,229 @@ let lspServers: LspServer[] = [
 
 let gh: GhStatus = { installed: false, path: null, version: null, logged_in: false, user: null, install_command: "brew install gh", error: null };
 const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
+
+// Remote MCP connections. Sign-ins finish on their own after a moment.
+const mcpCatalog: McpCatalogEntry[] = [
+  { id: "linear", name: "Linear", url: "https://mcp.linear.app/mcp", description: "Agents can find, create and update issues, projects and comments.", category: "work", color: "#5e6ad2", fills_queue: true, kinds: [{ kind: "linear.issue", label: "Linear issue", icon: "linear", tone: "accent" }] },
+  { id: "notion", name: "Notion", url: "https://mcp.notion.com/mcp", description: "Agents can search, read and edit pages and databases.", category: "work", color: "#191919", fills_queue: true, queue_query: "tasks assigned to me", kinds: [{ kind: "notion.page", label: "Notion page", icon: "notion", tone: "neutral" }, { kind: "notion.database", label: "Notion database", icon: "notion", tone: "neutral" }] },
+  { id: "atlassian", name: "Jira & Confluence", url: "https://mcp.atlassian.com/v1/mcp", description: "Agents can search, comment on and move tickets, and read pages.", category: "work", color: "#1868db", fills_queue: false, kinds: [] },
+  { id: "sentry", name: "Sentry", url: "https://mcp.sentry.dev/mcp", description: "Agents can look up issues, stack traces and events.", category: "code", color: "#362d59", fills_queue: true, kinds: [{ kind: "sentry.issue", label: "Sentry issue", icon: "alert", tone: "danger" }] },
+  { id: "vercel", name: "Vercel", url: "https://mcp.vercel.com", description: "Agents can read deployments, build logs and project settings.", category: "code", color: "#000000", fills_queue: false, kinds: [] },
+  { id: "stripe", name: "Stripe", url: "https://mcp.stripe.com", description: "Agents can look up customers, payments, invoices and disputes.", category: "work", color: "#635bff", fills_queue: false, kinds: [] },
+];
+const mcpSignedIn = new Map<string, string>();
+/** Connections whose sign-in for tab cloud the hub keeps. */
+const mcpCloudSignedIn = new Set<string>();
+const mcpSignInListeners = new Set<(e: McpSignInEvent) => void>();
+let mailSignedIn: EmailSignInStatus["signed_in"] = null;
+const mockMcpTools: Omit<McpTool, "policy" | "chosen" | "cloud_policy" | "cloud_chosen">[] = [
+  { name: "list_issues", title: "List issues", description: "Search and filter issues.", read_only: true },
+  { name: "get_issue", title: "Get issue", description: "One issue with its comments.", read_only: true },
+  { name: "list_projects", title: "List projects", description: "Projects in the workspace.", read_only: true },
+  { name: "create_comment", title: "Comment", description: "Comment on an issue.", read_only: false },
+  { name: "update_issue", title: "Update issue", description: "Change status, assignee or estimate.", read_only: false },
+  { name: "create_issue", title: "Create issue", description: "Create an issue.", read_only: false },
+];
+function mcpServersInfo(): McpServerInfo[] {
+  return Object.entries(config.mcp_servers ?? {}).map(([id, c]) => ({
+    ...c,
+    id,
+    ready: c.enabled && (!!c.command || !c.sign_in || mcpSignedIn.has(id)),
+    signed_in_at: mcpSignedIn.get(id) ?? null,
+    error: null,
+    tool_count: !c.sign_in || mcpSignedIn.has(id) ? mockMcpTools.length : null,
+    cloud: mockImport.find((m) => m.key === c.imported_from)?.cloud ?? { portable: true, why_not: null, needs_key: false },
+    keys: !!c.headers?.length || !!c.command?.env?.length,
+    queue_sync: mcpCatalog.find((e) => e.id === c.catalog)?.fills_queue
+      ? { on: c.queue !== false, last_sync: c.queue !== false && mcpSignedIn.has(id) ? mcpSignedIn.get(id)! : null, error: null, found: c.queue !== false && mcpSignedIn.has(id) ? 3 : null }
+      : null,
+  }));
+}
+
+/** What Claude Code has, in the mock. */
+const here = { portable: false, why_not: null, needs_key: false };
+const mockImport: (McpImportCandidate & { config: McpServerConfig })[] = [
+  { key: "user:linear", name: "linear", source: "user", path: null, kind: "remote", url: "https://mcp.linear.app/mcp", command: null, header_names: [], env_names: [], cloud: { portable: true, why_not: null, needs_key: false }, catalog: "linear", status: "new", existing: null, id: "linear", note: null,
+    config: { name: "Linear", url: "https://mcp.linear.app/mcp", enabled: true, sign_in: true, catalog: "linear", imported_from: "user:linear" } },
+  { key: "user:github", name: "github", source: "user", path: null, kind: "remote_keys", url: "https://api.githubcopilot.com/mcp/", command: null, header_names: ["Authorization"], env_names: [], cloud: { portable: true, why_not: null, needs_key: true }, catalog: null, status: "new", existing: null, id: "github", note: null,
+    config: { name: "github", url: "https://api.githubcopilot.com/mcp/", enabled: true, sign_in: false, headers: ["Authorization"], imported_from: "user:github" } },
+  { key: "user:playwright", name: "playwright", source: "user", path: null, kind: "local", url: null, command: "npx -y @playwright/mcp@latest", header_names: [], env_names: [], cloud: { portable: true, why_not: null, needs_key: false }, catalog: null, status: "new", existing: null, id: "playwright", note: null,
+    config: { name: "playwright", url: "", enabled: true, sign_in: false, command: { command: "npx", args: ["-y", "@playwright/mcp@latest"] }, imported_from: "user:playwright" } },
+  { key: "project:/users/vincent/code/shop:postgres", name: "postgres", source: "project", path: "/Users/vincent/code/shop", kind: "local", url: null, command: "uvx postgres-mcp --access-mode=restricted", header_names: [], env_names: ["DATABASE_URI"], cloud: { ...here, why_not: "talks to this computer or your network", needs_key: true }, catalog: null, status: "new", existing: null, id: "postgres", note: null,
+    config: { name: "postgres", url: "", enabled: true, sign_in: false, command: { command: "uvx", args: ["postgres-mcp", "--access-mode=restricted"], env: ["DATABASE_URI"], cwd: "/Users/vincent/code/shop" }, imported_from: "project:/users/vincent/code/shop:postgres" } },
+  { key: "repo:/users/vincent/code/shop:docs", name: "docs", source: "repo", path: "/Users/vincent/code/shop", kind: "local", url: null, command: "npx -y @acme/docs-mcp", header_names: [], env_names: ["DOCS_TOKEN"], cloud: { portable: true, why_not: null, needs_key: true }, catalog: null, status: "new", existing: null, id: "docs", note: "DOCS_TOKEN isn't set for tab, so it'll be empty.",
+    config: { name: "docs", url: "", enabled: true, sign_in: false, command: { command: "npx", args: ["-y", "@acme/docs-mcp"], env: ["DOCS_TOKEN"], cwd: "/Users/vincent/code/shop" }, imported_from: "repo:/users/vincent/code/shop:docs" } },
+  { key: "user:obsidian", name: "obsidian", source: "user", path: null, kind: "local", url: null, command: "/Users/vincent/bin/obsidian-mcp ~/Notes", header_names: [], env_names: [], cloud: { ...here, why_not: "runs a program from this computer" }, catalog: null, status: "new", existing: null, id: "obsidian", note: null,
+    config: { name: "obsidian", url: "", enabled: true, sign_in: false, command: { command: "/Users/vincent/bin/obsidian-mcp", args: ["~/Notes"] }, imported_from: "user:obsidian" } },
+  { key: "claude_ai:Notion", name: "Notion", source: "claude_ai", path: null, kind: "claude_ai", url: "https://mcp.notion.com/mcp", command: null, header_names: [], env_names: [], cloud: { portable: true, why_not: null, needs_key: false }, catalog: "notion", status: "new", existing: null, id: "notion", note: null,
+    config: { name: "Notion", url: "https://mcp.notion.com/mcp", enabled: true, sign_in: true, catalog: "notion", imported_from: "claude_ai:Notion" } },
+  { key: "user:old-sse", name: "old-sse", source: "user", path: null, kind: "remote", url: "https://example.com/sse", command: null, header_names: [], env_names: [], cloud: here, catalog: null, status: "unsupported", existing: null, id: "old-sse", note: "It uses the older SSE transport, which tab doesn't speak yet.",
+    config: { name: "", url: "", enabled: false, sign_in: false } },
+  { key: "claude_ai:Health", name: "Health", source: "claude_ai", path: null, kind: "claude_ai", url: null, command: null, header_names: [], env_names: [], cloud: here, catalog: null, status: "unsupported", existing: null, id: "health", note: "tab can't read claude.ai connectors' settings, and doesn't know this one. It keeps working in chats that aren't strict.",
+    config: { name: "", url: "", enabled: false, sign_in: false } },
+];
+function mcpImportScan(): McpImportCandidate[] {
+  const servers = config.mcp_servers ?? {};
+  return mockImport.map(({ config: c, ...m }) => {
+    if (m.status === "unsupported") return m;
+    const existing = Object.entries(servers).find(([, s]) => s.imported_from === m.key || (!!c.url && s.url === c.url) || (!!m.catalog && s.catalog === m.catalog))?.[0] ?? null;
+    return existing ? { ...m, status: "imported", existing, id: existing } : m;
+  });
+}
+function mcpSetServers(next: Record<string, McpServerConfig>) {
+  config = { ...config, mcp_servers: next };
+  emit({ type: "config_changed" });
+}
+function mcpFinishSoon(id: string, cloud = false) {
+  setTimeout(() => {
+    if (cloud) mcpCloudSignedIn.add(id);
+    else mcpSignedIn.set(id, new Date().toISOString());
+    mcpSignInListeners.forEach((l) => l({ id, ok: true, error: null, cloud }));
+    emit({ type: "config_changed" });
+  }, 1800);
+}
+function mcpHandle(cmd: string, args: Record<string, any>): unknown {
+  const servers = config.mcp_servers ?? {};
+  switch (cmd) {
+    case "mcp_catalog": return mcpCatalog;
+    case "mcp_servers": return mcpServersInfo();
+    case "mcp_probe": {
+      let u: URL;
+      try { u = new URL(String(args.url).trim()); } catch { throw "That isn't a URL. It should look like https://example.com/mcp"; }
+      if (u.protocol !== "https:" && u.hostname !== "localhost") throw "MCP servers need an https:// address";
+      const host = u.hostname.replace(/^mcp\./, "").split(".")[0];
+      let id = host.toLowerCase().replace(/[^a-z0-9-]/g, "-") || "mcp";
+      while (servers[id]) id = id + "-2";
+      const probe: McpProbe = { url: u.toString(), name: host.charAt(0).toUpperCase() + host.slice(1), sign_in: !u.hostname.includes("open"), id };
+      return probe;
+    }
+    case "mcp_add": {
+      if (servers[args.id]) throw "There's already a connection called " + args.id + ".";
+      mcpSetServers({ ...servers, [args.id]: { name: args.name, url: args.url, enabled: true, sign_in: args.signIn, ...(args.catalog ? { catalog: args.catalog } : {}) } });
+      if (!args.signIn) return null;
+      mcpFinishSoon(args.id);
+      return args.url + "#authorize";
+    }
+    case "mcp_sign_in": mcpFinishSoon(args.id); return (servers[args.id]?.url ?? "") + "#authorize";
+    case "mcp_sign_out": mcpSignedIn.delete(args.id); emit({ type: "config_changed" }); return null;
+    case "email_sign_in_status": {
+      const status: EmailSignInStatus = {
+        providers: [{ id: "google", name: "Google", available: true }, { id: "microsoft", name: "Microsoft", available: true }],
+        signed_in: mailSignedIn,
+      };
+      return status;
+    }
+    case "email_sign_in": {
+      const provider = args.provider as MailProvider;
+      setTimeout(() => {
+        const address = provider === "google" ? "you@gmail.com" : "you@outlook.com";
+        mailSignedIn = { provider, address, signed_in_at: new Date().toISOString() };
+        const host = provider === "google" ? "imap.gmail.com" : "outlook.office365.com";
+        const prev = config.connectors.email?.settings ?? {};
+        config = { ...config, connectors: { ...config.connectors, email: { enabled: true, settings: { ...prev, auth: provider, host, port: 993, username: address } } } };
+        emit({ type: "config_changed" });
+      }, 1800);
+      return provider === "google" ? "https://accounts.google.com/#authorize" : "https://login.microsoftonline.com/#authorize";
+    }
+    case "email_sign_out": {
+      mailSignedIn = null;
+      const c = config.connectors.email;
+      if (c?.settings.auth) {
+        const { auth: _, ...settings } = c.settings;
+        config = { ...config, connectors: { ...config.connectors, email: { ...c, enabled: false, settings } } };
+      }
+      emit({ type: "config_changed" });
+      return null;
+    }
+    case "mcp_remove": {
+      const rest = { ...servers };
+      delete rest[args.id];
+      mcpSignedIn.delete(args.id);
+      mcpSetServers(rest);
+      return null;
+    }
+    case "mcp_set_enabled": mcpSetServers({ ...servers, [args.id]: { ...servers[args.id], enabled: args.enabled } }); return null;
+    case "mcp_set_queue": mcpSetServers({ ...servers, [args.id]: { ...servers[args.id], queue: args.on ? undefined : false, queue_query: args.query?.trim() || undefined } }); return null;
+    case "mcp_tools": {
+      const chosen = servers[args.id]?.tools ?? {};
+      const cloud = servers[args.id]?.cloud_tools ?? {};
+      return mockMcpTools.map((t) => ({
+        ...t,
+        policy: chosen[t.name] ?? (t.read_only ? "allow" : "ask"), chosen: t.name in chosen,
+        cloud_policy: cloud[t.name] ?? (t.read_only ? "allow" : "off"), cloud_chosen: t.name in cloud,
+      }));
+    }
+    case "mcp_cloud_states": {
+      const fits = new Map(mcpServersInfo().map((s) => [s.id, s.cloud]));
+      const states: McpCloudState[] = Object.entries(servers).map(([id, c]) => {
+        const fit = fits.get(id);
+        const allowed = !!c.cloud_jobs;
+        if (!mockMoved) return { id, allowed, state: "no_hub", why: "Move your hub to tab cloud first (Settings → Hub)." };
+        if (fit && !fit.portable) return { id, allowed, state: "cant_run", why: fit.why_not };
+        if (!allowed) return { id, allowed, state: "off", why: null };
+        return { id, allowed, state: !c.sign_in || mcpCloudSignedIn.has(id) ? "ready" : "sign_in", why: null };
+      });
+      return states;
+    }
+    case "mcp_set_cloud": {
+      if (args.on && !mockMoved) throw "Move your hub to tab cloud first (Settings → Hub), then connections can be used in cloud jobs.";
+      const s = servers[args.id];
+      mcpSetServers({ ...servers, [args.id]: { ...s, cloud_jobs: args.on || undefined } });
+      if (!args.on || !s.sign_in || mcpCloudSignedIn.has(args.id)) return null;
+      mcpFinishSoon(args.id, true);
+      return s.url + "#authorize-tab-cloud";
+    }
+    case "mcp_cloud_sign_in": mcpFinishSoon(args.id, true); return (servers[args.id]?.url ?? "") + "#authorize-tab-cloud";
+    case "mcp_set_cloud_tool": {
+      if (args.policy === "ask") throw "Cloud jobs can't ask: nobody is there to answer. Pick Allowed or Off.";
+      const s = servers[args.id];
+      const cloud_tools = { ...(s.cloud_tools ?? {}) };
+      if (args.policy) cloud_tools[args.tool] = args.policy;
+      else delete cloud_tools[args.tool];
+      mcpSetServers({ ...servers, [args.id]: { ...s, cloud_tools } });
+      return null;
+    }
+    case "cloud_job_gaps": {
+      // One finished cloud job on the first item that needed Linear (and a write it doesn't have), and Notion.
+      const gaps: JobGaps[] = [{
+        job_id: "job-mock-1", run_id: "run-mock-1", workflow_id: "wf-triage", workflow_name: "Triage new Sentry issues", step_id: "fix",
+        item_id: items[0]?.id ?? null, failed: false, finished_at: ago(25),
+        missing: [
+          servers.linear?.cloud_jobs
+            ? { connection: "linear", name: "Linear", tool: "create_issue", why: "tool_off" }
+            : { connection: "linear", name: "Linear", why: "not_in_cloud" },
+          { connection: "obsidian", name: "obsidian", why: "only_on_computer" },
+        ],
+      }];
+      return gaps;
+    }
+    case "mcp_import_scan": return mcpImportScan();
+    case "mcp_import": {
+      const found = mcpImportScan();
+      const next = { ...servers };
+      const results: McpImportResult[] = [];
+      for (const key of args.keys as string[]) {
+        const c = found.find((f) => f.key === key && (f.status === "new" || f.status === "changed"));
+        const cfg = mockImport.find((m) => m.key === key)?.config;
+        if (!c || !cfg) continue;
+        next[c.id] = cfg;
+        results.push({ key, id: c.id, name: cfg.name, sign_in: cfg.sign_in, error: null });
+      }
+      mcpSetServers(next);
+      return results;
+    }
+    case "mcp_set_tool": {
+      const s = servers[args.id];
+      const tools = { ...(s.tools ?? {}) };
+      if (args.policy) tools[args.tool] = args.policy;
+      else delete tools[args.tool];
+      mcpSetServers({ ...servers, [args.id]: { ...s, tools } });
+      return null;
+    }
+  }
+  return NOT_HANDLED;
+}
+
 const upgradeListeners = new Set<(line: string) => void>();
 let mockUpgraded = false;
 const appUpdateListeners = new Set<(p: { downloaded: number; total: number | null }) => void>();
@@ -523,8 +1190,23 @@ let mockAppUpdated = false;
 // A link an agent attached, to show links rendered by what they point at.
 let contexts: ContextEntry[] = items.slice(0, 4).map((i) => ({ id: `ctx-seed-${i.id}`, item_id: i.id, section: "context", pinned: false, ref_item: null, url: "https://github.com/acme/payments/pull/491", title: "https://github.com/acme/payments/pull/491", summary: null, added_by: "agent", created_at: new Date().toISOString() }));
 let projects: Project[] = [
-  { id: "p-pay", name: "Payments", color: "#7c5cff", icon: "zap", created_at: ago(9000) },
-  { id: "p-sec", name: "SOC 2", color: "#e5484d", icon: "shield", created_at: ago(9000) },
+  { id: "p-pay", name: "Payments", color: "#7c5cff", icon: "zap", about: "Checkout, the ledger and refunds: everything that moves money for Acme's customers.", rules: "- Every change to the ledger needs a review from Priya.\n- Feature-flag anything customer-facing.", coordinator_watch: true, coordinator_brief: "08:00", compact_at: 200000, created_at: ago(9000) },
+  { id: "p-sec", name: "SOC 2", color: "#e5484d", icon: "shield", about: "", rules: "", coordinator_watch: true, coordinator_brief: "08:00", compact_at: 200000, created_at: ago(9000) },
+];
+let segments: Segment[] = [];
+let repos: ProjectRepo[] = [
+  { id: "r1", project_id: "p-pay", repo: "acme/payments", path: "~/src/payments", note: "Checkout API and ledger service", added_by: "agent", created_at: ago(3000), updated_at: ago(3000) },
+  { id: "r2", project_id: "p-pay", repo: "acme/web", path: null, note: "Checkout UI", added_by: "user", created_at: ago(900), updated_at: ago(900) },
+];
+let resources: ProjectResource[] = [
+  { id: "res1", project_id: "p-pay", kind: "website", title: "acme.com/pricing", url: "https://acme.com/pricing", note: "Public pricing and plans", access: "all", options: { depth: 1, schedule: "daily" }, status: "indexed", chunks: 42, pinned: false, added_by: "user", created_at: ago(2000), updated_at: ago(60), indexed_at: ago(45), last_used_at: ago(12) },
+  { id: "res2", project_id: "p-pay", kind: "service", title: "Stripe dashboard", url: "https://dashboard.stripe.com", note: "Charges, refunds, disputes", access: "coordinator", options: {}, status: "live", chunks: 0, pinned: false, added_by: "user", created_at: ago(2000), updated_at: ago(2000) },
+  { id: "res3", project_id: "p-pay", kind: "service", title: "Cloudflare · checkout-edge", url: "https://dash.cloudflare.com/acme/workers/services/view/checkout-edge", note: "Edge worker in front of checkout", access: "all", options: { watch_deploys: true }, status: "live", chunks: 0, pinned: false, added_by: "user", created_at: ago(1500), updated_at: ago(1500) },
+  { id: "res4", project_id: "p-pay", kind: "email", title: "Billing inbox", url: "label:billing", note: "Customer billing questions", access: "coordinator", options: {}, status: "indexed", chunks: 118, pinned: false, added_by: "user", created_at: ago(1500), updated_at: ago(30), indexed_at: ago(20), last_used_at: ago(240) },
+  { id: "res7", project_id: "p-pay", kind: "file", title: "Merchant agreement 2026.pdf", url: `sha256:${"ab".repeat(32)}`, note: "Signed terms with our processor", access: "coordinator", options: { name: "Merchant agreement 2026.pdf", size: 184_220 }, status: "indexed", chunks: 37, pinned: false, added_by: "user", created_at: ago(800), updated_at: ago(800), indexed_at: ago(799) },
+  { id: "res8", project_id: "p-pay", kind: "website", title: "status.acme.com", url: "https://status.acme.com", note: "", access: "all", options: { depth: 0, schedule: "hourly" }, status: "failed", chunks: 0, pinned: false, added_by: "agent", created_at: ago(300), updated_at: ago(300), index_error: "status.acme.com didn't answer (timed out)" },
+  { id: "res5", project_id: "p-pay", kind: "note", title: "Refund policy", url: null, note: "Full refunds within 30 days of a charge. Over $500 needs Priya.", access: "all", options: {}, status: "indexed", chunks: 1, pinned: true, added_by: "user", created_at: ago(900), updated_at: ago(900), indexed_at: ago(900), last_used_at: ago(3) },
+  { id: "res6", project_id: "p-pay", kind: "link", title: "Runbook: checkout incidents", url: "https://docs.google.com/document/d/1abc", note: "", access: "all", options: {}, status: "needs_sign_in", chunks: 0, pinned: false, added_by: "agent", created_at: ago(400), updated_at: ago(400) },
 ];
 let notes: ProjectNote[] = [
   { id: "n1", project_id: "p-pay", topic: "deploys", text: "Payments deploys go through the staging branch; prod is cut on Tuesdays and Thursdays.", added_by: "agent", session_id: null, sources: [], created_at: ago(3000), updated_at: ago(3000) },
@@ -533,6 +1215,12 @@ let notes: ProjectNote[] = [
 // Put some of the sample work into projects.
 items = items.map((i) => ({ ...i, project_id: /checkout|payment|PAY-|ledger|refund/i.test(`${i.title} ${i.body}`) ? "p-pay" : /SOC 2|security|audit/i.test(`${i.title} ${i.body}`) ? "p-sec" : null }));
 const sessions: Session[] = [];
+
+/** A task's chats, the one opened last first. */
+function chatsOf(itemId: string) {
+  const opened = (s: Session) => s.opened_at ?? s.created_at;
+  return sessions.filter((s) => s.item_id === itemId).sort((a, b) => opened(b).localeCompare(opened(a)));
+}
 const messages: SessionMessage[] = [];
 let msgId = 1;
 
@@ -566,7 +1254,7 @@ const withImages = (a: string[]) => (a.length ? { attachments: a } : null);
 function simulateTurn(session: Session, item: QueueItem, text: string, attachments: string[] = []) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (async () => {
-    post(session, "user", "text", text, withImages(attachments));
+    post(session, "user", "text", text, { ...withImages(attachments), agent_uuid: `u-${msgId}` });
     status(session, "working");
     await sleep(500);
     post(session, "assistant", "tool", "tab: tab_search: checkout", { tool: "mcp__tab__tab_search" });
@@ -578,7 +1266,15 @@ function simulateTurn(session: Session, item: QueueItem, text: string, attachmen
       post(session, "assistant", "tool", `tab: tab_add_found: ${related.title}`, { tool: "mcp__tab__tab_add_found" });
       post(session, "tool", "tool_result", "Added under found.");
     }
-    const reply = `I looked through your queue for context on **${item.title}**.\n\n- The #incident-checkout thread is the same problem, so I filed it under Found.\n- Next I'd check the cart cache TTL change from the 14:10 deploy.\n\nWant me to open a branch and draft the fix?`;
+    const reply = [
+      `I looked through your queue for context on **${item.title}**.`,
+      "- The #incident-checkout thread is the same problem, so I filed it under Found.\n- Next I'd check the cart cache TTL change from the 14:10 deploy.",
+      "The deploy shortened the TTL in `src/cart/cache.ts`:",
+      "```ts\nexport const CART_TTL_MS = 5_000; // was 60_000\n\nexport function cartKey(userId: string) {\n  return `cart:${userId}`;\n}\n```",
+      "| Before | After | p99 |\n| --- | --- | --- |\n| 60s TTL | 5s TTL | 400ms → 1.7s |",
+      "1. Put the TTL back to 60s.\n2. Add a test that pins it.",
+      "Want me to open a branch and draft the fix?",
+    ].join("\n\n");
     for (let i = 0; i < reply.length; i += 12) {
       emit({ type: "session_delta", session_id: session.id, text: reply.slice(i, i + 12) });
       await sleep(30);
@@ -588,6 +1284,70 @@ function simulateTurn(session: Session, item: QueueItem, text: string, attachmen
     status(session, "idle");
   })();
 }
+
+/**
+ * `?showcase`: the incident item opens on a finished turn and a second one
+ * caught mid-work (plan, tool calls, tests running), for screenshots
+ * of the chat on tabqueue.com.
+ */
+const showcasePulls: Record<string, LinkSummary> = {
+  "acme/payments#488": { title: "Cut cart cache TTL to 5s for price freshness", state: "merged", author: "marco-r", checks: "passing", updated_at: ago(70) },
+  "acme/payments#493": { title: "Restore cart cache TTL behind cart_cache_ttl flag", state: "open", author: "you", checks: "pending", updated_at: ago(1), merge_state: "blocked", review_decision: "review_required", open_threads: 0 },
+};
+
+function showcase() {
+  const item = items.find((i) => i.title.includes("#incident-checkout"));
+  if (!item) return;
+  const session: Session = { id: "sess-showcase", item_id: item.id, agent: "claude_code", agent_session_id: "4f1c-showcase", title: "Checkout latency after the 14:10 deploy", status: "working", cwd: "~/src/payments", created_at: ago(6), updated_at: ago(0) };
+  sessions.push(session);
+  const tool = (content: string, name: string, input: unknown, result?: string) => {
+    post(session, "assistant", "tool", content, { tool: name, input });
+    if (result !== undefined) post(session, "tool", "tool_result", result);
+  };
+  post(session, "user", "text", "What changed in the 14:10 deploy? Is the cart cache the cause?");
+  tool("mcp__tab__tab_search: 14:10 deploy checkout", "mcp__tab__tab_search", { query: "14:10 deploy checkout" }, "3 results");
+  post(session, "assistant", "text", "The incident thread puts the slowdown right at 14:10. Checking what that deploy shipped.");
+  tool("git log --oneline --since=13:30 origin/main", "Bash", { command: "git log --oneline --since=13:30 origin/main", description: "List commits in the deploy" }, "a41c2e9 Cut cart cache TTL to 5s for price freshness (#488)\n7be0d13 Bump tracing to 0.1.41");
+  tool("Read src/cart/cache.rs", "Read", { file_path: "src/cart/cache.rs" }, "const CART_TTL: Duration = Duration::from_secs(5);");
+  tool("mcp__tab__tab_add_found: #incident-checkout thread", "mcp__tab__tab_add_found", { title: "#incident-checkout thread" }, "Added under found.");
+  post(session, "assistant", "text",
+    "Yes. The 14:10 deploy shipped one real change:\n\nhttps://github.com/acme/payments/pull/488\n\nIt cut `CART_TTL` from **300s to 5s**, so almost every `/checkout` call now misses the cache and rebuilds the cart from Postgres. That matches the p99 jump from 400ms to 1.7s in the incident thread, which I filed under Found.\n\nThe safe fix is to restore 300s behind a flag, so pricing can still opt into the short TTL.");
+  post(session, "system", "result", "", { cost_usd: 0.034, duration_ms: 14200, context: { model: "claude-opus-5-5", window: 200000, used: 46800, first_call: 22400, cache_read: 41200, cache_write: 4300, fresh_input: 1300, output: 1100, tab_context: 2600 } });
+  post(session, "user", "text", "Restore the TTL behind a flag, open a PR, and let Priya know in the thread.");
+  tool("mcp__tab__tab_steps", "mcp__tab__tab_steps", { steps: [
+    { title: "Find the TTL change", status: "completed" },
+    { title: "Restore 300s behind a flag", status: "completed" },
+    { title: "Run the cart tests", status: "in_progress", activeForm: "Running the cart tests" },
+    { title: "Open a PR", status: "pending" },
+    { title: "Let Priya know in #incident-checkout", status: "pending" },
+  ] });
+  tool("git switch -c fix/cart-cache-ttl", "Bash", { command: "git switch -c fix/cart-cache-ttl", description: "Make a branch" }, "Switched to a new branch 'fix/cart-cache-ttl'");
+  tool("Edit src/cart/cache.rs", "Edit", { file_path: "src/cart/cache.rs" }, "Updated src/cart/cache.rs");
+  tool("Edit src/flags.rs", "Edit", { file_path: "src/flags.rs" }, "Updated src/flags.rs");
+  post(session, "assistant", "text", "`CART_TTL` is back to 300s behind the `cart_cache_ttl` flag, so pricing can still opt into 5s. Running the tests before I open the PR.");
+  tool("cargo test -p cart", "Bash", { command: "cargo test -p cart", description: "Run the cart tests" });
+}
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("showcase")) showcase();
+
+/** Task statuses by item, for `?statuses`: what the GitHub connector would report. */
+const mockContextStatus: Record<string, ContextStatus[]> = {};
+
+/** `?statuses`: idle chats on the first few items, one per row status. */
+function statusesDemo() {
+  // Skip the first: the app opens it, which reads its reply.
+  const open = items.filter((i) => i.state === "open").slice(1, 5);
+  const later = new Date(Date.now() + 60_000).toISOString();
+  const pr = (n: number, label: string, tone: ContextStatus["tone"], waiting_on: ContextStatus["waiting_on"]): ContextStatus =>
+    ({ source: "github", label, detail: `acme/api#${n}: ${label}`, tone, waiting_on, finished: waiting_on === "nobody", url: `https://github.com/acme/api/pull/${n}` });
+  open.forEach((item, k) => {
+    // The first finished a turn you haven't read; the rest you've read.
+    sessions.push({ id: `sess-status-${k}`, item_id: item.id, agent: "claude_code", agent_session_id: null, title: item.title, status: "idle", cwd: "~/code", created_at: ago(30), updated_at: k === 0 ? later : ago(30) });
+  });
+  if (open[1]) mockContextStatus[open[1].id] = [pr(114, "Review PR", "accent", "you")];
+  if (open[2]) mockContextStatus[open[2].id] = [pr(115, "In review", "info", "others")];
+  if (open[3]) mockContextStatus[open[3].id] = [pr(116, "Merged", "success", "nobody")];
+}
+if (typeof location !== "undefined" && new URLSearchParams(location.search).has("statuses")) statusesDemo();
 
 /** The demo items' entities as a graph, with projects as nodes. */
 /** Keys of graph nodes the person deleted, so the mock graph forgets them. */
@@ -626,21 +1386,24 @@ function mockGraph(projectId: string | null, days: number | null): GraphView {
   };
 }
 
-function simulateAskTurn(session: Session, text: string, focus: string[], attachments: string[] = []) {
+function simulateCoordinatorTurn(session: Session, project: Project, text: string, attachments: string[] = []) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (async () => {
-    post(session, "user", "text", focus.length ? `(Selected in the graph: ${focus.join(", ")})\n\n${text}` : text, withImages(attachments));
+    post(session, "user", "text", text, { ...withImages(attachments), agent_uuid: `u-${msgId}` });
     status(session, "working");
     await sleep(400);
-    post(session, "assistant", "tool", `tab: tab_graph_search: ${focus[0] ?? "payments"}`, { tool: "mcp__tab__tab_graph_search" });
-    post(session, "tool", "tool_result", "3 matches");
-    const reply = `**${focus[0] ?? "acme/payments"}** sits at the center of the Payments work: Dana reviews most of its PRs, and the checkout incident and the idempotency-keys PR both touch it.\n\n- Open now: the p99 latency on /checkout and Dana's review request.\n- The project note says deploys go through staging on Tuesdays and Thursdays.`;
+    post(session, "assistant", "tool", `tab: tab_project: ${project.name}`, { tool: "mcp__tab__tab_project" });
+    post(session, "tool", "tool_result", "about, rules, 6 resources, 3 notes");
+    post(session, "assistant", "tool", `tab: tab_search: ${text.slice(0, 40)}`, { tool: "mcp__tab__tab_search" });
+    post(session, "tool", "tool_result", "5 matches");
+    const open = items.filter((i) => i.project_id === project.id && i.state !== "done");
+    const reply = `Here's where **${project.name}** stands.\n\n- **${open.length} open** in the queue${open[0] ? `, most urgent: ${open[0].title}` : ""}.\n- The billing inbox had 3 refund questions this week; all are inside the 30-day policy (Refund policy note).\n- Stripe shows no new disputes since Monday.\n\nWant me to start a task for any of these?`;
     for (let i = 0; i < reply.length; i += 14) {
       emit({ type: "session_delta", session_id: session.id, text: reply.slice(i, i + 14) });
       await sleep(25);
     }
     post(session, "assistant", "text", reply);
-    post(session, "system", "result", "", { cost_usd: 0.009, duration_ms: 4100 });
+    post(session, "system", "result", "", { cost_usd: 0.011, duration_ms: 4800, context: { model: "claude-opus-5-5", window: 200000, used: 31200 + messages.filter((m) => m.session_id === session.id).length * 900, first_call: 24000, tab_context: 3000 } });
     status(session, "idle");
   })();
 }
@@ -649,7 +1412,7 @@ function simulateAskTurn(session: Session, text: string, focus: string[], attach
 function simulateReviewTurn(session: Session, text: string, attachments: string[] = []) {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   (async () => {
-    post(session, "user", "text", text, withImages(attachments));
+    post(session, "user", "text", text, { ...withImages(attachments), agent_uuid: `u-${msgId}` });
     status(session, "working");
     await sleep(400);
     const fixes = /fix list/i.test(text);

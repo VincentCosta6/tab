@@ -16,7 +16,10 @@
 //!   rows and adds only what the hub doesn't have.
 //!
 //! The sync speaks the hub protocol (`Apply`, `GetChanges`), so the same
-//! loop can later point at a hub in the cloud.
+//! loop points at a hub in tab cloud once this computer has moved there
+//! ([`LocalHub::move_to_cloud`], [`LocalHub::use_cloud`]): `tab.db` then
+//! syncs with the cloud hub over its WebSocket ([`crate::cloud_link`])
+//! instead of with `hub.db`, which keeps the copy it had at the move.
 //!
 //! The hub also listens for other devices on a localhost WebSocket
 //! (`wss://127.0.0.1:<port>/hub`, TLS 1.3 with a pinned certificate and the
@@ -49,6 +52,7 @@ use tab_store::sqlite::SqliteStore;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::agents::{AgentHub, Decision};
+use crate::cloud_link::CloudLink;
 use crate::engine::{Change, EngineEvent};
 use crate::live::{FileRef, LiveEvent, SteerCommand, attachment_path};
 use crate::model::SessionStatus;
@@ -64,6 +68,8 @@ const IDLE: Duration = Duration::from_secs(5);
 const PULL: u32 = 500;
 /// How often files nothing refers to are cleaned up.
 const COLLECT: Duration = Duration::from_secs(60 * 60);
+/// How long a file the cloud hub didn't have isn't asked for again.
+const MISS_FOR: Duration = Duration::from_secs(60);
 
 /// Who a frame is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +96,9 @@ pub struct LocalHub {
     remote_approvals: Mutex<std::collections::HashMap<String, String>>,
     /// Sessions other devices run that the app is watching.
     watching: Mutex<std::collections::BTreeSet<String>>,
+    /// How many connections the cloud hub says watch each session this app
+    /// runs (its `Watched` notices). On the app's own hub it asks the hub.
+    cloud_watchers: Mutex<std::collections::HashMap<String, u32>>,
     next_conn: AtomicU64,
     next_request: AtomicU64,
     url: OnceLock<String>,
@@ -103,6 +112,35 @@ pub struct LocalHub {
     sys: Mutex<Option<sysinfo::System>>,
     /// Woken when another device changes something.
     remote: tokio::sync::Notify,
+    /// The cloud hub `tab.db` syncs with instead of `hub.db`, once moved.
+    cloud: std::sync::RwLock<Option<Arc<CloudLink>>>,
+    /// Held while syncing `tab.db`, so a move doesn't race the sync loop.
+    syncing: Mutex<()>,
+    /// `tab.db` belongs to a cloud hub that isn't connected yet: sync waits
+    /// (changes queue up) rather than go to `hub.db`, whose sequence
+    /// numbers stopped matching at the move.
+    awaiting_cloud: std::sync::atomic::AtomicBool,
+    /// The cloud hub `tab.db` belongs to while it waits to connect, so the
+    /// status says tab cloud (not this computer) from the first moment.
+    cloud_expected: Mutex<Option<String>>,
+    /// Why the cloud hub couldn't be reached or synced with, last time.
+    cloud_error: Mutex<Option<String>>,
+    /// Files the cloud hub is known to have.
+    uploaded: Mutex<std::collections::HashSet<String>>,
+    /// Files that couldn't go up yet; tried again on each sync.
+    to_upload: Mutex<std::collections::BTreeSet<String>>,
+    /// Files the cloud hub didn't have, and when it was asked.
+    misses: Mutex<std::collections::HashMap<String, std::time::Instant>>,
+}
+
+/// How [`LocalHub::move_to_cloud`] went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MoveOutcome {
+    /// The cloud hub was empty and now has this hub's history.
+    Moved { changes: u64 },
+    /// The cloud hub already had work; this computer joined it.
+    Joined { head: u64 },
 }
 
 /// What the Hub page in Settings shows.
@@ -132,6 +170,18 @@ pub struct HubStatusView {
     pub cpus: usize,
     /// Local changes not yet sent to the hub.
     pub pending: u64,
+    /// The cloud hub this computer's work syncs with, once it has moved.
+    /// The rest of this view describes this computer's own hub, which
+    /// keeps its copy from the move.
+    pub cloud_hub: Option<String>,
+    /// Whether that cloud hub is connected right now.
+    pub cloud_connected: bool,
+    /// Why it couldn't be reached or synced with, while that's so.
+    pub cloud_error: Option<String>,
+    /// The last change of the hub in use (cloud once moved) this copy has.
+    pub pulled_to: u64,
+    /// What this copy holds that syncs, by kind (projects, notes, graph…).
+    pub synced: Vec<crate::store::hub_sync::SyncedCount>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -180,6 +230,7 @@ impl LocalHub {
             agents: OnceLock::new(),
             remote_approvals: Default::default(),
             watching: Default::default(),
+            cloud_watchers: Default::default(),
             next_conn: AtomicU64::new(1),
             next_request: AtomicU64::new(1),
             url: OnceLock::new(),
@@ -188,6 +239,14 @@ impl LocalHub {
             local: OnceLock::new(),
             sys: Mutex::new(sysinfo::System::new().ok()),
             remote: tokio::sync::Notify::new(),
+            cloud: Default::default(),
+            syncing: Mutex::new(()),
+            awaiting_cloud: Default::default(),
+            cloud_expected: Default::default(),
+            cloud_error: Default::default(),
+            uploaded: Default::default(),
+            to_upload: Default::default(),
+            misses: Default::default(),
         }))
     }
 
@@ -223,14 +282,76 @@ impl LocalHub {
         }
     }
 
+    /// The cloud hub `tab.db` syncs with, if this computer has moved.
+    pub fn cloud_link(&self) -> Option<Arc<CloudLink>> {
+        self.cloud.read().unwrap().clone()
+    }
+
+    /// Starts syncing with the cloud hub behind `link`: its live pushes come
+    /// to this app's inbox, and it watches what this app watches.
+    fn link_cloud(&self, link: Arc<CloudLink>) {
+        link.set_live(self.inbox.clone());
+        link.watch(self.watching.lock().unwrap().iter().cloned().collect());
+        *self.cloud.write().unwrap() = Some(link);
+    }
+
+    /// Whether anyone watches `session`, on the hub this app's sessions are
+    /// seen through: the cloud one once moved, else this app's own.
+    fn watched(&self, session: &str) -> bool {
+        if self.cloud_link().is_some() {
+            return self
+                .cloud_watchers
+                .lock()
+                .unwrap()
+                .get(session)
+                .is_some_and(|n| *n > 0);
+        }
+        !self.hub.lock().unwrap().watchers(session).is_empty()
+    }
+
+    /// Notes how many watch a session this app runs. True if anyone does.
+    fn note_watched(&self, w: &pb::Watched) -> bool {
+        let mut counts = self.cloud_watchers.lock().unwrap();
+        if w.watchers == 0 {
+            counts.remove(&w.session);
+            return false;
+        }
+        counts.insert(w.session.clone(), w.watchers);
+        true
+    }
+
+    /// A request to the hub `tab.db` syncs with: the cloud one once moved,
+    /// else this app's own. Blocks on the cloud's reply.
+    fn up(&self, req: Req) -> anyhow::Result<pb::server_envelope::Body> {
+        match self.cloud_link() {
+            Some(link) => link.request(req),
+            None => self.request(req),
+        }
+    }
+
     fn apply(&self, ops: &[Op]) -> anyhow::Result<()> {
-        self.request(Req::Apply(pb::Apply {
+        self.up(Req::Apply(pb::Apply {
             ops: ops.iter().map(Into::into).collect(),
         }))
         .map(|_| ())
     }
 
+    /// A record's body in the hub `tab.db` syncs with.
     fn hub_record(&self, kind: &str, id: &str) -> anyhow::Result<Option<serde_json::Value>> {
+        if self.cloud_link().is_some() {
+            let Res::Record(r) = self.up(Req::GetRecord(pb::GetRecord {
+                kind: kind.into(),
+                id: id.into(),
+            }))?
+            else {
+                anyhow::bail!("hub: unexpected reply to GetRecord");
+            };
+            return r
+                .record
+                .map(|r| serde_json::from_slice(&r.body_json))
+                .transpose()
+                .map_err(Into::into);
+        }
         Ok(self
             .hub
             .lock()
@@ -241,6 +362,25 @@ impl LocalHub {
             .map(|r| r.body))
     }
 
+    /// The head of the hub `tab.db` syncs with.
+    fn up_head(&self) -> anyhow::Result<u64> {
+        if self.cloud_link().is_none() {
+            return self.head();
+        }
+        // Nothing is newer than this, so the reply is just the head. The
+        // largest integer JavaScript holds exactly: the cloud hub's storage
+        // refuses anything bigger, and no hub gets near it.
+        let Res::Changes(page) = self.up(Req::GetChanges(pb::GetChanges {
+            since: (1 << 53) - 1,
+            limit: 1,
+        }))?
+        else {
+            anyhow::bail!("hub: unexpected reply to GetChanges");
+        };
+        Ok(page.head)
+    }
+
+    /// The head of this app's own hub.
     fn head(&self) -> anyhow::Result<u64> {
         self.hub
             .lock()
@@ -258,26 +398,46 @@ impl LocalHub {
         };
         let mut ops = Vec::with_capacity(rows.len());
         let mut seen = std::collections::HashSet::new();
+        let cloud = self.cloud_link().is_some();
         for r in rows.iter().rev() {
             // The same row queued twice carries the same contents: send it once.
             if !seen.insert((r.table.as_str(), r.key.as_str())) {
                 continue;
             }
-            match (&r.row, self.hub_record(&r.table, &r.key)?) {
-                (Some(row), Some(old)) if *row == old => {}
-                (None, None) => {}
+            // Skipping rows the hub already has saves log entries. Asking a
+            // cloud hub would cost a round trip per row, so it gets them all.
+            let old = if cloud {
+                None
+            } else {
+                Some(self.hub_record(&r.table, &r.key)?)
+            };
+            match (&r.row, old) {
+                (Some(row), Some(Some(old))) if *row == old => {}
+                (None, Some(None)) => {}
                 (Some(row), _) => ops.push(Op::Put {
                     kind: r.table.clone(),
                     id: r.key.clone(),
                     body: row.clone(),
                 }),
-                (None, Some(_)) => ops.push(Op::Delete {
+                (None, _) => ops.push(Op::Delete {
                     kind: r.table.clone(),
                     id: r.key.clone(),
                 }),
             }
         }
         ops.reverse();
+        // The files these records mention go up first, so a device that
+        // gets the record can fetch what it names.
+        if let Some(link) = self.cloud_link() {
+            let mut refs = std::collections::BTreeSet::new();
+            for op in &ops {
+                if let Op::Put { body, .. } = op {
+                    refs.extend(tab_domain::blob::refs(body));
+                }
+            }
+            refs.extend(std::mem::take(&mut *self.to_upload.lock().unwrap()));
+            self.upload(&link, refs, false);
+        }
         let mut refused = vec![];
         if !ops.is_empty() && self.apply(&ops).is_err() {
             // Find which ones the hub won't take; the rest go through.
@@ -306,12 +466,75 @@ impl LocalHub {
         Ok(rows.len())
     }
 
+    /// Sends the cloud hub the files in `hashes` this hub has and it lacks.
+    /// One that fails is tried again on the next sync. With `ask`, first
+    /// asks whether the cloud has each (for files that may have gone up
+    /// from another device, or before this app started).
+    fn upload(&self, link: &CloudLink, hashes: impl IntoIterator<Item = String>, ask: bool) {
+        for hash in hashes {
+            if self.uploaded.lock().unwrap().contains(&hash) {
+                continue;
+            }
+            let bytes = match self.file_get(&hash) {
+                Ok(Some(b)) => b,
+                // Not on this computer: another device's, or swept.
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(error = %e, "hub: couldn't read a file to upload");
+                    continue;
+                }
+            };
+            let done = match ask.then(|| link.has_file(&hash)) {
+                Some(Ok(true)) => Ok(()),
+                _ => link.put_file(bytes).and_then(|s| {
+                    anyhow::ensure!(s.hash == hash, "cloud hub stored {} for {hash}", s.hash);
+                    Ok(())
+                }),
+            };
+            match done {
+                Ok(()) => {
+                    self.uploaded.lock().unwrap().insert(hash);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "hub: couldn't upload a file; will retry");
+                    self.to_upload.lock().unwrap().insert(hash);
+                }
+            }
+        }
+    }
+
+    /// Sends the cloud hub every file this hub keeps that it lacks, in the
+    /// background: files attached before the move, or while it was away.
+    fn upload_all_soon(self: &Arc<Self>) {
+        let Some(link) = self.cloud_link() else {
+            return;
+        };
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let mut after = String::new();
+            loop {
+                let page = match me.files.lock().unwrap().list(&after, 200) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "hub: couldn't list files to upload");
+                        return;
+                    }
+                };
+                let Some(last) = page.last() else {
+                    return;
+                };
+                after = last.hash.clone();
+                me.upload(&link, page.into_iter().map(|m| m.hash), true);
+            }
+        });
+    }
+
     /// Reads one page of the hub's log into `tab.db`. Returns whether
     /// there's more.
     fn pull_once(&self, store: &Store) -> anyhow::Result<bool> {
         let since = store.hub_pulled_to()?;
         let pb::server_envelope::Body::Changes(page) =
-            self.request(Req::GetChanges(pb::GetChanges { since, limit: PULL }))?
+            self.up(Req::GetChanges(pb::GetChanges { since, limit: PULL }))?
         else {
             anyhow::bail!("hub: unexpected reply to GetChanges");
         };
@@ -346,6 +569,36 @@ impl LocalHub {
         let Some((_, events)) = self.local.get() else {
             return;
         };
+        // Projects, their notes and repos: one refresh per project, however
+        // many rows came. A deleted note or repo no longer says whose it
+        // was; an empty id refreshes every project's.
+        let mut projects = std::collections::BTreeSet::new();
+        for (table, key) in changed {
+            let project = match table.as_str() {
+                "projects" => Some(
+                    serde_json::from_str::<Vec<serde_json::Value>>(key)
+                        .ok()
+                        .and_then(|k| k.into_iter().next())
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_default(),
+                ),
+                "project_notes" | "project_repos" | "project_resources" => Some(
+                    store
+                        .hub_row(table, key)
+                        .ok()
+                        .flatten()
+                        .and_then(|r| r["project_id"].as_str().map(str::to_string))
+                        .unwrap_or_default(),
+                ),
+                _ => None,
+            };
+            if let Some(id) = project {
+                projects.insert(id);
+            }
+        }
+        for project_id in projects {
+            let _ = events.send(EngineEvent::ProjectChanged { project_id });
+        }
         for (table, key) in changed {
             let first = || {
                 serde_json::from_str::<Vec<serde_json::Value>>(key)
@@ -401,7 +654,7 @@ impl LocalHub {
     /// Introduces `tab.db` to the hub the first time they meet.
     fn introduce(&self, store: &Store) -> anyhow::Result<()> {
         store.hub_sync_install()?;
-        let head = self.head()?;
+        let head = self.up_head()?;
         if store.hub_pulled_to()? > head {
             tracing::warn!("hub: hub.db is behind this copy (replaced or reset); syncing again");
             store.hub_forget()?;
@@ -454,18 +707,62 @@ impl LocalHub {
         self.run_live(store.clone(), events);
         let me = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = me.introduce(&store) {
+            // On a blocking thread, like each sync below: once linked to
+            // tab cloud, introducing waits on the cloud's reply, which a
+            // runtime thread mustn't (the link reads replies on one).
+            let (m, st) = (me.clone(), store.clone());
+            let introduced = tokio::task::spawn_blocking(move || {
+                let _turn = m.syncing.lock().unwrap();
+                if m.awaiting_cloud.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                m.introduce(&st)
+            })
+            .await
+            .unwrap_or_else(|e| Err(anyhow::anyhow!("introducing panicked: {e}")));
+            if let Err(e) = introduced {
                 tracing::error!(error = %e, "hub: couldn't set up sync; staying local");
                 return;
             }
             let commits = store.commits();
             loop {
-                if let Err(e) = me.sync(&store) {
-                    tracing::warn!(error = %e, "hub: sync failed; will retry");
+                // On a blocking thread: SQLite, and the cloud's replies.
+                let (m, st) = (me.clone(), store.clone());
+                let done = tokio::task::spawn_blocking(move || {
+                    let _turn = m.syncing.lock().unwrap();
+                    if m.awaiting_cloud.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    // A move whose first sync failed finishes joining
+                    // the cloud hub here.
+                    let introduced = if m.cloud_link().is_some() && !st.hub_backfilled()? {
+                        m.introduce(&st)
+                    } else {
+                        Ok(())
+                    };
+                    let r = introduced.and_then(|()| m.sync(&st));
+                    if m.cloud_link().is_some() {
+                        *m.cloud_error.lock().unwrap() = r.as_ref().err().map(|e| format!("{e:#}"));
+                    }
+                    r
+                })
+                .await;
+                match done {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => tracing::warn!(error = %e, "hub: sync failed; will retry"),
+                    Err(e) => tracing::error!(error = %e, "hub: sync panicked; will retry"),
                 }
+                let cloud = me.cloud_link().map(|l| l.changed.clone());
+                let cloud_changed = async {
+                    match &cloud {
+                        Some(n) => n.notified().await,
+                        None => std::future::pending().await,
+                    }
+                };
                 tokio::select! {
                     _ = commits.notified() => {}
                     _ = me.remote.notified() => {}
+                    _ = cloud_changed => {}
                     _ = tokio::time::sleep(IDLE) => {}
                 }
             }
@@ -482,6 +779,188 @@ impl LocalHub {
                 }
             }
         });
+    }
+
+    /// This computer moved to tab cloud hub `hub_id` before: hold sync
+    /// until [`LocalHub::use_cloud`] connects. Call before
+    /// [`LocalHub::follow`].
+    pub fn expect_cloud(&self, hub_id: &str) {
+        *self.cloud_expected.lock().unwrap() = Some(hub_id.to_string());
+        self.awaiting_cloud.store(true, Ordering::Relaxed);
+    }
+
+    /// Says hello to a cloud hub as this device. Returns its head.
+    fn cloud_hello(&self, link: &CloudLink, store: &Store) -> anyhow::Result<u64> {
+        link.hello(pb::Hello {
+            device: store.device_id()?,
+            client: format!("tab-desktop/{}", env!("CARGO_PKG_VERSION")),
+            since: store.hub_pulled_to()?,
+        })
+    }
+
+    /// Moves this computer's work into the cloud hub behind `link`, then
+    /// syncs `tab.db` with it from now on. Blocks; run it on a blocking
+    /// thread.
+    ///
+    /// An empty cloud hub gets this hub's whole log (`Import`), with every
+    /// change's sequence number, author and time, so `tab.db` carries on
+    /// from where it was. A cloud hub that already has work (another
+    /// computer moved first) is joined instead: `tab.db` takes its rows and
+    /// adds what it lacks, as when meeting any hub with data. `hub.db`
+    /// keeps its copy either way. `progress(done, total)` hears each page.
+    pub fn move_to_cloud(
+        self: &Arc<Self>,
+        link: Arc<CloudLink>,
+        store: &Store,
+        mut progress: impl FnMut(u64, u64),
+    ) -> anyhow::Result<MoveOutcome> {
+        let _turn = self.syncing.lock().unwrap();
+        anyhow::ensure!(
+            self.cloud_link().is_none(),
+            "already syncing with tab cloud"
+        );
+        // Everything waiting goes into this hub first, so it moves too.
+        self.sync(store)?;
+        let cloud_head = self.cloud_hello(&link, store)?;
+        let outcome = if cloud_head == 0 {
+            let total = self.head()?;
+            let mut since = 0;
+            progress(0, total);
+            loop {
+                let page = self
+                    .hub
+                    .lock()
+                    .unwrap()
+                    .store()
+                    .changes_since(since, PULL as usize)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let Some(last) = page.last().map(|a| a.seq) else {
+                    break;
+                };
+                let Res::Imported(done) = link.request(Req::Import(pb::Import {
+                    changes: page.iter().map(Into::into).collect(),
+                }))?
+                else {
+                    anyhow::bail!("cloud hub: unexpected reply to Import");
+                };
+                anyhow::ensure!(
+                    done.head == last,
+                    "cloud hub is at {} after importing up to {last}",
+                    done.head
+                );
+                since = last;
+                progress(since, total);
+            }
+            MoveOutcome::Moved { changes: since }
+        } else {
+            store.hub_forget()?;
+            MoveOutcome::Joined { head: cloud_head }
+        };
+        self.link_cloud(link);
+        self.upload_all_soon();
+        // Linked: the work is in tab cloud now, and the caller has to save
+        // that, or the next launch opens on this computer's hub again. A
+        // first sync that fails (offline, a slow join) is retried by the
+        // sync loop, which also finishes the introduction.
+        if let Err(e) = self.introduce(store).and_then(|()| self.sync(store)) {
+            tracing::warn!(error = %e, "hub: moved to tab cloud; the first sync failed, will retry");
+            *self.cloud_error.lock().unwrap() = Some(format!("{e:#}"));
+        }
+        Ok(outcome)
+    }
+
+    /// Brings this computer's work back from tab cloud into its own hub,
+    /// and stops syncing with the cloud. Blocks; run it on a blocking
+    /// thread.
+    ///
+    /// `tab.db` is a full copy of the cloud hub, so after one last sync it
+    /// is what `hub.db` should hold: every synced row goes in as a new
+    /// change, and anything `hub.db` still has from before the move that
+    /// the cloud has since dropped is deleted. `hub.db`'s older changes
+    /// aren't read back, so they can't undo newer ones. The cloud hub keeps
+    /// its copy, and other computers syncing with it carry on.
+    pub fn move_to_local(&self, store: &Store) -> anyhow::Result<u64> {
+        let _turn = self.syncing.lock().unwrap();
+        let waiting = self.awaiting_cloud.load(Ordering::Relaxed);
+        anyhow::ensure!(
+            self.cloud_link().is_some() || waiting,
+            "not syncing with tab cloud"
+        );
+        // Still waiting to connect: what's here is all there is to bring
+        // back, and what's waiting to go is queued again below.
+        if !waiting {
+            self.sync(store)?;
+        }
+        *self.cloud.write().unwrap() = None;
+        *self.cloud_expected.lock().unwrap() = None;
+        *self.cloud_error.lock().unwrap() = None;
+        self.awaiting_cloud.store(false, Ordering::Relaxed);
+        // Watch on this app's own hub again.
+        let watching: Vec<String> = self.watching.lock().unwrap().iter().cloned().collect();
+        if let Err(e) = self.request(Req::Watch(pb::Watch { sessions: watching })) {
+            tracing::debug!(error = %e, "hub: couldn't watch on this app's hub");
+        }
+        let mut keys: std::collections::BTreeSet<(String, String)> =
+            store.hub_local_keys()?.into_iter().collect();
+        let tables: std::collections::HashSet<&str> = crate::store::hub_sync::SYNCED
+            .iter()
+            .map(|(t, _)| *t)
+            .collect();
+        let head = self.head()?;
+        let mut since = 0;
+        while since < head {
+            let page = self
+                .hub
+                .lock()
+                .unwrap()
+                .store()
+                .changes_since(since, PULL as usize)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let Some(last) = page.last().map(|a| a.seq) else {
+                break;
+            };
+            for a in &page {
+                if let Op::Put { kind, id, .. } | Op::Delete { kind, id } = &a.op
+                    && tables.contains(kind.as_str())
+                {
+                    keys.insert((kind.clone(), id.clone()));
+                }
+            }
+            since = last;
+        }
+        let keys: Vec<_> = keys.into_iter().collect();
+        store.hub_queue(&keys)?;
+        store.hub_set_pulled_to(head)?;
+        store.hub_mark_backfilled()?;
+        self.sync(store)?;
+        Ok(keys.len() as u64)
+    }
+
+    /// Syncs `tab.db` with the cloud hub behind `link` (this computer moved
+    /// before). Blocks; run it on a blocking thread.
+    /// Does nothing once the work has moved back to this computer.
+    pub fn use_cloud(self: &Arc<Self>, link: Arc<CloudLink>, store: &Store) -> anyhow::Result<()> {
+        let _turn = self.syncing.lock().unwrap();
+        if self.cloud_expected.lock().unwrap().is_none() {
+            return Ok(());
+        }
+        let r = self.connect_cloud(link.clone(), store);
+        // The socket's own reason (signed out, refused) says more than "not
+        // connected".
+        *self.cloud_error.lock().unwrap() = r
+            .as_ref()
+            .err()
+            .map(|e| link.last_error().unwrap_or_else(|| format!("{e:#}")));
+        r
+    }
+
+    fn connect_cloud(self: &Arc<Self>, link: Arc<CloudLink>, store: &Store) -> anyhow::Result<()> {
+        self.cloud_hello(&link, store)?;
+        self.link_cloud(link);
+        self.upload_all_soon();
+        self.awaiting_cloud.store(false, Ordering::Relaxed);
+        self.introduce(store)?;
+        self.sync(store)
     }
 
     /// Listens for other devices on localhost: TLS 1.3 only, with this
@@ -653,6 +1132,25 @@ impl LocalHub {
                 .get()
                 .and_then(|(s, _)| s.hub_outbox_len().ok())
                 .unwrap_or(0),
+            cloud_hub: self
+                .cloud_link()
+                .map(|l| l.hub_id.clone())
+                .or_else(|| self.cloud_expected.lock().unwrap().clone()),
+            cloud_connected: self.cloud_link().is_some_and(|l| l.is_connected()),
+            cloud_error: self
+                .cloud_link()
+                .and_then(|l| l.last_error())
+                .or_else(|| self.cloud_error.lock().unwrap().clone()),
+            pulled_to: self
+                .local
+                .get()
+                .and_then(|(s, _)| s.hub_pulled_to().ok())
+                .unwrap_or(0),
+            synced: self
+                .local
+                .get()
+                .and_then(|(s, _)| s.hub_synced_counts().ok())
+                .unwrap_or_default(),
         })
     }
 
@@ -683,7 +1181,15 @@ impl LocalHub {
 /// Files, and the live channel.
 impl LocalHub {
     /// Lets other devices steer the sessions this app runs.
-    pub fn attach_agents(&self, agents: Arc<AgentHub>) {
+    /// Also gives them somewhere to put the files their replies name.
+    pub fn attach_agents(self: &Arc<Self>, agents: Arc<AgentHub>) {
+        let hub = Arc::downgrade(self);
+        agents.set_file_sink(Arc::new(move |bytes: &[u8]| {
+            let hub = hub
+                .upgrade()
+                .ok_or_else(|| anyhow::anyhow!("the hub has shut down"))?;
+            Ok(hub.file_put(bytes)?.hash)
+        }));
         let _ = self.agents.set(agents);
     }
 
@@ -705,6 +1211,19 @@ impl LocalHub {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    /// A hub file's bytes, copied from the cloud hub first when this one
+    /// doesn't have it. Blocks on the download.
+    pub fn file_bytes(&self, hash: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        if let Some(b) = self.file_get(hash)? {
+            return Ok(Some(b));
+        }
+        if self.cloud_link().is_none() {
+            return Ok(None);
+        }
+        self.fetch_from_cloud(hash)?;
+        self.file_get(hash)
+    }
+
     /// Puts a hub file in the attachments folder `dir` as
     /// `<dir>/<hash hex>/<name>` and returns its path. Already there: just the path.
     pub fn file_materialize(&self, dir: &Path, hash: &str, name: &str) -> anyhow::Result<PathBuf> {
@@ -713,18 +1232,58 @@ impl LocalHub {
         if dest.is_file() {
             return Ok(dest);
         }
-        let src = self
-            .files
-            .lock()
-            .unwrap()
-            .path(hash)
-            .filter(|p| p.is_file())
-            .ok_or_else(|| anyhow::anyhow!("the hub doesn't have that file"))?;
+        let here = |hub: &Self| hub.files.lock().unwrap().path(hash).filter(|p| p.is_file());
+        let src = match here(self) {
+            Some(p) => p,
+            None => {
+                self.fetch_from_cloud(hash)?;
+                here(self).ok_or_else(|| anyhow::anyhow!("the hub doesn't have that file"))?
+            }
+        };
         std::fs::create_dir_all(dest.parent().expect("has a folder"))?;
         // A copy, not a link: an agent editing the attachment mustn't change
         // the bytes behind the hash. (On APFS and Btrfs this is a cheap clone.)
         std::fs::copy(&src, &dest)?;
         Ok(dest)
+    }
+
+    /// Copies a file from the cloud hub into this one. Blocks on the
+    /// download. A file the cloud didn't have isn't asked for again for a
+    /// minute (the chat polls the files it shows).
+    fn fetch_from_cloud(&self, hash: &str) -> anyhow::Result<()> {
+        let link = self
+            .cloud_link()
+            .ok_or_else(|| anyhow::anyhow!("the hub doesn't have that file"))?;
+        if self
+            .misses
+            .lock()
+            .unwrap()
+            .get(hash)
+            .is_some_and(|at| at.elapsed() < MISS_FOR)
+        {
+            anyhow::bail!("the hub doesn't have that file");
+        }
+        match link.get_file(hash) {
+            Ok(Some(bytes)) => {
+                self.file_put(&bytes)?;
+                self.uploaded.lock().unwrap().insert(hash.to_string());
+                Ok(())
+            }
+            Ok(None) => {
+                self.misses
+                    .lock()
+                    .unwrap()
+                    .insert(hash.to_string(), std::time::Instant::now());
+                anyhow::bail!("the hub doesn't have that file")
+            }
+            Err(e) => {
+                self.misses
+                    .lock()
+                    .unwrap()
+                    .insert(hash.to_string(), std::time::Instant::now());
+                Err(e)
+            }
+        }
     }
 
     /// Saves a file the person attached: into the hub, then into the
@@ -736,6 +1295,11 @@ impl LocalHub {
 
     /// Deletes files nothing refers to any more (after the grace period).
     pub fn collect_files(&self) -> anyhow::Result<usize> {
+        // Synced with the cloud, this hub's records stop moving, so its
+        // files are a cache of the cloud's; keep any that haven't gone up.
+        if self.cloud_link().is_some() && !self.to_upload.lock().unwrap().is_empty() {
+            return Ok(0);
+        }
         let hub = self.hub.lock().unwrap();
         let mut files = self.files.lock().unwrap();
         let gone =
@@ -744,13 +1308,22 @@ impl LocalHub {
         Ok(gone.len())
     }
 
-    /// Sends a command to the device running `session`. Returns how many of
+    /// Sends a command to the device running `session`, through the hub
+    /// this app syncs with (the cloud one once moved). Returns how many of
     /// its connections got it; fails if it isn't connected.
-    pub fn steer_remote(&self, session: &str, cmd: &SteerCommand) -> anyhow::Result<u32> {
-        match self.request(Req::Steer(pb::Steer {
+    pub async fn steer_remote(
+        self: &Arc<Self>,
+        session: &str,
+        cmd: &SteerCommand,
+    ) -> anyhow::Result<u32> {
+        let req = Req::Steer(pb::Steer {
             session: session.into(),
             body_json: serde_json::to_vec(cmd)?,
-        }))? {
+        });
+        // The cloud's reply is waited for on a blocking thread.
+        let me = self.clone();
+        let reply = tokio::task::spawn_blocking(move || me.up(req)).await??;
+        match reply {
             Res::Delivered(d) => Ok(d.connections),
             _ => anyhow::bail!("hub: unexpected reply to Steer"),
         }
@@ -763,22 +1336,23 @@ impl LocalHub {
 
     /// Publishes a live event for a session this app runs, if anyone watches.
     fn publish(&self, event: &LiveEvent) {
-        if self
-            .hub
-            .lock()
-            .unwrap()
-            .watchers(event.session())
-            .is_empty()
-        {
+        if !self.watched(event.session()) {
             return;
         }
         let Ok(json) = serde_json::to_vec(event) else {
             return;
         };
-        if let Err(e) = self.request(Req::Publish(pb::Publish {
+        let req = Req::Publish(pb::Publish {
             session: event.session().into(),
             event_json: json,
-        })) {
+        });
+        // Live events aren't worth waiting for: one the cloud misses is
+        // overtaken by the next, and the stored transcript has it anyway.
+        if let Some(link) = self.cloud_link() {
+            link.send(req);
+            return;
+        }
+        if let Err(e) = self.request(req) {
             tracing::debug!(error = %e, "hub: couldn't publish a live event");
         }
     }
@@ -801,9 +1375,12 @@ impl LocalHub {
         }
         *watching = want.clone();
         drop(watching);
-        if let Err(e) = self.request(Req::Watch(pb::Watch {
-            sessions: want.into_iter().collect(),
-        })) {
+        let sessions: Vec<String> = want.into_iter().collect();
+        if let Some(link) = self.cloud_link() {
+            link.watch(sessions);
+            return;
+        }
+        if let Err(e) = self.request(Req::Watch(pb::Watch { sessions })) {
             tracing::debug!(error = %e, "hub: couldn't update what this app watches");
         }
     }
@@ -812,16 +1389,7 @@ impl LocalHub {
     /// events for watchers, handles steering and watch notices addressed to
     /// it, and shows other devices' live events here.
     fn run_live(self: &Arc<Self>, store: Arc<Store>, events: broadcast::Sender<EngineEvent>) {
-        // Text streamed so far in each session's current reply, for
-        // watchers who join mid-turn.
-        let partial: Arc<Mutex<std::collections::HashMap<String, String>>> = Default::default();
-
-        let (me, mut rx, part, st) = (
-            self.clone(),
-            events.subscribe(),
-            partial.clone(),
-            store.clone(),
-        );
+        let (me, mut rx, st) = (self.clone(), events.subscribe(), store.clone());
         tokio::spawn(async move {
             loop {
                 let e = match rx.recv().await {
@@ -829,30 +1397,14 @@ impl LocalHub {
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
                 };
-                match &e {
-                    EngineEvent::SessionDelta { session_id, text } => {
-                        part.lock()
-                            .unwrap()
-                            .entry(session_id.clone())
-                            .or_default()
-                            .push_str(text);
-                    }
-                    EngineEvent::SessionMessage { message } => {
-                        part.lock().unwrap().remove(&message.session_id);
-                    }
-                    EngineEvent::SessionChanged { session } => {
-                        if session.status != SessionStatus::Working {
-                            part.lock().unwrap().remove(&session.id);
-                        }
-                        me.rewatch(&st);
-                    }
-                    _ => {}
+                if let EngineEvent::SessionChanged { .. } = &e {
+                    me.rewatch(&st);
                 }
                 let Some(live) = LiveEvent::from_engine(&e) else {
                     continue;
                 };
                 // Only sessions this app runs, and only while someone watches.
-                if me.hub.lock().unwrap().watchers(live.session()).is_empty() {
+                if !me.watched(live.session()) {
                     continue;
                 }
                 let mine = me.agents.get().is_some_and(|a| {
@@ -876,13 +1428,9 @@ impl LocalHub {
             while let Some(env) = inbox.recv().await {
                 match env.body {
                     Some(Res::Steered(s)) => me.steered(&store, s).await,
-                    Some(Res::Watched(w)) if w.watchers > 0 => {
-                        let text = partial.lock().unwrap().get(&w.session).cloned();
-                        if let Some(text) = text.filter(|t| !t.is_empty()) {
-                            me.publish(&LiveEvent::SessionDelta {
-                                session_id: w.session.clone(),
-                                text,
-                            });
+                    Some(Res::Watched(w)) => {
+                        if !me.note_watched(&w) {
+                            continue;
                         }
                         if let Some(agents) = me.agents.get() {
                             for approval in agents.pending_approvals(&w.session) {
@@ -957,7 +1505,14 @@ impl LocalHub {
                 message,
                 answers,
             } => {
-                agents.resolve_approval(&id, Decision::from_parts(&decision, message, answers));
+                // Only the steered chat's own approvals.
+                if !agents.resolve_approval_in(
+                    &session.id,
+                    &id,
+                    Decision::from_parts(&decision, message, answers),
+                ) {
+                    tracing::warn!(session = %session.id, from = %s.from, "hub: approval isn't this chat's, or was already answered");
+                }
                 Ok(())
             }
             SteerCommand::Interrupt => {
@@ -1247,3 +1802,45 @@ async fn connection(hub: Arc<LocalHub>, mut socket: WebSocket, addr: SocketAddr)
 #[cfg(test)]
 #[path = "local_hub_tests.rs"]
 mod tests;
+
+/// Leases on the hub `tab.db` syncs with: this app's own, or the cloud hub
+/// once moved, where every runner (each computer, and tab cloud) claims.
+impl crate::leases::Leases for LocalHub {
+    /// The device id this app says hello with (to its own hub once
+    /// following, and to the cloud hub), which the hub names as holder.
+    fn holder(&self) -> String {
+        self.local
+            .get()
+            .and_then(|(store, _)| store.device_id().ok())
+            .unwrap_or_else(|| "this-computer".into())
+    }
+
+    fn claim_blocking(
+        &self,
+        key: &str,
+        ttl: chrono::Duration,
+    ) -> anyhow::Result<crate::leases::Claimed> {
+        let ttl_secs = ttl.num_seconds().clamp(1, u32::MAX as i64) as u32;
+        let Res::LeaseClaim(c) = self.up(Req::ClaimLease(pb::ClaimLease {
+            key: key.into(),
+            ttl_secs,
+        }))?
+        else {
+            anyhow::bail!("hub: unexpected reply to ClaimLease");
+        };
+        let claim = tab_domain::lease::Claim::try_from(c)
+            .map_err(|e| anyhow::anyhow!("hub: bad lease reply: {e:?}"))?;
+        let lease = claim.lease();
+        Ok(crate::leases::Claimed {
+            won: claim.won(),
+            token: lease.token,
+            holder: lease.holder.clone(),
+            expires_at: lease.expires_at,
+        })
+    }
+
+    fn release_blocking(&self, key: &str) -> anyhow::Result<()> {
+        self.up(Req::ReleaseLease(pb::ReleaseLease { key: key.into() }))
+            .map(|_| ())
+    }
+}
