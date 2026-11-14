@@ -36,6 +36,12 @@ gpui = { package = "gpui-pre", version = "=0.3.12" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["font-kit", "x11", "wayland"] }
 gpui-component = "=0.9.1"
 
+# For `examples/diff_bench.rs` only: syntax for the languages tab's repos are
+# written in, and the rope its highlighter takes.
+[dev-dependencies]
+gpui-component = { version = "=0.9.1", features = ["tree-sitter-rust", "tree-sitter-typescript", "tree-sitter-tsx", "tree-sitter-javascript"] }
+ropey = "=2.0.0-beta.1"
+
 # Its own workspace, so it doesn't inherit the root's release profile; keep
 # the two in step.
 [profile.release]
