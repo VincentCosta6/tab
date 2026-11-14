@@ -1,8 +1,9 @@
-//! Connection secrets (passwords, tokens, the ranker's API key) live in the
+//! Connection secrets (passwords, tokens, the ranker's API keys) live in the
 //! [`Vault`], not in `config.json`.
 //!
 //! In memory, [`TabConfig`] still carries them where they always were (a
-//! connection's settings, `ranking.ai.api_key`), so nothing that reads the
+//! connection's settings, `ranking.ai.api_key`, `ranking.decision.api_keys`),
+//! so nothing that reads the
 //! config changes. [`TabConfig::save`] lifts them out into one vault entry
 //! and writes the rest; [`TabConfig::load`] puts them back.
 //!
@@ -82,6 +83,9 @@ pub fn secret_keys() -> Vec<(String, String)> {
 pub(crate) struct Stored {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_api_key: Option<String>,
+    /// Decision provider id → key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub decision_api_keys: BTreeMap<String, String>,
     /// Connector id → setting key → value.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub connectors: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
@@ -89,7 +93,7 @@ pub(crate) struct Stored {
 
 impl Stored {
     pub fn is_empty(&self) -> bool {
-        self.ai_api_key.is_none() && self.connectors.is_empty()
+        self.ai_api_key.is_none() && self.decision_api_keys.is_empty() && self.connectors.is_empty()
     }
 }
 
@@ -104,6 +108,10 @@ pub(crate) fn split(cfg: &TabConfig) -> (TabConfig, Stored) {
     if let Some(k) = file.ranking.ai.api_key.take().filter(|k| !k.is_empty()) {
         stored.ai_api_key = Some(k);
     }
+    stored.decision_api_keys = std::mem::take(&mut file.ranking.decision.api_keys)
+        .into_iter()
+        .filter(|(_, k)| !k.is_empty())
+        .collect();
     for (id, key) in secret_keys() {
         let Some(c) = file.connectors.get_mut(&id) else {
             continue;
@@ -126,6 +134,12 @@ pub(crate) fn has_plaintext(cfg: &TabConfig) -> bool {
 pub(crate) fn merge(cfg: &mut TabConfig, stored: Stored) {
     if cfg.ranking.ai.api_key.as_deref().is_none_or(str::is_empty) {
         cfg.ranking.ai.api_key = stored.ai_api_key;
+    }
+    for (provider, k) in stored.decision_api_keys {
+        let have = cfg.ranking.decision.api_keys.entry(provider).or_default();
+        if have.is_empty() {
+            *have = k;
+        }
     }
     for (id, values) in stored.connectors {
         // A connection removed from the file is gone; its secrets go too.
@@ -169,6 +183,10 @@ mod tests {
     fn with_secrets() -> TabConfig {
         let mut cfg = TabConfig::default();
         cfg.ranking.ai.api_key = Some("sk-ant".into());
+        cfg.ranking
+            .decision
+            .api_keys
+            .insert("openrouter".into(), "sk-or".into());
         let mut email = ConnectorConfig::on();
         email
             .settings
@@ -186,11 +204,12 @@ mod tests {
         let cfg = with_secrets();
         let (file, stored) = split(&cfg);
         let text = serde_json::to_string(&file).unwrap();
-        for s in ["sk-ant", "hunter2", "ghp_x"] {
+        for s in ["sk-ant", "sk-or", "hunter2", "ghp_x"] {
             assert!(!text.contains(s), "{s} stayed in config.json");
         }
         assert!(text.contains("imap.example.com"));
         assert_eq!(stored.ai_api_key.as_deref(), Some("sk-ant"));
+        assert_eq!(stored.decision_api_keys["openrouter"], "sk-or");
         assert_eq!(stored.connectors["email"]["password"], "hunter2");
         assert!(!has_plaintext(&file));
         assert!(has_plaintext(&cfg));
@@ -227,6 +246,10 @@ mod tests {
     fn empty_secrets_arent_kept() {
         let mut cfg = TabConfig::default();
         cfg.ranking.ai.api_key = Some(String::new());
+        cfg.ranking
+            .decision
+            .api_keys
+            .insert("openai".into(), String::new());
         let mut email = ConnectorConfig::on();
         email.settings.insert("password".into(), "".into());
         cfg.connectors.insert("email".into(), email);

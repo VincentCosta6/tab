@@ -5,6 +5,7 @@ import { NOT_HANDLED, withActions, workflowMock } from "./mock-workflows";
 import { queueRuns, queueWorkflowMock } from "./mock-queue-workflows";
 // The same harness metadata the app ships.
 import harnessData from "../../crates/tab-core/src/agents/harnesses.json";
+import decisionData from "../../crates/tab-core/src/decisions/decisions.json";
 import { create, toBinary } from "@bufbuild/protobuf";
 import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
 import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, RunnerState, RunnerStatusSchema, type HubStatus } from "./protocol/cloud";
@@ -12,7 +13,7 @@ import type {
   ChatSummary,
   McpCatalogEntry, McpCloudState, JobGaps, McpImportCandidate, McpImportResult, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
   EmailSignInStatus, MailProvider,
-  Account, AgentKind, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
+  Account, AgentKind, DecisionProvider, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceInput, Segment, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
   VaultAudit, VaultDevice, VaultEntry, VaultEntryInput, VaultStatus,
@@ -221,6 +222,7 @@ let config: TabConfig = {
   ranking: {
     rules: { kinds: [], default_score: 30, keywords: [{ contains: "outage", delta: 20 }, { contains: "urgent", delta: 15 }], vip_actors: [], vip_boost: 15, muted: [] },
     ai: { enabled: true, backend: "auto", api_key: "••••••••", model: null, instructions: "Anything from on-call or my manager is urgent. Dependabot can wait until Friday." },
+    decision: { provider: "", model: null, api_keys: {}, key_from: {}, base_url: null },
   },
   connectors: { demo: { enabled: true, settings: {} }, tab: { enabled: true, settings: {} } },
   agent: {
@@ -741,6 +743,13 @@ export const mockApi = {
           ? { kind: h.id, found: true, path: `/usr/local/bin/${h.command}`, version: h.id === "claude_code" ? "2.1.318 (Claude Code)" : "1.4.2", error: null }
           : { kind: h.id, found: false, path: null, version: null, error: `\`${h.command}\` was not found on PATH.`, install_command: h.install.npm ? `npm install -g ${h.install.npm}` : h.install.unix });
         case "agent_harnesses": return harnesses;
+        case "decision_providers": return (decisionData as unknown as DecisionProvider[]).map((p) => ({
+          ...p,
+          // As `decisions::agent_models`: one model per harness, from the template.
+          models: p.dialect === "llm" ? harnesses.map((h) => ({ ...p.models[0], id: h.id, label: h.small_model ? `${h.name} (${h.small_model})` : h.name })) : p.models,
+          has_key: p.dialect === "llm" || !!config.ranking.decision?.api_keys[p.id],
+          reusable_from: p.id === "openrouter" && mockOpenCode() ? ["opencode"] : [],
+        }));
         case "agent_models": return mockModels();
         case "agent_install": {
           const h = harnesses.find((x) => x.id === args.kind);

@@ -27,6 +27,7 @@ pub mod cloud_link;
 pub mod config;
 pub mod connector;
 pub mod connectors;
+pub mod decisions;
 pub mod deps;
 pub mod e2e;
 pub mod embed;

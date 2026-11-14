@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
     let gateway = Arc::new(Gateway::new(store.clone()));
     let mut cfg = TabConfig::default();
     cfg.ranking.ai.api_key = None;
-    let pipeline = Pipeline::from_config(&cfg, gateway, store.clone());
+    let pipeline = Pipeline::from_config(&cfg, gateway, store.clone(), None);
     println!(
         "ai layer: {:?}",
         pipeline

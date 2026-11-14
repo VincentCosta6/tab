@@ -133,6 +133,18 @@ impl Engine {
         self
     }
 
+    /// Lets the ranker answer through the person's agents (the decision
+    /// catalog's "Your agent"), which it can't without them.
+    pub fn with_agents(mut self, cfg: &TabConfig, agents: &Arc<crate::agents::AgentHub>) -> Self {
+        self.ranker = Arc::new(Pipeline::from_config(
+            cfg,
+            self.gateway.clone(),
+            self.store.clone(),
+            Some(agents.clone()),
+        ));
+        self
+    }
+
     /// Builds an engine from config: enabled connectors, ranking pipeline, connector infos.
     pub fn from_config(
         cfg: &TabConfig,
@@ -172,7 +184,12 @@ impl Engine {
         for f in connectors::registry() {
             gateway.declare_limits(&f.descriptor().rate_limits);
         }
-        let ranker = Arc::new(Pipeline::from_config(cfg, gateway.clone(), store.clone()));
+        let ranker = Arc::new(Pipeline::from_config(
+            cfg,
+            gateway.clone(),
+            store.clone(),
+            None,
+        ));
         let me = store.device_id().unwrap_or_else(|_| "this-computer".into());
         Self {
             leases: crate::leases::InMemory::new(&me),
@@ -1328,6 +1345,7 @@ mod tests {
             rules: RankingRules::default(),
             profile: Default::default(),
             ai: None,
+            decision: None,
         });
         let handle = Engine {
             gateway: Arc::new(Gateway::new(store.clone())),
@@ -1606,6 +1624,7 @@ mod tests {
                 rules: RankingRules::default(),
                 profile: Default::default(),
                 ai: None,
+                decision: None,
             }),
             connectors: vec![acting.clone(), Arc::new(crate::connectors::TabConnector)],
             infos,
@@ -1724,6 +1743,7 @@ mod tests {
                 rules: RankingRules::default(),
                 profile: Default::default(),
                 ai: None,
+                decision: None,
             }),
             connectors: vec![Arc::new(crate::connectors::TabConnector)],
             infos: Vec::new(),

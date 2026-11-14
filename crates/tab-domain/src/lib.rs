@@ -8,6 +8,7 @@
 //! - [`ops`]: the changes a hub applies and replicates.
 //! - [`blob`]: files, named by the hash of their bytes, that records point to.
 //! - [`workflow`]: workflow definitions, validation and templates.
+//! - [`decision`]: questions for decision models and their typed answers.
 //! - [`links`]: recognizing links agents create or mention.
 //! - [`runner`]: runners, jobs, and the leases that decide who does what.
 //!
@@ -18,6 +19,7 @@
 
 pub mod blob;
 pub mod cli;
+pub mod decision;
 pub mod families;
 pub mod lease;
 pub mod links;

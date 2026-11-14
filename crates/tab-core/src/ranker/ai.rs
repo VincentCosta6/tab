@@ -54,6 +54,28 @@ pub struct AiVerdict {
     pub reason: String,
 }
 
+/// What the AI layer reads about an item: the person, the item (body cut
+/// at [`MAX_BODY_CHARS`]) and the rules result. Haiku and decision models
+/// see the same facts.
+pub(super) fn facts(
+    item: &QueueItem,
+    profile: &UserProfile,
+    base: &RuleResult,
+) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    let e = &item.event;
+    let mut body = e.body.clone().unwrap_or_default();
+    if body.chars().count() > MAX_BODY_CHARS {
+        body = body.chars().take(MAX_BODY_CHARS).collect::<String>() + " [truncated]";
+    }
+    let person = json!({ "name": profile.name, "role": profile.role, "handles": profile.handles });
+    let item_json = json!({
+        "source": e.source, "kind": e.kind, "title": e.title, "from": e.actor,
+        "where": e.context, "body": body,
+    });
+    let rules = json!({ "score": base.score, "reason": base.reason, "fired": base.fired });
+    (person, item_json, rules)
+}
+
 pub struct AiLayer {
     gateway: Arc<Gateway>,
     store: Arc<Store>,
@@ -178,18 +200,7 @@ impl AiLayer {
     }
 
     fn prompt(&self, item: &QueueItem, profile: &UserProfile, base: &RuleResult) -> String {
-        let e = &item.event;
-        let mut body = e.body.clone().unwrap_or_default();
-        if body.chars().count() > MAX_BODY_CHARS {
-            body = body.chars().take(MAX_BODY_CHARS).collect::<String>() + " [truncated]";
-        }
-        let person =
-            json!({ "name": profile.name, "role": profile.role, "handles": profile.handles });
-        let item_json = json!({
-            "source": e.source, "kind": e.kind, "title": e.title, "from": e.actor,
-            "where": e.context, "body": body,
-        });
-        let rules = json!({ "score": base.score, "reason": base.reason, "fired": base.fired });
+        let (person, item_json, rules) = facts(item, profile, base);
         format!(
             "<person>\n{person}\n</person>\n\n<instructions>\n{}\n</instructions>\n\n<rules_result>\n{rules}\n</rules_result>\n\n<item>\n{item_json}\n</item>",
             if self.instructions.trim().is_empty() {

@@ -586,6 +586,37 @@ impl AgentHub {
         self.cfg.read().unwrap().clone()
     }
 
+    /// One structured answer from a harness's model, the way the titler and
+    /// suggestions ask: no tools, no MCP, no saved session. `model: None` is
+    /// the harness's small model (`harnesses.json`), else its chat model.
+    /// `Value::Null` when the model returned an error.
+    pub async fn ask_structured(
+        self: &Arc<Self>,
+        agent: AgentKind,
+        model: Option<&str>,
+        system: &str,
+        prompt: &str,
+        schema: serde_json::Value,
+        purpose: &'static str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let cfg = self.config();
+        small::complete(
+            self,
+            &cfg,
+            small::Ask {
+                agent: Some(agent),
+                model,
+                system,
+                prompt,
+                schema: Some(schema),
+                purpose,
+                session_id: None,
+                timeout: Duration::from_secs(120),
+            },
+        )
+        .await
+    }
+
     /// The config a chat's turn runs with: tab's, on the chat's own model.
     pub fn config_for(&self, session: &Session) -> AgentConfig {
         let mut cfg = self.config();

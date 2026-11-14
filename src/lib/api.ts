@@ -3,7 +3,7 @@
 // and screenshotted without the desktop shell.
 
 import type {
-  AgentKind, AgentProbe, AuditEntry, Harness, ModelOption, Chat, ChatStarted, ChatSummary, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
+  AgentKind, AgentProbe, AuditEntry, DecisionProvider, Harness, ModelOption, Chat, ChatStarted, ChatSummary, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
   AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceAccess, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem, SlashCommand, Subagent,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Suggestion, Workflow, WorkflowRun, ItemWorkflowStatus, RunView, WorkflowFactory, WorkflowInsights, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, ModelFamily, Runner, RunsOn,
@@ -165,6 +165,8 @@ export const api = {
     call<boolean>("approval_resolve", { id, decision, message: message ?? null, answers: answers ?? null }),
   detectAgents: () => call<AgentProbe[]>("detect_agents"),
   agentHarnesses: () => call<Harness[]>("agent_harnesses"),
+  /** Decision model providers, whether each has a key, and harnesses whose key could be reused. */
+  decisionProviders: () => call<DecisionProvider[]>("decision_providers"),
   agentModels: () => call<ModelOption[]>("agent_models"),
   /** Installs a harness; its output arrives through `onAgentUpgrade`. */
   agentInstall: (kind: AgentKind) => call<void>("agent_install", { kind }),
