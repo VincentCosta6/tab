@@ -29,18 +29,34 @@ const QUOTE: usize = 300;
 /// Messages the person sent mid-turn, until the agent answers them in text.
 ///
 /// Claude Code shows a queued message to the model with the next tool
-/// result. The model then sometimes answers only in its thinking, which the
-/// person never sees, and goes on to its next tool call: from their side
-/// the message was ignored. So once a message has been shown, the agent's
-/// next step must start with visible text. If it starts with a tool call
-/// instead, tab says so in the chat and reminds the agent, once per message.
+/// result. The model then often answers only in its thinking, which the
+/// person never sees, or not at all, and goes on with its work: from their
+/// side the message was ignored. A reminder sent then only reaches it with
+/// the result after that, and it can go past that one too. So once a
+/// message has been shown, tab holds the agent's next tool calls until it
+/// says something visible: a `PreToolUse` hook (see [`hold_hook`]) asks tab,
+/// and a held call is denied with [`hold_reason`]. At most [`HOLDS`] rounds
+/// of calls are held, so an agent that won't answer still gets its work done.
 #[derive(Default)]
 pub(super) struct Unanswered {
     /// Written to stdin; the agent hasn't been shown them yet.
     sent: Vec<String>,
     /// Shown to the agent, with no reply in text since.
     shown: Vec<String>,
+    /// Rounds of calls held for the messages in `shown`.
+    rounds: usize,
+    /// A call was held since the last tool result: calls the model makes
+    /// together are one round.
+    holding: bool,
+    /// Tool calls read from the agent's messages, by id. The hook asks over
+    /// another path than the messages come, so it waits for its call to be
+    /// read: by then, so is any text the agent wrote before it.
+    calls: HashSet<String>,
 }
+
+/// Rounds of tool calls held for an unanswered message before tab lets the
+/// agent go on anyway.
+const HOLDS: usize = 2;
 
 impl Unanswered {
     /// The person's message went to the agent.
@@ -51,17 +67,44 @@ impl Unanswered {
     /// A tool result came back: queued messages go to the model with it.
     fn shown(&mut self) {
         self.shown.append(&mut self.sent);
+        self.holding = false;
     }
 
     /// The agent said something visible: that answers what it was shown.
     fn replied(&mut self) {
         self.shown.clear();
+        self.rounds = 0;
+        self.holding = false;
     }
 
-    /// The agent made a tool call. Returns the messages it went past
-    /// without a word, if any.
-    fn skipped(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.shown)
+    /// The agent's message with tool call `id` was read.
+    fn called(&mut self, id: &str) {
+        self.calls.insert(id.to_string());
+    }
+
+    /// Whether tool call `id` was read yet.
+    pub(super) fn has_called(&self, id: &str) -> bool {
+        self.calls.contains(id)
+    }
+
+    /// The agent is about to run a tool. When the call should wait for a
+    /// reply, returns the messages it hasn't answered, and whether this
+    /// call starts a new round of held calls.
+    pub(super) fn hold(&mut self) -> Option<(Vec<String>, bool)> {
+        if self.shown.is_empty() {
+            return None;
+        }
+        if self.holding {
+            return Some((self.shown.clone(), false));
+        }
+        if self.rounds >= HOLDS {
+            // It won't answer; holding more only stalls the work.
+            self.replied();
+            return None;
+        }
+        self.rounds += 1;
+        self.holding = true;
+        Some((self.shown.clone(), true))
     }
 }
 
@@ -116,9 +159,10 @@ impl Steps {
     }
 }
 
-/// What tab tells the agent when it went past the person's messages.
-fn reminder(skipped: &[String]) -> String {
-    let quoted: Vec<String> = skipped
+/// Why tab held the agent's tool call: the person's messages it hasn't
+/// answered.
+pub(super) fn hold_reason(unanswered: &[String]) -> String {
+    let quoted: Vec<String> = unanswered
         .iter()
         .map(|m| {
             let m = m.trim();
@@ -131,11 +175,25 @@ fn reminder(skipped: &[String]) -> String {
         })
         .collect();
     format!(
-        "(From tab, not the person.) You went on without replying to the person's message {}. \
-         Your thinking isn't shown to them, so to them it looks ignored. Reply to it now in visible \
-         text, then carry on.",
+        "(From tab, not the person.) Not run: the person sent {} while you were working and you \
+         haven't replied. Your thinking isn't shown to them, so to them it looks ignored. Reply to \
+         it now in visible text, then make this call again.",
         quoted.join(" and ")
     )
+}
+
+/// The `PreToolUse` hook that asks tab whether to hold a tool call (see
+/// [`Unanswered`]), for the chat's Claude Code settings.
+fn hold_hook(mcp: &super::McpEndpoint, session_id: &str) -> Value {
+    json!([{ "hooks": [{
+        "type": "http",
+        "url": mcp.url.replace("/mcp", "/hooks/pre-tool"),
+        "headers": {
+            "Authorization": format!("Bearer {}", crate::mcp::chat_token(&mcp.token, session_id)),
+            "X-Tab-Session": session_id,
+        },
+        "timeout": 10,
+    }] }])
 }
 
 /// Claude Code's folder (`~/.claude`, or `CLAUDE_CONFIG_DIR`).
@@ -220,6 +278,9 @@ pub(super) fn acp_setup(
     };
     // The adapter starts in the settings' default mode.
     settings["permissions"]["defaultMode"] = json!(mode);
+    if let Some(mcp) = hub.mcp().filter(|_| !hub.remote_mcp().in_cloud()) {
+        settings["hooks"]["PreToolUse"] = hold_hook(&mcp, &session.id);
+    }
     std::fs::write(
         dir.join("settings.json"),
         serde_json::to_vec_pretty(&settings)?,
@@ -620,6 +681,12 @@ impl Parser {
     }
 
     /// The person's message went to the agent mid-turn.
+    /// The person's mid-turn messages, for the hook that holds tool calls
+    /// until the agent answers them.
+    pub(super) fn unanswered(&self) -> Arc<Mutex<Unanswered>> {
+        self.unanswered.clone()
+    }
+
     pub(super) fn steered(&self, text: &str) {
         self.unanswered.lock().unwrap().sent(text);
     }
@@ -844,17 +911,7 @@ impl Parser {
                         Some("tool_use") => {
                             let id = block["id"].as_str().unwrap_or_default().to_string();
                             if self.once(format!("tool:{id}")) {
-                                let skipped = self.unanswered.lock().unwrap().skipped();
-                                if !skipped.is_empty() {
-                                    hub.post(
-                                        &sid,
-                                        "system",
-                                        "status",
-                                        "The agent went on without replying to your message; tab asked it to answer.",
-                                        Value::Null,
-                                    );
-                                    hub.remind(&sid, reminder(&skipped));
-                                }
+                                self.unanswered.lock().unwrap().called(&id);
                                 self.open_tools.lock().unwrap().insert(id.clone());
                                 let name = block["name"].as_str().unwrap_or("tool");
                                 if let Some(r) = self.steps.call(name, &block["input"]) {
@@ -1268,40 +1325,75 @@ mod tests {
     const THINK_2: &str = r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"thinking","thinking":"It's a made-up path."}]}}"#;
     const CALL_2: &str = r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"pwd"}}]}}"#;
 
+    /// A parser whose mid-turn messages the hub's hook sees, as over ACP.
+    fn watched(p: &Parser, sid: &str) {
+        p.hub.watch_unanswered(sid, Some(p.unanswered()));
+    }
+
+    const RESULT_2: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Not run"}]}}"#;
+    const CALL_3: &str = r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"pwd"}}]}}"#;
+    const RESULT_3: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t3","content":"Not run"}]}}"#;
+    const CALL_4: &str = r#"{"type":"assistant","message":{"id":"m4","content":[{"type":"tool_use","id":"t4","name":"Bash","input":{"command":"pwd"}}]}}"#;
+
     #[tokio::test]
-    async fn a_message_answered_only_in_thinking_gets_the_agent_reminded() {
-        let (store, sid, mut p, mut steering) = steered_turn();
+    async fn a_message_answered_only_in_thinking_holds_the_next_call() {
+        let (store, sid, mut p, _steering) = steered_turn();
+        watched(&p, &sid);
+        let hub = p.hub.clone();
         // Sent while the first call runs; the model sees it with its result.
         feed(&mut p, &[CALL_1]);
         p.unanswered.lock().unwrap().sent("what is shot.png?");
         feed(&mut p, &[RESULT_1, THINK_2, CALL_2]);
-        let note = store
-            .messages(&sid)
-            .unwrap()
-            .into_iter()
-            .find(|m| m.kind == "status");
-        assert!(note.is_some_and(|m| m.content.contains("without replying")));
-        match steering.try_recv() {
-            Ok(Steer::Reminder(r)) => {
-                assert!(r.contains("\"what is shot.png?\""));
-                assert!(r.contains("visible"));
-            }
-            _ => panic!("expected a reminder"),
-        }
-        // Once per message: the next call alone doesn't remind again.
-        feed(
-            &mut p,
-            &[
-                r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"/w"}]}}"#,
-                r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"ls"}}]}}"#,
-            ],
-        );
-        assert!(steering.try_recv().is_err());
+        let why = hub.hold_tool(&sid, "t2").await.expect("held");
+        assert!(why.contains("\"what is shot.png?\""));
+        assert!(why.contains("visible text"));
+        let notes = |store: &Store| {
+            store
+                .messages(&sid)
+                .unwrap()
+                .into_iter()
+                .filter(|m| m.kind == "status")
+                .count()
+        };
+        assert_eq!(notes(&store), 1);
+        // Held again, once more, then let go: it won't answer.
+        feed(&mut p, &[RESULT_2, CALL_3]);
+        assert!(hub.hold_tool(&sid, "t3").await.is_some());
+        assert_eq!(notes(&store), 2);
+        feed(&mut p, &[RESULT_3, CALL_4]);
+        assert!(hub.hold_tool(&sid, "t4").await.is_none());
     }
 
     #[tokio::test]
-    async fn a_message_answered_in_text_needs_no_reminder() {
-        let (store, sid, mut p, mut steering) = steered_turn();
+    async fn calls_made_together_are_one_round() {
+        let (store, sid, mut p, _steering) = steered_turn();
+        watched(&p, &sid);
+        let hub = p.hub.clone();
+        feed(&mut p, &[CALL_1]);
+        p.unanswered.lock().unwrap().sent("stop");
+        feed(
+            &mut p,
+            &[
+                RESULT_1,
+                r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"tool_use","id":"a","name":"Read","input":{}},{"type":"tool_use","id":"b","name":"Read","input":{}}]}}"#,
+            ],
+        );
+        assert!(hub.hold_tool(&sid, "a").await.is_some());
+        assert!(hub.hold_tool(&sid, "b").await.is_some());
+        let statuses = store
+            .messages(&sid)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.kind == "status")
+            .count();
+        assert_eq!(statuses, 1);
+    }
+
+    #[tokio::test]
+    async fn a_message_answered_in_text_holds_nothing() {
+        let (store, sid, mut p, _steering) = steered_turn();
+        watched(&p, &sid);
+        let hub = p.hub.clone();
         feed(&mut p, &[CALL_1]);
         p.unanswered.lock().unwrap().sent("what is shot.png?");
         feed(
@@ -1313,7 +1405,7 @@ mod tests {
                 CALL_2,
             ],
         );
-        assert!(steering.try_recv().is_err());
+        assert!(hub.hold_tool(&sid, "t2").await.is_none());
         assert!(
             !store
                 .messages(&sid)
@@ -1324,13 +1416,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_call_made_before_the_message_was_shown_is_fine() {
+    async fn a_call_made_before_the_message_was_shown_runs() {
         // The model was already writing its next call when the message
         // arrived: it only sees the message with that call's result.
-        let (_store, _sid, mut p, mut steering) = steered_turn();
+        let (_store, sid, mut p, _steering) = steered_turn();
+        watched(&p, &sid);
         p.unanswered.lock().unwrap().sent("what is shot.png?");
         feed(&mut p, &[CALL_1]);
-        assert!(steering.try_recv().is_err());
+        assert!(p.hub.hold_tool(&sid, "t1").await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_hook_waits_for_its_call_to_be_read() {
+        let (_store, sid, mut p, _steering) = steered_turn();
+        watched(&p, &sid);
+        let hub = p.hub.clone();
+        feed(&mut p, &[CALL_1]);
+        p.unanswered.lock().unwrap().sent("what is shot.png?");
+        feed(&mut p, &[RESULT_1]);
+        // The hook asks before the agent's reply and call reach tab.
+        let ask = tokio::spawn({
+            let hub = hub.clone();
+            let sid = sid.clone();
+            async move { hub.hold_tool(&sid, "t2").await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        feed(
+            &mut p,
+            &[
+                r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"An example path."}]}}"#,
+                CALL_2,
+            ],
+        );
+        assert!(ask.await.unwrap().is_none());
+        // A call that never shows up runs too.
+        assert!(hub.hold_tool(&sid, "nope").await.is_none());
+        // And a chat with no turn running holds nothing.
+        hub.watch_unanswered(&sid, None);
+        assert!(hub.hold_tool(&sid, "t2").await.is_none());
     }
 
     fn steps_call(id: &str, steps: &str) -> String {
@@ -1397,9 +1520,9 @@ mod tests {
     }
 
     #[test]
-    fn reminders_quote_long_messages_cut_short() {
+    fn hold_reasons_quote_long_messages_cut_short() {
         let long = "x".repeat(QUOTE + 50);
-        let r = reminder(&[long, "and this".into()]);
+        let r = hold_reason(&[long, "and this".into()]);
         assert!(r.contains(&format!("\"{}…\"", "x".repeat(QUOTE))));
         assert!(r.contains("and \"and this\""));
         assert!(r.starts_with("(From tab, not the person.)"));

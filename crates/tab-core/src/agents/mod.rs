@@ -52,6 +52,11 @@ use crate::store::Store;
 /// How long an approval waits for the person before it is denied.
 pub(crate) const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// How long the tool-call hook waits for its call to show up in the agent's
+/// messages, and how often it looks (see [`AgentHub::hold_tool`]).
+const HOLD_WAIT: Duration = Duration::from_secs(3);
+const HOLD_POLL: Duration = Duration::from_millis(25);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
@@ -492,6 +497,9 @@ pub struct AgentHub {
     /// Messages that arrived after a turn stopped taking steering (its result
     /// is in, the process hasn't exited). They run as the next turn.
     followups: Mutex<HashMap<String, Vec<String>>>,
+    /// Running Claude Code turns' mid-turn messages, until answered (see
+    /// [`AgentHub::hold_tool`]).
+    unanswered: Mutex<HashMap<String, Arc<Mutex<claude::Unanswered>>>>,
     /// Chats whose running turn tab started on its own (a coordinator
     /// woken by its monitor), with nobody reading along until the person
     /// writes in it. Their tools are held tighter (see `crate::mcp`).
@@ -559,6 +567,7 @@ impl AgentHub {
             steering: Mutex::new(HashMap::new()),
             steering_rx: Mutex::new(HashMap::new()),
             followups: Mutex::new(HashMap::new()),
+            unanswered: Mutex::new(HashMap::new()),
             woken: Mutex::new(Default::default()),
             approvals: Mutex::new(HashMap::new()),
             file_sink: std::sync::OnceLock::new(),
@@ -1292,6 +1301,48 @@ impl AgentHub {
         Ok(true)
     }
 
+    /// Lets [`Self::hold_tool`] see a running turn's mid-turn messages;
+    /// `None` when the turn ends.
+    pub(super) fn watch_unanswered(
+        &self,
+        session_id: &str,
+        unanswered: Option<Arc<Mutex<claude::Unanswered>>>,
+    ) {
+        let mut all = self.unanswered.lock().unwrap();
+        match unanswered {
+            Some(u) => all.insert(session_id.into(), u),
+            None => all.remove(session_id),
+        };
+    }
+
+    /// Claude Code's `PreToolUse` hook: whether to hold tool call
+    /// `tool_use_id` until the agent replies to the person's mid-turn
+    /// message (see `claude::Unanswered`). Returns why, for the agent.
+    pub async fn hold_tool(&self, session_id: &str, tool_use_id: &str) -> Option<String> {
+        let unanswered = self.unanswered.lock().unwrap().get(session_id).cloned()?;
+        // Wait for the call to be read from the agent's messages, so text it
+        // wrote just before counts. If it never shows up, let it run.
+        let mut waited = Duration::ZERO;
+        while !unanswered.lock().unwrap().has_called(tool_use_id) {
+            if waited >= HOLD_WAIT {
+                return None;
+            }
+            tokio::time::sleep(HOLD_POLL).await;
+            waited += HOLD_POLL;
+        }
+        let (messages, new_round) = unanswered.lock().unwrap().hold()?;
+        if new_round {
+            self.post(
+                session_id,
+                "system",
+                "status",
+                "The agent went on without replying to your message; tab held it until it answers.",
+                serde_json::Value::Null,
+            );
+        }
+        Some(claude::hold_reason(&messages))
+    }
+
     /// "Send now": cuts short the tool the running turn is waiting on, like
     /// Esc in Claude Code's terminal, so steering already sent is read right
     /// away instead of when the tool ends. False when no turn takes steering.
@@ -1888,12 +1939,17 @@ impl AgentHub {
             Decision::Answer(_) => "Answered".to_string(),
             Decision::Deny(why) => format!("Denied: {why}"),
         };
+        let mut meta = serde_json::json!({ "tool": approval.tool });
+        // What the person picked stays in the chat (their card closes).
+        if let Decision::Answer(answers) = &decision {
+            meta["answers"] = answers.clone();
+        }
         self.post(
             session_id,
             "system",
             "approval",
             &format!("{verdict} · {}", approval.summary),
-            serde_json::json!({ "tool": approval.tool }),
+            meta,
         );
         if self.is_running(session_id) {
             self.update(session_id, Some(SessionStatus::Working), None);

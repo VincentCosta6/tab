@@ -65,6 +65,7 @@ pub(super) async fn run_turn(
     hub.steering_close(&session.id);
     let mut queued = hub.steering_open(&session.id);
     let result = run(hub, session, prompt, system, &mut queued, cancel).await;
+    hub.watch_unanswered(&session.id, None);
     let mut later = Vec::new();
     while let Ok(s) = queued.try_recv() {
         if let Steer::Message(m) = s {
@@ -196,6 +197,7 @@ async fn run(
     let claude_mode = claude.as_ref().map(|c| c.mode.clone());
     // Claude Code's chat comes from its own messages (`_claude/sdkMessage`).
     events.raw = claude.take().map(|c| c.parser);
+    hub.watch_unanswered(&session.id, events.raw.as_ref().map(|p| p.unanswered()));
 
     let outcome: anyhow::Result<Option<Result<Value, RpcError>>> = async {
         // Start: initialize, then the chat's session. Updates that replay an

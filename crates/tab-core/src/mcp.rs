@@ -168,6 +168,7 @@ pub async fn serve(server: Arc<McpServer>, port: u16) -> anyhow::Result<String> 
         .route("/mcp/{server}", axum::routing::any(handle_remote))
         .route("/oauth/callback", axum::routing::get(handle_oauth_callback))
         .route("/cli", post(handle_cli))
+        .route("/hooks/pre-tool", post(handle_pre_tool))
         .route(
             "/git/{session}/{connector}/{*rest}",
             axum::routing::any(handle_git),
@@ -237,6 +238,40 @@ async fn handle_cli(State(s): State<Arc<McpServer>>, headers: HeaderMap, body: S
     };
     let reply = s.run_cli(&session, req).await;
     axum::Json(reply).into_response()
+}
+
+/// Claude Code's `PreToolUse` hook for a chat (see
+/// `agents::claude::Unanswered`): holds the agent's tool call while the
+/// person's mid-turn message waits for a reply. Anything else lets it run.
+async fn handle_pre_tool(
+    State(s): State<Arc<McpServer>>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let id = headers
+        .get("x-tab-session")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if !authed_chat(&s, &headers, &id) {
+        return (StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
+    }
+    let input: Value = serde_json::from_str(&body).unwrap_or_default();
+    // A subagent's calls: the person talks to the main agent.
+    let main = input.get("agent_id").is_none_or(Value::is_null);
+    let reason = match input["tool_use_id"].as_str() {
+        Some(call) if main => s.hub.hold_tool(&id, call).await,
+        _ => None,
+    };
+    axum::Json(match reason {
+        Some(reason) => json!({ "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        } }),
+        None => json!({}),
+    })
+    .into_response()
 }
 
 /// Headers a chat's MCP client sends that the remote server needs too.
