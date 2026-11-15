@@ -11,7 +11,7 @@ import { timestampFromDate, timestampNow } from "@bufbuild/protobuf/wkt";
 import { ErrorCode, HubKind, HubListSchema, HubSchema, HubState, HubStatusSchema, PlanSchema, Role, RunnerState, RunnerStatusSchema, type HubStatus } from "./protocol/cloud";
 import type {
   ChatSummary,
-  McpCatalogEntry, McpCloudState, JobGaps, McpImportCandidate, McpImportResult, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
+  ManifestStatus, MarketListingView, McpCatalogEntry, McpCloudState, JobGaps, McpImportCandidate, McpImportResult, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
   EmailSignInStatus, MailProvider,
   Account, AgentKind, DecisionProvider, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
   AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
@@ -963,6 +963,19 @@ let gh: GhStatus = { installed: false, path: null, version: null, logged_in: fal
 const ghCodeListeners = new Set<(c: GhLoginCode) => void>();
 
 // Remote MCP connections. Sign-ins finish on their own after a moment.
+const mockManifests: ManifestStatus = {
+  dir: "~/Library/Application Support/dev.tab.app/recipes",
+  manifests: [
+    { id: "linear", name: "Linear", source: "built_in", fills_queue: true, plugin: false, path: null, replaces_built_in: false },
+    { id: "sentry", name: "Sentry", source: "built_in", fills_queue: true, plugin: false, path: null, replaces_built_in: false },
+    { id: "acme", name: "Acme", source: "yours", fills_queue: true, plugin: true, path: "~/…/recipes/acme.json", replaces_built_in: false },
+  ],
+  errors: [{ path: "~/…/recipes/broken.json", error: "expected `,` or `}` at line 3 column 5" }],
+};
+const marketInstalled = new Set<string>();
+const mockListings: Omit<MarketListingView, "installed">[] = [
+  { id: "vercel", name: "Vercel deployments", description: "Failed production deployments come into your queue.", author: "tab", version: "1.0.0", file: "manifests/vercel.json", sha256: "", signature: "" },
+];
 const mcpCatalog: McpCatalogEntry[] = [
   { id: "linear", name: "Linear", url: "https://mcp.linear.app/mcp", description: "Agents can find, create and update issues, projects and comments.", category: "work", color: "#5e6ad2", fills_queue: true, queue_description: "Issues assigned to you come into your queue. Issues that are done or cancelled in Linear are marked done here.", kinds: [{ kind: "linear.issue", label: "Linear issue", icon: "linear", tone: "accent" }] },
   { id: "notion", name: "Notion", url: "https://mcp.notion.com/mcp", description: "Agents can search, read and edit pages and databases.", category: "work", color: "#191919", fills_queue: true, queue_description: "Pages matching a search come into your queue. Notion has no list of what's assigned to you, so tab runs a search you pick.", queue_query: "tasks assigned to me", kinds: [{ kind: "notion.page", label: "Notion page", icon: "notion", tone: "neutral" }, { kind: "notion.database", label: "Notion database", icon: "notion", tone: "neutral" }] },
@@ -1046,6 +1059,13 @@ function mcpHandle(cmd: string, args: Record<string, any>): unknown {
   const servers = config.mcp_servers ?? {};
   switch (cmd) {
     case "mcp_catalog": return mcpCatalog;
+    case "manifests":
+    case "manifests_reload": return mockManifests;
+    case "manifests_open_folder": return null;
+    case "marketplace_listings": return mockListings.map((l) => ({ ...l, installed: marketInstalled.has(l.id) ? l.version : null }));
+    case "marketplace_preview": return { listing: args.listing, calls: ["list_deployments", "get_deployment"], fills_queue: true, replaces_built_in: args.listing.id === "vercel", url: "https://mcp.vercel.com" };
+    case "marketplace_install": marketInstalled.add(args.listing.id); return mockManifests;
+    case "marketplace_uninstall": marketInstalled.delete(args.id); return mockManifests;
     case "mcp_servers": return mcpServersInfo();
     case "mcp_probe": {
       let u: URL;
@@ -1103,6 +1123,7 @@ function mcpHandle(cmd: string, args: Record<string, any>): unknown {
       return null;
     }
     case "mcp_set_enabled": mcpSetServers({ ...servers, [args.id]: { ...servers[args.id], enabled: args.enabled } }); return null;
+    case "mcp_set_queue_choice": mcpSetServers({ ...servers, [args.id]: { ...servers[args.id], queue_choice: args.choice || undefined } }); return null;
     case "mcp_set_queue": mcpSetServers({ ...servers, [args.id]: { ...servers[args.id], queue: args.on ? undefined : false, queue_query: args.query?.trim() || undefined } }); return null;
     case "mcp_tools": {
       const chosen = servers[args.id]?.tools ?? {};

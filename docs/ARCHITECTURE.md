@@ -185,7 +185,7 @@ A `Connector` instance:
 
 **Remote MCP connections (built).** Services with a remote MCP server (Linear, Notion, Sentry, Vercel, Stripe, Atlassian, or any URL) connect with one browser sign-in: tab finds the authorization server (RFC 9728 / 8414), registers itself (RFC 7591), signs in with PKCE back to `/oauth/callback` on its MCP server, and keeps the tokens out of `config.json` (DPAPI on Windows, the keychain on macOS, a private file elsewhere). Agents in chats the person drives get each server as `--mcp-config` entry `http://127.0.0.1:<port>/mcp/<id>`: tab adds the token, refreshes it, hides tools set to off and asks the person before tools set to ask. Because they come in through tab's own config, they work in strict chats. They give agents tools; they don't fill the queue yet. See `docs/connect-via-mcp.md`.
 
-**Third-party connectors (designed).** Out-of-process connectors speaking a small JSON-RPC protocol over stdio (descriptor, run → event notifications, preview, on_done). This keeps the core safe from plugin crashes and lets connectors be written in any language. The protocol is deliberately close to MCP so an MCP server can be wrapped as a connector.
+**Third-party connectors (built for MCP connections).** Each service tab knows the MCP server of is a JSON manifest (`remote_mcp::manifest`): its catalog entry and how its tools fill the queue. The person adds their own in `<app data>/recipes`, or installs signed ones from the marketplace (`remote_mcp::marketplace`). What a manifest can't express runs as a plugin (`remote_mcp::plugin`): a program in the sandbox that speaks JSON-RPC over stdio and calls the connection's tools through tab. See `docs/recipe-manifests.md`.
 
 ## Ranking (built)
 

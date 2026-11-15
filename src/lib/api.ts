@@ -7,7 +7,7 @@ import type {
   AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceAccess, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem, SlashCommand, Subagent,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Suggestion, Workflow, WorkflowRun, ItemWorkflowStatus, RunView, WorkflowFactory, WorkflowInsights, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, ModelFamily, Runner, RunsOn,
-  AgentMcpServer, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
+  AgentMcpServer, ManifestStatus, MarketListing, MarketListingView, MarketPreview, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
   EmailSignInStatus, MailProvider, Segment, SessionMessage, ChatRewound, RewoundFiles, VaultAudit, VaultEntry, VaultEntryInput, VaultStatus,
 } from "./types";
 import { mockApi } from "./mock";
@@ -245,6 +245,18 @@ export const api = {
   mcpSetEnabled: (id: string, enabled: boolean) => call<void>("mcp_set_enabled", { id, enabled }),
   /** Whether its work fills the queue, and what it watches (for recipes that ask). */
   mcpSetQueue: (id: string, on: boolean, query: string | null) => call<void>("mcp_set_queue", { id, on, query }),
+  mcpSetQueueChoice: (id: string, choice: string | null) => call<void>("mcp_set_queue_choice", { id, choice }),
+  /** Connection manifests: what's loaded, from where, and what didn't load. */
+  manifests: () => call<ManifestStatus>("manifests"),
+  /** Reads the manifest folders again and restarts what syncs from them. */
+  manifestsReload: () => call<ManifestStatus>("manifests_reload"),
+  manifestsOpenFolder: () => call<void>("manifests_open_folder"),
+  /** Signed manifests on offer, and which are installed. */
+  marketplaceListings: () => call<MarketListingView[]>("marketplace_listings"),
+  /** Downloads and checks a listing, and says what it would call. */
+  marketplacePreview: (listing: MarketListing) => call<MarketPreview>("marketplace_preview", { listing }),
+  marketplaceInstall: (listing: MarketListing) => call<ManifestStatus>("marketplace_install", { listing }),
+  marketplaceUninstall: (id: string) => call<ManifestStatus>("marketplace_uninstall", { id }),
   /** A server's tools with the person's choices; `refresh` asks the server again. */
   mcpTools: (id: string, refresh: boolean) => call<McpTool[]>("mcp_tools", { id, refresh }),
   /** Allowed, ask or off for one tool; null goes back to the default. */

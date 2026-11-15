@@ -870,6 +870,8 @@ export interface McpServerConfig {
   queue?: boolean;
   /** What the queue watches, for recipes that ask (Notion: a search). */
   queue_query?: string;
+  /** What the queue brings in, for recipes that offer choices; unset is the first. */
+  queue_choice?: string;
   /** The person allowed it in tab cloud jobs ("Allow in cloud"). */
   cloud_jobs?: boolean;
   /** The person's choice per tool in cloud jobs: allow or off (nobody can answer an ask there). */
@@ -984,6 +986,56 @@ export interface McpCatalogEntry {
   queue_choices?: McpQueueChoice[];
   /** What comes into the queue and when it's marked done, from its recipe. */
   queue_description?: string;
+}
+
+/** Where a connection manifest came from. */
+export type ManifestSource = "built_in" | "yours" | "marketplace";
+
+export interface ManifestInfo {
+  id: string;
+  name: string;
+  source: ManifestSource;
+  fills_queue: boolean;
+  /** Runs a plugin rather than steps. */
+  plugin: boolean;
+  path: string | null;
+  /** It takes the place of the built-in with the same id. */
+  replaces_built_in: boolean;
+}
+
+export interface ManifestStatus {
+  /** The person's manifest folder. */
+  dir: string | null;
+  manifests: ManifestInfo[];
+  /** Files that didn't load, and why. */
+  errors: { path: string; error: string }[];
+}
+
+/** A manifest the marketplace offers. */
+export interface MarketListing {
+  id: string;
+  name: string;
+  description: string;
+  author?: string | null;
+  version: string;
+  file: string;
+  sha256: string;
+  signature: string;
+}
+
+export interface MarketListingView extends MarketListing {
+  /** The installed version, if it's installed. */
+  installed: string | null;
+}
+
+/** What installing a listing would do. */
+export interface MarketPreview {
+  listing: MarketListing;
+  /** Tools it calls on the connection. */
+  calls: string[];
+  fills_queue: boolean;
+  replaces_built_in: boolean;
+  url: string;
 }
 
 /** One option for what a connection brings into the queue. */

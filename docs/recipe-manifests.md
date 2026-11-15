@@ -1,8 +1,9 @@
 # Connection manifests
 
-Status: built for MCP connections (`remote_mcp::manifest`). Not built yet:
-a Reload button, load errors on the Connections page, connector plugins,
-and the marketplace (see "What's next").
+Status: built: manifests (`remote_mcp::manifest`), connector plugins
+(`remote_mcp::plugin`) and the marketplace (`remote_mcp::marketplace`,
+`marketplace/`). Before the marketplace works, someone has to make the
+signing key (see "The marketplace"). Still to do is under "What's next".
 
 ## Why
 
@@ -15,9 +16,15 @@ Rust or in the UI.
 
 - Built-ins: `crates/tab-core/src/remote_mcp/manifests/*.json`, compiled
   in (Linear, Notion, Jira & Confluence, Sentry, Vercel, Stripe).
-- The person's own: `<app data>/recipes/*.json`, read at startup. One with
-  a built-in's id takes its place. A file that doesn't load is skipped and
-  logged with the reason.
+- The person's own: `<app data>/recipes/*.json`.
+- Installed from the marketplace: `<app data>/recipes/marketplace/*.json`.
+
+tab reads both folders at startup and again when the person presses
+Reload under Connections → Installed → Manifests. That section shows every
+manifest that isn't built in, where it came from, and each file that didn't
+load with the reason. Reload also restarts the queue sync, so changes apply
+straight away. When two manifests have the same id, the person's own beats
+the marketplace's, which beats the built-in.
 
 `docs/connect-via-mcp.md` §3 gave three reasons recipes were Rust. Here's
 how manifests handle each:
@@ -46,10 +53,10 @@ how manifests handle each:
     "description": "What comes in, and when it's marked done.",
     "interval": "5m",                  // at least 1m
     "kinds": [{ "kind": "sentry.issue", "label": "Sentry issue", "icon": "alert", "tone": "danger" }],
-    "choices": [                       // what the person picks; the first is the default
+    "choices": [                       // what the person picks (queue_choice); the first is the default
       { "value": "mine", "label": "Only mine", "vars": { "searches": ["is:unresolved assigned:me"] } }
     ],
-    "search": { "hint": "tasks assigned to me" },   // or a typed search, as $query
+    "search": { "hint": "tasks assigned to me" },   // and/or a typed search (queue_query), as $query
     "incremental": { "overlap": "5m" },             // later looks list only changes, from $since
     "steps": [
       { "name": "orgs", "call": ["find_organizations"], "list": ["organizations"], "limit": 5,
@@ -103,12 +110,75 @@ needs an `if`, the work belongs in a connector plugin.
 so they're marked done. A first look, or a look that lists everything open,
 drops them.
 
+## Connector plugins
+
+Some work needs code: answers in markdown, logic with conditions. For that,
+a manifest in the person's own folder can name a program instead of
+`steps`, `item` and `check`:
+
+```json
+"queue": {
+  "description": "…", "kinds": [ … ], "choices": [ … ],
+  "plugin": { "command": "node", "args": ["acme.js"], "network": [], "timeout": "60s" }
+}
+```
+
+How tab runs it:
+- **When:** tab starts the program for each look, and for each item check,
+  from the manifest's folder. It stops the whole process tree when it's
+  done or when the timeout passes.
+- **Sandbox:** the program runs isolated. It can read files that aren't
+  hidden, write only its own folder and temp, and reach only the hosts in
+  `network` (none by default). Its environment holds none of tab's tokens.
+
+They talk JSON-RPC 2.0, one message per line on stdin and stdout:
+
+| Who asks | Method | Params | Answer |
+|---|---|---|---|
+| tab | `poll` | `{choice, query, since}` | `{items: [{id, title, kind?, body?, url?, actor?, context?, time?, resolved?, fields?, badges?, text?, markdown?, link?, entities?, metadata?}]}` |
+| tab | `check` | `{external_id, metadata}` | `{resolved: true \| false \| null}` |
+| plugin | `tools/list` | | `{tools: [{name, read_only}]}` |
+| plugin | `tools/call` | `{name, arguments}` | the tool's result |
+| plugin | `log` (notification) | `{message}` | |
+
+**Tool calls go through tab.** tab calls the connection's tools as the
+person, with the same budgets, audit log and read-only rule as a manifest's
+steps, and with at most 50 calls per request. A plugin never sees the
+connection's sign-in.
+
+**Limits:** a look returns at most 500 items. Plugins only load from the
+person's own folder, never from the marketplace.
+
+## The marketplace
+
+**Where it shows:** signed manifests appear under Connections →
+Marketplace → Community manifests.
+
+**The index:** `marketplace/index.json` in tab's repo (or the build
+variable `TAB_MARKETPLACE_INDEX`). It lists each manifest's file, version,
+SHA-256 and an Ed25519 signature over the file's bytes.
+
+**Installing:**
+1. tab downloads the file.
+2. It checks the hash and the signature against the key the build was made
+   with (`TAB_MARKETPLACE_PUBKEY`).
+3. It validates the manifest, and refuses plugins and ids that don't match
+   the listing.
+4. It shows which tools the manifest will call, and whether it replaces a
+   built-in.
+5. Once the person confirms, it saves the file into the marketplace folder
+   and reloads.
+
+**Publishing:** `marketplace/README.md` covers publishing and making the
+key. Until a key exists and release builds get its public half, the app
+says that this build has no marketplace.
+
 ## Safety
 
-- **Tools:** a manifest only calls tools on its own connection, through
+- **Tools:** a manifest (or plugin) only calls tools on its own connection, through
   `Gateway::run`, with the same budgets and audit log as before.
-- **Read-only:** manifests that don't ship with tab may only call tools the
-  server marks read-only (MCP's `readOnlyHint`). Built-ins are reviewed
+- **Read-only:** manifests and plugins that don't ship with tab may only
+  call tools the server marks read-only (MCP's `readOnlyHint`). Built-ins are reviewed
   with tab's code, and some servers don't annotate their tools.
 - **Limits:** at most 10 steps and 50 calls per look, and a look at most
   once a minute.
@@ -125,17 +195,11 @@ drops them.
 
 ## What's next
 
-1. **Reload and errors in the app:** a Reload button on Connections that
-   re-reads `recipes/` and rebuilds the sync connectors, and that shows the
-   files that didn't load and why. `manifest::load_dir` already returns
-   those errors.
-2. **Connector plugins:** the stdio protocol in `ARCHITECTURE.md`, for
-   what manifests can't do (markdown, webhooks, services without MCP).
-3. **Marketplace:** signing, review and installing, as its own design.
-   Installing a manifest should show what it reads ("Calls `search_issues`
-   on your Sentry connection") before it runs.
-4. **Choices beyond one pick:** a connection keeps one `queue_query`, so a
-   manifest offers either choices or a typed search, not both. A map of
-   variables (`queue_vars`) would cover both, and needs a config migration.
-5. **Cloud:** manifests are data, so the cloud runner could run them too.
-   That's phase 4 of `connect-via-mcp.md`.
+1. **The marketplace key:** make it (`manifest_sign keygen`), keep the
+   private half safe, and give release builds `TAB_MARKETPLACE_PUBKEY`.
+   Then publish the first manifests.
+2. **Cloud:** manifests are data, so the cloud runner could run them too.
+   That's phase 4 of `connect-via-mcp.md`. Plugins would stay local.
+3. **Connectors beyond MCP:** GitHub and email are still Rust connectors.
+   A plugin that is itself a local MCP server (a stdio command connection)
+   covers new services without an MCP server of their own.

@@ -42,7 +42,7 @@ pub struct Found {
 /// One option for what a connection brings into the queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct QueueChoice {
-    /// What's saved in [`RemoteMcpConfig::queue_query`].
+    /// What's saved in [`RemoteMcpConfig::queue_choice`].
     pub value: &'static str,
     pub label: &'static str,
 }
@@ -75,7 +75,7 @@ pub trait Recipe: Send + Sync {
     }
 
     /// For recipes where the person picks what comes in from a short list:
-    /// the choices, kept in [`RemoteMcpConfig::queue_query`]. The first is
+    /// the choices, kept in [`RemoteMcpConfig::queue_choice`]. The first is
     /// the default.
     fn queue_choices(&self) -> &'static [QueueChoice] {
         &[]
@@ -136,6 +136,7 @@ pub fn build(
                 remote: remote.clone(),
                 gateway: gateway.clone(),
                 query: c.queue_query.clone().filter(|q| !q.trim().is_empty()),
+                choice: c.queue_choice.clone(),
                 since: Mutex::new(None),
                 open: Mutex::new(HashMap::new()),
             }) as Arc<dyn Connector>)
@@ -158,8 +159,10 @@ pub struct Session<'a> {
     id: &'a str,
     remote: &'a RemoteMcp,
     gateway: &'a Gateway,
-    /// The person's pick, for recipes that watch something they choose.
+    /// The person's search, for recipes that watch one they type.
     pub query: Option<&'a str>,
+    /// The person's pick, for recipes that offer choices.
+    pub choice: Option<&'a str>,
     tools: Vec<String>,
     /// The tools the server marks read-only.
     read_only: Vec<String>,
@@ -169,6 +172,11 @@ impl Session<'_> {
     /// Whether the server has this tool.
     pub fn has(&self, tool: &str) -> bool {
         self.tools.iter().any(|t| t == tool)
+    }
+
+    /// The server's tools.
+    pub fn tools(&self) -> &[String] {
+        &self.tools
     }
 
     /// Whether the server marks this tool read-only.
@@ -271,6 +279,7 @@ pub struct McpConnector {
     remote: Arc<RemoteMcp>,
     gateway: Arc<Gateway>,
     query: Option<String>,
+    choice: Option<String>,
     /// When the last good look started.
     since: Mutex<Option<DateTime<Utc>>>,
     /// What the last look found open, by external id.
@@ -299,6 +308,7 @@ impl McpConnector {
             remote: &self.remote,
             gateway: &self.gateway,
             query: self.query.as_deref(),
+            choice: self.choice.as_deref(),
             tools,
             read_only,
         })
@@ -534,6 +544,7 @@ mod tests {
             remote: remote.clone(),
             gateway: gateway.clone(),
             query: None,
+            choice: None,
             since: Mutex::new(None),
             open: Mutex::new(HashMap::new()),
         });
@@ -589,6 +600,106 @@ mod tests {
             audit
                 .iter()
                 .any(|a| a.connector == "sentry" && a.url == "mcp://sentry/search_issues")
+        );
+    }
+
+    /// A plugin answers a look by asking tab to call the connection's tools:
+    /// a read-only one runs, and one that changes things is refused.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runs_a_plugin_that_calls_tools_through_tab() {
+        use axum::{Router, routing::post};
+        async fn mcp(body: String) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            let req: Value = serde_json::from_str(&body).unwrap();
+            let result = match req["method"].as_str().unwrap_or_default() {
+                "initialize" => {
+                    json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": { "name": "A" } })
+                }
+                "tools/list" => json!({ "tools": [
+                    { "name": "list_things", "annotations": { "readOnlyHint": true } },
+                    { "name": "delete_thing" } ] }),
+                "tools/call" => {
+                    assert_eq!(req["params"]["name"], "list_things");
+                    let out = json!({ "things": [{ "id": "t1" }] });
+                    json!({ "content": [{ "type": "text", "text": out.to_string() }], "structuredContent": out })
+                }
+                _ => return axum::http::StatusCode::ACCEPTED.into_response(),
+            };
+            (
+                [("content-type", "application/json")],
+                json!({ "jsonrpc": "2.0", "id": req["id"], "result": result }).to_string(),
+            )
+                .into_response()
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/mcp", post(mcp)))
+                .await
+                .unwrap()
+        });
+
+        let dir = std::env::temp_dir().join(format!("tab-plugin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Asks for a tool that changes things, then one that reads, then
+        // answers with what it heard.
+        std::fs::write(
+            dir.join("plugin.sh"),
+            r#"read request
+echo '{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"delete_thing","arguments":{}}}'
+read refused
+echo '{"jsonrpc":"2.0","id":"b","method":"tools/call","params":{"name":"list_things","arguments":{}}}'
+read things
+case "$refused" in *read-only*) r=yes;; *) r=no;; esac
+case "$things" in *'"t1"'*) g=yes;; *) g=no;; esac
+case "$request" in *'"poll"'*) p=yes;; *) p=no;; esac
+echo '{"jsonrpc":"2.0","method":"log","params":{"message":"done"}}'
+printf '{"jsonrpc":"2.0","id":1,"result":{"items":[{"id":"t1","title":"poll=%s refused=%s got=%s"}]}}\n' "$p" "$r" "$g"
+"#,
+        )
+        .unwrap();
+        let manifest = json!({ "manifest": 1, "id": "acme", "name": "Acme", "url": "http://x",
+            "description": "d", "queue": { "description": "d",
+                "kinds": [{ "kind": "acme.thing", "label": "Thing", "icon": "alert" }],
+                "plugin": { "command": "sh", "args": ["plugin.sh"], "timeout": "20s" } } });
+        let recipe = super::super::manifest::recipe_from(
+            &manifest.to_string(),
+            super::super::manifest::Source::Yours,
+            Some(dir.join("acme.json")),
+        );
+
+        let remote =
+            RemoteMcp::new(std::env::temp_dir().join(format!("tab-sync-{}", uuid::Uuid::new_v4())));
+        let mut servers = std::collections::BTreeMap::new();
+        servers.insert(
+            "acme".to_string(),
+            RemoteMcpConfig {
+                name: "Acme".into(),
+                url: format!("http://{addr}/mcp"),
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        remote.set_servers(servers);
+        let store = Arc::new(crate::store::Store::in_memory().unwrap());
+        let m = McpConnector {
+            id: "acme".into(),
+            recipe,
+            remote: remote.clone(),
+            gateway: Arc::new(Gateway::new(store)),
+            query: None,
+            choice: None,
+            since: Mutex::new(None),
+            open: Mutex::new(HashMap::new()),
+        };
+        let (ctx, mut rx, _c) = crate::connector::test_context("acme");
+        assert_eq!(m.look(&ctx).await.unwrap(), 1);
+        drop(ctx);
+        let line = rx.recv().await.unwrap();
+        assert!(
+            line.starts_with("event acme.thing | t1 | poll=yes refused=yes got=yes"),
+            "{line}"
         );
     }
 

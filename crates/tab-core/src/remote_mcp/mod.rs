@@ -11,7 +11,9 @@
 
 pub mod import;
 pub mod manifest;
+pub mod marketplace;
 pub mod oauth;
+pub mod plugin;
 pub mod stdio;
 pub mod sync;
 pub use crate::vault;
@@ -67,10 +69,13 @@ pub struct RemoteMcpConfig {
     /// recipe for it ([`sync`]). `None` means yes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<bool>,
-    /// What the queue watches, for recipes that ask (Notion: a search;
-    /// Sentry: one of its [`sync::Recipe::queue_choices`]).
+    /// What the queue watches, for recipes that ask (Notion: a search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_query: Option<String>,
+    /// What the queue brings in, for recipes that offer choices
+    /// ([`sync::Recipe::queue_choices`]). `None` is the first, the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_choice: Option<String>,
     /// The person allowed it in tab cloud jobs ("Allow in cloud"). It runs
     /// there only when it can ([`cloud_fit`]) and the hub is in tab cloud.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

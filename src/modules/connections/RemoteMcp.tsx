@@ -491,6 +491,7 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
           description={catalogEntry?.queue_description}
           busy={busy}
           onChange={(on, query) => void run(() => api.mcpSetQueue(id, on, query))}
+          onChoice={(choice) => void run(() => api.mcpSetQueueChoice(id, choice))}
         />
       )}
 
@@ -547,7 +548,7 @@ export function McpDetail({ id, color, onBack }: { id: string; color?: string; o
 }
 
 /** "Fills your queue" on a connection's page: on or off, how the last look went, and what it watches. */
-function QueueSection({ s, q, hint, choices, description, busy, onChange }: { s: McpServerInfo; q: McpQueueState; hint?: string; choices?: McpQueueChoice[]; description?: string; busy: boolean; onChange: (on: boolean, query: string | null) => void }) {
+function QueueSection({ s, q, hint, choices, description, busy, onChange, onChoice }: { s: McpServerInfo; q: McpQueueState; hint?: string; choices?: McpQueueChoice[]; description?: string; busy: boolean; onChange: (on: boolean, query: string | null) => void; onChoice: (choice: string | null) => void }) {
   const [query, setQuery] = useState(s.queue_query ?? "");
   useEffect(() => setQuery(s.queue_query ?? ""), [s.queue_query]);
   const status = !q.on
@@ -560,7 +561,7 @@ function QueueSection({ s, q, hint, choices, description, busy, onChange }: { s:
           ? `Looked ${timeAgo(q.last_sync)} · ${q.found ?? 0} open`
           : "Looking…";
   // Nothing saved, or a choice that's gone, means the first (the default).
-  const picked = choices?.find((c) => c.value === s.queue_query)?.value ?? choices?.[0]?.value;
+  const picked = choices?.find((c) => c.value === s.queue_choice)?.value ?? choices?.[0]?.value;
   const tone: Tone = !q.on ? "neutral" : q.error ? "danger" : q.last_sync ? "success" : "warning";
   return (
     <Section title="Fills your queue" description={description ?? "Work from it comes into your queue."}>
@@ -574,7 +575,7 @@ function QueueSection({ s, q, hint, choices, description, busy, onChange }: { s:
           {choices?.length && q.on ? (
             <div className="seg" role="radiogroup" aria-label="Which issues come in">
               {choices.map((c, i) => (
-                <button key={c.value} role="radio" aria-checked={c.value === picked} className={cx(c.value === picked && "on")} disabled={busy} onClick={() => onChange(true, i === 0 ? null : c.value)}>
+                <button key={c.value} role="radio" aria-checked={c.value === picked} className={cx(c.value === picked && "on")} disabled={busy} onClick={() => onChoice(i === 0 ? null : c.value)}>
                   {c.label}
                 </button>
               ))}

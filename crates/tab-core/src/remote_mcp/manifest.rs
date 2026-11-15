@@ -30,6 +30,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::CatalogEntry;
+use super::plugin::{Plugin, PluginSpec};
 use super::sync::{Found, QueueChoice, Recipe, Session, clip, list, name_of, time_of};
 use crate::model::{Block, EntityRef, Field, IncomingEvent, KindInfo, Link, Tone};
 
@@ -71,6 +72,11 @@ pub struct Manifest {
     pub category: String,
     #[serde(default = "grey")]
     pub color: String,
+    /// For the marketplace: which release of the manifest this is.
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub author: Option<String>,
     /// How it fills the queue. Without one, it gives agents tools only.
     #[serde(default)]
     pub queue: Option<Queue>,
@@ -105,11 +111,19 @@ pub struct Queue {
     #[serde(default)]
     pub incremental: Option<IncrementalSpec>,
     /// Run in order; the last one's list becomes the items.
+    #[serde(default)]
     pub steps: Vec<Step>,
-    pub item: ItemSpec,
+    /// How the last step's list maps to items.
+    #[serde(default)]
+    pub item: Option<ItemSpec>,
     /// Asks about an item that dropped out of the list.
     #[serde(default)]
     pub check: Option<CheckSpec>,
+    /// A program that does the looking instead of `steps`, `item` and
+    /// `check` ([`super::plugin`]). Only for manifests in the person's own
+    /// folder.
+    #[serde(default)]
+    pub plugin: Option<PluginSpec>,
 }
 
 fn five_minutes() -> String {
@@ -600,7 +614,15 @@ impl Manifest {
         if q.kinds.is_empty() {
             return Err("the queue needs at least one kind".into());
         }
-        if q.steps.is_empty() || q.steps.len() > MAX_STEPS {
+        if let Some(p) = &q.plugin {
+            if !q.steps.is_empty() || q.item.is_some() || q.check.is_some() {
+                return Err("a queue with a plugin has no steps, item or check".into());
+            }
+            if p.command.trim().is_empty() {
+                return Err("the plugin needs a command".into());
+            }
+            duration(&p.timeout)?;
+        } else if q.steps.is_empty() || q.steps.len() > MAX_STEPS {
             return Err(format!("the queue needs 1 to {MAX_STEPS} steps"));
         }
         let mut values: Vec<&str> = Vec::new();
@@ -635,7 +657,12 @@ impl Manifest {
                 names.push(n);
             }
         }
-        let it = &q.item;
+        let Some(it) = &q.item else {
+            if q.plugin.is_none() {
+                return Err("the queue needs an item".into());
+            }
+            return Ok(());
+        };
         let mut tpls: Vec<&Tpl> = vec![&it.id, &it.title];
         tpls.extend(
             [&it.body, &it.url, &it.actor, &it.context, &it.time]
@@ -702,11 +729,23 @@ pub struct ManifestRecipe {
     overlap: Option<chrono::Duration>,
     /// Shipped with tab (and reviewed with it): may call any tool.
     built_in: bool,
+    plugin: Option<Plugin>,
 }
 
 impl ManifestRecipe {
-    fn new(m: &'static Manifest, built_in: bool) -> Option<ManifestRecipe> {
+    /// `dir` is the manifest's folder, where its plugin runs.
+    fn new(m: &'static Manifest, built_in: bool, dir: Option<&Path>) -> Option<ManifestRecipe> {
         let q = m.queue.as_ref()?;
+        let plugin = match &q.plugin {
+            Some(spec) => Some(Plugin {
+                name: &m.name,
+                spec,
+                dir: dir?.to_path_buf(),
+                timeout: duration(&spec.timeout).ok()?,
+                built_in,
+            }),
+            None => None,
+        };
         let choices: Vec<QueueChoice> = q
             .choices
             .iter()
@@ -726,18 +765,24 @@ impl ManifestRecipe {
                 .and_then(|i| duration(&i.overlap).ok())
                 .and_then(|d| chrono::Duration::from_std(d).ok()),
             built_in,
+            plugin,
         })
     }
 
     /// The variables a look starts with: the person's choice (or search),
     /// and `$since`.
-    fn vars(&self, query: Option<&str>, since: Option<DateTime<Utc>>) -> Map<String, Value> {
+    fn vars(
+        &self,
+        choice: Option<&str>,
+        query: Option<&str>,
+        since: Option<DateTime<Utc>>,
+    ) -> Map<String, Value> {
         let mut vars = Map::new();
         let choice = self
             .q
             .choices
             .iter()
-            .find(|c| Some(c.value.as_str()) == query)
+            .find(|c| Some(c.value.as_str()) == choice)
             .or(self.q.choices.first());
         if let Some(c) = choice {
             vars.extend(c.vars.clone());
@@ -765,7 +810,7 @@ impl ManifestRecipe {
 
     /// One item, or `None` when it has no id or title.
     fn item(&self, v: &Value, vars: &Map<String, Value>) -> Option<Found> {
-        let it = &self.q.item;
+        let it = self.q.item.as_ref()?;
         let sc = Scope {
             item: Some(v),
             vars,
@@ -917,7 +962,15 @@ impl Recipe for ManifestRecipe {
         s: &Session<'_>,
         since: Option<DateTime<Utc>>,
     ) -> anyhow::Result<Vec<Found>> {
-        let vars = self.vars(s.query, since);
+        if let Some(p) = &self.plugin {
+            let kinds: Vec<&str> = self.q.kinds.iter().map(|k| k.kind.as_str()).collect();
+            let mut out = p.poll(s, &kinds, since).await?;
+            if !(self.incremental() && since.is_some()) {
+                out.retain(|f| !f.resolved);
+            }
+            return Ok(out);
+        }
+        let vars = self.vars(s.choice, s.query, since);
         let mut lists: HashMap<String, Vec<Value>> = HashMap::new();
         let mut out = Vec::new();
         let mut calls = 0;
@@ -1000,7 +1053,10 @@ impl Recipe for ManifestRecipe {
     }
 
     async fn check(&self, s: &Session<'_>, item: &IncomingEvent) -> anyhow::Result<Option<bool>> {
-        let Some(c) = &self.q.check else {
+        if let Some(p) = &self.plugin {
+            return p.check(s, item).await;
+        }
+        let (Some(c), Some(it)) = (&self.q.check, &self.q.item) else {
             return Ok(None);
         };
         let names: Vec<&str> = c.call.iter().map(String::as_str).collect();
@@ -1034,7 +1090,7 @@ impl Recipe for ManifestRecipe {
         if render(&c.known, &sc).is_none() {
             return Ok(None);
         }
-        Ok(Some(self.q.item.resolved.iter().any(|c| holds(c, &sc))))
+        Ok(Some(it.resolved.iter().any(|c| holds(c, &sc))))
     }
 }
 
@@ -1042,17 +1098,37 @@ impl Recipe for ManifestRecipe {
 // The registry
 // ---------------------------------------------------------------------------
 
+/// Where a manifest came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    BuiltIn,
+    /// The person's own folder.
+    Yours,
+    /// Installed from the marketplace ([`super::marketplace`]).
+    Marketplace,
+}
+
 struct Entry {
     m: &'static Manifest,
     recipe: Option<&'static ManifestRecipe>,
+    source: Source,
+    path: Option<PathBuf>,
 }
 
-fn entry(m: Manifest, built_in: bool) -> Entry {
+fn entry(m: Manifest, source: Source, path: Option<PathBuf>) -> Entry {
     // Manifests live as long as tab: a reload leaks the old ones, which is
     // a few kilobytes on a rare click.
     let m: &'static Manifest = Box::leak(Box::new(m));
-    let recipe = ManifestRecipe::new(m, built_in).map(|r| &*Box::leak(Box::new(r)));
-    Entry { m, recipe }
+    let dir = path.as_deref().and_then(Path::parent);
+    let recipe =
+        ManifestRecipe::new(m, source == Source::BuiltIn, dir).map(|r| &*Box::leak(Box::new(r)));
+    Entry {
+        m,
+        recipe,
+        source,
+        path,
+    }
 }
 
 fn built_ins() -> Vec<Entry> {
@@ -1061,63 +1137,178 @@ fn built_ins() -> Vec<Entry> {
         .map(|(file, json)| {
             let m =
                 Manifest::parse(json).unwrap_or_else(|e| panic!("built-in manifest {file}: {e}"));
-            entry(m, true)
+            entry(m, Source::BuiltIn, None)
         })
         .collect()
 }
 
-static REGISTRY: LazyLock<RwLock<Vec<Entry>>> = LazyLock::new(|| RwLock::new(built_ins()));
+struct Registry {
+    entries: Vec<Entry>,
+    /// The person's folder, once loaded.
+    dir: Option<PathBuf>,
+    errors: Vec<LoadError>,
+}
+
+static REGISTRY: LazyLock<RwLock<Registry>> = LazyLock::new(|| {
+    RwLock::new(Registry {
+        entries: built_ins(),
+        dir: None,
+        errors: Vec::new(),
+    })
+});
 
 /// A manifest that didn't load, and why.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct LoadError {
     pub path: PathBuf,
     pub error: String,
 }
 
-/// Loads the person's own manifests from `dir` (`*.json`), replacing the
-/// ones loaded before. One with a built-in's id takes its place. Returns
-/// the ones that didn't load; a missing folder is no manifests.
-pub fn load_dir(dir: &Path) -> Vec<LoadError> {
-    let mut errors = Vec::new();
-    let mut theirs: Vec<Manifest> = Vec::new();
+/// One manifest tab has, for the Connections page.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ManifestInfo {
+    pub id: String,
+    pub name: String,
+    pub source: Source,
+    pub fills_queue: bool,
+    /// Runs a plugin rather than steps.
+    pub plugin: bool,
+    pub path: Option<PathBuf>,
+    /// It takes the place of the built-in with the same id.
+    pub replaces_built_in: bool,
+}
+
+/// What's loaded, from where, and what didn't load.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Status {
+    pub dir: Option<PathBuf>,
+    pub manifests: Vec<ManifestInfo>,
+    pub errors: Vec<LoadError>,
+}
+
+/// The folder marketplace installs go in, under the person's.
+pub const MARKETPLACE_DIR: &str = "marketplace";
+
+fn json_files(dir: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "json"))
         .collect();
     paths.sort();
-    for path in paths {
+    paths
+}
+
+/// Loads the person's manifests from `dir` (`*.json`) and the
+/// marketplace's from `dir/marketplace`, replacing the ones loaded before.
+/// Theirs beat the marketplace's, which beat the built-ins, by id. A missing
+/// folder is no manifests.
+pub fn load_dir(dir: &Path) -> Status {
+    let mut errors = Vec::new();
+    let mut theirs: Vec<(Manifest, Source, PathBuf)> = Vec::new();
+    let found = json_files(dir)
+        .into_iter()
+        .map(|p| (p, Source::Yours))
+        .chain(
+            json_files(&dir.join(MARKETPLACE_DIR))
+                .into_iter()
+                .map(|p| (p, Source::Marketplace)),
+        );
+    for (path, source) in found {
         let parsed = std::fs::read_to_string(&path)
             .map_err(|e| e.to_string())
             .and_then(|json| Manifest::parse(&json))
             .and_then(|m| {
-                if theirs.iter().any(|t| t.id == m.id) {
-                    Err(format!(
+                if source == Source::Marketplace
+                    && m.queue.as_ref().is_some_and(|q| q.plugin.is_some())
+                {
+                    return Err("manifests from the marketplace can't run plugins".into());
+                }
+                match theirs.iter().find(|(t, _, _)| t.id == m.id) {
+                    Some((_, Source::Yours, _)) if source == Source::Marketplace => Err(format!(
+                        "your own manifest for \"{}\" takes its place",
+                        m.id
+                    )),
+                    Some(_) => Err(format!(
                         "another manifest here already has the id \"{}\"",
                         m.id
-                    ))
-                } else {
-                    Ok(m)
+                    )),
+                    None => Ok(m),
                 }
             });
         match parsed {
-            Ok(m) => theirs.push(m),
+            Ok(m) => theirs.push((m, source, path)),
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "manifest didn't load");
                 errors.push(LoadError { path, error });
             }
         }
     }
-    let mut all: Vec<Entry> = built_ins()
+    let mut entries: Vec<Entry> = built_ins()
         .into_iter()
-        .filter(|b| !theirs.iter().any(|t| t.id == b.m.id))
+        .filter(|b| !theirs.iter().any(|(t, _, _)| t.id == b.m.id))
         .collect();
-    all.extend(theirs.into_iter().map(|m| entry(m, false)));
-    *REGISTRY.write().unwrap() = all;
-    errors
+    entries.extend(
+        theirs
+            .into_iter()
+            .map(|(m, source, path)| entry(m, source, Some(path))),
+    );
+    let mut r = REGISTRY.write().unwrap();
+    *r = Registry {
+        entries,
+        dir: Some(dir.to_path_buf()),
+        errors,
+    };
+    status_of(&r)
+}
+
+/// Loads the person's folder again (after they changed it).
+pub fn reload() -> Option<Status> {
+    let dir = REGISTRY.read().unwrap().dir.clone()?;
+    Some(load_dir(&dir))
+}
+
+/// What's loaded now.
+pub fn status() -> Status {
+    status_of(&REGISTRY.read().unwrap())
+}
+
+fn status_of(r: &Registry) -> Status {
+    let built_in: Vec<String> = BUILT_IN
+        .iter()
+        .filter_map(|(f, _)| f.strip_suffix(".json").map(str::to_string))
+        .collect();
+    Status {
+        dir: r.dir.clone(),
+        manifests: r
+            .entries
+            .iter()
+            .map(|e| ManifestInfo {
+                id: e.m.id.clone(),
+                name: e.m.name.clone(),
+                source: e.source,
+                fills_queue: e.recipe.is_some(),
+                plugin: e.recipe.is_some_and(|r| r.plugin.is_some()),
+                path: e.path.clone(),
+                replaces_built_in: e.source != Source::BuiltIn && built_in.contains(&e.m.id),
+            })
+            .collect(),
+        errors: r.errors.clone(),
+    }
+}
+
+/// A recipe from one manifest, outside the registry.
+#[cfg(test)]
+pub(crate) fn recipe_from(
+    json: &str,
+    source: Source,
+    path: Option<PathBuf>,
+) -> &'static dyn Recipe {
+    entry(Manifest::parse(json).unwrap(), source, path)
+        .recipe
+        .unwrap()
 }
 
 /// The recipe for a catalog entry, if its manifest fills the queue.
@@ -1125,6 +1316,7 @@ pub fn recipe(id: &str) -> Option<&'static dyn Recipe> {
     REGISTRY
         .read()
         .unwrap()
+        .entries
         .iter()
         .find(|e| e.m.id == id)
         .and_then(|e| e.recipe)
@@ -1133,7 +1325,7 @@ pub fn recipe(id: &str) -> Option<&'static dyn Recipe> {
 
 /// Every service tab knows, from the manifests.
 pub fn catalog() -> Vec<CatalogEntry> {
-    catalog_of(&REGISTRY.read().unwrap())
+    catalog_of(&REGISTRY.read().unwrap().entries)
 }
 
 fn catalog_of(entries: &[Entry]) -> Vec<CatalogEntry> {
@@ -1170,7 +1362,7 @@ mod tests {
             .find(|(f, _)| f.strip_suffix(".json") == Some(id))
             .unwrap();
         let m: &'static Manifest = Box::leak(Box::new(Manifest::parse(json).unwrap()));
-        ManifestRecipe::new(m, true).unwrap()
+        ManifestRecipe::new(m, true, None).unwrap()
     }
 
     /// Items from one answer of the last step, as a look would map them.
@@ -1293,6 +1485,51 @@ mod tests {
     }
 
     #[test]
+    fn plugins_replace_steps_and_choices_sit_beside_a_search() {
+        let base = |queue: Value| {
+            json!({ "manifest": 1, "id": "thing", "name": "Thing", "url": "https://x", "description": "d",
+                "queue": queue })
+            .to_string()
+        };
+        let kinds = json!([{ "kind": "thing.x", "label": "X", "icon": "x" }]);
+        let plugin = json!({ "command": "node", "args": ["p.js"] });
+        assert!(
+            Manifest::parse(&base(
+                json!({ "description": "d", "kinds": kinds, "plugin": plugin })
+            ))
+            .is_ok()
+        );
+        let both = base(
+            json!({ "description": "d", "kinds": kinds, "plugin": plugin,
+            "steps": [{ "call": ["a"] }] }),
+        );
+        assert!(Manifest::parse(&both).unwrap_err().contains("plugin"));
+        let no_item =
+            base(json!({ "description": "d", "kinds": kinds, "steps": [{ "call": ["a"] }] }));
+        assert!(Manifest::parse(&no_item).unwrap_err().contains("item"));
+
+        let m: &'static Manifest = Box::leak(Box::new(
+            Manifest::parse(&base(json!({ "description": "d", "kinds": kinds,
+                "choices": [{ "value": "open", "label": "Open", "vars": { "state": "open" } },
+                            { "value": "all", "label": "All", "vars": { "state": "any" } }],
+                "search": { "hint": "bugs" },
+                "steps": [{ "call": ["a"] }], "item": { "id": "{id}", "title": "{title}" } })))
+            .unwrap(),
+        ));
+        let r = ManifestRecipe::new(m, false, None).unwrap();
+        let v = r.vars(Some("all"), Some("crash"), None);
+        assert_eq!(
+            (v["state"].as_str(), v["query"].as_str()),
+            (Some("any"), Some("crash"))
+        );
+        let v = r.vars(None, None, None);
+        assert_eq!(
+            (v["state"].as_str(), v["query"].as_str()),
+            (Some("open"), Some("bugs"))
+        );
+    }
+
+    #[test]
     fn linear_maps_issues_and_spots_finished_ones() {
         let r = built_in("linear");
         let v = json!({ "issues": [
@@ -1352,7 +1589,7 @@ mod tests {
         let t = DateTime::parse_from_rfc3339("2026-11-08T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let vars = r.vars(None, Some(t));
+        let vars = r.vars(None, None, Some(t));
         assert_eq!(vars["since"], "2026-11-08T09:55:00+00:00");
         let a = args(
             &r.q.steps[0].args,
@@ -1367,7 +1604,7 @@ mod tests {
             &r.q.steps[0].args,
             &Scope {
                 item: None,
-                vars: &r.vars(None, None),
+                vars: &r.vars(None, None, None),
             },
         );
         assert!(first.get("updatedAt").is_none());
@@ -1421,7 +1658,7 @@ mod tests {
         let r = built_in("sentry");
         let mine = "is:unresolved assigned:me";
         let unassigned = "is:unresolved is:unassigned";
-        let searches = |q: Option<&str>| r.vars(q, None)["searches"].clone();
+        let searches = |q: Option<&str>| r.vars(q, None, None)["searches"].clone();
         assert_eq!(searches(None), json!([mine, unassigned]));
         assert_eq!(searches(Some("mine_unassigned")), json!([mine, unassigned]));
         assert_eq!(searches(Some("mine")), json!([mine]));
@@ -1433,7 +1670,7 @@ mod tests {
             "orgs".to_string(),
             vec![json!({ "slug": "a" }), json!({ "slug": "b" })],
         );
-        let b = bindings(&r.q.steps[1], &r.vars(None, None), &lists);
+        let b = bindings(&r.q.steps[1], &r.vars(None, None, None), &lists);
         let pairs: Vec<(Value, Value)> = b
             .iter()
             .map(|b| (b["org"]["slug"].clone(), b["search"].clone()))
@@ -1453,8 +1690,8 @@ mod tests {
     fn notion_maps_search_results() {
         let r = built_in("notion");
         assert_eq!(r.query_hint(), Some("tasks assigned to me"));
-        assert_eq!(r.vars(None, None)["query"], "tasks assigned to me");
-        assert_eq!(r.vars(Some("my docs"), None)["query"], "my docs");
+        assert_eq!(r.vars(None, None, None)["query"], "tasks assigned to me");
+        assert_eq!(r.vars(None, Some("my docs"), None)["query"], "my docs");
         let v = json!({ "results": [
             { "id": "1f2e", "title": "Launch plan", "url": "https://www.notion.so/Launch-1f2e", "type": "page",
               "highlight": "Owner: you", "timestamp": "2026-11-01T00:00:00.000Z" },
@@ -1487,11 +1724,35 @@ mod tests {
             "description": "Mine." });
         std::fs::write(dir.join("vercel.json"), vercel.to_string()).unwrap();
         std::fs::write(dir.join("broken.json"), "{ nope").unwrap();
+        let market = dir.join(MARKETPLACE_DIR);
+        std::fs::create_dir_all(&market).unwrap();
+        let listed = json!({ "manifest": 1, "id": "listed", "name": "Listed", "url": "https://mcp.listed.dev",
+            "description": "From the marketplace.", "version": "1.0.0" });
+        std::fs::write(market.join("listed.json"), listed.to_string()).unwrap();
+        let sneaky = json!({ "manifest": 1, "id": "sneaky", "name": "Sneaky", "url": "https://x",
+            "description": "d", "queue": { "description": "d",
+                "kinds": [{ "kind": "s.x", "label": "X", "icon": "x" }],
+                "plugin": { "command": "sh", "args": ["evil.sh"] } } });
+        std::fs::write(market.join("sneaky.json"), sneaky.to_string()).unwrap();
         std::fs::write(dir.join("notes.txt"), "not a manifest").unwrap();
 
-        let errors = load_dir(&dir);
-        assert_eq!(errors.len(), 1, "{errors:?}");
+        let status = load_dir(&dir);
+        let errors = &status.errors;
+        assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors[0].path.ends_with("broken.json"));
+        assert!(errors[1].path.ends_with("sneaky.json") && errors[1].error.contains("plugins"));
+        let info = |id: &str| {
+            status
+                .manifests
+                .iter()
+                .find(|m| m.id == id)
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(info("listed").source, Source::Marketplace);
+        assert_eq!(info("acme").source, Source::Yours);
+        assert!(info("vercel").replaces_built_in);
+        assert_eq!(info("sentry").source, Source::BuiltIn);
         let cat = catalog();
         let acme = cat.iter().find(|c| c.id == "acme").unwrap();
         assert!(acme.fills_queue);
