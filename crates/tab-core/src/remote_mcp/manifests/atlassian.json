@@ -1,0 +1,9 @@
+{
+  "manifest": 1,
+  "id": "atlassian",
+  "name": "Jira & Confluence",
+  "url": "https://mcp.atlassian.com/v1/mcp",
+  "description": "Agents can search, comment on and move tickets, and read pages.",
+  "category": "work",
+  "color": "#1868db"
+}

@@ -1,0 +1,80 @@
+{
+  "manifest": 1,
+  "id": "linear",
+  "name": "Linear",
+  "url": "https://mcp.linear.app/mcp",
+  "description": "Agents can find, create and update issues, projects and comments.",
+  "category": "work",
+  "color": "#5e6ad2",
+  "queue": {
+    "description": "Issues assigned to you come into your queue. Issues that are done or cancelled in Linear are marked done here.",
+    "interval": "5m",
+    "incremental": { "overlap": "5m" },
+    "kinds": [
+      { "kind": "linear.issue", "label": "Linear issue", "icon": "linear", "tone": "accent" }
+    ],
+    "steps": [
+      {
+        "call": ["list_issues", "list_my_issues"],
+        "if_missing": "Linear has no tool to list issues",
+        "args": {
+          "assignee": "me",
+          "limit": 100,
+          "orderBy": "updatedAt",
+          "includeArchived": false,
+          "updatedAt": "{$since}"
+        },
+        "list": ["issues", "nodes", "results", "data"],
+        "page": { "cursor": "{cursor ?? nextCursor}", "more": "{hasNextPage}", "arg": "cursor", "max": 3 }
+      }
+    ],
+    "item": {
+      "id": "{uuid ?? id}",
+      "title": [
+        "{identifier ?? id|short_id} {title ?? 'Untitled issue'}",
+        "{title ?? 'Untitled issue'}"
+      ],
+      "body": "{description|clip:400}",
+      "url": "{url}",
+      "actor": "{createdBy|name ?? creator|name}",
+      "context": "{team|name ?? project|name}",
+      "time": "{updatedAt ?? createdAt}",
+      "resolved": [
+        { "value": "{completedAt}", "set": true },
+        { "value": "{canceledAt}", "set": true },
+        { "value": "{archivedAt}", "set": true },
+        { "value": "{status.type ?? state.type ?? statusType}", "in": ["completed", "canceled", "cancelled", "duplicate"] },
+        { "value": "{status|name ?? state|name}", "in": ["done", "canceled", "cancelled", "duplicate", "completed"] }
+      ],
+      "fields_as": "badges",
+      "fields": [
+        { "label": "Status", "value": "{status|name ?? state|name}" },
+        {
+          "label": "Priority",
+          "value": "{priority|name ?? priorityLabel}",
+          "skip": ["No priority"],
+          "tones": { "Urgent": "danger", "High": "warning" }
+        },
+        { "label": "Project", "value": "{project|name}" },
+        { "label": "Due", "value": "{dueDate}" }
+      ],
+      "text": { "value": "{description|clip:1500}", "markdown": true },
+      "link": "Open in Linear",
+      "entities": [
+        { "kind": "team", "key": "linear:team:{team|name}", "label": "{team|name}" },
+        { "kind": "project", "key": "linear:project:{project|name}", "label": "{project|name}" }
+      ],
+      "metadata": {
+        "identifier": "{identifier ?? id|short_id}",
+        "status": "{status|name ?? state|name}",
+        "priority": "{priority|name ?? priorityLabel}"
+      }
+    },
+    "check": {
+      "call": ["get_issue"],
+      "args": { "id": "{$metadata.identifier ?? $external_id}" },
+      "unwrap": ["issue"],
+      "known": "{uuid ?? id}"
+    }
+  }
+}

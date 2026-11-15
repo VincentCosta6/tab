@@ -10,6 +10,7 @@
 //! strict chats too, where the person's own MCP servers don't load.
 
 pub mod import;
+pub mod manifest;
 pub mod oauth;
 pub mod stdio;
 pub mod sync;
@@ -354,98 +355,10 @@ pub struct CatalogEntry {
     pub queue_description: Option<&'static str>,
 }
 
-/// Services whose servers let tab register itself (no app to set up).
+/// Services whose servers let tab register itself (no app to set up),
+/// from their manifests ([`manifest`]).
 pub fn catalog() -> Vec<CatalogEntry> {
-    let mut all = vec![
-        CatalogEntry {
-            id: "linear",
-            name: "Linear",
-            url: "https://mcp.linear.app/mcp",
-            description: "Agents can find, create and update issues, projects and comments.",
-            category: "work",
-            color: "#5e6ad2",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-            queue_choices: &[],
-            queue_description: None,
-        },
-        CatalogEntry {
-            id: "notion",
-            name: "Notion",
-            url: "https://mcp.notion.com/mcp",
-            description: "Agents can search, read and edit pages and databases.",
-            category: "work",
-            color: "#191919",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-            queue_choices: &[],
-            queue_description: None,
-        },
-        CatalogEntry {
-            id: "atlassian",
-            name: "Jira & Confluence",
-            url: "https://mcp.atlassian.com/v1/mcp",
-            description: "Agents can search, comment on and move tickets, and read pages.",
-            category: "work",
-            color: "#1868db",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-            queue_choices: &[],
-            queue_description: None,
-        },
-        CatalogEntry {
-            id: "sentry",
-            name: "Sentry",
-            url: "https://mcp.sentry.dev/mcp",
-            description: "Agents can look up issues, stack traces and events.",
-            category: "code",
-            color: "#362d59",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-            queue_choices: &[],
-            queue_description: None,
-        },
-        CatalogEntry {
-            id: "vercel",
-            name: "Vercel",
-            url: "https://mcp.vercel.com",
-            description: "Agents can read deployments, build logs and project settings.",
-            category: "code",
-            color: "#000000",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-            queue_choices: &[],
-            queue_description: None,
-        },
-        CatalogEntry {
-            id: "stripe",
-            name: "Stripe",
-            url: "https://mcp.stripe.com",
-            description: "Agents can look up customers, payments, invoices and disputes.",
-            category: "work",
-            color: "#635bff",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-            queue_choices: &[],
-            queue_description: None,
-        },
-    ];
-    for e in &mut all {
-        if let Some(r) = sync::recipe(e.id) {
-            e.fills_queue = true;
-            e.kinds = r.kinds();
-            e.queue_query = r.query_hint();
-            e.queue_choices = r.queue_choices();
-            e.queue_description = Some(r.description());
-        }
-    }
-    all
+    manifest::catalog()
 }
 
 /// What tab keeps in the [`Vault`] for a server that wants a sign-in.

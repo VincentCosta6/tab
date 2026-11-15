@@ -1,0 +1,9 @@
+{
+  "manifest": 1,
+  "id": "stripe",
+  "name": "Stripe",
+  "url": "https://mcp.stripe.com",
+  "description": "Agents can look up customers, payments, invoices and disputes.",
+  "category": "work",
+  "color": "#635bff"
+}

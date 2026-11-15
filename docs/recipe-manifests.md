@@ -1,207 +1,141 @@
-# Queue recipes as manifests — design sketch
+# Connection manifests
 
-Status: design. Nothing here is built yet, except the first step: the UI
-already reads everything about a connection's queue (description, choices,
-search placeholder) from its recipe, not from connector names.
+Status: built for MCP connections (`remote_mcp::manifest`). Not built yet:
+a Reload button, load errors on the Connections page, connector plugins,
+and the marketplace (see "What's next").
 
 ## Why
 
 tab should be able to take a new connector without a release: a manifest
 someone writes for their own tool, and later one installed from a
-marketplace. Today, filling the queue from an MCP connection
-(`remote_mcp::sync`) is plug and play for the plumbing and hardcoded for
-the rest:
+marketplace. Each service tab knows the MCP server of is now one JSON file:
+its catalog entry and, optionally, how to fill the queue from it. One
+engine (`ManifestRecipe`) runs every manifest. No service is named in
+Rust or in the UI.
 
-| Piece | Today | Plug and play? |
-|---|---|---|
-| Running a recipe: budgets, audit log, dedupe, resolving what finished | `McpConnector` | Yes, generic |
-| Choices and description shown in the UI | `Recipe::queue_choices`, `Recipe::description`, passed through `CatalogEntry` | Yes, generic |
-| Which recipes exist | `sync::recipe()`, a `match` on `"linear" \| "sentry" \| "notion"` | No |
-| What a recipe does | Rust: `impl Recipe for Sentry`, … | No |
-| The catalog (name, URL, color) | `remote_mcp::catalog()`, a Rust `vec![]` | No |
+- Built-ins: `crates/tab-core/src/remote_mcp/manifests/*.json`, compiled
+  in (Linear, Notion, Jira & Confluence, Sentry, Vercel, Stripe).
+- The person's own: `<app data>/recipes/*.json`, read at startup. One with
+  a built-in's id takes its place. A file that doesn't load is skipped and
+  logged with the reason.
 
-`docs/connect-via-mcp.md` §3 sketched a declarative recipe and then built
-a Rust trait instead. Its reasons still apply, and this design has to answer
-them:
+`docs/connect-via-mcp.md` §3 gave three reasons recipes were Rust. Here's
+how manifests handle each:
 
-1. **More than one call per look.** Sentry looks up your organizations,
-   then searches each one, and now runs two searches per organization.
-2. **Paging and "changed since".** Linear pages with a cursor and asks for
-   what changed since the last look.
-3. **Answers that aren't JSON.** Sentry's server sometimes answers in
-   markdown only, and tab parses that.
+1. **More than one call per look:** steps, where a step can run once per
+   item of an earlier step's list (`for_each`). Sentry lists your
+   organizations, then searches each one.
+2. **Paging and "changed since":** `page` follows a cursor, and
+   `incremental` gives the steps `$since`. Linear uses both.
+3. **Answers that aren't JSON:** manifests read `structuredContent`, or
+   JSON in the text. They don't parse markdown. Sentry's server answers in
+   JSON now, so its markdown parsing is gone. A service that only answers
+   in markdown needs a connector plugin.
 
-## Two tiers
+## The format
 
-1. **Manifests (data, no code).** A manifest describes calls to the
-   connection's own MCP tools and how their JSON answers map to queue
-   items. This covers most services: one generic engine runs every
-   manifest, and Linear, Sentry and Notion become manifests shipped with
-   tab.
-2. **Connector plugins (code, out of process).** This is the
-   JSON-RPC-over-stdio protocol in `ARCHITECTURE.md` ("Third-party
-   connectors"). It's for anything a manifest can't express: parsing
-   markdown, webhooks, services without an MCP server. It runs as a
-   separate program, so a crash or a bug can't take tab down.
+`manifests/sentry.json` is the fullest example. The fields:
 
-A manifest is deliberately not a programming language. When one needs an
-`if`, the work belongs in tier 2.
-
-## The manifest
-
-One file per service: JSON on disk, shown here as TOML for reading.
-
-```toml
-manifest = 1
-id = "sentry"
-name = "Sentry"
-url = "https://mcp.sentry.dev/mcp"          # the catalog entry
-color = "#362d59"
-category = "code"
-description = "Agents can look up issues, stack traces and events."
-
-[queue]
-description = "Unresolved issues come into your queue, from every organization you're in: yours and unassigned ones, unless you pick otherwise. Resolved or ignored issues are marked done here."
-interval = "5m"
-
-[[queue.kinds]]
-kind = "sentry.issue"
-label = "Sentry issue"
-icon = "alert"
-tone = "danger"
-
-# The person's pick. Each choice sets variables the steps use.
-[[queue.choices]]
-value = "mine_unassigned"
-label = "Mine + unassigned"
-vars = { searches = ["is:unresolved assigned:me", "is:unresolved is:unassigned"] }
-
-[[queue.choices]]
-value = "mine"
-label = "Only mine"
-vars = { searches = ["is:unresolved assigned:me"] }
-
-[[queue.choices]]
-value = "all"
-label = "All unresolved"
-vars = { searches = ["is:unresolved"] }
-
-# Steps run in order. A step's answer can feed the next one with `for_each`.
-[[queue.steps]]
-name = "orgs"
-call = ["find_organizations", "list_organizations"]   # the first one the server has
-args = {}
-list = "organizations"                 # where the list is in the answer
-limit = 5
-
-[[queue.steps]]
-call = ["search_issues", "find_issues", "list_issues"]
-for_each = { org = "orgs", query = "$searches" }       # every org × every search
-args = { organizationSlug = "{org.slug}", regionUrl = "{org.regionUrl?}", query = "{query}", sort = "date", limit = 100 }
-list = "issues"
-emit = "issue"                         # items come from this step
-
-[queue.issue]
-external_id = "{org.slug}/{shortId}"
-title = "{shortId} {title}"
-url = "{url? ?? permalink? ?? https://{org.slug}.sentry.io/issues/{shortId}/}"
-updated_at = "lastSeen"
-resolved_when = { status = ["resolved", "ignored", "archived", "muted"] }
-fields = [
-  { label = "Where", value = "{culprit?}" },
-  { label = "Events", value = "{occurrences? ?? count?}" },
-  { label = "Users", value = "{usersImpacted? ?? userCount?}" },
-]
-metadata = { organization = "{org.slug}", short_id = "{shortId}", region_url = "{org.regionUrl?}" }
-
-# Asked about items that dropped out of the list.
-[queue.check]
-call = ["get_issue_details"]
-args = { organizationSlug = "{metadata.organization}", issueId = "{metadata.short_id}", regionUrl = "{metadata.region_url?}" }
-resolved_when = { status = ["resolved", "ignored", "archived", "muted"] }
+```jsonc
+{
+  "manifest": 1,                       // the format version
+  "id": "sentry", "name": "Sentry", "url": "https://mcp.sentry.dev/mcp",
+  "description": "Agents can …",        // for the catalog
+  "category": "code", "color": "#362d59",
+  "queue": {                           // leave out: agent tools only
+    "description": "What comes in, and when it's marked done.",
+    "interval": "5m",                  // at least 1m
+    "kinds": [{ "kind": "sentry.issue", "label": "Sentry issue", "icon": "alert", "tone": "danger" }],
+    "choices": [                       // what the person picks; the first is the default
+      { "value": "mine", "label": "Only mine", "vars": { "searches": ["is:unresolved assigned:me"] } }
+    ],
+    "search": { "hint": "tasks assigned to me" },   // or a typed search, as $query
+    "incremental": { "overlap": "5m" },             // later looks list only changes, from $since
+    "steps": [
+      { "name": "orgs", "call": ["find_organizations"], "list": ["organizations"], "limit": 5,
+        "if_empty": "Sentry didn't say which organizations you're in" },
+      { "call": ["search_issues"],     // the first of these the server has
+        "if_missing": "Sentry didn't offer a tool to search issues",
+        "for_each": [{ "var": "org", "in": "orgs" }, { "var": "search", "in": "$searches" }],
+        "args": { "organizationSlug": "{$org.slug}", "query": "{$search}", "limit": 100 },
+        "list": ["issues"],
+        "page": { "cursor": "{nextCursor}", "more": "{hasMore}", "arg": "cursor", "max": 3 } }
+    ],
+    "item": {                          // each thing in the last step's list
+      "id": "{$org.slug}/{shortId}",
+      "title": "{shortId} {title ?? shortId}",
+      "url": ["{url ?? permalink}", "https://{$org.slug}.sentry.io/issues/{shortId}/"],
+      "kind": { "from": "{type}", "map": { "database": "notion.database" }, "default": "notion.page" },
+      "body": "…", "actor": "…", "context": "…", "time": "{lastSeen}",
+      "resolved": [{ "value": "{status}", "in": ["resolved", "ignored"] }, { "value": "{completedAt}", "set": true }],
+      "fields_as": "fields",           // or "badges"
+      "fields": [{ "label": "Priority", "value": "{priority|name}", "skip": ["No priority"], "tones": { "Urgent": "danger" } }],
+      "text": { "value": "{description|clip:1500}", "markdown": true },
+      "link": "Open in Sentry",
+      "entities": [{ "kind": "project", "key": "sentry:{$org.slug}/{projectSlug}", "label": "{projectSlug}" }],
+      "metadata": { "short_id": "{shortId}" }
+    },
+    "check": {                         // asked about items that dropped out of the list
+      "call": ["get_issue_details"],
+      "args": { "issueId": "{$metadata.short_id}" },
+      "unwrap": ["issue"],
+      "known": "{status}"              // otherwise tab can't tell
+    }
+  }
+}
 ```
 
-How it handles the three gaps from earlier:
-
-- **More than one call:** steps, plus `for_each` over an earlier step's
-  list (and over a list from the person's choice). The engine caps the
-  total calls per look, on top of the gateway's budgets.
-- **Paging and since:** a step can have
-  `page = { cursor = "nextCursor", more = "hasNextPage", arg = "cursor", max = 3 }`
-  and `since = { arg = "updatedAt", overlap = "5m" }`. A manifest with
-  `since` is incremental, like Linear today.
-- **Non-JSON answers:** the engine reads `structuredContent`, then JSON in
-  the text, which is what `payload()` does today. Markdown isn't parsed: a
-  service that only answers in markdown needs a tier 2 plugin. Sentry's
-  server returns JSON now, so its markdown fallback can go once the
-  manifest ships.
-
 **Templates** are the only expression language:
-- `{path}` reads from the current item or from a variable;
-- `?` makes a value optional (the field is dropped when it's missing);
-- `??` falls back to the next option.
+- `{path}` reads the current thing (`{status.type}`) or a variable
+  (`{$org.slug}`);
+- `??` falls back to the next option, and `'text'` is a literal;
+- `|` applies a filter: `name`, `lower`, `short_id`, `nodash` or `clip:N`.
 
-There is no arithmetic, no conditions and no loops beyond `for_each`.
+A template with a missing value (absent, null or empty) is missing as a
+whole. Where a manifest gives a list of templates, the first one that
+isn't missing wins. An argument whose template is missing is left out. A
+lone `{…}` keeps its JSON type.
 
-## The engine
+There are no conditions, and no loops beyond `for_each`. When a manifest
+needs an `if`, the work belongs in a connector plugin.
 
-`ManifestRecipe` implements the existing `Recipe` trait. `McpConnector`
-doesn't change: it still runs recipes, dedupes on `external_id`, checks
-items that dropped out, and resolves what finished. `sync::recipe()`
-becomes a lookup in a registry loaded from:
-
-1. the built-ins, embedded in the binary with `include_str!`;
-2. a folder of the person's own (`<data>/recipes/*.json`), for writing and
-   testing one locally;
-3. later, the marketplace.
-
-`remote_mcp::catalog()` is built from the same manifests, so adding a
-service is one file.
+**Resolved items:** an incremental look keeps items that finished upstream,
+so they're marked done. A first look, or a look that lists everything open,
+drops them.
 
 ## Safety
 
-A manifest is data, but it does act on the person's behalf:
+- **Tools:** a manifest only calls tools on its own connection, through
+  `Gateway::run`, with the same budgets and audit log as before.
+- **Read-only:** manifests that don't ship with tab may only call tools the
+  server marks read-only (MCP's `readOnlyHint`). Built-ins are reviewed
+  with tab's code, and some servers don't annotate their tools.
+- **Limits:** at most 10 steps and 50 calls per look, and a look at most
+  once a minute.
+- **Checked on load:** a manifest is validated when it loads:
+  - the version;
+  - its id;
+  - its interval;
+  - that every template parses;
+  - that `for_each` points at earlier steps;
+  - that item kinds are among the queue's kinds.
 
-- **It only calls tools on its own connection,** through `Gateway::run`
-  with the same budgets and audit log as today.
-- **It only calls read-only tools.** The engine refuses a step whose tool
-  doesn't say it's read-only (MCP's `readOnlyHint`), and refuses tools
-  the person turned Off. Filling the queue never changes anything
-  upstream.
-- **Strings from a manifest are shown as text.** That covers
-  descriptions, labels and fields: no HTML and no links outside `url`.
-- **The engine validates a manifest before running it:** a known schema
-  version, steps that point at real step names, and at most 10 steps and
-  50 calls per look. A manifest that fails validation shows the error on
-  the connection's page, the same way a failed look does today.
-- **Marketplace manifests are signed and reviewed.** Installing one shows
-  what it reads ("Calls `search_issues` and `get_issue_details` on your
-  Sentry connection") before it runs.
+  Unknown fields are refused, so typos don't pass silently.
+- **Strings are shown as text:** no HTML, and no links other than `url`.
 
-## Moving there
+## What's next
 
-1. **Done (tab#159):** the UI reads the queue description and choices
-   from the recipe. No connector names are left in the UI.
-2. **Build the engine** and a manifest JSON schema, with tests that run
-   the Linear, Sentry and Notion manifests against the same fake servers
-   `sync.rs` tests use today. The Rust recipes stay until the manifests
-   pass every one of those tests.
-3. **Swap the built-ins to manifests** and delete the Rust recipes and the
-   `match` in `sync::recipe()`. Move `catalog()` into the manifests.
-4. **Load the person's own manifests** from the data folder, with a
-   "Reload" button and errors on the connection page.
-5. **Build tier 2,** the stdio connector protocol, for what manifests
-   can't do.
-6. **Marketplace:** signing, review and installing, as its own design.
-
-## Open questions
-
-- **Manifests for built-in connectors:** should GitHub and email (the
-  connectors that aren't MCP) get manifests too, or stay Rust? They do
-  much more than list and check, so probably Rust, or tier 2.
-- **Choices beyond one pick:** some services will want a free-text search
-  and a choice together. Today a connection has one `queue_query` field.
-  A map of variables (`queue_vars`) would cover both, and needs a config
-  migration.
-- **Cloud:** manifests are data, so the cloud runner could run them as
-  well. That is phase 4 of `connect-via-mcp.md`.
+1. **Reload and errors in the app:** a Reload button on Connections that
+   re-reads `recipes/` and rebuilds the sync connectors, and that shows the
+   files that didn't load and why. `manifest::load_dir` already returns
+   those errors.
+2. **Connector plugins:** the stdio protocol in `ARCHITECTURE.md`, for
+   what manifests can't do (markdown, webhooks, services without MCP).
+3. **Marketplace:** signing, review and installing, as its own design.
+   Installing a manifest should show what it reads ("Calls `search_issues`
+   on your Sentry connection") before it runs.
+4. **Choices beyond one pick:** a connection keeps one `queue_query`, so a
+   manifest offers either choices or a typed search, not both. A map of
+   variables (`queue_vars`) would cover both, and needs a config migration.
+5. **Cloud:** manifests are data, so the cloud runner could run them too.
+   That's phase 4 of `connect-via-mcp.md`.

@@ -3498,6 +3498,8 @@ pub fn run() {
             }
             let data_dir = app.path().app_data_dir()?;
             lsp::set_tools_dir(data_dir.join("tools"));
+            // The person's own connection manifests, beside the built-ins.
+            tab_core::remote_mcp::manifest::load_dir(&data_dir.join("recipes"));
             let config_path = app.path().app_config_dir()?.join("config.json");
             tab_core::secrets::install(&config_path);
             let mut config = TabConfig::load(&config_path)?;
