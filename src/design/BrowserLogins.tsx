@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, type LoginSite, type LoginSource, type PasskeyEvent } from "../lib/api";
+import { api, type LoginSite, type LoginSource } from "../lib/api";
 import { Button, cx } from "./components";
 import { Icon } from "./icons";
 
@@ -99,37 +99,6 @@ export function ImportLogins({ url, onClose, onImported }: { url?: string; onClo
         </>
       )}
       {note && <p className={cx("blogins-note", note.tone === "err" && "err")}>{note.text}</p>}
-    </div>
-  );
-}
-
-/** "Which account?" for a page's passkey sign-in, or a note that tab has none for the site. */
-export function PasskeyPrompt({ ask, onDone }: { ask: PasskeyEvent; onDone: () => void }) {
-  const answer = (id: string | null) => {
-    void api.browserPasskeyChoose(ask.request, id).catch(() => {});
-    onDone();
-  };
-  if (ask.kind === "none") {
-    return (
-      <div className="blogins" role="status">
-        <div className="blogins-head">
-          <Icon name="lock" size={14} />
-          <span>tab has no passkey for <strong>{ask.site}</strong> yet. Sign in another way, then add one in the site's security settings.</span>
-          <button className="icon-btn" title="Dismiss" onClick={onDone}><Icon name="x" size={14} /></button>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="blogins" role="dialog" aria-label="Choose a passkey">
-      <div className="blogins-head">
-        <Icon name="lock" size={14} />
-        <span>Sign in to <strong>{ask.site}</strong> as</span>
-        <button className="icon-btn" title="Cancel" onClick={() => answer(null)}><Icon name="x" size={14} /></button>
-      </div>
-      <div className="blogins-accounts">
-        {ask.accounts.map((a) => <Button key={a.id} size="sm" icon="user" onClick={() => answer(a.id)}>{a.name || "Unnamed account"}</Button>)}
-      </div>
     </div>
   );
 }

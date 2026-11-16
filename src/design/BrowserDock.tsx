@@ -1,9 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, inTauri, onBrowserEvent, onPasskeyEvent, openUrl, type PasskeyEvent } from "../lib/api";
+import { api, inTauri, onBrowserEvent, openUrl } from "../lib/api";
 import {
   closeBrowser, closeBrowserTab, newBrowserTab, patchBrowserTab, selectBrowserTab, setBrowserExpanded, useBrowser, withHost,
 } from "../lib/browser";
-import { ImportLogins, PasskeyPrompt } from "./BrowserLogins";
+import { useConfig } from "../lib/hooks";
+import { ImportLogins } from "./BrowserLogins";
 import { cx } from "./components";
 import { Icon } from "./icons";
 
@@ -26,7 +27,7 @@ export function BrowserDock() {
   const [dragging, setDragging] = useState(false);
   const [address, setAddress] = useState("");
   const [importing, setImporting] = useState(false);
-  const [passkey, setPasskey] = useState<PasskeyEvent | null>(null);
+  const canImport = useConfig().data?.browser?.import_logins === true;
   const view = useRef<HTMLDivElement>(null);
   const created = useRef(new Set<string>());
   const current = tabs.find((t) => t.id === active);
@@ -37,19 +38,6 @@ export function BrowserDock() {
       if (e.kind === "url") patchBrowserTab(e.id, { url: e.value });
       else if (e.kind === "title") patchBrowserTab(e.id, { title: e.value });
       else patchBrowserTab(e.id, { loading: e.kind === "loading" });
-    }).then((f) => (off = f));
-    return () => off();
-  }, []);
-
-  // A page asked for a passkey: show its question over that tab.
-  useEffect(() => {
-    let off = () => {};
-    void onPasskeyEvent((e) => {
-      if (e.kind === "done") setPasskey((p) => (p?.request === e.request ? null : p));
-      else {
-        selectBrowserTab(e.tab);
-        setPasskey(e);
-      }
     }).then((f) => (off = f));
     return () => off();
   }, []);
@@ -149,11 +137,10 @@ export function BrowserDock() {
         <button type="button" className="icon-btn" title="Forward" onClick={() => nav("forward")}><Icon name="arrow-right" size={14} /></button>
         <button type="button" className="icon-btn" title="Reload" onClick={() => nav("reload")}><Icon name="refresh" size={14} /></button>
         <input value={address} onChange={(e) => setAddress(e.target.value)} onFocus={(e) => e.target.select()} spellCheck={false} aria-label="Address" placeholder="Search or enter address" />
-        <button type="button" className={cx("icon-btn", importing && "active")} title="Import logins from another browser" onClick={() => setImporting((v) => !v)}><Icon name="download" size={14} /></button>
+        {canImport && <button type="button" className={cx("icon-btn", importing && "active")} title="Import logins from another browser" onClick={() => setImporting((v) => !v)}><Icon name="download" size={14} /></button>}
         <button type="button" className="icon-btn" title="Open in your browser" onClick={() => current && void openUrl(current.url)}><Icon name="external" size={14} /></button>
       </form>
-      {passkey && passkey.tab === current?.id && <PasskeyPrompt ask={passkey} onDone={() => setPasskey(null)} />}
-      {importing && <ImportLogins url={current?.url} onClose={() => setImporting(false)} onImported={() => nav("reload")} />}
+      {canImport && importing && <ImportLogins url={current?.url} onClose={() => setImporting(false)} onImported={() => nav("reload")} />}
       <div className="bview" ref={view}>
         {!inTauri && current && <iframe key={current.id} src={current.url} title={current.title} />}
       </div>

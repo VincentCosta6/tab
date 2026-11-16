@@ -35,7 +35,6 @@ tauri-plugin-updater = "2"
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
-url = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }

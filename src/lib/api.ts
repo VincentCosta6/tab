@@ -362,8 +362,6 @@ export const api = {
   browserLoginSites: (sourceId: string) => call<LoginSite[]>("browser_login_sites", { sourceId }),
   /** Copies those sites' cookies into the in-app browser; resolves with how many. macOS may ask for the keychain first. */
   browserImportLogins: (sourceId: string, sites: string[]) => call<number>("browser_import_logins", { sourceId, sites }),
-  /** Answers "which account?" for a passkey sign-in; null cancels. */
-  browserPasskeyChoose: (request: string, passkey: string | null) => call<void>("browser_passkey_choose", { request, passkey }),
   itemActivity: (id: string) => call<Activity[]>("item_activity", { id }),
 };
 
@@ -378,15 +376,6 @@ export async function onBrowserEvent(cb: (e: { id: string; kind: "url" | "title"
 
 export interface LoginSource { id: string; name: string }
 export interface LoginSite { site: string; cookies: number }
-/** A page asked for one of tab's passkeys: pick an account, there is none, or the question is over. */
-export interface PasskeyEvent { kind: "choose" | "none" | "done"; request: string; tab: string; site: string; accounts: { id: string; name: string }[] }
-
-export async function onPasskeyEvent(cb: (e: PasskeyEvent) => void): Promise<() => void> {
-  if (!inTauri) return () => {};
-  const { listen } = await import("@tauri-apps/api/event");
-  return listen<PasskeyEvent>("tab://passkey", (e) => cb(e.payload));
-}
-
 export async function openUrl(url: string) {
   // A bare host ("mail.example.com/webmail") from a settings field.
   if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) url = `https://${url}`;

@@ -3418,8 +3418,6 @@ fn browser_open(
                 },
             );
         });
-    #[cfg(target_os = "macos")]
-    let builder = builder.initialization_script(browser_logins::SHIM);
     window
         .add_child(
             builder,
@@ -3557,7 +3555,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(browser_logins::plugin())
         .manage(updates::PendingUpdate::default())
         .setup(|app| {
             // On Windows tab draws its own title bar, window buttons and
@@ -3570,7 +3567,6 @@ pub fn run() {
                 open_log_file(&dir);
             }
             let data_dir = app.path().app_data_dir()?;
-            app.manage(browser_logins::Logins::new(data_dir.join("passkeys")));
             lsp::set_tools_dir(data_dir.join("tools"));
             tab_core::agents::adapter::set_dir(data_dir.join("tools").join("acp"));
             // The person's own connection manifests, beside the built-ins.
@@ -3840,7 +3836,6 @@ pub fn run() {
             browser_logins::browser_login_sources,
             browser_logins::browser_login_sites,
             browser_logins::browser_import_logins,
-            browser_logins::browser_passkey_choose,
             list_items,
             search_items,
             item_detail,

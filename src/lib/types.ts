@@ -870,6 +870,8 @@ export interface TabConfig {
   /** Where the hub runs. Mirrors tab_core::config::HubConfig. */
   /** `cloud_hub`: the cloud hub this computer moved into (set by the move). */
   hub?: { mode: HubMode; cloud_hub?: string };
+  /** The in-app browser. Mirrors tab_core::config::BrowserConfig. */
+  browser?: { import_logins: boolean };
   onboarded: boolean;
 }
 

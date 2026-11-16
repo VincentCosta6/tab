@@ -66,8 +66,7 @@ bip39 = { version = "2", default-features = false, features = ["std"] }
 # cookies with AES-128-CBC.
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
-# Public suffixes, so cookies group by site and a passkey can't claim a
-# whole suffix like github.io (crate::passkeys).
+# Public suffixes, so imported cookies group by site.
 psl = "2"
 
 # Zed's crates come from git, pinned to one commit (never a branch), with

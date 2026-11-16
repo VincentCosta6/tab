@@ -47,7 +47,6 @@ pub mod mail_oauth;
 pub mod mcp;
 pub mod named_files;
 pub mod net;
-pub mod passkeys;
 pub mod ranker;
 pub mod ratelimit;
 pub mod remote_mcp;

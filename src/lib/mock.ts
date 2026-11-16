@@ -258,6 +258,7 @@ let config: TabConfig = {
     lsp_domains: ["crates.io", "*.crates.io", "proxy.golang.org", "sum.golang.org", "pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com", "*.githubusercontent.com"],
   },
   hub: { mode: "local" },
+  browser: { import_logins: true },
   onboarded: true,
 };
 // `?account=1` starts the browser mock signed in.
