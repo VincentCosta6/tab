@@ -102,11 +102,13 @@ async fn look(core: &Core, w: &Watch) -> anyhow::Result<()> {
     };
     let idle = session.as_ref().is_none_or(|s| !core.hub.is_running(&s.id));
     let (mut next, message) = autofix::step(w, report.as_ref(), idle, now);
-    if let Some(text) = message {
+    if let Some(handoff) = message {
+        let mut meta = serde_json::Map::new();
+        meta.insert("autofix".into(), serde_json::to_value(&handoff.card)?);
         let sent = core
             .hub
             .session_for_item(&w.item_id)
-            .and_then(|s| core.hub.send_with(&s.id, &text, &[]));
+            .and_then(|s| core.hub.send_tagged(&s.id, &handoff.text, meta));
         if let Err(e) = sent {
             // Not handed over: try again next time.
             next.handled = w.handled.clone();

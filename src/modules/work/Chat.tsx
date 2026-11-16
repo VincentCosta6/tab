@@ -29,7 +29,7 @@ export function openOnboarding() {
   window.dispatchEvent(new CustomEvent("tab:onboarding"));
 }
 
-import { openItem } from "../../lib/links";
+import { openItem, openLink } from "../../lib/links";
 import { LinkBar } from "./LinkBar";
 export { openItem, takePendingOpen } from "../../lib/links";
 
@@ -697,6 +697,7 @@ export function openRewind(sessionId: string, messageId: number) {
 function MessageView({ m, result, onSend, rewind }: { m: SessionMessage; result?: SessionMessage; onSend?: (text: string) => void; rewind?: string }) {
   if (m.kind === "suggestion") return null;
   if (m.kind === "shell") return <ShellRun m={m} />;
+  if (m.role === "user" && m.meta?.autofix) return <AutofixCard card={m.meta.autofix} text={m.content} />;
   if (m.role === "user") {
     const images: string[] = Array.isArray(m.meta?.attachments) ? m.meta.attachments : [];
     return (
@@ -736,6 +737,39 @@ function MessageView({ m, result, onSend, rewind }: { m: SessionMessage; result?
     return <div className="msg-note">{[secs != null && `${secs}s`, cost != null && `$${Number(cost).toFixed(3)}`].filter(Boolean).join(" · ")}</div>;
   }
   return <div className="msg-note">{m.content}</div>;
+}
+
+type FixCard = { url: string; label: string; title: string; problems: { kind: "check" | "thread" | "conflict"; title: string; url?: string | null }[] };
+const fixKinds = { conflict: ["git-merge", "Conflict"], check: ["x-circle", "Check"], thread: ["message", "Review"] } as const;
+
+/** What autofix handed the agent, a line per problem; the full message it got is a click away. */
+function AutofixCard({ card, text }: { card: FixCard; text: string }) {
+  const n = card.problems.length;
+  const open = (url: string) => (e: React.MouseEvent) => { e.preventDefault(); void openLink(url, e); };
+  return (
+    <div className="msg msg-user msg-autofix">
+      <div className="msg-autofix-head">
+        <Icon name="zap" size={12} />
+        <span>Autofix · <a href={card.url} title={card.title} onClick={open(card.url)}>{card.label}</a> · {n} new problem{n === 1 ? "" : "s"}</span>
+      </div>
+      <ul className="msg-autofix-list">
+        {card.problems.map((p, i) => {
+          const [icon, kind] = fixKinds[p.kind] ?? fixKinds.check;
+          return (
+            <li key={i} title={p.title}>
+              <Icon name={icon} size={11} />
+              <span className="msg-autofix-kind">{kind}</span>
+              {p.url ? <a href={p.url} onClick={open(p.url)}>{p.title}</a> : <span>{p.title}</span>}
+            </li>
+          );
+        })}
+      </ul>
+      <details className="msg-autofix-full">
+        <summary>What the agent was told</summary>
+        <Markdown text={text} />
+      </details>
+    </div>
+  );
 }
 
 /** What the person picked on the agent's question card, kept in the chat as their reply. */
@@ -1448,7 +1482,7 @@ export function Composer({ chat, onSend, onShell, placeholder, autoFocus, extra 
   /** Past messages for ↑: this chat's newest first, then what was sent elsewhere. */
   const history = () => {
     const own = (chat?.messages ?? [])
-      .filter((m) => (m.role === "user" && m.kind === "text") || m.kind === "shell")
+      .filter((m) => (m.role === "user" && m.kind === "text" && !m.meta?.autofix) || m.kind === "shell")
       .map((m) => (m.kind === "shell" ? `!${m.content}` : m.content))
       .reverse();
     return [...new Set([...own, ...sentHistory()].filter((t) => t.trim()))];

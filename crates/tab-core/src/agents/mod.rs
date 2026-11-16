@@ -1395,6 +1395,17 @@ impl AgentHub {
         self.start_turn(session_id, text, true, attachments)
     }
 
+    /// Sends a message tab wrote for the person (autofix's), with `meta`
+    /// added to it so the chat can show it as a card rather than the text.
+    pub fn send_tagged(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+        meta: serde_json::Map<String, serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        self.start_turn_with(session_id, text, true, &[], meta)
+    }
+
     /// Picks up turns that were cut off when tab last quit: each session
     /// still marked working resumes its agent conversation (`--resume`) with
     /// a note to carry on. One that never got as far as starting is marked
@@ -1446,6 +1457,18 @@ impl AgentHub {
         text: &str,
         visible: bool,
         attachments: &[String],
+    ) -> anyhow::Result<()> {
+        self.start_turn_with(session_id, text, visible, attachments, Default::default())
+    }
+
+    /// [`Self::start_turn`], with `extra` added to the visible message's meta.
+    fn start_turn_with(
+        self: &Arc<Self>,
+        session_id: &str,
+        text: &str,
+        visible: bool,
+        attachments: &[String],
+        extra: serde_json::Map<String, serde_json::Value>,
     ) -> anyhow::Result<()> {
         let session = self
             .store
@@ -1512,7 +1535,7 @@ impl AgentHub {
         let uuid = (visible && session.agent == AgentKind::ClaudeCode)
             .then(|| uuid::Uuid::new_v4().to_string());
         if visible {
-            let mut meta = serde_json::Map::new();
+            let mut meta = extra;
             if !attachments.is_empty() {
                 // `files` names them in the hub, so other devices can show them.
                 meta.insert("attachments".into(), serde_json::json!(attachments));

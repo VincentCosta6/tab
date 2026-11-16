@@ -128,6 +128,48 @@ pub fn remember(report: &FixReport, handled: &[String], sent: &[&FixProblem]) ->
     out
 }
 
+/// What autofix hands the agent: the full message, and a short summary of it
+/// for the chat to show in its place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Handoff {
+    pub text: String,
+    pub card: FixCard,
+}
+
+/// The chat's compact view of an autofix message (kept in the message's
+/// `meta.autofix`): which link, and one line per problem.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FixCard {
+    pub url: String,
+    pub label: String,
+    pub title: String,
+    pub problems: Vec<CardProblem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CardProblem {
+    pub kind: FixKind,
+    pub title: String,
+    pub url: Option<String>,
+}
+
+/// The summary of handing `problems` over, for [`FixCard`].
+pub fn card(report: &FixReport, problems: &[&FixProblem]) -> FixCard {
+    FixCard {
+        url: report.url.clone(),
+        label: report.label.clone(),
+        title: report.title.clone(),
+        problems: problems
+            .iter()
+            .map(|p| CardProblem {
+                kind: p.kind,
+                title: p.title.clone(),
+                url: p.url.clone(),
+            })
+            .collect(),
+    }
+}
+
 /// The message that hands `problems` to the agent.
 pub fn prompt(report: &FixReport, problems: &[&FixProblem]) -> String {
     let mut s = format!(
@@ -193,7 +235,7 @@ pub fn step(
     report: Option<&FixReport>,
     idle: bool,
     now: DateTime<Utc>,
-) -> (Watch, Option<String>) {
+) -> (Watch, Option<Handoff>) {
     let mut w = w.clone();
     w.checked_at = Some(now);
     let Some(r) = report else {
@@ -230,7 +272,10 @@ pub fn step(
         let n = new.len();
         let s = if n == 1 { "" } else { "s" };
         if idle {
-            message = Some(prompt(r, &new));
+            message = Some(Handoff {
+                text: prompt(r, &new),
+                card: card(r, &new),
+            });
             w.handled = remember(r, &w.handled, &new);
             w.last = Some(format!("Gave the agent {n} problem{s}"));
         } else {
@@ -358,5 +403,9 @@ mod tests {
         assert!(p.contains("ask me what to do"));
         assert!(p.contains("Resolve only once the fixing commit is pushed"));
         assert!(p.ends_with("Use gh.\n"));
+        let c = card(&r, &fresh(&r, &[]));
+        assert_eq!(c.label, "o/r#1");
+        assert_eq!(c.problems.len(), 2);
+        assert_eq!(c.problems[1].kind, FixKind::Thread);
     }
 }
