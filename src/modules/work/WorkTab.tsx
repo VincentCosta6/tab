@@ -329,6 +329,8 @@ export function WorkTab() {
   // Closed from somewhere else (a merged PR's "Close task"): select it, so
   // closing it opens the next one, then close it like the Done button.
   const [closing, setClosing] = useState<string | null>(() => takePendingDone());
+  // A row opened by a click focuses its chat box; j/k leave focus in the queue.
+  const [clicked, setClicked] = useState({ id: "", n: 0 });
   useEffect(() => {
     const on = () => setClosing(takePendingDone());
     window.addEventListener("tab:done-item", on);
@@ -392,7 +394,7 @@ export function WorkTab() {
     const waiting = (i.blocked_by ?? []).map((b) => titles.get(b) ?? "another task");
     return (
       <div key={i.id} className={cx("thread", kids && "has-kids")} style={{ "--depth": depth } as React.CSSProperties}>
-        <QueueRow item={i} agent={activity.get(i.id)} workflow={workflows.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} waiting={waiting} hideProject={!!project} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
+        <QueueRow item={i} agent={activity.get(i.id)} workflow={workflows.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} waiting={waiting} hideProject={!!project} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => (setClicked((c) => ({ id: i.id, n: c.n + 1 })), setSelected(i.id))} onAct={(a) => act(i, a)} />
         {kids && !open && (
           <button className="thread-more" aria-expanded={false} onClick={() => toggleFollowups(i.id)}>
             {kids.length} follow-up{kids.length === 1 ? "" : "s"}
@@ -505,7 +507,7 @@ export function WorkTab() {
         ) : isStackId(selected) ? (
           <EmptyState icon="check" title="Stack cleared">Pick something from the queue, or start a new chat.</EmptyState>
         ) : selected ? (
-          <ItemPane key={selected} id={selected} arrived={arrived === selected} onAct={act} onSelect={(id) => ((recheck.current = null), setSelected(id))} />
+          <ItemPane key={selected} id={selected} arrived={arrived === selected} focusChat={clicked.id === selected ? clicked.n : undefined} onAct={act} onSelect={(id) => ((recheck.current = null), setSelected(id))} />
         ) : (
           <EmptyState icon="inbox" title="Nothing selected">Pick something from the queue, or start a new chat.</EmptyState>
         )}
