@@ -52,7 +52,9 @@ how manifests handle each:
   "queue": {                           // leave out: agent tools only
     "description": "What comes in, and when it's marked done.",
     "interval": "5m",                  // at least 1m
-    "kinds": [{ "kind": "sentry.issue", "label": "Sentry issue", "icon": "alert", "tone": "danger" }],
+    "kinds": [{ "kind": "sentry.issue", "label": "Sentry issue", "icon": "alert", "tone": "danger",
+                // where items of this kind live upstream; tab routes them to a project by it
+                "container": { "kind": "sentry.project", "key": "sentry:{$org.slug}/{projectSlug}", "label": "{projectSlug}" } }],
     "choices": [                       // what the person picks (queue_choice); the first is the default
       { "value": "mine", "label": "Only mine", "vars": { "searches": ["is:unresolved assigned:me"] } }
     ],
@@ -96,7 +98,8 @@ how manifests handle each:
 - `{path}` reads the current thing (`{status.type}`) or a variable
   (`{$org.slug}`);
 - `??` falls back to the next option, and `'text'` is a literal;
-- `|` applies a filter: `name`, `lower`, `short_id`, `nodash` or `clip:N`.
+- `|` applies a filter: `name`, `lower`, `short_id`, `nodash`, `prefix`
+  (`TAB-123` → `TAB`) or `clip:N`.
 
 A template with a missing value (absent, null or empty) is missing as a
 whole. Where a manifest gives a list of templates, the first one that
@@ -105,6 +108,15 @@ lone `{…}` keeps its JSON type.
 
 There are no conditions, and no loops beyond `for_each`. When a manifest
 needs an `if`, the work belongs in a connector plugin.
+
+**Containers:** a kind's `container` names where its items live upstream
+(a Sentry project, a Linear team, a Notion parent page). Its `kind` is
+`<service>.<what>`. Ingest writes it to the graph as an entity with
+`rel: "container"`, and tab routes the item to the project that container
+is anchored to (the project's Routing section). The GitHub connector does
+the same with `owner/repo`, and a plugin can return an entity with
+`"rel": "container"` itself. A container with a missing value is left
+out.
 
 **Resolved items:** an incremental look keeps items that finished upstream,
 so they're marked done. A first look, or a look that lists everything open,

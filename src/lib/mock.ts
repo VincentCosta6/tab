@@ -17,6 +17,7 @@ import type {
   AuditEntry, AutofixWatch, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceInput, Segment, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
   VaultAudit, VaultDevice, VaultEntry, VaultEntryInput, VaultStatus,
+  ProjectAnchor, EntityRef,
 } from "./types";
 
 const harnesses = harnessData as unknown as Harness[];
@@ -104,7 +105,7 @@ const urgency = (s: number): Urgency => (s >= 80 ? "now" : s >= 60 ? "today" : s
 function entities(kind: string, actor: string, context: string, url: string) {
   const app = kind.split(".")[0];
   const e = [{ kind: "person", key: `${app}:${actor}`, label: actor, rel: "from" }];
-  if (context.includes("/")) e.push({ kind: "repo", key: `github:${context}`, label: context, rel: "in" });
+  if (context.includes("/")) e.push({ kind: "repo", key: `github:${context}`, label: context, rel: "container" });
   else if (context.startsWith("#")) e.push({ kind: "channel", key: `slack:${context}`, label: context, rel: "in" });
   const pr = url.split("/pull/")[1]?.split("/")[0];
   if (pr) e.push({ kind: "pull_request", key: `github:${context}#${pr}`, label: `${context}#${pr}`, rel: "about" });
@@ -458,6 +459,7 @@ export const mockApi = {
           projects = projects.filter((x) => x.id !== args.id);
           notes = notes.filter((n) => n.project_id !== args.id);
           repos = repos.filter((r) => r.project_id !== args.id);
+          anchors = anchors.filter((a) => a.project_id !== args.id);
           items = items.map((i) => (i.project_id === args.id ? { ...i, project_id: null } : i));
           return null;
         }
@@ -465,6 +467,8 @@ export const mockApi = {
           const i = items.find((x) => x.id === args.id);
           if (!i) return null;
           i.project_id = args.projectId;
+          i.routed_by = null;
+          i.suggestion = null;
           emit({ type: "item_changed", change: "updated", item: i });
           return i;
         }
@@ -537,6 +541,29 @@ export const mockApi = {
           const r: ProjectRepo = { id: `r-${Date.now()}`, project_id: args.projectId, repo: name, path: args.path ?? null, note: args.note ?? "", added_by: "user", created_at: now, updated_at: now };
           repos = [...repos, r];
           return r;
+        }
+        case "project_anchors":
+          return anchors.filter((a) => a.project_id === args.projectId).sort((a, b) => ["always", "proposed", "never"].indexOf(a.state) - ["always", "proposed", "never"].indexOf(b.state) || a.label.localeCompare(b.label));
+        case "anchor_save": {
+          const c = args.container as EntityRef;
+          const now = new Date().toISOString();
+          let a = anchors.find((x) => x.project_id === args.projectId && x.kind === c.kind && x.key === c.key);
+          if (a && args.anchorState === "proposed" && a.state !== "proposed") return a;
+          if (a) Object.assign(a, { state: args.anchorState, source: args.source ?? "person", updated_at: now });
+          else anchors = [...anchors, (a = { id: `an-${Date.now()}`, project_id: args.projectId, kind: c.kind, key: c.key, label: c.label, state: args.anchorState, source: args.source ?? "person", reason: "", created_at: now, updated_at: now })];
+          if (a.state === "always")
+            for (const i of items)
+              if (!i.project_id && containerOf(i)?.key === c.key) {
+                Object.assign(i, { project_id: args.projectId, routed_by: nameOf(c), suggestion: null });
+                emit({ type: "item_changed", change: "updated", item: i });
+              }
+          return a;
+        }
+        case "anchor_delete": anchors = anchors.filter((a) => a.id !== args.id); return null;
+        case "route_offer": {
+          const i = items.find((x) => x.id === args.id);
+          const c = i && containerOf(i);
+          return i?.project_id && c && routeFor(c) !== i.project_id ? c : null;
         }
         case "project_repo_delete": repos = repos.filter((r) => !(r.project_id === args.projectId && (r.id === args.id || r.repo === args.id))); return null;
         case "project_items": return items.filter((i) => i.project_id === args.projectId).sort((a, b) => Number(a.state === "done") - Number(b.state === "done") || b.occurred_at.localeCompare(a.occurred_at)).slice(0, 50);
@@ -1240,6 +1267,27 @@ let notes: ProjectNote[] = [
 ];
 // Put some of the sample work into projects.
 items = items.map((i) => ({ ...i, project_id: /checkout|payment|PAY-|ledger|refund/i.test(`${i.title} ${i.body}`) ? "p-pay" : /SOC 2|security|audit/i.test(`${i.title} ${i.body}`) ? "p-sec" : null }));
+// Routing: containers tied to projects, some proposed by a scan of the checkout.
+let anchors: ProjectAnchor[] = [
+  { id: "an1", project_id: "p-pay", kind: "sentry.project", key: "sentry:acme/checkout", label: "checkout", state: "proposed", source: "scan", reason: "Sentry project acme/checkout in .env.production", created_at: ago(600), updated_at: ago(600) },
+  { id: "an2", project_id: "p-pay", kind: "linear.team", key: "linear:team:PAY", label: "Payments", state: "proposed", source: "scan", reason: "Linear keys like PAY-123 in branches and commits", created_at: ago(600), updated_at: ago(600) },
+  { id: "an3", project_id: "p-pay", kind: "sentry.project", key: "sentry:acme/ledger", label: "ledger", state: "always", source: "learned", reason: "", created_at: ago(2000), updated_at: ago(2000) },
+];
+const containerOf = (i: QueueItem) => i.entities.find((e) => e.rel === "container");
+/** Where tab would route an item: an anchor, or a repo the project lists. */
+const routeFor = (c: EntityRef) =>
+  anchors.find((a) => a.state === "always" && a.kind === c.kind && a.key === c.key)?.project_id
+  ?? (c.kind === "repo" ? repos.find((r) => `github:${r.repo}` === c.key)?.project_id : undefined);
+const nameOf = (c: EntityRef) => (c.kind === "repo" ? `repo ${c.label}` : `${c.kind.replace(".", " ")} ${c.label}`);
+items = items.map((i) => {
+  const c = containerOf(i);
+  const p = !i.project_id && c ? routeFor(c) : undefined;
+  return p ? { ...i, project_id: p, routed_by: nameOf(c!) } : i;
+});
+{
+  const unsure = items.find((i) => !i.project_id && i.kind === "github.ci_failed");
+  if (unsure) unsure.suggestion = { project_id: "p-pay", reason: "reads like Payments's items" };
+}
 const sessions: Session[] = [];
 
 /** A task's chats, the one opened last first. */

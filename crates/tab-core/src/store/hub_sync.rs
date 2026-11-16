@@ -25,7 +25,8 @@
 //! call syncs as its one-line summary without its input.
 //!
 //! What isn't synced stays on this device on purpose: caches (HTTP, AI,
-//! previews, embeddings), the API audit log and usage counters.
+//! previews, embeddings), the API audit log, usage counters and what a scan
+//! of this device's checkouts found (`repo_hints`).
 //!
 //! Every row change is recorded as a whole-row `Put` (or a `Delete`), and
 //! the last write the hub orders wins.
@@ -46,6 +47,7 @@ pub const SYNCED: &[(&str, &[&str])] = &[
     ("project_notes", &["id"]),
     ("project_repos", &["id"]),
     ("project_resources", &["id"]),
+    ("project_anchors", &["id"]),
     ("vault_devices", &["id"]),
     ("vault_generations", &["id"]),
     ("vault_keys", &["id"]),

@@ -40,7 +40,8 @@ pub fn item_id(source: &str, external_id: &str) -> String {
 const COLUMNS: &str = "items.id, items.source, items.external_id, items.kind, items.title, items.body, items.url, \
     items.actor, items.context, items.occurred_at, items.blocks, items.entities, items.metadata, items.state, \
     items.snoozed_until, items.score, items.base_score, items.ai_adjustment, items.urgency, items.reason, \
-    items.ranked_by, items.fired, items.created_at, items.updated_at, items.project_id";
+    items.ranked_by, items.fired, items.created_at, items.updated_at, items.project_id, items.project_by, \
+    items.routed_by, items.suggested_project_id, items.suggested_by";
 
 /// Display order. Fully deterministic: ties fall back to recency, then id.
 /// Narrows a search: when things happened, and which project they're in.
@@ -115,6 +116,20 @@ fn row_to_item(r: &Row<'_>) -> rusqlite::Result<QueueItem> {
         ranking,
         snoozed_until: snoozed.as_deref().map(parse_ts).transpose()?,
         project_id: r.get("project_id")?,
+        routed_by: match r.get::<_, Option<String>>("project_by")?.as_deref() {
+            Some("auto") => r.get("routed_by")?,
+            _ => None,
+        },
+        suggestion: match (
+            r.get::<_, Option<String>>("suggested_project_id")?,
+            r.get::<_, Option<String>>("suggested_by")?,
+        ) {
+            (Some(project_id), reason) => Some(crate::model::ProjectSuggestion {
+                project_id,
+                reason: reason.unwrap_or_default(),
+            }),
+            _ => None,
+        },
         created_at: parse_ts(&r.get::<_, String>("created_at")?)?,
         updated_at: parse_ts(&r.get::<_, String>("updated_at")?)?,
         parent_id: None,
@@ -216,8 +231,12 @@ impl Store {
             }
         };
         super::graph::link_item(&tx, &id, &e.entities, now)?;
+        super::routing::route_item(&tx, &id, now)?;
         let item = get_item(&tx, &id)?.expect("row just written");
         Transaction::commit(tx)?;
+        if inserted {
+            self.routing_wake.notify_one();
+        }
         Ok(if inserted {
             Upsert::Inserted(item)
         } else {

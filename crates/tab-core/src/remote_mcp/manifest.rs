@@ -13,7 +13,7 @@
 //! Strings in a manifest are templates: `{path}` reads the current item
 //! (`{status.type}`) or a variable (`{$org.slug}`), `??` falls back
 //! (`{url ?? permalink}`), `'text'` is a literal and `|` applies a filter
-//! (`name`, `lower`, `short_id`, `nodash`, `clip:N`). A template with a
+//! (`name`, `lower`, `short_id`, `nodash`, `prefix`, `clip:N`). A template with a
 //! missing value is missing as a whole; where a manifest gives a list of
 //! templates, the first that isn't missing wins. There are no conditions
 //! or loops beyond a step's `for_each`: what needs code belongs in a
@@ -138,6 +138,21 @@ pub struct KindSpec {
     pub icon: String,
     #[serde(default)]
     pub tone: Tone,
+    /// Where items of this kind live upstream (a Sentry project, a Linear
+    /// team), so tab can route them to a project. Written to the graph as
+    /// an entity with `rel = "container"`.
+    #[serde(default)]
+    pub container: Option<ContainerSpec>,
+}
+
+/// See [`KindSpec::container`].
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerSpec {
+    /// The entity kind, `<service>.<what>`: `sentry.project`, `linear.team`.
+    pub kind: String,
+    pub key: Tpl,
+    pub label: Tpl,
 }
 
 #[derive(Debug, Deserialize)]
@@ -368,7 +383,7 @@ pub struct CheckSpec {
 // Templates
 // ---------------------------------------------------------------------------
 
-const FILTERS: &[&str] = &["name", "lower", "short_id", "nodash", "clip"];
+const FILTERS: &[&str] = &["name", "lower", "short_id", "nodash", "clip", "prefix"];
 
 /// What a template reads: the current thing, and variables.
 struct Scope<'a> {
@@ -472,6 +487,8 @@ fn filter(v: Value, f: &str) -> Option<Value> {
         "lower" => text(&v)?.to_lowercase(),
         "short_id" => text(&v).filter(|s| looks_like_short_id(s))?,
         "nodash" => text(&v)?.replace('-', ""),
+        // `TAB-123` → `TAB`: a Linear or Jira key's team.
+        "prefix" => text(&v)?.split_once('-')?.0.to_string(),
         "clip" => clip(&text(&v)?, arg.parse().ok()?),
         _ => return None,
     };
@@ -674,6 +691,15 @@ impl Manifest {
         tpls.extend(it.text.iter().map(|t| &t.value));
         tpls.extend(it.entities.iter().flat_map(|e| [&e.key, &e.label]));
         tpls.extend(it.metadata.values());
+        for c in q.kinds.iter().filter_map(|k| k.container.as_ref()) {
+            if !c.kind.contains('.') {
+                return Err(format!(
+                    "a container's kind is <service>.<what>, like sentry.project, not \"{}\"",
+                    c.kind
+                ));
+            }
+            tpls.extend([&c.key, &c.label]);
+        }
         if let Some(c) = &q.check {
             tpls.push(&c.known);
             check_args(&c.args)?;
@@ -858,6 +884,20 @@ impl ManifestRecipe {
                 }],
             });
         }
+        let container = self
+            .q
+            .kinds
+            .iter()
+            .find(|k| k.kind == kind)
+            .and_then(|k| k.container.as_ref())
+            .and_then(|c| {
+                Some(EntityRef::new(
+                    &c.kind,
+                    render(&c.key, &sc)?,
+                    render(&c.label, &sc)?,
+                    crate::model::CONTAINER_REL,
+                ))
+            });
         let entities = it
             .entities
             .iter()
@@ -869,6 +909,7 @@ impl ManifestRecipe {
                     rel: e.rel.clone(),
                 })
             })
+            .chain(container)
             .collect();
         let metadata: Map<String, Value> = it
             .metadata
@@ -1549,6 +1590,18 @@ mod tests {
         assert_eq!(a.event.kind, "linear.issue");
         assert_eq!(a.event.title, "ENG-12 Fix login");
         assert_eq!(a.event.context.as_deref(), Some("Engineering"));
+        // Routed by team, keyed by the team's key so `ENG-12` in a branch
+        // name finds it.
+        let c = a
+            .event
+            .entities
+            .iter()
+            .find(|x| x.rel == "container")
+            .unwrap();
+        assert_eq!(
+            (c.key.as_str(), c.label.as_str()),
+            ("linear:team:ENG", "Engineering")
+        );
         assert_eq!(
             a.event.occurred_at.to_rfc3339(),
             "2026-11-08T10:00:00+00:00"
@@ -1572,6 +1625,7 @@ mod tests {
         assert_eq!(n.event.external_id, "u-1");
         assert_eq!(n.event.title, "ENG-1 New");
         assert_eq!(n.event.metadata["identifier"], "ENG-1");
+        assert!(n.event.entities.iter().any(|x| x.key == "linear:team:ENG"));
         assert!(n.resolved);
         let open = one(json!({ "id": "ENG-2", "title": "Open", "status": "Todo",
             "statusType": "unstarted", "completedAt": null }));
@@ -1580,6 +1634,7 @@ mod tests {
         let old = one(json!({ "id": "4b1c9e2a", "title": "Plain" }));
         assert_eq!(old.event.title, "Plain");
         assert!(old.event.metadata["identifier"].is_null());
+        assert!(!old.event.entities.iter().any(|x| x.rel == "container"));
     }
 
     #[test]
@@ -1634,6 +1689,12 @@ mod tests {
         );
         assert_eq!(e.context.as_deref(), Some("web"));
         assert_eq!(e.entities[0].key, "sentry:acme/web");
+        // Its Sentry project is the container items route by.
+        let c = e.entities.iter().find(|x| x.rel == "container").unwrap();
+        assert_eq!(
+            (c.kind.as_str(), c.key.as_str(), c.label.as_str()),
+            ("sentry.project", "sentry:acme/web", "web")
+        );
         assert_eq!(e.metadata["region_url"], "https://us.sentry.io");
         let Block::Fields { items } = &e.blocks[0] else {
             panic!()

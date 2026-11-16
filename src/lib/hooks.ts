@@ -121,6 +121,10 @@ export function useProjectNotes(projectId: string | null | undefined) {
   return useQuery({ queryKey: keys.notes(projectId ?? ""), queryFn: () => api.projectNotes(projectId!), enabled: !!projectId, staleTime: 0 });
 }
 
+export function useProjectAnchors(projectId: string | null | undefined) {
+  return useQuery({ queryKey: keys.anchors(projectId ?? ""), queryFn: () => api.projectAnchors(projectId!), enabled: !!projectId, staleTime: 0 });
+}
+
 export function useProjectRepos(projectId: string | null | undefined) {
   return useQuery({ queryKey: keys.repos(projectId ?? ""), queryFn: () => api.projectRepos(projectId!), enabled: !!projectId, staleTime: 0 });
 }

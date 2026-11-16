@@ -276,9 +276,17 @@ pub struct QueueItem {
     pub snoozed_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    /// The project the person put this in, if any.
+    /// The project the item is in, if any.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Why tab put it in `project_id`, when tab routed it rather than the
+    /// person (e.g. "Sentry project tab-desktop").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_by: Option<String>,
+    /// A project tab thinks it belongs in but isn't sure enough to file it,
+    /// for the person to accept with one click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<ProjectSuggestion>,
     /// The task this is a follow-up of. While that one is open, this shows
     /// under it in the queue rather than as a row of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,6 +295,41 @@ pub struct QueueItem {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
 }
+
+/// See [`QueueItem::suggestion`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectSuggestion {
+    pub project_id: String,
+    pub reason: String,
+}
+
+/// The `rel` of the entity naming where an item lives upstream: its repo,
+/// Sentry project, Linear team or Notion parent. Items route to projects
+/// by their container.
+pub const CONTAINER_REL: &str = "container";
+
+/// A container tied to a project: its items go there (`always`), never go
+/// there (`never`), or the person hasn't said yet (`proposed`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProjectAnchor {
+    pub id: String,
+    pub project_id: String,
+    /// The container's graph entity.
+    pub kind: String,
+    pub key: String,
+    pub label: String,
+    /// `always`, `never` or `proposed`.
+    pub state: String,
+    /// `person`, `learned`, `scan`, `match` or `undo`.
+    pub source: String,
+    /// What a proposal is based on.
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// The states of a [`ProjectAnchor`].
+pub const ANCHOR_STATES: [&str; 3] = ["always", "never", "proposed"];
 
 /// How one task relates to another (see [`QueueItem::parent_id`] and
 /// [`QueueItem::blocked_by`]).

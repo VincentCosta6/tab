@@ -9,6 +9,7 @@ import type {
   Activity, Issue, Suggestion, Workflow, WorkflowRun, ItemWorkflowStatus, RunView, WorkflowFactory, WorkflowInsights, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, ModelFamily, Runner, RunsOn,
   AgentMcpServer, ManifestStatus, MarketListing, MarketListingView, MarketPreview, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
   EmailSignInStatus, MailProvider, Segment, SessionMessage, ChatRewound, RewoundFiles, VaultAudit, VaultEntry, VaultEntryInput, VaultStatus,
+  ProjectAnchor, EntityRef,
 } from "./types";
 import { mockApi } from "./mock";
 import { HubListSchema, HubStatusSchema, RunnerStatusSchema, decode } from "./protocol/cloud";
@@ -114,6 +115,11 @@ export const api = {
   projectRepoSave: (projectId: string, r: { repo: string; path?: string | null; note?: string | null }) =>
     call<ProjectRepo>("project_repo_save", { projectId, repo: r.repo, path: r.path ?? null, note: r.note ?? null }),
   projectRepoDelete: (projectId: string, id: string) => call<void>("project_repo_delete", { projectId, id }),
+  projectAnchors: (projectId: string) => call<ProjectAnchor[]>("project_anchors", { projectId }),
+  anchorSave: (projectId: string, container: EntityRef, state: ProjectAnchor["state"], source?: string) =>
+    call<ProjectAnchor>("anchor_save", { projectId, container, anchorState: state, source: source ?? null }),
+  anchorDelete: (id: string) => call<void>("anchor_delete", { id }),
+  routeOffer: (id: string) => call<EntityRef | null>("route_offer", { id }),
   projectResources: (projectId: string) => call<ProjectResource[]>("project_resources", { projectId }),
   projectResourceSave: (projectId: string, resource: ResourceInput) => call<ProjectResource>("project_resource_save", { projectId, resource }),
   projectResourceDelete: (projectId: string, id: string) => call<boolean>("project_resource_delete", { projectId, id }),

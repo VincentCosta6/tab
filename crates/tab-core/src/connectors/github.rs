@@ -609,11 +609,13 @@ impl GithubConnector {
             });
         }
 
+        // The repo is where the notification lives: tab routes it to the
+        // project that lists the repo.
         let mut entities = vec![EntityRef::new(
             "repo",
             format!("github:{repo}"),
             repo.clone(),
-            "in",
+            crate::model::CONTAINER_REL,
         )];
         if let Some(num) = number {
             let kind = if n.subject.kind == "PullRequest" {

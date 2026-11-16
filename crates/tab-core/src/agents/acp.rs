@@ -112,23 +112,28 @@ async fn run(
         )?),
         _ => None,
     };
-    let exe = match &spec.command {
-        Some(c) => super::resolve(c).map_err(|e| {
-            anyhow::anyhow!(
-                "{}'s ACP adapter ({c}) isn't installed: {e}{}",
-                harness.name,
-                spec.adapter
-                    .as_ref()
-                    .and_then(|a| a.npm.as_deref())
-                    .map(|p| format!(". Install it with `npm install -g {p}`."))
-                    .unwrap_or_default()
-            )
-        })?,
-        None => super::agent_exe(&cfg, kind)?,
+    let start = match &spec.command {
+        // Installed now if it's missing (the first chat after an update).
+        Some(c) if spec.adapter.is_some() => {
+            super::adapter::ensure(kind, |l| tracing::info!("{l}"))
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "tab couldn't set up {c}, which {} runs through: {e:#}",
+                        harness.name
+                    )
+                })?
+        }
+        Some(c) => super::adapter::Launch::program(super::resolve(c)?),
+        None => super::adapter::Launch::program(super::agent_exe(&cfg, kind)?),
     };
+    let exe = start.program;
+    let mut args = start.args;
+    args.extend(spec.args_for(strict));
+    policy.readable.extend(start.readable);
     let cwd = std::path::Path::new(&session.cwd);
     let mut prepared = crate::sandbox::current()
-        .command(&exe, &spec.args_for(strict), cwd, &policy)
+        .command(&exe, &args, cwd, &policy)
         .await?;
     hub.add_shims(session, &mut prepared.cmd);
     for (k, v) in spec.env_for(strict) {

@@ -11,7 +11,17 @@
     "interval": "5m",
     "incremental": { "overlap": "5m" },
     "kinds": [
-      { "kind": "linear.issue", "label": "Linear issue", "icon": "linear", "tone": "accent" }
+      {
+        "kind": "linear.issue",
+        "label": "Linear issue",
+        "icon": "linear",
+        "tone": "accent",
+        "container": {
+          "kind": "linear.team",
+          "key": "linear:team:{team.key ?? identifier|prefix ?? id|short_id|prefix}",
+          "label": "{team|name ?? team.key ?? identifier|prefix ?? id|short_id|prefix}"
+        }
+      }
     ],
     "steps": [
       {

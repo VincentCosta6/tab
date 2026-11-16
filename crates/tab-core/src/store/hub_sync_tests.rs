@@ -100,6 +100,20 @@ fn populate(s: &Store) -> String {
         .unwrap();
     s.repo_save(&p.id, "acme/launch", None, None, "me", now())
         .unwrap();
+    s.anchor_save(
+        &p.id,
+        &crate::model::EntityRef::new(
+            "sentry.project",
+            "sentry:acme/launch",
+            "launch",
+            "container",
+        ),
+        "always",
+        "person",
+        "",
+        now(),
+    )
+    .unwrap();
     s.resource_save(
         &p.id,
         &crate::store::ResourceInput {
@@ -144,6 +158,7 @@ fn every_synced_table_round_trips_through_the_outbox() {
         "project_notes",
         "project_repos",
         "project_resources",
+        "project_anchors",
         "item_context",
         "entities",
         "item_entities",

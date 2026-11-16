@@ -183,7 +183,7 @@ fn entities(s: &Sample) -> Vec<EntityRef> {
             "repo",
             format!("github:{}", s.context),
             s.context,
-            "in",
+            crate::model::CONTAINER_REL,
         ));
     } else if s.context.starts_with('#') {
         v.push(EntityRef::new(

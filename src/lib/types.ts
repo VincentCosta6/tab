@@ -64,6 +64,10 @@ export interface QueueItem {
   ranking: Ranking | null;
   snoozed_until: string | null;
   project_id?: string | null;
+  /** Why tab put it in its project, when tab routed it rather than you. */
+  routed_by?: string | null;
+  /** A project tab thinks it belongs in but isn't sure of: one click files it. */
+  suggestion?: { project_id: string; reason: string } | null;
   /** The task this is a follow-up of; it shows under that one while it's open. */
   parent_id?: string | null;
   /** Tasks not done yet that have to be done before this one. */
@@ -146,6 +150,25 @@ export interface Segment {
 }
 
 /** A repo a project's work happens in. */
+/**
+ * A container (a repo, a Sentry project, a Linear team) tied to a project:
+ * its items go there (`always`), never go there (`never`), or tab proposed
+ * it from a scan of the project's checkout or a matching name (`proposed`).
+ */
+export interface ProjectAnchor {
+  id: string;
+  project_id: string;
+  kind: string;
+  key: string;
+  label: string;
+  state: "always" | "never" | "proposed";
+  /** `person`, `learned`, `scan`, `match` or `undo`. */
+  source: string;
+  reason: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ProjectRepo {
   id: string;
   project_id: string;

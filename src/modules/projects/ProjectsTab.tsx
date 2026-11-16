@@ -19,6 +19,7 @@ import { NewChat } from "../work/NewChat";
 import { actOnItem, type ItemAction } from "../work/optimistic";
 import { ProjectEditor, ProjectMark, ProjectNotes, useProjectTint, useRememberedProject } from "../work/Projects";
 import { taskStatus, unread, useContextStatus, useSeen, type TaskStatus } from "../work/taskStatus";
+import { ProjectRouting } from "../work/Routing";
 import { QueueRow } from "../work/WorkTab";
 import { CompactMeter, CoordinatorSettings, HistoryDialog } from "./Compaction";
 import { AddResource, KnowledgeRail, KnowledgeView } from "./Knowledge";
@@ -200,6 +201,7 @@ function ProjectPage({ project, switcher }: { project: Project; switcher: React.
               <ProfileField project={project} field="rules" label="Instructions" placeholder={"How should agents work here? One per line, e.g.\n- Reply to customers short and technical\n- Refunds over $100 need me"} empty="No instructions yet. Add how agents should work here: tone, approvals, what not to touch." />
               <CoordinatorSettings project={project} />
               <Repos projectId={project.id} />
+              <ProjectRouting projectId={project.id} />
             </div>
           </div>
         )}

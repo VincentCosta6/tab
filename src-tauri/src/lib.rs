@@ -1135,6 +1135,59 @@ async fn project_repo_save(
 }
 
 #[tauri::command]
+async fn project_anchors(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<tab_core::model::ProjectAnchor>> {
+    state.store.project_anchors(&project_id).map_err(err)
+}
+
+/// Ties a container to a project (`always`, `never` or back to
+/// `proposed`). `always` routes the container's waiting items there.
+#[tauri::command]
+async fn anchor_save(
+    state: State<'_, AppState>,
+    project_id: String,
+    container: tab_core::model::EntityRef,
+    anchor_state: String,
+    source: Option<String>,
+) -> CmdResult<tab_core::model::ProjectAnchor> {
+    let (anchor, routed) = state
+        .store
+        .anchor_save(
+            &project_id,
+            &container,
+            &anchor_state,
+            source.as_deref().unwrap_or("person"),
+            "",
+            Utc::now(),
+        )
+        .map_err(err)?;
+    if routed > 0 {
+        let _ = state.events.send(EngineEvent::ProjectChanged {
+            project_id: project_id.clone(),
+        });
+    }
+    Ok(anchor)
+}
+
+#[tauri::command]
+async fn anchor_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.store.anchor_delete(&id).map_err(err)?;
+    Ok(())
+}
+
+/// After the person files an item: its container, to offer "Always send
+/// it here?", unless it already goes there.
+#[tauri::command]
+async fn route_offer(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Option<tab_core::model::EntityRef>> {
+    state.store.route_offer(&id).map_err(err)
+}
+
+#[tauri::command]
 async fn project_repo_delete(
     state: State<'_, AppState>,
     project_id: String,
@@ -1294,7 +1347,7 @@ fn agent_acp_adapter(kind: AgentKind) -> Option<bool> {
     tab_core::agents::acp_adapter_installed(kind)
 }
 
-/// Installs a harness's ACP adapter with npm. Output lines arrive as
+/// Installs a harness's ACP adapter into tab's tools folder. Output lines arrive as
 /// `tab://agent-upgrade` events while it runs.
 #[tauri::command]
 async fn agent_install_adapter(app: tauri::AppHandle, kind: AgentKind) -> CmdResult<()> {
@@ -3510,6 +3563,7 @@ pub fn run() {
             }
             let data_dir = app.path().app_data_dir()?;
             lsp::set_tools_dir(data_dir.join("tools"));
+            tab_core::agents::adapter::set_dir(data_dir.join("tools").join("acp"));
             // The person's own connection manifests, beside the built-ins.
             tab_core::remote_mcp::manifest::load_dir(&data_dir.join("recipes"));
             let config_path = app.path().app_config_dir()?.join("config.json");
@@ -3571,6 +3625,13 @@ pub fn run() {
                 data_dir.clone(),
             );
             dev::report_status(hub.clone());
+            // The ACP adapter the person's agent runs through, so their
+            // first chat doesn't have to wait for it.
+            if let Some(kind) = config.agent.kind {
+                tauri::async_runtime::spawn(async move {
+                    tab_core::agents::prepare_adapter(kind);
+                });
+            }
             hub.remote_mcp().set_servers(config.mcp_servers.clone());
             remote_mcp::forward_sign_ins(app.handle().clone(), hub.remote_mcp().clone());
             let engine: SharedEngine = Arc::new(RwLock::new(None));
@@ -3640,6 +3701,14 @@ pub fn run() {
                 let (store, gateway) = (store.clone(), core.gateway.clone());
                 tauri::async_runtime::spawn(async move {
                     tab_core::knowledge::spawn(store, gateway, sources);
+                });
+            }
+            // Routing proposals: what the projects' checkouts say about the
+            // services they use, and containers named like a project.
+            {
+                let store = store.clone();
+                tauri::async_runtime::spawn(async move {
+                    tab_core::routing::spawn(store);
                 });
             }
             let state = AppState {
@@ -3861,6 +3930,10 @@ pub fn run() {
             project_repos,
             project_repo_save,
             project_repo_delete,
+            project_anchors,
+            anchor_save,
+            anchor_delete,
+            route_offer,
             project_items,
             review_chat_open,
             review_chat_send,

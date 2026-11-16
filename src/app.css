@@ -135,14 +135,39 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .pj-dot + .row-sub-text::before { content: "·"; margin-right: 6px; color: var(--fg-subtle); }
 .row-reason { color: var(--fg-muted); font-size: var(--text-sm); display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 .row-time { color: var(--fg-subtle); font-size: var(--text-xs); }
-/* Follow-ups fold under the task they came from, indented with a guide line. */
-.followup { margin-left: var(--space-6); border-left: 1px solid var(--border); }
-.followup .row { padding-left: var(--space-3); }
-.followups-toggle { display: flex; align-items: center; gap: 4px; margin: calc(-1 * var(--space-2)) 0 var(--space-1) calc(var(--space-4) + 28px + var(--space-3)); padding: 2px 6px; border: 0; border-radius: var(--radius-sm); background: none; color: var(--fg-subtle); font: inherit; font-size: var(--text-xs); cursor: pointer; }
-.followups-toggle:hover { background: var(--bg-hover); color: var(--fg); }
-.followups-toggle svg { transition: transform 120ms; }
-.followups-toggle.open svg { transform: rotate(90deg); }
+/* Follow-ups hang off the task they came from by a thread line: a stem from
+   its icon, then an elbow into each follow-up's icon. 28px per level puts a
+   follow-up's icon just right of its parent's stem. */
+.queue-list { --thread-line: var(--border); }
+.thread { --indent: calc(var(--depth, 0) * 28px); }
+.thread > .row { padding-left: calc(var(--space-4) + var(--indent)); }
+.thread.has-kids > .row::after { content: ""; position: absolute; left: calc(30px + var(--indent)); top: 42px; bottom: 0; border-left: 1px solid var(--thread-line); pointer-events: none; }
+.thread-kids { position: relative; }
+.thread-kids > .thread { position: relative; }
+.thread-kids > .thread::before { content: ""; position: absolute; z-index: 1; left: calc(4px + var(--indent)); top: 0; width: 10px; height: 24px; border: solid var(--thread-line); border-width: 0 0 1px 1px; border-bottom-left-radius: 8px; pointer-events: none; }
+.thread-kids > .thread:not(:nth-last-child(2))::after { content: ""; position: absolute; z-index: 1; left: calc(4px + var(--indent)); top: 0; bottom: 0; border-left: 1px solid var(--thread-line); pointer-events: none; }
+/* The stem is the fold: click it to tuck the follow-ups away. */
+.thread-fold { position: absolute; z-index: 2; left: calc(26px + var(--indent)); top: 0; bottom: 0; width: 13px; padding: 0; border: 0; background: none; cursor: pointer; }
+.thread-kids:has(> .thread-fold:hover) { --thread-line: var(--fg-subtle); }
+.thread:has(> .thread-kids > .thread-fold:hover) > .row::after { border-color: var(--fg-subtle); }
+/* Folded: the stem ends in an elbow pointing at the count. */
+.thread-more { position: relative; display: flex; align-items: center; gap: 4px; width: 100%; height: 22px; margin-bottom: var(--space-1); padding: 0 0 0 calc(58px + var(--indent)); border: 0; background: none; color: var(--fg-subtle); font: inherit; font-size: var(--text-xs); text-align: left; cursor: pointer; }
+.thread-more::before { content: ""; position: absolute; left: calc(32px + var(--indent)); top: 0; width: 18px; height: 11px; border: solid var(--thread-line); border-width: 0 0 1px 1px; border-bottom-left-radius: 8px; }
+.thread-more:hover { color: var(--fg); }
+.thread-more:hover::before, .thread.has-kids:has(> .thread-more:hover) > .row::after { border-color: var(--fg-subtle); }
 .followups-ready { color: var(--fg-muted); }
+/* A project tab suggests for a row; clicking files it there. */
+.route-chip { flex: none; display: inline-flex; align-items: center; gap: 5px; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px; border: 1px dashed var(--border-strong); border-radius: var(--radius-sm); background: none; color: var(--fg-muted); font: inherit; font-size: var(--text-xs); font-weight: 500; cursor: pointer; }
+.route-chip i { flex: none; width: 7px; height: 7px; border-radius: 2px; }
+.route-chip:hover { border-style: solid; color: var(--fg); background: var(--bg-hover); }
+.route-chip + .row-sub-text::before { content: "·"; margin-right: 6px; color: var(--fg-subtle); }
+/* After filing an item by hand: "Always send … here?" */
+.route-offer { display: flex; align-items: center; gap: var(--space-2); margin: 0 var(--space-4) var(--space-2); padding: 6px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-sunken); font-size: var(--text-sm); color: var(--fg-muted); }
+.route-offer-text { flex: 1; min-width: 0; }
+.route-offer-text b { color: var(--fg); font-weight: 500; }
+.item-project { display: contents; }
+.route-anchor.never { opacity: 0.7; }
+.route-anchor.proposed { border-style: dashed; }
 .row-waiting { flex: none; display: inline-flex; align-items: center; gap: 3px; color: var(--fg-muted); font-size: var(--text-xs); }
 
 .detail { min-width: 0; overflow: auto; }

@@ -107,9 +107,41 @@ pub enum Steering {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AcpAdapter {
     pub npm: Option<String>,
+    /// The npm version tab installs, with every package pinned by
+    /// `adapters/<command>.lock.json` (see `agents::adapter`). For adapters
+    /// without a `release`.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Builds tab downloads itself, so the adapter needs no Node.
+    #[serde(default)]
+    pub release: Option<AcpRelease>,
     pub repo: String,
-    /// SPDX id, as read from the repository.
+    /// SPDX id of its source, as read from the repository.
     pub license: String,
+}
+
+/// An adapter's release builds, pinned: tab only runs a build whose checksum
+/// is written here, as listed in the ACP registry
+/// (github.com/agentclientprotocol/registry) when it was pinned. Bumped by
+/// `node scripts/acp-pins.mjs`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AcpRelease {
+    pub version: String,
+    /// The builds' license where it isn't the source's. claude-agent-acp's
+    /// bundle Anthropic's Claude Agent SDK and Claude Code (proprietary), so
+    /// tab downloads them on the person's computer from the release, and
+    /// never ships or rebuilds them.
+    #[serde(default)]
+    pub license: Option<String>,
+    /// By target (`darwin-arm64`, `linux-x64-musl`, `windows-x64`, ...).
+    pub builds: std::collections::BTreeMap<String, Pinned>,
+}
+
+/// A file to download and the sha256 it must have.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Pinned {
+    pub url: String,
+    pub sha256: String,
 }
 
 fn yes() -> bool {
@@ -205,12 +237,14 @@ impl Harness {
 
     /// The command that installs it on this computer, if tab can run one.
     pub fn install_command(&self) -> Option<String> {
-        // The ACP adapter it runs through comes with it.
+        // The ACP adapter it runs through comes with it, unless tab
+        // installs a pinned one itself (`agents::adapter`).
         let adapter = self
             .acp
             .as_ref()
             .filter(|a| !a.preview)
             .and_then(|a| a.adapter.as_ref())
+            .filter(|a| a.release.is_none() && a.version.is_none())
             .and_then(|a| a.npm.as_deref());
         if let Some(pkg) = &self.install.npm
             && which::which("npm").is_ok()

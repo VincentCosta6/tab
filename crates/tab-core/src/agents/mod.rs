@@ -14,6 +14,7 @@
 //!   search the queue, attach context, file what they find and create tasks.
 
 mod acp;
+pub mod adapter;
 pub mod catalog;
 pub use coordinator::COORDINATOR_KEY_PREFIX;
 mod claude;
@@ -377,28 +378,18 @@ pub async fn run_install(
 pub fn acp_adapter_installed(kind: AgentKind) -> Option<bool> {
     let spec = catalog::harness(kind).acp.as_ref()?;
     spec.adapter.as_ref()?;
-    Some(resolve(spec.command.as_deref()?).is_ok())
+    Some(adapter::find(kind).is_some())
 }
 
-/// Installs `kind`'s ACP adapter with npm, passing each line it prints to
-/// `on_line`. Only adapters whose license tab allows have an entry (see
+/// Installs `kind`'s ACP adapter into tab's own folder (see `adapter`),
+/// passing progress to `on_line`. Only adapters whose license tab allows
+/// have an entry (see
 /// `catalog::tests::every_acp_adapter_has_an_allowed_license`).
 pub async fn run_install_adapter(
     kind: AgentKind,
     on_line: impl Fn(String) + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
-    let h = catalog::harness(kind);
-    let pkg = h
-        .acp
-        .as_ref()
-        .and_then(|a| a.adapter.as_ref())
-        .and_then(|a| a.npm.as_deref())
-        .ok_or_else(|| anyhow::anyhow!("{} has no ACP adapter to install.", h.name))?;
-    let npm = which::which("npm")
-        .map_err(|_| anyhow::anyhow!("`npm` isn't on PATH. Install Node.js, then try again."))?;
-    let mut c = command(&npm);
-    c.args(["install", "-g", pkg]);
-    run_streaming(c, &format!("npm install -g {pkg}"), on_line).await
+    adapter::install(kind, on_line).await.map(drop)
 }
 
 /// Runs an installer or updater, a line of its output at a time.
@@ -2491,6 +2482,25 @@ pub fn command(exe: &std::path::Path) -> tokio::process::Command {
     cmd
 }
 
+/// Starts installing (or updating to the pinned version) `kind`'s ACP
+/// adapter in the background, when tab can do that by itself. A chat that
+/// starts meanwhile waits for it. Whether tab can.
+pub fn prepare_adapter(kind: AgentKind) -> bool {
+    if !adapter::installable(kind) {
+        return false;
+    }
+    if !adapter::needs_install(kind) {
+        return true;
+    }
+    tokio::spawn(async move {
+        match adapter::ensure(kind, |l| tracing::debug!("{l}")).await {
+            Ok(l) => tracing::info!(adapter = %l.program.display(), "ACP adapter ready"),
+            Err(e) => tracing::warn!("setting up {}'s ACP adapter failed: {e:#}", kind.as_str()),
+        }
+    });
+    true
+}
+
 async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
     // Just installed: the app's PATH may not have its folder yet.
     let found = find(kind, custom);
@@ -2526,11 +2536,14 @@ async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
         Ok(Ok(o)) if o.status.success() => {
             p.found = true;
             p.version = Some(String::from_utf8_lossy(&o.stdout).trim().to_string());
-            // Its chats run through an ACP adapter, which needs installing too.
+            // Its chats run through an ACP adapter. tab sets that up itself
+            // where it can (now, so the first chat needn't wait); otherwise
+            // it needs installing too.
             let acp = catalog::harness(kind).acp.as_ref().filter(|a| !a.preview);
             if let Some((cmd, adapter)) =
                 acp.and_then(|a| Some((a.command.as_deref()?, a.adapter.as_ref()?)))
-                && resolve(cmd).is_err()
+                && !prepare_adapter(kind)
+                && adapter::find(kind).is_none()
             {
                 p.found = false;
                 p.error = Some(format!(
