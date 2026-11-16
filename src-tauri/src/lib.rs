@@ -172,6 +172,17 @@ impl EngineAccess for LiveEngine {
             .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
             .create_task(task)
     }
+    async fn update_task(
+        &self,
+        id: &str,
+        edit: tab_core::model::TaskEdit,
+    ) -> anyhow::Result<QueueItem> {
+        let guard = self.0.engine.read().await;
+        guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("engine is not running"))?
+            .update_task(id, edit, "agent")
+    }
     async fn preview(&self, item_id: &str) -> anyhow::Result<Preview> {
         let guard = self.0.engine.read().await;
         guard

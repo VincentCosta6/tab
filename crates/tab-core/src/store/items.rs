@@ -341,6 +341,37 @@ impl Store {
         get_item(&conn, id)
     }
 
+    /// Rewrites a task's kind, title, body and metadata from `e` (and its
+    /// chat sessions' titles), and clears its ranking so it's ranked again.
+    pub fn item_edit(
+        &self,
+        id: &str,
+        e: &IncomingEvent,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<Option<QueueItem>> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE items SET kind = ?2, title = ?3, body = ?4, metadata = ?5, fingerprint = ?6,
+                 score = NULL, base_score = NULL, ai_adjustment = NULL, urgency = NULL, reason = NULL,
+                 ranked_by = NULL, updated_at = ?7
+             WHERE id = ?1",
+            params![
+                id,
+                e.kind,
+                e.title,
+                e.body,
+                e.metadata.to_string(),
+                fingerprint(e),
+                ts(now)
+            ],
+        )?;
+        conn.execute(
+            "UPDATE sessions SET title = ?2 WHERE item_id = ?1",
+            params![id, e.title],
+        )?;
+        get_item(&conn, id)
+    }
+
     /// Reopens snoozed items whose time has come and returns them.
     pub fn wake_due(&self, now: DateTime<Utc>) -> anyhow::Result<Vec<QueueItem>> {
         let conn = self.conn();
