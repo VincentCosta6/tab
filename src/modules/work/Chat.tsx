@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, cx } from "../../design/components";
 import { Icon } from "../../design/icons";
@@ -1507,12 +1507,29 @@ export function Composer({ chat, onSend, onShell, placeholder, autoFocus, extra 
     return true;
   };
 
+  const fit = useCallback(() => {
+    const t = ref.current;
+    if (!t) return;
+    const empty = !t.value;
+    t.style.height = "auto";
+    // An empty box is sized to its placeholder (e.g. a long suggested reply),
+    // which WebKit leaves out of scrollHeight.
+    if (empty && t.placeholder) t.value = t.placeholder;
+    t.style.height = `${Math.min(220, t.scrollHeight)}px`;
+    if (empty) t.value = "";
+  }, []);
+  useEffect(fit, [fit, text, suggestion, running, placeholder]);
+  // The box rewraps when it narrows (a file opening beside the chat), so it's measured again.
   useEffect(() => {
     const t = ref.current;
     if (!t) return;
-    t.style.height = "auto";
-    t.style.height = `${Math.min(220, t.scrollHeight)}px`;
-  }, [text]);
+    let width = t.offsetWidth;
+    const ro = new ResizeObserver(() => {
+      if (t.offsetWidth !== width) (width = t.offsetWidth, fit());
+    });
+    ro.observe(t);
+    return () => ro.disconnect();
+  }, [fit]);
 
   useEffect(() => {
     if (autoFocus) ref.current?.focus();
