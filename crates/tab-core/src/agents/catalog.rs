@@ -107,6 +107,11 @@ pub enum Steering {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AcpAdapter {
     pub npm: Option<String>,
+    /// Its GitHub releases' build for each computer, `{target}` standing for
+    /// `darwin-arm64`, `linux-x64` and so on. tab downloads it itself (see
+    /// `agents::adapter`), so it needs no Node.
+    #[serde(default)]
+    pub release: Option<String>,
     pub repo: String,
     /// SPDX id, as read from the repository.
     pub license: String,
@@ -205,12 +210,14 @@ impl Harness {
 
     /// The command that installs it on this computer, if tab can run one.
     pub fn install_command(&self) -> Option<String> {
-        // The ACP adapter it runs through comes with it.
+        // The ACP adapter it runs through comes with it, unless tab
+        // downloads that itself.
         let adapter = self
             .acp
             .as_ref()
             .filter(|a| !a.preview)
             .and_then(|a| a.adapter.as_ref())
+            .filter(|a| a.release.is_none())
             .and_then(|a| a.npm.as_deref());
         if let Some(pkg) = &self.install.npm
             && which::which("npm").is_ok()

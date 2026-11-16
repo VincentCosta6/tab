@@ -1282,7 +1282,7 @@ fn agent_acp_adapter(kind: AgentKind) -> Option<bool> {
     tab_core::agents::acp_adapter_installed(kind)
 }
 
-/// Installs a harness's ACP adapter with npm. Output lines arrive as
+/// Installs a harness's ACP adapter into tab's tools folder. Output lines arrive as
 /// `tab://agent-upgrade` events while it runs.
 #[tauri::command]
 async fn agent_install_adapter(app: tauri::AppHandle, kind: AgentKind) -> CmdResult<()> {
@@ -3498,6 +3498,7 @@ pub fn run() {
             }
             let data_dir = app.path().app_data_dir()?;
             lsp::set_tools_dir(data_dir.join("tools"));
+            tab_core::agents::adapter::set_dir(data_dir.join("tools").join("acp"));
             // The person's own connection manifests, beside the built-ins.
             tab_core::remote_mcp::manifest::load_dir(&data_dir.join("recipes"));
             let config_path = app.path().app_config_dir()?.join("config.json");
@@ -3559,6 +3560,13 @@ pub fn run() {
                 data_dir.clone(),
             );
             dev::report_status(hub.clone());
+            // The ACP adapter the person's agent runs through, so their
+            // first chat doesn't have to wait for it.
+            if let Some(kind) = config.agent.kind {
+                tauri::async_runtime::spawn(async move {
+                    tab_core::agents::prepare_adapter(kind);
+                });
+            }
             hub.remote_mcp().set_servers(config.mcp_servers.clone());
             remote_mcp::forward_sign_ins(app.handle().clone(), hub.remote_mcp().clone());
             let engine: SharedEngine = Arc::new(RwLock::new(None));

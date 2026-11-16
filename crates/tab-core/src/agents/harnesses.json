@@ -80,6 +80,7 @@
       "preview": false,
       "adapter": {
         "npm": "@agentclientprotocol/claude-agent-acp",
+        "release": "claude-agent-acp-{target}",
         "repo": "https://github.com/agentclientprotocol/claude-agent-acp",
         "license": "Apache-2.0"
       }
