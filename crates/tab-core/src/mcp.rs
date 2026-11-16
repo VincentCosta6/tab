@@ -13,6 +13,8 @@
 //!   Context), and `start_agent` can put an agent on it right away.
 //!   The new task is a follow-up of the chat's task, so the queue shows it
 //!   under that one, and `after` orders it behind other tasks.
+//! * `tab_update_task`: change a task made in tab: its title, details,
+//!   priority or due time (rescheduling it).
 //! * `tab_link_tasks`: order tasks (what has to be done first) and nest or
 //!   un-nest follow-ups.
 //! * `tab_graph_search`, `tab_graph_expand`: the knowledge graph (repos,
@@ -62,7 +64,7 @@ use crate::engine::EngineEvent;
 use crate::model::Session;
 use crate::model::{
     Change, ConnectorInfo, ContextSection, Entity, ItemState, LinkKind, NewContext, NewTask,
-    Preview, Project, ProjectNote, ProjectRepo, ProjectResource, QueueItem, SettingKind,
+    Preview, Project, ProjectNote, ProjectRepo, ProjectResource, QueueItem, SettingKind, TaskEdit,
 };
 use crate::sandbox::broker;
 use crate::store::{AuditEntry, Store};
@@ -74,6 +76,10 @@ use tab_domain::CliEffect;
 pub trait EngineAccess: Send + Sync + 'static {
     async fn create_task(&self, task: NewTask) -> anyhow::Result<QueueItem>;
     async fn preview(&self, item_id: &str) -> anyhow::Result<Preview>;
+    /// Changes a task made in tab (title, details, priority, due time).
+    async fn update_task(&self, _id: &str, _edit: TaskEdit) -> anyhow::Result<QueueItem> {
+        anyhow::bail!("tasks can't be changed from here")
+    }
 
     /// Connector types and their live state.
     async fn connectors(&self) -> anyhow::Result<Vec<ConnectorInfo>> {
@@ -1059,6 +1065,25 @@ fn ids(v: &Value) -> Vec<String> {
     .collect()
 }
 
+/// A due time from an agent: RFC 3339, or a bare date for the start of
+/// that day where the person is.
+fn due_time(v: &str) -> anyhow::Result<chrono::DateTime<Utc>> {
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(v) {
+        return Ok(t.with_timezone(&Utc));
+    }
+    let d = chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").map_err(|_| {
+        anyhow::anyhow!(
+            "due_at should be an ISO date-time like 2026-11-16T09:00:00-05:00, or a date"
+        )
+    })?;
+    d.and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_local_timezone(chrono::Local)
+        .earliest()
+        .map(|t| t.with_timezone(&Utc))
+        .ok_or_else(|| anyhow::anyhow!("{v} has no midnight here"))
+}
+
 fn brief(i: &QueueItem) -> Value {
     json!({
         "id": i.id,
@@ -1194,6 +1219,19 @@ pub fn tools() -> Value {
                 "after": { "type": "array", "items": { "type": "string" }, "description": "Ids of tasks that have to be done before this one, e.g. the previous phase." },
                 "start_agent": { "type": "string", "description": "Only when the person asks for it: start an agent on the new task now, with this as its first message. Not for scheduled tasks." }
             }, "required": ["title"] }
+        },
+        {
+            "name": "tab_update_task",
+            "description": "Change a task made in tab: its title, details, priority or due time. Rescheduling sets a new due time: the task waits (snoozed) until then and comes back into the queue when it's due; `clear_due` takes the due time off and brings it back now. Pass only what changes. Tasks from other places (GitHub, email, ...) can't be edited here.",
+            "inputSchema": { "type": "object", "properties": {
+                "item_id": { "type": "string", "description": "The task to change. Defaults to this session's task." },
+                "title": { "type": "string" },
+                "body": { "type": "string", "description": "New details, replacing the old ones (markdown). Empty clears them." },
+                "priority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
+                "due_at": { "type": "string", "description": "New due time: an ISO date-time with offset, or a date like 2026-11-16 for the start of that day in the person's time zone." },
+                "due_in_minutes": { "type": "integer", "minimum": 1, "description": "New due time, this many minutes from now." },
+                "clear_due": { "type": "boolean", "description": "Take the due time off." }
+            } }
         },
         {
             "name": "tab_link_tasks",
@@ -2425,6 +2463,37 @@ impl McpServer {
                 }
                 Ok(text(said))
             }
+            "tab_update_task" => {
+                let id = self.session_item(session, &args)?;
+                let due_at = if args["clear_due"] == true {
+                    Some(None)
+                } else if let Some(m) = args["due_in_minutes"].as_i64() {
+                    Some(Some(Utc::now() + chrono::Duration::minutes(m.max(1))))
+                } else if let Some(v) = s("due_at") {
+                    Some(Some(due_time(&v)?))
+                } else {
+                    None
+                };
+                let edit = TaskEdit {
+                    title: s("title"),
+                    body: args["body"].as_str().map(str::to_string),
+                    priority: s("priority"),
+                    due_at,
+                };
+                anyhow::ensure!(
+                    edit != TaskEdit::default(),
+                    "nothing to change: pass title, body, priority, due_at, due_in_minutes or clear_due"
+                );
+                let item = self.engine.update_task(&id, edit).await?;
+                let mut out = brief(&item);
+                if let Some(d) = item.event.metadata["due_at"].as_str() {
+                    out["due_at"] = d.into();
+                }
+                if let Some(d) = item.snoozed_until {
+                    out["waits_until"] = d.to_rfc3339().into();
+                }
+                Ok(text(serde_json::to_string_pretty(&out)?))
+            }
             "tab_link_tasks" => {
                 let id = self.session_item(session, &args)?;
                 let now = Utc::now();
@@ -3187,7 +3256,7 @@ mod tests {
         .json()
         .await
         .unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 28);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 29);
         let always: Vec<&str> = list["result"]["tools"]
             .as_array()
             .unwrap()

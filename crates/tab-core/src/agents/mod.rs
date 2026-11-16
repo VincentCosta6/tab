@@ -2130,7 +2130,9 @@ impl AgentHub {
              written in markdown (short paragraphs, lists, `code`, links): tab shows it rendered as the \
              task's details. For work in phases or steps, pass `after` with the earlier task's id so it \
              waits its turn; tab_link_tasks orders tasks that already exist. When the person asks for \
-             agents on them, pass start_agent with the first message.\n\
+             agents on them, pass start_agent with the first message. To change a task that already \
+             exists (rename it, rewrite its details, change its priority, reschedule it), use \
+             tab_update_task rather than creating a new one.\n\
              - Waiting on CI, a deploy or anything else slow: don't block on it with sleep or a --watch \
              command in the foreground. If you can, start the wait in the background (e.g. \
              run_in_background), say what you're waiting for and end your turn; tab shows the chat as \

@@ -985,6 +985,18 @@ pub struct NewTask {
     pub auto_title: bool,
 }
 
+/// Changes to a task made in tab. A field left `None` stays as it is.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TaskEdit {
+    pub title: Option<String>,
+    /// An empty body clears it.
+    pub body: Option<String>,
+    /// `low`, `normal`, `high` or `urgent`.
+    pub priority: Option<String>,
+    /// `Some(Some(t))` reschedules it for `t`; `Some(None)` takes the due time off.
+    pub due_at: Option<Option<DateTime<Utc>>>,
+}
+
 /// The source id of tab's own connector: items people make by hand and
 /// actions on tab itself (snooze, set project, ...).
 pub const TAB_SOURCE: &str = "tab";

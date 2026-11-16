@@ -23,6 +23,7 @@ use crate::gateway::GatewayError;
 use crate::model::{
     Approval, ConnectorInfo, ConnectorStatus, ContextStatus, DoneGuard, GuardLevel, IncomingEvent,
     ItemState, NewTask, Preview, QueueItem, Ranking, Session, SessionMessage, SessionStatus,
+    TaskEdit,
 };
 use crate::ranker::{Pipeline, Ranker};
 use crate::ratelimit;
@@ -457,6 +458,104 @@ impl Core {
             return Ok(self.snooze(&item.id, due, "schedule")?.unwrap_or(item));
         }
         Ok(item)
+    }
+
+    /// Changes a task made in tab. A new due time in the future schedules
+    /// it (snoozed until then); one now or past, or none, brings it back.
+    fn update_task(
+        self: &Arc<Self>,
+        id: &str,
+        edit: TaskEdit,
+        by: &str,
+    ) -> anyhow::Result<QueueItem> {
+        let item = self
+            .store
+            .get(id)?
+            .ok_or_else(|| anyhow::anyhow!("no item {id}"))?;
+        anyhow::ensure!(
+            item.event.source == crate::connectors::tab::SOURCE,
+            "only tasks made in tab can be edited; this one comes from {}",
+            item.event.source
+        );
+        let now = Utc::now();
+        let mut e = item.event.clone();
+        if !e.metadata.is_object() {
+            e.metadata = serde_json::json!({});
+        }
+        let mut changes = Vec::new();
+        if let Some(t) = edit.title {
+            let t: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            anyhow::ensure!(!t.is_empty(), "a title can't be empty");
+            let t: String = t.chars().take(200).collect();
+            if t != e.title {
+                e.title = t;
+                // Named on purpose: the titler leaves it alone.
+                e.metadata["title_source"] = by.into();
+                changes.push("title");
+            }
+        }
+        if let Some(b) = edit.body {
+            e.body = Some(b).filter(|b| !b.trim().is_empty());
+            changes.push("details");
+        }
+        if let Some(p) = edit.priority {
+            anyhow::ensure!(
+                matches!(p.as_str(), "low" | "normal" | "high" | "urgent"),
+                "priority is low, normal, high or urgent"
+            );
+            match p.as_str() {
+                "normal" => {
+                    e.metadata.as_object_mut().map(|m| m.remove("priority"));
+                }
+                _ => e.metadata["priority"] = p.into(),
+            }
+            changes.push("priority");
+        }
+        let due = edit.due_at;
+        match due {
+            Some(Some(d)) => {
+                e.metadata["due_at"] = d.to_rfc3339().into();
+                changes.push("due time");
+            }
+            Some(None) => {
+                e.metadata.as_object_mut().map(|m| m.remove("due_at"));
+                changes.push("due time");
+            }
+            None => {}
+        }
+        if due.is_some() {
+            e.kind = if due.flatten().is_some_and(|d| d > now) {
+                "tab.scheduled"
+            } else {
+                "tab.task"
+            }
+            .into();
+        }
+        let mut updated = self.store.item_edit(id, &e, now)?.unwrap_or(item.clone());
+        if !changes.is_empty() {
+            self.note(
+                id,
+                "updated",
+                &format!("Changed the {}", changes.join(", ")),
+                Some(by),
+                serde_json::json!({ "from": item.event.title, "to": updated.event.title }),
+            );
+        }
+        match due {
+            Some(Some(d)) if d > now && updated.state != ItemState::Done => {
+                if let Some(i) = self.snooze(id, d, by)? {
+                    updated = i;
+                }
+            }
+            Some(_) if updated.state == ItemState::Snoozed => {
+                if let Some(i) = self.reopen(id, by)? {
+                    updated = i;
+                }
+            }
+            _ => self.publish(Change::Updated, updated.clone()),
+        }
+        tokio::spawn(self.clone().rank(updated.clone()));
+        Ok(updated)
     }
 
     /// Marks an item done because it finished at the source.
@@ -1286,6 +1385,11 @@ impl EngineHandle {
         self.core.create_task(task, &[], None)
     }
 
+    /// Changes a task made in tab: its title, details, priority or due time.
+    pub fn update_task(&self, id: &str, edit: TaskEdit, by: &str) -> anyhow::Result<QueueItem> {
+        self.core.update_task(id, edit, by)
+    }
+
     /// Publishes an event on the engine's stream (used by the agent runner).
     pub fn emit(&self, event: EngineEvent) {
         let _ = self.core.events.send(event);
@@ -1465,6 +1569,45 @@ mod tests {
             .unwrap();
         assert_eq!(later.state, ItemState::Snoozed);
         assert_eq!(later.event.kind, "tab.scheduled");
+
+        // Agents edit tasks in place: rename, reprioritise, reschedule.
+        let tomorrow = Utc::now() + chrono::Duration::days(1);
+        let moved = handle
+            .update_task(
+                &task.id,
+                TaskEdit {
+                    title: Some("Ship  the onboarding flow v2".into()),
+                    priority: Some("low".into()),
+                    due_at: Some(Some(tomorrow)),
+                    ..Default::default()
+                },
+                "agent",
+            )
+            .unwrap();
+        assert_eq!(moved.id, task.id);
+        assert_eq!(moved.event.title, "Ship the onboarding flow v2");
+        assert_eq!(moved.event.metadata["priority"], "low");
+        assert_eq!(moved.event.metadata["title_source"], "agent");
+        assert_eq!(moved.event.kind, "tab.scheduled");
+        assert_eq!(moved.state, ItemState::Snoozed);
+        assert_eq!(
+            moved.snoozed_until.map(|d| d.timestamp()),
+            Some(tomorrow.timestamp())
+        );
+        // Taking the due time off brings it back now.
+        let back = handle
+            .update_task(
+                &later.id,
+                TaskEdit {
+                    due_at: Some(None),
+                    ..Default::default()
+                },
+                "agent",
+            )
+            .unwrap();
+        assert_eq!(back.state, ItemState::Open);
+        assert_eq!(back.event.kind, "tab.task");
+        assert!(back.event.metadata.get("due_at").is_none());
         assert!(
             !handle
                 .store()

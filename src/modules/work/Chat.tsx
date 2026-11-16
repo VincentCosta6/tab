@@ -381,6 +381,7 @@ function describeTool(m: SessionMessage): string {
       tab_attach_context: "Attaching context",
       tab_add_found: "Filing something under Found",
       tab_create_task: "Creating a follow-up task",
+      tab_update_task: "Updating a task",
       tab_project: "Reading the project",
       tab_project_note: "Saving a project note",
       tab_graph_search: "Looking up what tab knows",
