@@ -67,8 +67,9 @@ const persister = createSyncStoragePersister({
  * Queries not saved across restarts: streaming buffers and live telemetry,
  * the app's version and update check (a restart may change them), and what is
  * big and cheap to read again (chats, PR files and pulls, search results).
+ * Images hold `blob:` URLs, which die with the window that made them.
  */
-const PERSIST_SKIP = new Set(["stream", "pressure", "search-index", "workflow-issues", "app-version", "app-update", "chat", "chats", "file", "pull"]);
+const PERSIST_SKIP = new Set(["stream", "pressure", "search-index", "workflow-issues", "app-version", "app-update", "chat", "chats", "file", "pull", "image"]);
 const persisted = (key: readonly unknown[]) =>
   !PERSIST_SKIP.has(String(key[0])) && !(key[0] === "items" && key[2]);
 
@@ -84,7 +85,7 @@ function safeStorage(): Storage | undefined {
 }
 
 /** Bump when cached shapes change so old caches are dropped. */
-const CACHE_VERSION = "3";
+const CACHE_VERSION = "4";
 
 export const keys = {
   items: (state: string, query: string) => ["items", state, query] as const,
