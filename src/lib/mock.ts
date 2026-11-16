@@ -258,6 +258,7 @@ let config: TabConfig = {
     lsp_domains: ["crates.io", "*.crates.io", "proxy.golang.org", "sum.golang.org", "pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com", "*.githubusercontent.com"],
   },
   hub: { mode: "local" },
+  browser: { import_logins: null },
   onboarded: true,
 };
 // `?account=1` starts the browser mock signed in.
@@ -968,6 +969,15 @@ export const mockApi = {
           await new Promise((r) => setTimeout(r, 6000));
           gh = { ...gh, logged_in: true, user: "vincentcosta6" };
           return gh;
+        case "browser_login_browsers":
+          return ["Chrome", "Firefox"];
+        case "browser_login_sources":
+          return [{ id: "chrome", name: "Chrome" }, { id: "firefox", name: "Firefox" }];
+        case "browser_login_sites":
+          return [{ site: "github.com", cookies: 14 }, { site: "google.com", cookies: 31 }, { site: "linear.app", cookies: 6 }, { site: "sentry.io", cookies: 4 }];
+        case "browser_import_logins":
+          await new Promise((r) => setTimeout(r, 600));
+          return args.sites.length * 5;
         default: throw new Error(`mock: unknown command ${cmd}`);
       }
     })();

@@ -9,6 +9,7 @@ import { useUpdates } from "../updates/UpdatesBadge";
 import { DraftContext } from "./draft";
 import { AgentsPage } from "./pages/Agents";
 import { AccountPage } from "./pages/Account";
+import { BrowserPage } from "./pages/Browser";
 import { HubPage } from "./pages/Hub";
 import { McpPage } from "./pages/Mcp";
 import { RankingPage } from "./pages/Ranking";
@@ -30,6 +31,7 @@ const pages: Page[] = [
   { id: "hub", label: "Hub", icon: "cloud", component: HubPage, edits: (c) => c.hub },
   { id: "agents", label: "Agents", icon: "bot", component: AgentsPage, edits: (c) => [c.agent, c.sandbox] },
   { id: "ranking", label: "Ranking", icon: "filter", component: RankingPage, edits: (c) => c.ranking },
+  { id: "browser", label: "Browser", icon: "globe", component: BrowserPage, edits: (c) => c.browser },
   { id: "storage", label: "Storage", icon: "folder", component: StoragePage, edits: (c) => c.storage },
   { id: "mcp", label: "MCP server", icon: "terminal", component: McpPage },
   { id: "updates", label: "Updates", icon: "refresh", component: UpdatesPage },

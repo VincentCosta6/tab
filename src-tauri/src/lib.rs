@@ -32,6 +32,7 @@ use tauri::{Emitter, Manager, State};
 
 mod account;
 mod autofix;
+mod browser_logins;
 mod bundle_update;
 mod cloud_runner;
 mod dev;
@@ -3832,6 +3833,10 @@ pub fn run() {
             browser_visible,
             browser_nav,
             browser_close,
+            browser_logins::browser_login_browsers,
+            browser_logins::browser_login_sources,
+            browser_logins::browser_login_sites,
+            browser_logins::browser_import_logins,
             list_items,
             search_items,
             item_detail,

@@ -62,6 +62,12 @@ hmac = "0.12"
 getrandom = "0.3"
 zeroize = "1"
 bip39 = { version = "2", default-features = false, features = ["std"] }
+# Logins from other browsers (crate::browser_cookies): Chrome seals its
+# cookies with AES-128-CBC.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+# Public suffixes, so imported cookies group by site.
+psl = "2"
 
 # Zed's crates come from git, pinned to one commit (never a branch), with
 # default features off. deny.toml allows this repository only, and checks the

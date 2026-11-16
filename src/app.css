@@ -1015,6 +1015,20 @@ body.resizing iframe { pointer-events: none; }
 .bbar { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--border); }
 .bbar input { flex: 1; min-width: 0; height: 28px; padding: 0 var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font-size: var(--text-sm); }
 .bview { position: relative; flex: 1; min-height: 0; }
+.blogins { display: flex; flex-direction: column; gap: var(--space-2); max-height: 45%; padding: var(--space-2); border-bottom: 1px solid var(--border); background: var(--bg-sunken); font-size: var(--text-sm); }
+.blogins-head { display: flex; align-items: center; gap: var(--space-2); }
+.blogins-head > span { flex: 1; min-width: 0; }
+.blogins-head select { margin-left: auto; height: 26px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font-size: var(--text-sm); }
+.blogins-filter { height: 26px; padding: 0 var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font-size: var(--text-sm); }
+.blogins-list { flex: 1; min-height: 60px; overflow-y: auto; }
+.blogins-site { display: flex; align-items: center; gap: var(--space-2); padding: 3px var(--space-1); border-radius: var(--radius-sm); cursor: pointer; }
+.blogins-site:hover { background: var(--bg-hover); }
+.blogins-site > span:first-of-type { flex: 1; }
+.blogins .sub { color: var(--fg-subtle); font-size: var(--text-xs); }
+.blogins-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.blogins-actions { display: flex; gap: var(--space-1); flex-shrink: 0; }
+.blogins-note { margin: 0; color: var(--fg-muted); }
+.blogins-note.err { color: var(--tone-danger-fg); }
 .bview iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
 .open-menu { right: 0; left: auto; min-width: 230px; }
 .open-menu button .sub { color: var(--fg-subtle); font-size: var(--text-xs); }

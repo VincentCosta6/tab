@@ -35,9 +35,22 @@ pub struct TabConfig {
     /// Where this person's hub runs.
     #[serde(default)]
     pub hub: HubConfig,
+    /// The in-app browser.
+    #[serde(default)]
+    pub browser: BrowserConfig,
     /// Set once the first-launch onboarding is finished.
     #[serde(default)]
     pub onboarded: bool,
+}
+
+/// The in-app browser.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BrowserConfig {
+    /// Whether it may copy logins (cookies) from the person's other browsers
+    /// ([`crate::browser_cookies`]). Off until they turn it on; `None` until
+    /// they've been asked, which the browser does once.
+    #[serde(default)]
+    pub import_logins: Option<bool>,
 }
 
 /// Which coding agent tab drives, and how.
@@ -333,6 +346,7 @@ impl Default for TabConfig {
             storage: StorageConfig::default(),
             sandbox: Default::default(),
             hub: HubConfig::default(),
+            browser: BrowserConfig::default(),
             onboarded: false,
         }
     }
