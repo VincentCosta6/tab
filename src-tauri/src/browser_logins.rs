@@ -20,7 +20,7 @@ fn home() -> PathBuf {
 }
 
 async fn allowed(state: &AppState) -> CmdResult<()> {
-    if state.config.lock().await.browser.import_logins {
+    if state.config.lock().await.browser.import_logins == Some(true) {
         Ok(())
     } else {
         Err("importing logins is off; turn it on in Settings → Browser".into())
@@ -32,6 +32,24 @@ fn source(id: &str) -> CmdResult<Source> {
         .into_iter()
         .find(|s| s.id == id)
         .ok_or_else(|| "that browser profile is gone".to_string())
+}
+
+/// Which browsers (by name, once each) tab could import logins from, so it
+/// can offer to before it's turned on. Only looks for their folders: reads
+/// no cookies and no keychain.
+#[tauri::command]
+pub async fn browser_login_browsers() -> CmdResult<Vec<String>> {
+    tokio::task::spawn_blocking(|| {
+        let mut names: Vec<String> = Vec::new();
+        for s in browser_cookies::sources(&home()) {
+            if !names.contains(&s.browser) {
+                names.push(s.browser);
+            }
+        }
+        names
+    })
+    .await
+    .map_err(err)
 }
 
 /// Browser profiles on this computer tab can import logins from.

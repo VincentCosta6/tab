@@ -3,8 +3,8 @@ import { api, inTauri, onBrowserEvent, openUrl } from "../lib/api";
 import {
   closeBrowser, closeBrowserTab, newBrowserTab, patchBrowserTab, selectBrowserTab, setBrowserExpanded, useBrowser, withHost,
 } from "../lib/browser";
-import { useConfig } from "../lib/hooks";
-import { ImportLogins } from "./BrowserLogins";
+import { useConfig, useSaveConfig } from "../lib/hooks";
+import { ImportLogins, ImportOffer } from "./BrowserLogins";
 import { cx } from "./components";
 import { Icon } from "./icons";
 
@@ -27,7 +27,20 @@ export function BrowserDock() {
   const [dragging, setDragging] = useState(false);
   const [address, setAddress] = useState("");
   const [importing, setImporting] = useState(false);
-  const canImport = useConfig().data?.browser?.import_logins === true;
+  const config = useConfig().data;
+  const saveConfig = useSaveConfig();
+  const canImport = config?.browser?.import_logins === true;
+  // Asked once: while it's unanswered and there's a browser to import from.
+  const unasked = !!config && config.browser?.import_logins == null;
+  const [browsers, setBrowsers] = useState<string[]>([]);
+  useEffect(() => {
+    if (unasked) void api.browserLoginBrowsers().then(setBrowsers, () => {});
+  }, [unasked]);
+  const answerOffer = (yes: boolean) => {
+    if (!config) return;
+    saveConfig.mutate({ ...config, browser: { ...config.browser, import_logins: yes } });
+    setImporting(yes);
+  };
   const view = useRef<HTMLDivElement>(null);
   const created = useRef(new Set<string>());
   const current = tabs.find((t) => t.id === active);
@@ -140,6 +153,7 @@ export function BrowserDock() {
         {canImport && <button type="button" className={cx("icon-btn", importing && "active")} title="Import logins from another browser" onClick={() => setImporting((v) => !v)}><Icon name="download" size={14} /></button>}
         <button type="button" className="icon-btn" title="Open in your browser" onClick={() => current && void openUrl(current.url)}><Icon name="external" size={14} /></button>
       </form>
+      {unasked && browsers.length > 0 && <ImportOffer browsers={browsers} onAnswer={answerOffer} />}
       {canImport && importing && <ImportLogins url={current?.url} onClose={() => setImporting(false)} onImported={() => nav("reload")} />}
       <div className="bview" ref={view}>
         {!inTauri && current && <iframe key={current.id} src={current.url} title={current.title} />}

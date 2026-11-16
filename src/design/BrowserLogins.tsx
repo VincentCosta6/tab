@@ -102,3 +102,23 @@ export function ImportLogins({ url, onClose, onImported }: { url?: string; onClo
     </div>
   );
 }
+
+/** "Bring your logins over?", asked once the first time the browser opens. */
+export function ImportOffer({ browsers, onAnswer }: { browsers: string[]; onAnswer: (yes: boolean) => void }) {
+  const names = browsers.length > 1 ? `${browsers.slice(0, -1).join(", ")} or ${browsers[browsers.length - 1]}` : browsers[0];
+  return (
+    <div className="blogins" role="dialog" aria-label="Import logins">
+      <div className="blogins-head">
+        <Icon name="download" size={14} />
+        <span>Stay signed in here: import logins for sites you pick from {names}?</span>
+      </div>
+      <div className="blogins-foot">
+        <span className="sub">Nothing is copied until you pick sites. You can change this in Settings → Browser.</span>
+        <div className="blogins-actions">
+          <Button size="sm" variant="ghost" onClick={() => onAnswer(false)}>Not now</Button>
+          <Button size="sm" variant="primary" onClick={() => onAnswer(true)}>Turn on</Button>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -3833,6 +3833,7 @@ pub fn run() {
             browser_visible,
             browser_nav,
             browser_close,
+            browser_logins::browser_login_browsers,
             browser_logins::browser_login_sources,
             browser_logins::browser_login_sites,
             browser_logins::browser_import_logins,

@@ -19,7 +19,10 @@ use serde::Serialize;
 pub struct Source {
     /// Stable for the profile: its cookie file's path.
     pub id: String,
+    /// The profile, e.g. "Chrome (Work)".
     pub name: String,
+    /// The browser alone, e.g. "Chrome".
+    pub browser: String,
     kind: Kind,
     db: PathBuf,
 }
@@ -181,6 +184,7 @@ fn chromium_profiles(
         out.push(Source {
             id: db.to_string_lossy().into_owned(),
             name,
+            browser: browser.to_string(),
             kind: Kind::Chromium { service, account },
             db,
         });
@@ -216,6 +220,7 @@ fn firefox_profiles(root: &Path, out: &mut Vec<Source>) {
             } else {
                 "Firefox".into()
             },
+            browser: "Firefox".into(),
             kind: Kind::Firefox,
             db,
         });

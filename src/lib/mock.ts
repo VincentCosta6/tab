@@ -258,7 +258,7 @@ let config: TabConfig = {
     lsp_domains: ["crates.io", "*.crates.io", "proxy.golang.org", "sum.golang.org", "pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com", "*.githubusercontent.com"],
   },
   hub: { mode: "local" },
-  browser: { import_logins: true },
+  browser: { import_logins: null },
   onboarded: true,
 };
 // `?account=1` starts the browser mock signed in.
@@ -969,6 +969,8 @@ export const mockApi = {
           await new Promise((r) => setTimeout(r, 6000));
           gh = { ...gh, logged_in: true, user: "vincentcosta6" };
           return gh;
+        case "browser_login_browsers":
+          return ["Chrome", "Firefox"];
         case "browser_login_sources":
           return [{ id: "chrome", name: "Chrome" }, { id: "firefox", name: "Firefox" }];
         case "browser_login_sites":

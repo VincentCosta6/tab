@@ -356,6 +356,8 @@ export const api = {
   browserVisible: (id: string, visible: boolean) => call<void>("browser_visible", { id, visible }),
   browserNav: (id: string, action: "back" | "forward" | "reload" | "go", url?: string) => call<void>("browser_nav", { id, action, url: url ?? null }),
   browserClose: (id: string) => call<void>("browser_close", { id }),
+  /** Browsers on this computer logins could be imported from, by name. Reads no cookies, so it works before importing is turned on. */
+  browserLoginBrowsers: () => call<string[]>("browser_login_browsers"),
   /** Browser profiles on this computer whose logins can be imported. */
   browserLoginSources: () => call<LoginSource[]>("browser_login_sources"),
   /** The sites a profile is signed in to, most cookies first. */

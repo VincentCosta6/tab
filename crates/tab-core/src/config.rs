@@ -47,9 +47,10 @@ pub struct TabConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct BrowserConfig {
     /// Whether it may copy logins (cookies) from the person's other browsers
-    /// ([`crate::browser_cookies`]). Off until they turn it on.
+    /// ([`crate::browser_cookies`]). Off until they turn it on; `None` until
+    /// they've been asked, which the browser does once.
     #[serde(default)]
-    pub import_logins: bool,
+    pub import_logins: Option<bool>,
 }
 
 /// Which coding agent tab drives, and how.
