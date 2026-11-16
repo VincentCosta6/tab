@@ -22,6 +22,16 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
   return invoke<T>(cmd, args);
 }
 
+/**
+ * A command that returns raw bytes. On macOS, once Tauri's ipc:// protocol
+ * fails (it can after a sleep/wake), it falls back to postMessage for the
+ * rest of the session, and that sends bytes as a JSON array of numbers.
+ */
+async function callBytes(cmd: string, args?: Record<string, unknown>): Promise<ArrayBuffer> {
+  const v = await call<ArrayBuffer | number[]>(cmd, args);
+  return Array.isArray(v) ? new Uint8Array(v).buffer : v;
+}
+
 export const api = {
   listItems: (states: ItemState[]) => call<QueueItem[]>("list_items", { states }),
   searchItems: (query: string, states: ItemState[]) => call<QueueItem[]>("search_items", { query, states }),
@@ -61,8 +71,8 @@ export const api = {
     const { invoke } = await import("@tauri-apps/api/core");
     return invoke<string>("attachment_save", bytes, { headers: { "x-name": encodeURIComponent(name) } });
   },
-  imageRead: (path: string) => call<ArrayBuffer>("image_read", { path }),
-  fileRead: (path: string) => call<ArrayBuffer>("file_read", { path }),
+  imageRead: (path: string) => callBytes("image_read", { path }),
+  fileRead: (path: string) => callBytes("file_read", { path }),
   /** Per path, `[modified ms, size]`, or null once the file is gone. */
   fileStamps: (paths: string[]) => call<([number, number] | null)[]>("file_stamps", { paths }),
   fileOpen: (path: string, reveal = false) => call<void>("file_open", { path, reveal }),
@@ -201,7 +211,7 @@ export const api = {
   githubPull: (repo: string, number: number, sample: boolean) => call<PullReview>("github_pull", { repo, number, sample }),
   githubFile: (repo: string, sha: string, path: string) => call<string>("github_file", { repo, sha, path }),
   /** An image's bytes at a commit, for the review's image diff: from the local clone, or the API. */
-  reviewFileBytes: (repo: string, sha: string, path: string, local: boolean) => call<ArrayBuffer>("review_file_bytes", { repo, sha, path, local }),
+  reviewFileBytes: (repo: string, sha: string, path: string, local: boolean) => callBytes("review_file_bytes", { repo, sha, path, local }),
   githubReviewAction: (pr: PrRef, action: ReviewAction) => call<void>("github_review_action", { pr, action }),
   workspacePrepare: (target: { repo: string; number: number; head_sha: string; base_sha: string; base_ref: string }) =>
     call<ReviewWorkspace>("review_workspace_prepare", { target }),
