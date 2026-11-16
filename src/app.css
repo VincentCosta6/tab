@@ -988,11 +988,21 @@ body.resizing iframe { pointer-events: none; }
 /* Context rail: beside the chat on wide windows; narrow ones keep the pills. */
 .item-body { flex: 1; min-height: 0; display: flex; }
 .item-body > .chat { flex: 1; min-width: 0; }
-/* File stage: a file opened from a chat takes the middle, the chat docks on the right. */
-.stage-host.staged > .chat { flex: none; width: var(--stage-chat-w, 440px); border-left: 1px solid var(--border); }
+/* File stage: a file opened from a chat covers the page (the queue too, see
+   useCoverMain), with the chat docked on the right under a bar holding its
+   title and the close button. */
+.stage-host.staged { position: fixed; z-index: 20; top: var(--stage-top, 40px); left: var(--stage-left, 84px); width: var(--stage-w, calc(100vw - 84px)); height: var(--stage-h, calc(100vh - 40px));
+  display: grid; grid-template-columns: minmax(0, 1fr) var(--stage-chat-w, 440px); grid-template-rows: auto minmax(0, 1fr); background: var(--bg); }
+.stage-host.staged > .stage-file { grid-column: 1; grid-row: 1 / 3; }
+.stage-host.staged > .stage-dock-bar { grid-column: 2; grid-row: 1; }
+.stage-host.staged > .chat { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; border-left: 1px solid var(--border); }
 .stage-host.staged > .chat .transcript { padding-inline: var(--space-4); }
 .stage-host.staged > .ctx-rail { display: none !important; }
-.stage-file { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg-sunken); outline: none; }
+.stage-dock-bar { display: flex; align-items: center; gap: var(--space-2); min-height: 40px; padding: 0 var(--space-2) 0 var(--space-4); border-left: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--bg-raised); }
+.stage-dock-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-sm); font-weight: 600; color: var(--fg); }
+.stage-dock-bar button { flex: none; display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg-muted); cursor: pointer; }
+.stage-dock-bar button:hover { background: var(--bg-hover); color: var(--fg); }
+.stage-file { position: relative; min-width: 0; display: flex; flex-direction: column; background: var(--bg-sunken); outline: none; }
 .stage-bar { display: flex; align-items: center; gap: 6px; padding: 6px var(--space-3); border-bottom: 1px solid var(--border); background: var(--bg-raised); color: var(--fg-muted); font-size: var(--text-sm); min-height: 40px; }
 .stage-bar button { display: inline-grid; place-items: center; height: 28px; min-width: 28px; padding: 0 6px; border: 1px solid transparent; border-radius: var(--radius-md); background: transparent; color: var(--fg-muted); cursor: pointer; }
 .stage-bar button:hover { background: var(--bg-hover); color: var(--fg); }
@@ -1163,7 +1173,8 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
 .row-check { position: absolute; inset: 0; display: grid; place-items: center; border-radius: 50%; background: var(--tone-success-fg); color: var(--bg-raised);
   animation: row-check-pop 300ms cubic-bezier(.34, 1.56, .64, 1) both; }
 @keyframes row-check-pop { from { transform: scale(0.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-.work-pane > .item-pane.arrived { animation: pane-arrive 280ms cubic-bezier(.2, .8, .2, 1) both; }
+/* backwards, not both: a pane left holding a transform would trap the fixed file stage inside it. */
+.work-pane > .item-pane.arrived { animation: pane-arrive 280ms cubic-bezier(.2, .8, .2, 1) backwards; }
 @keyframes pane-arrive { from { opacity: 0; transform: translateY(10px); } }
 @media (prefers-reduced-motion: reduce) {
   .row.leaving-done .row-title, .row-check, .work-pane > .item-pane.arrived { animation: none; }

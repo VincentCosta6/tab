@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, inTauri } from "../lib/api";
 import { fileName, isImagePath, isLocalPath, MISSING_IMAGE, openImages, useImage, useImageSrc } from "../lib/images";
 import { StageContext, useStage, type Stage, type StageFile } from "../lib/stage";
@@ -48,15 +48,16 @@ const POLL_MS = 2_000;
 const UPDATED_MS = 4_000;
 
 /**
- * Wraps a chat (and anything beside it) so files opened from it take the
- * middle of the pane, with the chat docked on the right to keep talking.
- * The chat stays mounted throughout, so the draft and scroll survive.
+ * Wraps a chat (and anything beside it) so files opened from it take over
+ * the page, covering the queue beside it, with the chat docked on the right
+ * to keep talking. The chat stays mounted throughout, so the draft and
+ * scroll survive. `title` names the chat above it while the page is covered.
  *
  * `files` are the chat's files: the stage steps through them, and while it
  * is mounted it watches them on disk, so a file the agent rewrites reloads
  * wherever it shows (here, the tray, the rail).
  */
-export function StageHost({ className, files = [], children }: { className?: string; files?: ThreadFile[]; children: ReactNode }) {
+export function StageHost({ className, title, files = [], children }: { className?: string; title?: ReactNode; files?: ThreadFile[]; children: ReactNode }) {
   const [state, setState] = useState<{ path: string; list: StageFile[] | null } | null>(null);
   const [width, setWidth] = useState(() => {
     try { return clampChat(Number(localStorage.getItem(WIDTH_KEY)) || 440); } catch { return 440; }
@@ -127,10 +128,17 @@ export function StageHost({ className, files = [], children }: { className?: str
   const onPick = useCallback((path: string) => setState((s) => s && { ...s, path }), []);
   const onClose = useCallback(() => setState(null), []);
   const file = current ? list.find((f) => f.path === current) ?? { path: current } : null;
+  useCoverMain(hostRef, !!state);
 
   return (
     <StageContext.Provider value={stage}>
       <div ref={hostRef} className={cx(className, "stage-host", state && "staged")} style={state ? ({ "--stage-chat-w": `${width}px` } as React.CSSProperties) : undefined}>
+        {state && (
+          <div className="stage-dock-bar">
+            <span className="stage-dock-title">{title}</span>
+            <button onClick={onClose} aria-label="Close file" title="Close file (Esc)"><Icon name="x" size={16} /></button>
+          </div>
+        )}
         {file && (
           <FileView
             file={file}
@@ -148,6 +156,36 @@ export function StageHost({ className, files = [], children }: { className?: str
       </div>
     </StageContext.Provider>
   );
+}
+
+/**
+ * While a file is on show, pins the host over the whole of the app's main
+ * area (the queue beside the item included), whichever page it's on. The
+ * host stays where it is in the tree, so the chat inside it isn't remounted;
+ * it's fixed-positioned to `.main`'s box, kept current as the window resizes.
+ */
+function useCoverMain(ref: React.RefObject<HTMLDivElement | null>, on: boolean) {
+  useLayoutEffect(() => {
+    const host = ref.current;
+    const main = host?.closest<HTMLElement>(".main");
+    if (!on || !host || !main) return;
+    const place = () => {
+      const r = main.getBoundingClientRect();
+      host.style.setProperty("--stage-top", `${r.top}px`);
+      host.style.setProperty("--stage-left", `${r.left}px`);
+      host.style.setProperty("--stage-w", `${r.width}px`);
+      host.style.setProperty("--stage-h", `${r.height}px`);
+    };
+    place();
+    const ro = new ResizeObserver(place);
+    ro.observe(main);
+    window.addEventListener("resize", place);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", place);
+      for (const v of ["--stage-top", "--stage-left", "--stage-w", "--stage-h"]) host.style.removeProperty(v);
+    };
+  }, [ref, on]);
 }
 
 /**
@@ -257,7 +295,6 @@ function FileView({ file, files, index, replaced, fresh, onStep, onPick, onClose
         )}
         {local && inTauri && <button onClick={() => openExternally(false)} title="Open in its app"><Icon name="external" size={14} /></button>}
         {local && inTauri && <button onClick={() => openExternally(true)} title="Show in folder"><Icon name="folder-open" size={14} /></button>}
-        <button onClick={onClose} aria-label="Close" title="Close (Esc)"><Icon name="x" size={14} /></button>
       </header>
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
       <div className="stage-content">
