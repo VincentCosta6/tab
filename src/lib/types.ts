@@ -1167,6 +1167,8 @@ export interface AgentConfig {
   strict?: boolean;
   /** Harnesses whose chats run through the Agent Client Protocol (a preview). */
   acp?: string[];
+  /** Turn autofix on for new PRs in a task's Context: the last choice in a PR bar. */
+  autofix?: boolean;
   budget: BudgetConfig;
 }
 
