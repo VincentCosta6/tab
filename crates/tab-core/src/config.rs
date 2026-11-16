@@ -86,6 +86,10 @@ pub struct AgentConfig {
     /// the chats match (see `agents::acp`).
     #[serde(default)]
     pub acp: Vec<String>,
+    /// Turn autofix on for each new PR in a task's Context. The last choice
+    /// made in a chat's PR bar.
+    #[serde(default)]
+    pub autofix: bool,
 }
 
 /// The titler: after the first few turns of a chat, a small model renames
@@ -236,6 +240,7 @@ impl Default for AgentConfig {
             titler: TitlerConfig::default(),
             strict: true,
             acp: Vec::new(),
+            autofix: false,
         }
     }
 }

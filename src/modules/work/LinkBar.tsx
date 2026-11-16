@@ -37,7 +37,12 @@ export function LinkBar({ itemId }: { itemId: string }) {
           key={s.url}
           status={s}
           watch={watches.find((w) => w.url === s.url)}
-          onAutofix={(on) => update(api.autofixSet(itemId, s.url!, on))}
+          onAutofix={(on) => {
+            // Shown right away: turning it on also checks the PR first.
+            qc.setQueryData<AutofixWatch[]>(keys.autofix(itemId), (ws = []) =>
+              ws.some((w) => w.url === s.url) ? ws.map((w) => (w.url === s.url ? { ...w, enabled: on } : w)) : ws.concat({ item_id: itemId, url: s.url!, enabled: on, dismissed: false, active_at: new Date().toISOString(), next_at: null, checked_at: null, head: null, handled: [], last: null }));
+            update(api.autofixSet(itemId, s.url!, on));
+          }}
           onDismiss={() => update(api.autofixDismiss(itemId, s.url!, true))}
         />
       ))}

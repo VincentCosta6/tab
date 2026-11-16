@@ -3057,7 +3057,11 @@ async fn context_status(
     let Some(e) = guard.as_ref() else {
         return Ok(Default::default());
     };
-    Ok(e.context_statuses(&ids).await)
+    let statuses = e.context_statuses(&ids).await;
+    drop(guard);
+    // New PRs get autofix when the person's last choice was on.
+    tauri::async_runtime::spawn(autofix::adopt(state.core.clone(), statuses.clone()));
+    Ok(statuses)
 }
 
 #[tauri::command]
