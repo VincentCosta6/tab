@@ -165,7 +165,7 @@ export function ItemPane({ id, arrived, onAct, onSelect }: {
         right={tab === "content" && <RichSwitch item={item} mode={readMode} onChange={setReadMode} />}
       />
       {/* A file opened from the chat takes the middle; the chat docks on its right. */}
-      <StageHost className="item-body" files={files}>
+      <StageHost className="item-body" title={item.title} files={files}>
         <ChatView item={item} body={tab === "timeline" ? <Timeline itemId={item.id} /> : <Reader item={item} mode={readMode} />} showBody={tab !== "chat"} onSent={() => setTab("chat")} />
         <ContextRail key={item.id} item={item} onSelect={onSelect} />
       </StageHost>
