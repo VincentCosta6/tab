@@ -725,6 +725,7 @@ function MessageView({ m, result, onSend, rewind }: { m: SessionMessage; result?
     );
   if (m.kind === "tool_result") return <details className="msg-tool"><summary><Icon name="terminal" size={12} /><span className="msg-tool-name">Output</span></summary><pre>{m.content}</pre></details>;
   if (m.kind === "error") return <div className="msg-error"><Icon name="x-circle" size={14} /><span>{m.content}</span></div>;
+  if (m.kind === "approval" && m.meta?.answers && typeof m.meta.answers === "object") return <Answers answers={m.meta.answers} />;
   if (m.kind === "result") {
     const cost = m.meta?.cost_usd;
     const secs = m.meta?.duration_ms ? Math.round(m.meta.duration_ms / 1000) : null;
@@ -732,6 +733,22 @@ function MessageView({ m, result, onSend, rewind }: { m: SessionMessage; result?
     return <div className="msg-note">{[secs != null && `${secs}s`, cost != null && `$${Number(cost).toFixed(3)}`].filter(Boolean).join(" · ")}</div>;
   }
   return <div className="msg-note">{m.content}</div>;
+}
+
+/** What the person picked on the agent's question card, kept in the chat as their reply. */
+function Answers({ answers }: { answers: Record<string, unknown> }) {
+  const rows = Object.entries(answers).filter(([, a]) => a != null && String(a).trim());
+  if (!rows.length) return null;
+  return (
+    <div className="msg msg-user msg-answers">
+      {rows.map(([q, a]) => (
+        <div key={q}>
+          <div className="msg-answers-q">{q}</div>
+          <div>{String(a)}</div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /** A command the person ran with `!`, and what it printed. The agent sees both with their next message. */
