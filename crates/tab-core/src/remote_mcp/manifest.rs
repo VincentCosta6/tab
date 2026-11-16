@@ -143,6 +143,10 @@ pub struct KindSpec {
     /// an entity with `rel = "container"`.
     #[serde(default)]
     pub container: Option<ContainerSpec>,
+    /// Items of this kind that share a container stack into one queue row
+    /// when many are open at once (a project's errors).
+    #[serde(default)]
+    pub stack: bool,
 }
 
 /// See [`KindSpec::container`].
@@ -383,7 +387,9 @@ pub struct CheckSpec {
 // Templates
 // ---------------------------------------------------------------------------
 
-const FILTERS: &[&str] = &["name", "lower", "short_id", "nodash", "clip", "prefix"];
+const FILTERS: &[&str] = &[
+    "name", "lower", "short_id", "nodash", "clip", "prefix", "not",
+];
 
 /// What a template reads: the current thing, and variables.
 struct Scope<'a> {
@@ -438,6 +444,9 @@ fn check_tpl(tpl: &str) -> Result<(), String> {
                 if name == "clip" && arg.parse::<usize>().is_err() {
                     return Err(format!("clip needs a length (clip:300) in \"{tpl}\""));
                 }
+                if name == "not" && arg.is_empty() {
+                    return Err(format!("not needs a value (not:Error) in \"{tpl}\""));
+                }
             }
         }
     }
@@ -490,6 +499,7 @@ fn filter(v: Value, f: &str) -> Option<Value> {
         // `TAB-123` → `TAB`: a Linear or Jira key's team.
         "prefix" => text(&v)?.split_once('-')?.0.to_string(),
         "clip" => clip(&text(&v)?, arg.parse().ok()?),
+        "not" => text(&v).filter(|s| s != arg)?,
         _ => return None,
     };
     present(Value::String(s))
@@ -630,6 +640,17 @@ impl Manifest {
         }
         if q.kinds.is_empty() {
             return Err("the queue needs at least one kind".into());
+        }
+        // A plugin can name containers itself.
+        if let Some(k) = q
+            .kinds
+            .iter()
+            .find(|k| k.stack && k.container.is_none() && q.plugin.is_none())
+        {
+            return Err(format!(
+                "kind \"{}\" stacks by its container, so it needs one",
+                k.kind
+            ));
         }
         if let Some(p) = &q.plugin {
             if !q.steps.is_empty() || q.item.is_some() || q.check.is_some() {
@@ -974,7 +995,10 @@ impl Recipe for ManifestRecipe {
         self.q
             .kinds
             .iter()
-            .map(|k| KindInfo::new(&k.kind, &k.label, &k.icon, k.tone))
+            .map(|k| KindInfo {
+                stack: k.stack,
+                ..KindInfo::new(&k.kind, &k.label, &k.icon, k.tone)
+            })
             .collect()
     }
 
@@ -1712,6 +1736,47 @@ mod tests {
             Some("https://acme.sentry.io/issues/API-9/")
         );
         assert_eq!(b.event.context.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn sentry_issues_stack_by_project_and_skip_vague_titles() {
+        let r = built_in("sentry");
+        assert!(r.kinds()[0].stack);
+        let vars: Map<String, Value> =
+            serde_json::from_value(json!({ "org": { "slug": "acme" } })).unwrap();
+        let j = json!({ "issues": [
+            { "shortId": "WEB-8", "title": "Error: Error", "culprit": "src/pay.ts in charge", "projectSlug": "web" },
+            { "shortId": "WEB-9", "title": "Error: Error" },
+        ] });
+        let found = map(&r, &j, vars);
+        assert_eq!(found[0].event.title, "WEB-8 src/pay.ts in charge");
+        // Nothing better to say: the vague title stays.
+        assert_eq!(found[1].event.title, "WEB-9 Error: Error");
+    }
+
+    #[test]
+    fn a_stack_needs_a_container() {
+        let m = |container: bool| {
+            let mut kind =
+                json!({ "kind": "acme.alert", "label": "Alert", "icon": "alert", "stack": true });
+            if container {
+                kind["container"] = json!({ "kind": "acme.service", "key": "acme:{service}", "label": "{service}" });
+            }
+            json!({ "manifest": 1, "id": "acme", "name": "Acme", "url": "https://mcp.acme.dev",
+                "description": "d", "queue": { "description": "d", "kinds": [kind],
+                    "steps": [{ "call": ["list_alerts"], "list": ["alerts"] }],
+                    "item": { "id": "{id}", "title": "{title}" } } })
+            .to_string()
+        };
+        assert!(Manifest::parse(&m(true)).is_ok());
+        let err = Manifest::parse(&m(false)).unwrap_err();
+        assert!(err.contains("needs one"), "{err}");
+        let bad = m(true).replace("{title}", "{title|not:}");
+        assert!(
+            Manifest::parse(&bad)
+                .unwrap_err()
+                .contains("not needs a value")
+        );
     }
 
     #[test]

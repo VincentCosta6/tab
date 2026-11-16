@@ -15,6 +15,7 @@
         "label": "Sentry issue",
         "icon": "alert",
         "tone": "danger",
+        "stack": true,
         "container": {
           "kind": "sentry.project",
           "key": "sentry:{$org.slug}/{projectSlug ?? project.slug ?? project|name}",
@@ -66,7 +67,7 @@
     ],
     "item": {
       "id": "{$org.slug}/{shortId}",
-      "title": "{shortId} {title ?? shortId}",
+      "title": "{shortId} {title|not:Error: Error ?? culprit ?? title ?? shortId}",
       "url": ["{url ?? permalink}", "https://{$org.slug}.sentry.io/issues/{shortId}/"],
       "context": ["{projectSlug ?? project.slug ?? project|name}", "{$org.slug}"],
       "time": "{lastSeen}",

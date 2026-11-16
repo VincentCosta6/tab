@@ -265,7 +265,7 @@ export interface ProjectNote {
 
 export interface ItemDetail { item: QueueItem; related: QueueItem[] }
 
-export interface KindInfo { kind: string; label: string; icon: string; tone: Tone }
+export interface KindInfo { kind: string; label: string; icon: string; tone: Tone; /** Many open items of this kind in one container stack in the queue. */ stack?: boolean }
 export type SettingKind = "text" | "secret" | "number" | "toggle";
 export interface SettingField { key: string; label: string; kind: SettingKind; help?: string | null; required: boolean }
 

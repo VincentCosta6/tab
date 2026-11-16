@@ -168,6 +168,17 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .item-project { display: contents; }
 .route-anchor.never { opacity: 0.7; }
 .route-anchor.proposed { border-style: dashed; }
+/* A stack: its glyph sits on two cards peeking out below, and the count
+   reads quietly after the name. */
+.stack-glyph { margin-bottom: 8px; }
+.stack-glyph::before, .stack-glyph::after { content: ""; position: absolute; z-index: -1; left: 50%; height: 10px; border: 1px solid var(--border-strong); border-top: 0; border-radius: 0 0 var(--radius-md) var(--radius-md); background: var(--bg-raised); transform: translateX(-50%); }
+.stack-glyph { isolation: isolate; }
+.stack-glyph::before { bottom: -4px; width: calc(100% - 6px); }
+.stack-glyph::after { bottom: -8px; width: calc(100% - 12px); opacity: .55; }
+.thread.stack > .row::after { top: 48px; }
+.stack-count { margin-left: 4px; color: var(--fg-muted); font-weight: 400; }
+.stack-body { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-2) var(--space-3); }
+.stack-error { margin: var(--space-2) var(--space-3); color: var(--tone-danger-fg); font-size: var(--text-sm); }
 .row-waiting { flex: none; display: inline-flex; align-items: center; gap: 3px; color: var(--fg-muted); font-size: var(--text-xs); }
 
 .detail { min-width: 0; overflow: auto; }

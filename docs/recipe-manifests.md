@@ -53,6 +53,7 @@ how manifests handle each:
     "description": "What comes in, and when it's marked done.",
     "interval": "5m",                  // at least 1m
     "kinds": [{ "kind": "sentry.issue", "label": "Sentry issue", "icon": "alert", "tone": "danger",
+                "stack": true,  // optional: fold many open ones that share a container
                 // where items of this kind live upstream; tab routes them to a project by it
                 "container": { "kind": "sentry.project", "key": "sentry:{$org.slug}/{projectSlug}", "label": "{projectSlug}" } }],
     "choices": [                       // what the person picks (queue_choice); the first is the default
@@ -99,7 +100,8 @@ how manifests handle each:
   (`{$org.slug}`);
 - `??` falls back to the next option, and `'text'` is a literal;
 - `|` applies a filter: `name`, `lower`, `short_id`, `nodash`, `prefix`
-  (`TAB-123` → `TAB`) or `clip:N`.
+  (`TAB-123` → `TAB`), `clip:N`, or `not:text`, which drops a value that
+  says only that (`{title|not:Error: Error ?? culprit}`).
 
 A template with a missing value (absent, null or empty) is missing as a
 whole. Where a manifest gives a list of templates, the first one that

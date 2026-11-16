@@ -125,6 +125,28 @@ let items: QueueItem[] = seeds.map(([kind, title, body, actor, context, url, min
   };
 });
 
+// A noisy project's errors, which fold into one stack, and a quiet one's,
+// which don't.
+{
+  const issue = (project: string, short: string, title: string, min: number, score: number): QueueItem => ({
+    id: `mock-sentry-${short}`, source: "mcp.sentry", external_id: `acme/${short}`, kind: "sentry.issue", title: `${short} ${title}`, body: null,
+    url: `https://acme.sentry.io/issues/${short}/`, actor: null, context: project, occurred_at: ago(min), blocks: [],
+    entities: [{ kind: "sentry.project", key: `sentry:acme/${project}`, label: project, rel: "container" }], metadata: { demo: true },
+    state: "open", snoozed_until: null, created_at: ago(min), updated_at: ago(min),
+    ranking: { score, base_score: score, ai_adjustment: null, urgency: urgency(score), reason: "An unresolved error", ranked_by: "rules", fired: [] },
+  });
+  items.push(
+    issue("mannaform-web", "MANNAFORM-WEB-8", "src/pay.ts in charge", 60 * 24 * 6, 30),
+    issue("mannaform-web", "MANNAFORM-WEB-7", "TypeError: Cannot read properties of undefined (reading 'id')", 60 * 24 * 13, 28),
+    issue("mannaform-web", "MANNAFORM-WEB-6", "app/routes/checkout.tsx in loader", 60 * 24 * 16, 25),
+    issue("mannaform-web", "MANNAFORM-WEB-2", "ChunkLoadError: Loading chunk 412 failed", 60 * 24 * 16, 22),
+    issue("mannaform", "MANNAFORM-E", "ApiRequestError: mannaform.app/api/session 502", 60 * 24 * 11, 45),
+    issue("mannaform", "MANNAFORM-6", "App Hang Non Fully Blocking", 60 * 24 * 12, 30),
+    issue("mannaform", "MANNAFORM-3", "src/sync/queue.rs in flush", 60 * 24 * 16, 20),
+    issue("mannaform-desktop", "MANNAFORM-DESKTOP-2", "src/updater.ts in check", 60 * 24 * 13, 20),
+  );
+}
+
 // A planning chat that split its work into phases: they fold under it, each
 // waiting on the one before.
 {
@@ -1007,7 +1029,7 @@ const mcpCatalog: McpCatalogEntry[] = [
   { id: "linear", name: "Linear", url: "https://mcp.linear.app/mcp", description: "Agents can find, create and update issues, projects and comments.", category: "work", color: "#5e6ad2", fills_queue: true, queue_description: "Issues assigned to you come into your queue. Issues that are done or cancelled in Linear are marked done here.", kinds: [{ kind: "linear.issue", label: "Linear issue", icon: "linear", tone: "accent" }] },
   { id: "notion", name: "Notion", url: "https://mcp.notion.com/mcp", description: "Agents can search, read and edit pages and databases.", category: "work", color: "#191919", fills_queue: true, queue_description: "Pages matching a search come into your queue. Notion has no list of what's assigned to you, so tab runs a search you pick.", queue_query: "tasks assigned to me", kinds: [{ kind: "notion.page", label: "Notion page", icon: "notion", tone: "neutral" }, { kind: "notion.database", label: "Notion database", icon: "notion", tone: "neutral" }] },
   { id: "atlassian", name: "Jira & Confluence", url: "https://mcp.atlassian.com/v1/mcp", description: "Agents can search, comment on and move tickets, and read pages.", category: "work", color: "#1868db", fills_queue: false, kinds: [] },
-  { id: "sentry", name: "Sentry", url: "https://mcp.sentry.dev/mcp", description: "Agents can look up issues, stack traces and events.", category: "code", color: "#362d59", fills_queue: true, queue_description: "Unresolved issues come into your queue, from every organization you're in: yours and unassigned ones, unless you pick otherwise. Resolved or ignored issues are marked done here.", queue_choices: [{ value: "mine_unassigned", label: "Mine + unassigned" }, { value: "mine", label: "Only mine" }, { value: "all", label: "All unresolved" }], kinds: [{ kind: "sentry.issue", label: "Sentry issue", icon: "alert", tone: "danger" }] },
+  { id: "sentry", name: "Sentry", url: "https://mcp.sentry.dev/mcp", description: "Agents can look up issues, stack traces and events.", category: "code", color: "#362d59", fills_queue: true, queue_description: "Unresolved issues come into your queue, from every organization you're in: yours and unassigned ones, unless you pick otherwise. Resolved or ignored issues are marked done here.", queue_choices: [{ value: "mine_unassigned", label: "Mine + unassigned" }, { value: "mine", label: "Only mine" }, { value: "all", label: "All unresolved" }], kinds: [{ kind: "sentry.issue", label: "Sentry issue", icon: "alert", tone: "danger", stack: true }] },
   { id: "vercel", name: "Vercel", url: "https://mcp.vercel.com", description: "Agents can read deployments, build logs and project settings.", category: "code", color: "#000000", fills_queue: false, kinds: [] },
   { id: "stripe", name: "Stripe", url: "https://mcp.stripe.com", description: "Agents can look up customers, payments, invoices and disputes.", category: "work", color: "#635bff", fills_queue: false, kinds: [] },
 ];

@@ -515,6 +515,10 @@ pub struct KindInfo {
     pub icon: String,
     #[serde(default)]
     pub tone: Tone,
+    /// Items of this kind that share a container (a Sentry project) fold
+    /// into one stack in the queue, once there are a few of them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stack: bool,
 }
 
 impl KindInfo {
@@ -524,6 +528,7 @@ impl KindInfo {
             label: label.into(),
             icon: icon.into(),
             tone,
+            stack: false,
         }
     }
 }
