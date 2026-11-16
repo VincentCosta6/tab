@@ -25,6 +25,8 @@ import { ScoreBreakdown } from "./ScoreBreakdown";
 import { api } from "../../lib/api";
 import { actOnItem, type ItemAction } from "./optimistic";
 import { afterBlockers, nest } from "./followups";
+import { isStackId, stack, type Stack } from "./stacks";
+import { StackPane, plural } from "./StackPane";
 
 const urgencyOrder: Urgency[] = ["now", "today", "this_week", "whenever"];
 const urgencyHeading: Record<Urgency, string> = { now: "Now", today: "Today", this_week: "This week", whenever: "Whenever" };
@@ -43,7 +45,7 @@ const clampWidth = (w: number) => Math.round(Math.min(Math.max(w, 300), Math.max
 const PAGE = 150;
 
 export function WorkTab() {
-  const { apps } = useApp();
+  const { apps, kind } = useApp();
   const qc = useQueryClient();
   const [view, setView] = useState<ItemState>("open");
   const [app, setApp] = useState<string | null>(null);
@@ -113,10 +115,18 @@ export function WorkTab() {
     }
     return out;
   }, [visible, leaving]);
-  // Follow-ups fold under the task they came from; search and the other
-  // views stay flat.
+  // Follow-ups fold under the task they came from, and swarms of one kind
+  // (a project's errors) into a stack; search and the other views stay flat.
   const nested = view === "open" && !query;
-  const { top, children } = useMemo(() => (nested ? nest(drawn) : { top: drawn, children: new Map<string, QueueItem[]>() }), [drawn, nested]);
+  const { top: threads, children } = useMemo(() => (nested ? nest(drawn) : { top: drawn, children: new Map<string, QueueItem[]>() }), [drawn, nested]);
+  const { top, stacks } = useMemo(() => (nested ? stack(threads, (k) => !!kind(k).stack) : { top: threads, stacks: new Map<string, Stack>() }), [threads, nested, kind]);
+  // Each stack, and each of its members, to the stack's lead row.
+  const leadOf = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const [lead, st] of stacks) for (const k of [st.id, ...st.items.map((i) => i.id)]) m.set(k, lead);
+    return m;
+  }, [stacks]);
+  const openStack = isStackId(selected) ? [...stacks.values()].find((st) => st.id === selected) : undefined;
   const grouped = useMemo(() => {
     if (!nested) return [{ urgency: null as Urgency | null, items: top }];
     return urgencyOrder
@@ -146,19 +156,31 @@ export function WorkTab() {
     const out = new Set(openFollowups);
     const byId = new Map(drawn.map((i) => [i.id, i]));
     for (let p = byId.get(selected ?? "")?.parent_id; p && !out.has(p); p = byId.get(p)?.parent_id) out.add(p);
+    // And the stack it's in, when it's open from the pane or a search.
+    let root = byId.get(selected ?? "");
+    while (root?.parent_id && byId.has(root.parent_id)) root = byId.get(root.parent_id);
+    const lead = root && !isStackId(selected) ? leadOf.get(root.id) : undefined;
+    if (lead) out.add(stacks.get(lead)!.id);
     return out;
-  }, [openFollowups, drawn, selected]);
+  }, [openFollowups, drawn, selected, leadOf, stacks]);
   // Rows in the order they're drawn, for the arrow keys.
   const shown = useMemo(() => {
-    const out: QueueItem[] = [];
+    const out: string[] = [];
     const add = (i: QueueItem) => {
-      out.push(i);
+      if (!leaving.has(i.id)) out.push(i.id);
       if (unfolded.has(i.id)) children.get(i.id)?.forEach(add);
     };
-    grouped.forEach((g) => g.items.forEach(add));
-    return out.filter((i) => !leaving.has(i.id));
-  }, [grouped, children, unfolded, leaving]);
-  useEffect(() => setHere({ itemId: selected === NEW ? null : selected }), [selected]);
+    for (const g of grouped) for (const i of g.items) {
+      const st = stacks.get(i.id);
+      if (!st) add(i);
+      else if (!st.items.every((m) => leaving.has(m.id))) {
+        out.push(st.id);
+        if (unfolded.has(st.id)) st.items.forEach(add);
+      }
+    }
+    return out;
+  }, [grouped, children, stacks, unfolded, leaving]);
+  useEffect(() => setHere({ itemId: selected === NEW || isStackId(selected) ? null : selected }), [selected]);
 
   // Draw the queue a page at a time: every row costs DOM, and a queue of
   // thousands kept the webview at over a gigabyte. More rows draw as the list
@@ -169,9 +191,11 @@ export function WorkTab() {
     const byId = new Map(drawn.map((i) => [i.id, i]));
     let root = byId.get(selected ?? "");
     while (root?.parent_id && byId.has(root.parent_id)) root = byId.get(root.parent_id);
-    const at = root ? tops.indexOf(root) : -1;
+    const lead = byId.get(leadOf.get(root?.id ?? selected ?? "") ?? "");
+    const target = lead ?? root;
+    const at = target ? tops.indexOf(target) : -1;
     return new Set(tops.slice(0, Math.max(limit, at + 1)).map((i) => i.id));
-  }, [tops, drawn, selected, limit]);
+  }, [tops, drawn, selected, limit, leadOf]);
   const more = tops.length - drawnTops.size;
   const moreRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -194,11 +218,11 @@ export function WorkTab() {
   useEffect(() => {
     if (recheck.current === null) return;
     setSelected((s) => {
-      if (s === NEW || (s && live.some((i) => i.id === s))) return s;
+      if (s === NEW || (s && live.some((i) => i.id === s)) || (isStackId(s) && leadOf.has(s))) return s;
       recheck.current = null;
       return live[0]?.id ?? null;
     });
-  }, [live]);
+  }, [live, leadOf]);
   // A chat started elsewhere (e.g. "Set up with assistant" in Connections).
   useEffect(() => {
     const open = () => {
@@ -221,11 +245,11 @@ export function WorkTab() {
 
   const move = useCallback(
     (delta: number) => {
-      const idx = shown.findIndex((i) => i.id === selected);
+      const idx = shown.indexOf(selected ?? "");
       const next = shown[Math.max(0, Math.min(shown.length - 1, idx + delta))];
       if (next) {
-        setSelected(next.id);
-        document.getElementById(`row-${next.id}`)?.scrollIntoView({ block: "nearest" });
+        setSelected(next);
+        document.getElementById(`row-${next}`)?.scrollIntoView({ block: "nearest" });
       }
     },
     [shown, selected],
@@ -283,6 +307,25 @@ export function WorkTab() {
     [advance, dropGhost, leaving, visible, qc],
   );
 
+  // A whole stack at once: the row folds away like one item's, then each
+  // member goes the usual way. Done steps on to the next row.
+  const actOnStack = useCallback(
+    async (st: Stack, action: ItemAction) => {
+      if (st.id === selected) {
+        const rest = shown.filter((id) => id !== st.id && !st.items.some((m) => m.id === id));
+        const idx = shown.indexOf(st.id);
+        const next = rest.find((id) => shown.indexOf(id) > idx) ?? rest[rest.length - 1] ?? (action === "done" ? NEW : null);
+        setSelected(next);
+        if (next && next !== NEW) document.getElementById(`row-${next}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+      void animateOut(st.id, action === "done");
+      await Promise.all(st.items.map((m) => act(m, action)));
+      // Some stayed (a Done called off): show the row again.
+      document.getElementById(`row-${st.id}`)?.getAnimations().forEach((a) => a.cancel());
+    },
+    [act, selected, shown],
+  );
+
   // Closed from somewhere else (a merged PR's "Close task"): select it, so
   // closing it opens the next one, then close it like the Done button.
   const [closing, setClosing] = useState<string | null>(() => takePendingDone());
@@ -319,11 +362,31 @@ export function WorkTab() {
   const workflows = useWorkflowActivity();
   const seen = useSeen();
   // Opening a chat reads its latest reply.
-  const openId = selected && selected !== NEW ? selected : null;
+  const openId = selected && selected !== NEW && !isStackId(selected) ? selected : null;
   useMarkSeen(openId, openId ? activity.get(openId) : undefined);
   // Only items with a chat get a task status; that keeps the lookups few.
   const contextStatus = useContextStatus(drawn.filter((i) => activity.has(i.id)).map((i) => i.id));
+  const stackRow = (st: Stack): React.ReactNode => {
+    const open = unfolded.has(st.id);
+    return (
+      <div key={st.id} className="thread has-kids stack" style={{ "--depth": 0 } as React.CSSProperties}>
+        <StackRow stack={st} selected={st.id === selected} onSelect={() => setSelected(st.id)} onAct={(a) => actOnStack(st, a)} />
+        {!open ? (
+          <button className="thread-more" aria-expanded={false} onClick={() => toggleFollowups(st.id)}>
+            Show {st.items.length}
+          </button>
+        ) : (
+          <div className="thread-kids">
+            {st.items.map((k) => row(k, 1))}
+            <button className="thread-fold" aria-expanded title="Fold the stack" aria-label="Fold the stack" onClick={() => toggleFollowups(st.id)} />
+          </div>
+        )}
+      </div>
+    );
+  };
   const row = (i: QueueItem, depth = 0): React.ReactNode => {
+    const st = depth === 0 ? stacks.get(i.id) : undefined;
+    if (st) return stackRow(st);
     const kids = children.get(i.id);
     const open = unfolded.has(i.id);
     const waiting = (i.blocked_by ?? []).map((b) => titles.get(b) ?? "another task");
@@ -436,6 +499,11 @@ export function WorkTab() {
             if (doc.startViewTransition && !matchMedia("(prefers-reduced-motion: reduce)").matches) doc.startViewTransition(go);
             else go();
           }} />
+        ) : openStack ? (
+          <StackPane stack={openStack} project={project} onAct={(a) => actOnStack(openStack, a)} onSelect={setSelected}
+            onStarted={(itemId) => (setView("open"), setSelected(itemId))} />
+        ) : isStackId(selected) ? (
+          <EmptyState icon="check" title="Stack cleared">Pick something from the queue, or start a new chat.</EmptyState>
         ) : selected ? (
           <ItemPane key={selected} id={selected} arrived={arrived === selected} onAct={act} onSelect={(id) => ((recheck.current = null), setSelected(id))} />
         ) : (
@@ -551,6 +619,44 @@ export function QueueRow({ item, agent, workflow, status, waiting, hideProject, 
         />
       )}
       {showScore && <ScoreBreakdown item={item} onClose={() => setShowScore(false)} />}
+    </div>
+  );
+}
+
+/**
+ * A stack's row: the shared entity, how many, and the newest one. Its
+ * actions apply to every member.
+ */
+function StackRow({ stack: st, selected, onSelect, onAct }: {
+  stack: Stack;
+  selected: boolean;
+  onSelect: () => void;
+  onAct: (a: ItemAction) => void;
+}) {
+  const { kind } = useApp();
+  const k = kind(st.kind);
+  const [menu, setMenu] = useState(false);
+  return (
+    <div id={`row-${st.id}`} role="option" aria-selected={selected} className={cx("row", "stack-row", selected && "selected", menu && "menu-open")} onClick={onSelect}>
+      <span className="row-glyph stack-glyph">
+        <SourceGlyph kind={st.kind} source={st.newest.source} icon={k.icon} tone={k.tone} size={28} />
+      </span>
+      <div className="row-main">
+        <div className="row-head">
+          <div className="row-title">{st.label} <span className="stack-count">{st.items.length} {plural(k.label, st.items.length)}</span></div>
+          <span className="row-time">{timeAgo(st.newest.occurred_at)}</span>
+        </div>
+        <div className="row-sub"><span className="row-sub-text">{st.newest.title}</span></div>
+      </div>
+      <div className="row-actions" onClick={(e) => e.stopPropagation()}>
+        <button className={cx("row-action", menu && "active")} title="Snooze all" onClick={() => setMenu((v) => !v)}>
+          <Icon name="clock" size={15} />
+        </button>
+        <button className="row-action" title="All done" onClick={() => onAct("done")}>
+          <Icon name="check" size={15} />
+        </button>
+        {menu && <SnoozeMenu onPick={(m) => (setMenu(false), onAct({ snooze: m }))} onClose={() => setMenu(false)} />}
+      </div>
     </div>
   );
 }
