@@ -4,7 +4,7 @@
 
 import type {
   AgentKind, AgentProbe, AuditEntry, DecisionProvider, Harness, ModelOption, Chat, ChatStarted, ChatSummary, ConnectorInfo, ContextEntry, ContextSection, EngineEvent, GhLoginCode, GhStatus,
-  AgentActivity, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceAccess, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem, SlashCommand, Subagent,
+  AgentActivity, AutofixWatch, ContextStatus, DoneGuard, GraphNode, GraphView, LinkSummary, MyPull, IndexStatus, ItemContext, ItemDetail, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceAccess, ResourceInput, ItemState, DepsStatus, LspEvent, LspServer, LspStarted, NewContext, NewTask, Pressure, Preview, PrRef, PullReview, QueueItem, SlashCommand, Subagent,
   RateLimitState, ReviewAction, HubStatus, MoveOutcome, SandboxStatus, Session, StorageUsage, Swept, ReviewWorkspace, SearchHit, SearchQuery, TabConfig, UsageRow, UsageSummary, WorkspaceProgress,
   Activity, Issue, Suggestion, Workflow, WorkflowRun, ItemWorkflowStatus, RunView, WorkflowFactory, WorkflowInsights, AppVersion, AppUpdate, AppUpdateProgress, Account, AccountStatus, Job, ModelFamily, Runner, RunsOn,
   AgentMcpServer, ManifestStatus, MarketListing, MarketListingView, MarketPreview, McpCatalogEntry, McpCloudState, McpImportCandidate, McpImportResult, McpProbe, McpServerInfo, McpSignInEvent, McpTool, ToolPolicy, JobGaps,
@@ -68,6 +68,9 @@ export const api = {
   startDictation: () => call<void>("start_dictation"),
   agentActivity: () => call<AgentActivity[]>("agent_activity"),
   contextStatus: (ids: string[]) => call<Record<string, ContextStatus[]>>("context_status", { ids }),
+  autofixList: (itemId: string) => call<AutofixWatch[]>("autofix_list", { itemId }),
+  autofixSet: (itemId: string, url: string, on: boolean) => call<AutofixWatch[]>("autofix_set", { itemId, url, on }),
+  autofixDismiss: (itemId: string, url: string, dismissed: boolean) => call<AutofixWatch[]>("autofix_dismiss", { itemId, url, dismissed }),
   /** The slash commands a harness reported when it last started. */
   slashCommands: (agent: AgentKind | null) => call<SlashCommand[]>("agent_slash_commands", { agent }),
   subagents: () => call<Subagent[]>("agent_subagents"),

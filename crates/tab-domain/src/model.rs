@@ -790,6 +790,20 @@ pub struct ContextStatus {
     /// Finished at the source (merged, closed, resolved).
     pub finished: bool,
     pub url: Option<String>,
+    /// The thing's own name, for the chat's bar: "Fix the badge".
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Its short reference: "#12".
+    #[serde(default)]
+    pub reference: Option<String>,
+    /// An icon from the design system for its state ("git-pull-request",
+    /// "git-merge").
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// The connector can report problems on it for autofix
+    /// ([`crate::autofix::FixReport`]).
+    #[serde(default)]
+    pub autofix: bool,
 }
 
 /// Everything known around an item, rolled up for the chat view.

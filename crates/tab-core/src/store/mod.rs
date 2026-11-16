@@ -5,6 +5,7 @@
 //! ("checko" finds "#incident-checkout") across items and entities.
 
 mod activity;
+mod autofix;
 mod context;
 mod families;
 mod graph;
@@ -85,6 +86,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/026_model_families.sql"),
     include_str!("migrations/027_workflow_run_items.sql"),
     include_str!("migrations/028_workflow_rollups.sql"),
+    include_str!("migrations/029_autofix.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {

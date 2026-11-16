@@ -104,6 +104,7 @@ export const keys = {
   workflowActivity: ["workflow-activity"] as const,
   itemWorkflowRuns: (itemId: string) => ["item-workflow-runs", itemId] as const,
   contextStatus: (ids: string[]) => ["context-status", ids] as const,
+  autofix: (itemId: string) => ["autofix", itemId] as const,
   notes: (projectId: string) => ["notes", projectId] as const,
   repos: (projectId: string) => ["project-repos", projectId] as const,
   resources: (projectId: string) => ["project-resources", projectId] as const,

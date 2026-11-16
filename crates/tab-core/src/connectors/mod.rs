@@ -4,6 +4,7 @@
 mod demo;
 pub mod email;
 mod github;
+mod github_autofix;
 pub mod github_review;
 pub mod tab;
 
