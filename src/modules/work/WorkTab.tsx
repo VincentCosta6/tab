@@ -327,16 +327,20 @@ export function WorkTab() {
     const open = unfolded.has(i.id);
     const waiting = (i.blocked_by ?? []).map((b) => titles.get(b) ?? "another task");
     return (
-      <div key={i.id} className={cx(depth > 0 && "followup")}>
+      <div key={i.id} className={cx("thread", kids && "has-kids")} style={{ "--depth": depth } as React.CSSProperties}>
         <QueueRow item={i} agent={activity.get(i.id)} workflow={workflows.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} waiting={waiting} hideProject={!!project} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => setSelected(i.id)} onAct={(a) => act(i, a)} />
-        {kids && (
-          <button className={cx("followups-toggle", open && "open")} aria-expanded={open} onClick={() => toggleFollowups(i.id)}>
-            <Icon name="chevron-right" size={12} />
+        {kids && !open && (
+          <button className="thread-more" aria-expanded={false} onClick={() => toggleFollowups(i.id)}>
             {kids.length} follow-up{kids.length === 1 ? "" : "s"}
-            {!open && kids.some((k) => k.blocked_by?.length) && <span className="followups-ready">· {kids.filter((k) => !k.blocked_by?.length).length} ready</span>}
+            {kids.some((k) => k.blocked_by?.length) && <span className="followups-ready">· {kids.filter((k) => !k.blocked_by?.length).length} ready</span>}
           </button>
         )}
-        {kids && open && kids.map((k) => row(k, depth + 1))}
+        {kids && open && (
+          <div className="thread-kids">
+            {kids.map((k) => row(k, depth + 1))}
+            <button className="thread-fold" aria-expanded title="Hide follow-ups" aria-label="Hide follow-ups" onClick={() => toggleFollowups(i.id)} />
+          </div>
+        )}
       </div>
     );
   };
