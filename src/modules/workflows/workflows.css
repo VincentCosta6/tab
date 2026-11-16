@@ -139,6 +139,9 @@
 .wf-row .wf-input { width: 80px; }
 .wf-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
 .wf-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.kind-chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--bg); color: var(--fg-muted); font: inherit; font-size: var(--text-xs); cursor: pointer; max-width: 220px; }
+.kind-chip:hover:not(:disabled) { color: var(--fg); border-color: var(--border-strong); }
+.kind-chip:disabled { cursor: default; opacity: 0.6; }
 .wf-chips .kind-chip.off { opacity: 0.55; background: transparent; }
 .wf-chips .kind-chip:not(.off) { border-color: var(--tone-accent-fg); color: var(--tone-accent-fg); background: var(--tone-accent-bg); }
 .wf-safety { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); }
