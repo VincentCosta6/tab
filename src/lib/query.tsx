@@ -84,6 +84,8 @@ export const keys = {
   allItems: ["items"] as const,
   mcpServers: ["mcp-servers"] as const,
   mcpCatalog: ["mcp-catalog"] as const,
+  manifests: ["manifests"] as const,
+  marketplace: ["marketplace"] as const,
   mcpTools: (id: string) => ["mcp-tools", id] as const,
   mcpImport: ["mcp-import"] as const,
   mcpCloud: ["mcp-cloud"] as const,

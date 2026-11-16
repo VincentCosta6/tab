@@ -1,0 +1,98 @@
+{
+  "manifest": 1,
+  "id": "sentry",
+  "name": "Sentry",
+  "url": "https://mcp.sentry.dev/mcp",
+  "description": "Agents can look up issues, stack traces and events.",
+  "category": "code",
+  "color": "#362d59",
+  "queue": {
+    "description": "Unresolved issues come into your queue, from every organization you're in: yours and unassigned ones, unless you pick otherwise. Resolved or ignored issues are marked done here.",
+    "interval": "5m",
+    "kinds": [
+      { "kind": "sentry.issue", "label": "Sentry issue", "icon": "alert", "tone": "danger" }
+    ],
+    "choices": [
+      {
+        "value": "mine_unassigned",
+        "label": "Mine + unassigned",
+        "vars": { "searches": ["is:unresolved assigned:me", "is:unresolved is:unassigned"] }
+      },
+      {
+        "value": "mine",
+        "label": "Only mine",
+        "vars": { "searches": ["is:unresolved assigned:me"] }
+      },
+      {
+        "value": "all",
+        "label": "All unresolved",
+        "vars": { "searches": ["is:unresolved"] }
+      }
+    ],
+    "steps": [
+      {
+        "name": "orgs",
+        "call": ["find_organizations", "list_organizations"],
+        "list": ["organizations", "results", "data"],
+        "limit": 5,
+        "if_empty": "Sentry didn't say which organizations you're in"
+      },
+      {
+        "call": ["search_issues", "find_issues", "list_issues"],
+        "if_missing": "Sentry didn't offer a tool to search issues; reconnect and pick the Triage or Inspect skill",
+        "for_each": [
+          { "var": "org", "in": "orgs" },
+          { "var": "search", "in": "$searches" }
+        ],
+        "args": {
+          "organizationSlug": "{$org.slug}",
+          "regionUrl": "{$org.regionUrl}",
+          "query": "{$search}",
+          "sort": "date",
+          "limit": 100
+        },
+        "list": ["issues", "results", "data"]
+      }
+    ],
+    "item": {
+      "id": "{$org.slug}/{shortId}",
+      "title": "{shortId} {title ?? shortId}",
+      "url": ["{url ?? permalink}", "https://{$org.slug}.sentry.io/issues/{shortId}/"],
+      "context": ["{projectSlug ?? project.slug ?? project|name}", "{$org.slug}"],
+      "time": "{lastSeen}",
+      "resolved": [
+        { "value": "{status}", "in": ["resolved", "ignored", "archived", "muted"] }
+      ],
+      "fields_as": "fields",
+      "fields": [
+        { "label": "Status", "value": "{status ?? 'unresolved'}", "tone": "danger" },
+        { "label": "Where", "value": "{culprit}" },
+        { "label": "Events", "value": "{occurrences ?? count}" },
+        { "label": "Users", "value": "{usersImpacted ?? userCount}" }
+      ],
+      "link": "Open in Sentry",
+      "entities": [
+        {
+          "kind": "project",
+          "key": "sentry:{$org.slug}/{projectSlug ?? project.slug ?? project|name}",
+          "label": "{projectSlug ?? project.slug ?? project|name}"
+        }
+      ],
+      "metadata": {
+        "organization": "{$org.slug}",
+        "short_id": "{shortId}",
+        "region_url": "{$org.regionUrl}"
+      }
+    },
+    "check": {
+      "call": ["get_issue_details"],
+      "args": {
+        "organizationSlug": "{$metadata.organization}",
+        "issueId": "{$metadata.short_id}",
+        "regionUrl": "{$metadata.region_url}"
+      },
+      "unwrap": ["issue"],
+      "known": "{status}"
+    }
+  }
+}

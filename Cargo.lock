@@ -5677,6 +5677,7 @@ dependencies = [
  "quinn",
  "rcgen",
  "reqwest 0.12.28",
+ "ring",
  "rusqlite",
  "rustls",
  "serde",

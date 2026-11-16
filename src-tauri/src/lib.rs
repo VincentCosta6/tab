@@ -3498,6 +3498,8 @@ pub fn run() {
             }
             let data_dir = app.path().app_data_dir()?;
             lsp::set_tools_dir(data_dir.join("tools"));
+            // The person's own connection manifests, beside the built-ins.
+            tab_core::remote_mcp::manifest::load_dir(&data_dir.join("recipes"));
             let config_path = app.path().app_config_dir()?.join("config.json");
             tab_core::secrets::install(&config_path);
             let mut config = TabConfig::load(&config_path)?;
@@ -3871,6 +3873,14 @@ pub fn run() {
             usage_summary,
             gh_login,
             remote_mcp::mcp_catalog,
+            remote_mcp::mcp_set_queue_choice,
+            remote_mcp::manifests,
+            remote_mcp::manifests_reload,
+            remote_mcp::manifests_open_folder,
+            remote_mcp::marketplace_listings,
+            remote_mcp::marketplace_preview,
+            remote_mcp::marketplace_install,
+            remote_mcp::marketplace_uninstall,
             remote_mcp::mcp_servers,
             remote_mcp::mcp_probe,
             remote_mcp::mcp_add,

@@ -14,6 +14,7 @@ import { asFailure } from "../../lib/protocol/cloud";
 import { openSettings } from "../settings/SettingsTab";
 import { startSetupChat } from "../work/Chat";
 import { ApiUsage } from "./ApiUsage";
+import { ManifestsSection, MarketplaceSection } from "./Manifests";
 import { GhConnect } from "./GhConnect";
 import { EmailSignIn, usesMailSignIn } from "./EmailSignIn";
 import { ImportBanner, ImportDialog } from "./ClaudeImport";
@@ -130,6 +131,7 @@ export function ConnectionsTab() {
           </button>
         </div>
       )}
+      {view === "installed" && <ManifestsSection />}
       {connect.error && <p className="chat-error">{connect.error}</p>}
       {view === "marketplace" &&
         shelves.map((shelf) => {
@@ -149,6 +151,7 @@ export function ConnectionsTab() {
             </Section>
           );
         })}
+      {view === "marketplace" && <MarketplaceSection />}
       {view === "marketplace" && (
         <Section title="Advanced" description="Any service with a remote MCP server works too: tab signs in for you when it asks.">
           <div className="connector-list">

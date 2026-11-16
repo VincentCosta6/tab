@@ -32,9 +32,9 @@ What phase 3 leaves out, on purpose:
   connector registry, so workflows don't list them.
 - Cursors live in memory. Each engine start lists everything open again;
   dedupe on `external_id` makes that harmless.
-- Recipes are a Rust trait (`sync::Recipe`), not the declarative struct
-  sketched in §3: Sentry has to look up your organizations before it can
-  search, and that needs more than one call per look.
+- Recipes were a Rust trait at first. They're now data: one JSON
+  manifest per service, run by one engine (`docs/recipe-manifests.md`).
+  The person can add their own without a release.
 - Notion has no "assigned to me", so its recipe runs a search the person
   picks (default "tasks assigned to me").
 - Sync only runs on this computer; cloud polling comes with phase 4.
@@ -187,7 +187,7 @@ As built (see "What phase 3 leaves out" above):
 | Service | Call | Lands as | Done when |
 |---|---|---|---|
 | Linear | `list_issues {assignee: "me", updatedAt: <last look>}`, paged | `linear.issue` | `statusType` completed/canceled, or completed/canceled/archived set |
-| Sentry | `find_organizations`, then `search_issues {query: "is:unresolved assigned:me"}` per org (up to 5) | `sentry.issue` (`<org>/<SHORT-ID>`) | It drops out of the list and `get_issue_details` says resolved/ignored |
+| Sentry | `find_organizations`, then `search_issues` per org (up to 5) and per search the person picked (default `is:unresolved assigned:me` and `is:unresolved is:unassigned`) | `sentry.issue` (`<org>/<SHORT-ID>`) | It drops out of the list and `get_issue_details` says resolved/ignored |
 | Notion | `notion-search {query: <the person's search>, sort: "last_edited"}` | `notion.page` / `notion.database` | Never; mark it done yourself |
 
 Each tool call goes through `Gateway::run`, which uses the gateway's

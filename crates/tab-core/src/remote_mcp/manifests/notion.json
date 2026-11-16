@@ -1,0 +1,41 @@
+{
+  "manifest": 1,
+  "id": "notion",
+  "name": "Notion",
+  "url": "https://mcp.notion.com/mcp",
+  "description": "Agents can search, read and edit pages and databases.",
+  "category": "work",
+  "color": "#191919",
+  "queue": {
+    "description": "Pages matching a search come into your queue. Notion has no list of what's assigned to you, so tab runs a search you pick.",
+    "interval": "15m",
+    "kinds": [
+      { "kind": "notion.page", "label": "Notion page", "icon": "notion" },
+      { "kind": "notion.database", "label": "Notion database", "icon": "notion" }
+    ],
+    "search": { "hint": "tasks assigned to me" },
+    "steps": [
+      {
+        "call": ["notion-search", "search"],
+        "if_missing": "Notion has no search tool",
+        "args": { "query": "{$query}", "sort": "last_edited" },
+        "list": ["results", "pages", "data"],
+        "limit": 50
+      }
+    ],
+    "item": {
+      "id": "{id}",
+      "kind": {
+        "from": "{type}",
+        "map": { "database": "notion.database", "data_source": "notion.database" },
+        "default": "notion.page"
+      },
+      "title": ["{title}", "Untitled"],
+      "body": "{highlight|clip:300}",
+      "url": ["{url}", "https://www.notion.so/{id|nodash}"],
+      "time": "{page_last_edited_at ?? last_edited_time ?? timestamp}",
+      "text": { "value": "{highlight|clip:600}" },
+      "link": "Open in Notion"
+    }
+  }
+}

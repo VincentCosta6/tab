@@ -1,0 +1,9 @@
+{
+  "manifest": 1,
+  "id": "vercel",
+  "name": "Vercel",
+  "url": "https://mcp.vercel.com",
+  "description": "Agents can read deployments, build logs and project settings.",
+  "category": "code",
+  "color": "#000000"
+}

@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 
 use tab_core::remote_mcp::import::{self, Candidate};
+use tab_core::remote_mcp::manifest::{self, Status};
+use tab_core::remote_mcp::marketplace::{self, Listing, ListingView, Preview};
 use tab_core::remote_mcp::{
     self, CatalogEntry, Probe, RemoteMcpConfig, RemoteMcpInfo, ToolPolicy, ToolView,
 };
@@ -12,6 +14,69 @@ use tauri::{Emitter, State};
 use crate::account::AccountState;
 use crate::cloud_runner;
 use crate::{AppState, CmdResult, err};
+
+/// The manifests tab has, from where, and the ones that didn't load.
+#[tauri::command]
+pub async fn manifests() -> Status {
+    manifest::status()
+}
+
+/// The person's manifest folder.
+fn recipes_dir() -> CmdResult<PathBuf> {
+    manifest::status()
+        .dir
+        .ok_or_else(|| "manifests haven't loaded yet".to_string())
+}
+
+/// Reads the manifest folders again and restarts what syncs from them.
+async fn reload(state: &AppState) -> CmdResult<Status> {
+    let status = manifest::reload().ok_or("manifests haven't loaded yet")?;
+    let config = state.config.lock().await.clone();
+    state.apply(config).await.map_err(err)?;
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn manifests_reload(state: State<'_, AppState>) -> CmdResult<Status> {
+    reload(&state).await
+}
+
+/// Opens the person's manifest folder, making it first.
+#[tauri::command]
+pub async fn manifests_open_folder() -> CmdResult<()> {
+    let dir = recipes_dir()?;
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    tauri_plugin_opener::open_path(&dir, None::<&str>).map_err(err)
+}
+
+/// What the marketplace offers, and what's installed.
+#[tauri::command]
+pub async fn marketplace_listings() -> CmdResult<Vec<ListingView>> {
+    marketplace::listings(&recipes_dir()?).await.map_err(err)
+}
+
+/// Downloads and checks a listing, and says what it would call.
+#[tauri::command]
+pub async fn marketplace_preview(listing: Listing) -> CmdResult<Preview> {
+    marketplace::preview(&listing).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn marketplace_install(
+    state: State<'_, AppState>,
+    listing: Listing,
+) -> CmdResult<Status> {
+    marketplace::install(&recipes_dir()?, &listing)
+        .await
+        .map_err(err)?;
+    reload(&state).await
+}
+
+#[tauri::command]
+pub async fn marketplace_uninstall(state: State<'_, AppState>, id: String) -> CmdResult<Status> {
+    marketplace::uninstall(&recipes_dir()?, &id).map_err(err)?;
+    reload(&state).await
+}
 
 /// Services tab knows the MCP server of.
 #[tauri::command]
@@ -300,6 +365,21 @@ pub async fn mcp_set_queue(
     s.queue_query = query
         .map(|q| q.trim().to_string())
         .filter(|q| !q.is_empty());
+    state.apply(next).await.map_err(err)?;
+    Ok(())
+}
+
+/// What a connection's queue brings in, for recipes that offer choices.
+/// `None` goes back to the default.
+#[tauri::command]
+pub async fn mcp_set_queue_choice(
+    state: State<'_, AppState>,
+    id: String,
+    choice: Option<String>,
+) -> CmdResult<()> {
+    let mut next = state.config.lock().await.clone();
+    let s = next.mcp_servers.get_mut(&id).ok_or("no such connection")?;
+    s.queue_choice = choice.filter(|c| !c.is_empty());
     state.apply(next).await.map_err(err)?;
     Ok(())
 }

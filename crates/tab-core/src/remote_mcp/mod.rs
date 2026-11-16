@@ -10,7 +10,10 @@
 //! strict chats too, where the person's own MCP servers don't load.
 
 pub mod import;
+pub mod manifest;
+pub mod marketplace;
 pub mod oauth;
+pub mod plugin;
 pub mod stdio;
 pub mod sync;
 pub use crate::vault;
@@ -69,6 +72,10 @@ pub struct RemoteMcpConfig {
     /// What the queue watches, for recipes that ask (Notion: a search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_query: Option<String>,
+    /// What the queue brings in, for recipes that offer choices
+    /// ([`sync::Recipe::queue_choices`]). `None` is the first, the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_choice: Option<String>,
     /// The person allowed it in tab cloud jobs ("Allow in cloud"). It runs
     /// there only when it can ([`cloud_fit`]) and the hub is in tab cloud.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -343,86 +350,20 @@ pub struct CatalogEntry {
     /// [`RemoteMcpConfig::queue_query`]): the placeholder to show.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_query: Option<&'static str>,
+    /// What the queue brings in, for recipes that offer a short list (see
+    /// [`sync::Recipe::queue_choices`]). The first is the default.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub queue_choices: &'static [sync::QueueChoice],
+    /// What comes into the queue, from its recipe
+    /// ([`sync::Recipe::description`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_description: Option<&'static str>,
 }
 
-/// Services whose servers let tab register itself (no app to set up).
+/// Services whose servers let tab register itself (no app to set up),
+/// from their manifests ([`manifest`]).
 pub fn catalog() -> Vec<CatalogEntry> {
-    let mut all = vec![
-        CatalogEntry {
-            id: "linear",
-            name: "Linear",
-            url: "https://mcp.linear.app/mcp",
-            description: "Agents can find, create and update issues, projects and comments.",
-            category: "work",
-            color: "#5e6ad2",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-        },
-        CatalogEntry {
-            id: "notion",
-            name: "Notion",
-            url: "https://mcp.notion.com/mcp",
-            description: "Agents can search, read and edit pages and databases.",
-            category: "work",
-            color: "#191919",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-        },
-        CatalogEntry {
-            id: "atlassian",
-            name: "Jira & Confluence",
-            url: "https://mcp.atlassian.com/v1/mcp",
-            description: "Agents can search, comment on and move tickets, and read pages.",
-            category: "work",
-            color: "#1868db",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-        },
-        CatalogEntry {
-            id: "sentry",
-            name: "Sentry",
-            url: "https://mcp.sentry.dev/mcp",
-            description: "Agents can look up issues, stack traces and events.",
-            category: "code",
-            color: "#362d59",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-        },
-        CatalogEntry {
-            id: "vercel",
-            name: "Vercel",
-            url: "https://mcp.vercel.com",
-            description: "Agents can read deployments, build logs and project settings.",
-            category: "code",
-            color: "#000000",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-        },
-        CatalogEntry {
-            id: "stripe",
-            name: "Stripe",
-            url: "https://mcp.stripe.com",
-            description: "Agents can look up customers, payments, invoices and disputes.",
-            category: "work",
-            color: "#635bff",
-            fills_queue: false,
-            kinds: Vec::new(),
-            queue_query: None,
-        },
-    ];
-    for e in &mut all {
-        if let Some(r) = sync::recipe(e.id) {
-            e.fills_queue = true;
-            e.kinds = r.kinds();
-            e.queue_query = r.query_hint();
-        }
-    }
-    all
+    manifest::catalog()
 }
 
 /// What tab keeps in the [`Vault`] for a server that wants a sign-in.
