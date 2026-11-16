@@ -15,10 +15,10 @@ pub(crate) fn link_item(
     refs: &[EntityRef],
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
-    // Project membership is set by the person, not the source: keep it.
+    // Project membership isn't the source's to say: keep it.
     tx.execute(
         "DELETE FROM item_entities WHERE item_id = ?1
-           AND entity_id NOT IN (SELECT id FROM entities WHERE kind = 'project')",
+           AND entity_id NOT IN (SELECT id FROM entities WHERE kind = 'project' AND key LIKE 'project:%')",
         [item_id],
     )?;
     let mut ids = Vec::with_capacity(refs.len());

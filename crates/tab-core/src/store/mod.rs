@@ -17,6 +17,7 @@ mod links;
 mod previews;
 mod projects;
 mod rollups;
+mod routing;
 mod segments;
 mod sessions;
 mod usage;
@@ -27,6 +28,7 @@ mod workflows;
 pub use jobs::CloudConnection;
 pub use knowledge::{ChunkHit, IndexTarget, Reader};
 pub use projects::ResourceInput;
+pub use routing::{RepoHint, container_name, names_match};
 pub use segments::{DIVIDER as COMPACTED, ProjectChange, Segment, WatchState};
 
 use std::path::Path;
@@ -53,6 +55,9 @@ pub struct Store {
     /// Woken when a resource or repo is added or changed, so it's indexed
     /// right away rather than on the next pass.
     knowledge_wake: std::sync::Arc<tokio::sync::Notify>,
+    /// Woken when items arrive or a repo changes, so routing proposals
+    /// (`crate::routing`) look again.
+    routing_wake: std::sync::Arc<tokio::sync::Notify>,
 }
 
 /// Ordered migrations; `PRAGMA user_version` records how many have run.
@@ -85,6 +90,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/026_model_families.sql"),
     include_str!("migrations/027_workflow_run_items.sql"),
     include_str!("migrations/028_workflow_rollups.sql"),
+    include_str!("migrations/029_project_routing.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {
@@ -140,11 +146,17 @@ impl Store {
         Ok(Self {
             commits,
             knowledge_wake: Default::default(),
+            routing_wake: Default::default(),
             conn: Mutex::new(conn),
             embedder: std::sync::RwLock::new(None),
             index_status: Mutex::new(Default::default()),
             workflows_rev: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// See [`crate::routing::spawn`].
+    pub fn routing_wake(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        self.routing_wake.clone()
     }
 
     /// This install's device id (`device-<hex>`), made once by a migration.

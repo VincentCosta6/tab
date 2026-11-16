@@ -1134,6 +1134,59 @@ async fn project_repo_save(
 }
 
 #[tauri::command]
+async fn project_anchors(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CmdResult<Vec<tab_core::model::ProjectAnchor>> {
+    state.store.project_anchors(&project_id).map_err(err)
+}
+
+/// Ties a container to a project (`always`, `never` or back to
+/// `proposed`). `always` routes the container's waiting items there.
+#[tauri::command]
+async fn anchor_save(
+    state: State<'_, AppState>,
+    project_id: String,
+    container: tab_core::model::EntityRef,
+    anchor_state: String,
+    source: Option<String>,
+) -> CmdResult<tab_core::model::ProjectAnchor> {
+    let (anchor, routed) = state
+        .store
+        .anchor_save(
+            &project_id,
+            &container,
+            &anchor_state,
+            source.as_deref().unwrap_or("person"),
+            "",
+            Utc::now(),
+        )
+        .map_err(err)?;
+    if routed > 0 {
+        let _ = state.events.send(EngineEvent::ProjectChanged {
+            project_id: project_id.clone(),
+        });
+    }
+    Ok(anchor)
+}
+
+#[tauri::command]
+async fn anchor_delete(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    state.store.anchor_delete(&id).map_err(err)?;
+    Ok(())
+}
+
+/// After the person files an item: its container, to offer "Always send
+/// it here?", unless it already goes there.
+#[tauri::command]
+async fn route_offer(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Option<tab_core::model::EntityRef>> {
+    state.store.route_offer(&id).map_err(err)
+}
+
+#[tauri::command]
 async fn project_repo_delete(
     state: State<'_, AppState>,
     project_id: String,
@@ -3640,6 +3693,14 @@ pub fn run() {
                     tab_core::knowledge::spawn(store, gateway, sources);
                 });
             }
+            // Routing proposals: what the projects' checkouts say about the
+            // services they use, and containers named like a project.
+            {
+                let store = store.clone();
+                tauri::async_runtime::spawn(async move {
+                    tab_core::routing::spawn(store);
+                });
+            }
             let state = AppState {
                 core: core.clone(),
                 work_hub: work_hub.clone(),
@@ -3856,6 +3917,10 @@ pub fn run() {
             project_repos,
             project_repo_save,
             project_repo_delete,
+            project_anchors,
+            anchor_save,
+            anchor_delete,
+            route_offer,
             project_items,
             review_chat_open,
             review_chat_send,

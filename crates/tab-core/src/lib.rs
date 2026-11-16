@@ -49,6 +49,7 @@ pub mod net;
 pub mod ranker;
 pub mod ratelimit;
 pub mod remote_mcp;
+pub mod routing;
 pub mod sandbox;
 pub mod secrets;
 pub mod shell_path;
