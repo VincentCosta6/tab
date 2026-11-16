@@ -166,7 +166,12 @@ fn get(purpose: &str, url: String, ttl: Duration) -> Call {
 }
 
 /// Runs a GraphQL query or mutation and returns its `data`.
-async fn graphql(gw: &Gateway, purpose: &str, query: &str, vars: Value) -> anyhow::Result<Value> {
+pub(crate) async fn graphql(
+    gw: &Gateway,
+    purpose: &str,
+    query: &str,
+    vars: Value,
+) -> anyhow::Result<Value> {
     let resp = gw
         .send(
             Call::post("github", "github", purpose, format!("{API}/graphql"))
@@ -239,7 +244,7 @@ query($owner: String!, $name: String!, $number: Int!) {
 }
 "#;
 
-fn split_repo(repo: &str) -> anyhow::Result<(&str, &str)> {
+pub(crate) fn split_repo(repo: &str) -> anyhow::Result<(&str, &str)> {
     repo.split_once('/')
         .filter(|(o, n)| !o.is_empty() && !n.is_empty() && !n.contains('/'))
         .ok_or_else(|| anyhow::anyhow!("not a repository: {repo}"))

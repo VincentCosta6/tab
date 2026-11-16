@@ -31,6 +31,7 @@ use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tauri::{Emitter, Manager, State};
 
 mod account;
+mod autofix;
 mod bundle_update;
 mod cloud_runner;
 mod dev;
@@ -3645,6 +3646,7 @@ pub fn run() {
                 embed,
                 leases: Default::default(),
             });
+            autofix::spawn(core.clone());
             // The hub: this device's copy (tab.db) syncs through its change
             // log, and other devices connect to it on localhost.
             // Tried a few times: without it, work that moved to tab cloud
@@ -3842,6 +3844,9 @@ pub fn run() {
             mark_done,
             done_guards,
             context_status,
+            autofix::autofix_list,
+            autofix::autofix_set,
+            autofix::autofix_dismiss,
             snooze,
             reopen,
             list_connectors,

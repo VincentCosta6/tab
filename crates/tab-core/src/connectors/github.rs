@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Mutex;
 
+use crate::autofix::FixReport;
 use crate::config::ConnectorConfig;
 use crate::connector::{Connector, ConnectorContext, ConnectorFactory};
 use crate::gateway::{Call, Gateway, GatewayError};
@@ -967,6 +968,15 @@ impl Connector for GithubConnector {
             .collect())
     }
 
+    async fn fix_report(&self, url: &str) -> anyhow::Result<Option<FixReport>> {
+        let Some((repo, n)) = pull_ref(url) else {
+            return Ok(None);
+        };
+        crate::connectors::github_autofix::fix_report(&self.gateway, &repo, n)
+            .await
+            .map(Some)
+    }
+
     async fn is_resolved(&self, item: &QueueItem) -> anyhow::Result<bool> {
         let m = &item.event.metadata;
         if m["subject_type"].as_str() != Some("PullRequest") {
@@ -1120,6 +1130,18 @@ fn pull_status(
         waiting_on,
         finished: waiting_on == Nobody,
         url: Some(format!("https://github.com/{repo}/pull/{n}")),
+        title: Some(s.title.clone()),
+        reference: Some(format!("#{n}")),
+        icon: Some(
+            match s.state.as_str() {
+                "merged" => "git-merge",
+                "closed" => "git-pull-request-closed",
+                "draft" => "git-pull-request-draft",
+                _ => "git-pull-request",
+            }
+            .into(),
+        ),
+        autofix: waiting_on != Nobody,
     }
 }
 

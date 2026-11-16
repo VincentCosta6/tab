@@ -30,6 +30,7 @@ export function openOnboarding() {
 }
 
 import { openItem } from "../../lib/links";
+import { LinkBar } from "./LinkBar";
 export { openItem, takePendingOpen } from "../../lib/links";
 
 /**
@@ -107,6 +108,7 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
       {body && <div className="chat-body" hidden={!showBody}>{body}</div>}
       {(!body || !showBody) && <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />}
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
+      <LinkBar itemId={item.id} />
       <Composer chat={chat} onSend={send} onShell={shell} placeholder={`Ask about this, or tell the agent what to do…`} />
     </div>
   );

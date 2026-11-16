@@ -1231,6 +1231,17 @@ impl EngineHandle {
             .collect()
     }
 
+    /// What's wrong with a link, from the first connector that knows it
+    /// ([`Connector::fix_report`]). `None` when no running connector does.
+    pub async fn fix_report(&self, url: &str) -> anyhow::Result<Option<crate::autofix::FixReport>> {
+        for c in self.core.connectors.values() {
+            if let Some(r) = crate::ratelimit::background(c.fix_report(url)).await? {
+                return Ok(Some(r));
+            }
+        }
+        Ok(None)
+    }
+
     /// Marks an item done and lets its connector react (e.g. mark the GitHub thread read).
     pub async fn mark_done(&self, id: &str) -> anyhow::Result<Option<QueueItem>> {
         self.core.mark_done(id, "you").await

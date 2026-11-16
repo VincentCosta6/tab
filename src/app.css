@@ -1351,3 +1351,18 @@ label.import-row { cursor: pointer; }
 .composer:has(.shell-mode) { border-color: color-mix(in srgb, var(--tone-accent-fg) 55%, var(--border-strong)); }
 .slash-menu button > svg { flex: none; align-self: center; color: var(--fg-subtle); }
 .slash-card-actions { flex-wrap: wrap; }
+
+/* The bar above a task's composer for a PR (or any link a connector reports on). */
+.link-bars { display: grid; gap: 6px; margin: 0 var(--space-6) var(--space-2); max-width: 780px; width: calc(100% - 2 * var(--space-6)); align-self: center; }
+.link-bar { display: flex; align-items: center; gap: 4px; padding: 3px 4px 3px 0; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); font-size: var(--text-sm); min-width: 0; }
+.link-bar-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 4px 10px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: var(--radius-sm); }
+.link-bar-main:hover .link-bar-title { text-decoration: underline; }
+.link-bar-icon { display: inline-flex; color: var(--tone-fg); flex: none; }
+.link-bar-ref { color: var(--fg-muted); font-variant-numeric: tabular-nums; flex: none; }
+.link-bar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link-bar-state { flex: none; margin-left: auto; padding: 1px 8px; border-radius: 999px; background: var(--tone-bg); color: var(--tone-fg); font-size: var(--text-xs); }
+.link-bar-btn { flex: none; display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border: 1px solid transparent; border-radius: var(--radius-sm); background: none; color: var(--fg-muted); font: inherit; font-size: var(--text-xs); cursor: pointer; }
+.link-bar-btn:hover { background: var(--bg-hover, var(--tone-neutral-bg)); color: var(--fg); }
+.link-bar-autofix { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; color: var(--fg-muted); font-size: var(--text-xs); cursor: pointer; white-space: nowrap; user-select: none; }
+.link-bar-autofix:hover { color: var(--fg); }
+.link-bar-autofix input { margin: 0; accent-color: var(--tone-accent-fg); cursor: pointer; }

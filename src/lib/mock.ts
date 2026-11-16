@@ -14,7 +14,7 @@ import type {
   ManifestStatus, MarketListingView, McpCatalogEntry, McpCloudState, JobGaps, McpImportCandidate, McpImportResult, McpProbe, McpServerConfig, McpServerInfo, McpSignInEvent, McpTool,
   EmailSignInStatus, MailProvider,
   Account, AgentKind, DecisionProvider, GhLoginCode, GhStatus, Harness, LinkSummary, LspServer, ModelOption,
-  AuditEntry, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
+  AuditEntry, AutofixWatch, Block, Chat, ConnectorInfo, ContextEntry, ContextStatus, EngineEvent, ItemState, Pressure, QueueItem, RateLimitState,
   Entity, GraphView, Project, ProjectNote, ProjectRepo, ProjectResource, ResourceInput, Segment, PullReview, Session, SessionMessage, TabConfig, Urgency, UsageRow, WorkspaceProgress,
   VaultAudit, VaultDevice, VaultEntry, VaultEntryInput, VaultStatus,
   ProjectAnchor, EntityRef,
@@ -636,6 +636,9 @@ export const mockApi = {
           ] satisfies Block[]);
         }
         case "done_guards": return [];
+        case "autofix_list": return mockAutofix.filter((w) => w.item_id === args.itemId);
+        case "autofix_set": return mockWatch(args.itemId, args.url, { enabled: args.on, dismissed: false, last: args.on ? "Gave the agent 1 problem" : null });
+        case "autofix_dismiss": return mockWatch(args.itemId, args.url, { dismissed: args.dismissed, ...(args.dismissed ? { enabled: false } : {}) });
         case "context_status": return Object.fromEntries((args.ids as string[]).flatMap((id) => (mockContextStatus[id] ? [[id, mockContextStatus[id]]] : [])));
         case "mark_done": return setState(args.id, "done");
         case "snooze": return setState(args.id, "snoozed", new Date(Date.now() + args.minutes * 60_000).toISOString());
@@ -1424,6 +1427,13 @@ if (typeof location !== "undefined" && new URLSearchParams(location.search).has(
 
 /** Task statuses by item, for `?statuses`: what the GitHub connector would report. */
 const mockContextStatus: Record<string, ContextStatus[]> = {};
+const mockAutofix: AutofixWatch[] = [];
+function mockWatch(itemId: string, url: string, patch: Partial<AutofixWatch>): AutofixWatch[] {
+  let w = mockAutofix.find((x) => x.item_id === itemId && x.url === url);
+  if (!w) mockAutofix.push((w = { item_id: itemId, url, enabled: false, dismissed: false, active_at: new Date().toISOString(), next_at: null, checked_at: null, head: null, handled: [], last: null }));
+  Object.assign(w, patch);
+  return mockAutofix.filter((x) => x.item_id === itemId);
+}
 
 /** `?statuses`: idle chats on the first few items, one per row status. */
 function statusesDemo() {
@@ -1431,7 +1441,8 @@ function statusesDemo() {
   const open = items.filter((i) => i.state === "open").slice(1, 5);
   const later = new Date(Date.now() + 60_000).toISOString();
   const pr = (n: number, label: string, tone: ContextStatus["tone"], waiting_on: ContextStatus["waiting_on"]): ContextStatus =>
-    ({ source: "github", label, detail: `acme/api#${n}: ${label}`, tone, waiting_on, finished: waiting_on === "nobody", url: `https://github.com/acme/api/pull/${n}` });
+    ({ source: "github", label, detail: `acme/api#${n}: ${label}`, tone, waiting_on, finished: waiting_on === "nobody", url: `https://github.com/acme/api/pull/${n}`,
+       title: "Add idempotency keys to webhook deliveries", reference: `#${n}`, icon: waiting_on === "nobody" ? "git-merge" : "git-pull-request", autofix: waiting_on !== "nobody" });
   open.forEach((item, k) => {
     // The first finished a turn you haven't read; the rest you've read.
     sessions.push({ id: `sess-status-${k}`, item_id: item.id, agent: "claude_code", agent_session_id: null, title: item.title, status: "idle", cwd: "~/code", created_at: ago(30), updated_at: k === 0 ? later : ago(30) });

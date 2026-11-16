@@ -87,7 +87,18 @@ export interface LinkSummary { title: string; state: "open" | "draft" | "merged"
 export type WaitingOn = "you" | "others" | "nobody";
 
 /** Where something in an item's Context stands, from its connector ("Review PR", "Merged"). */
-export interface ContextStatus { source: string; label: string; detail: string | null; tone: Tone; waiting_on: WaitingOn; finished: boolean; url: string | null }
+export interface ContextStatus {
+  source: string; label: string; detail: string | null; tone: Tone; waiting_on: WaitingOn; finished: boolean; url: string | null;
+  /** For the chat's bar: its name, short reference ("#12"), state icon, and whether autofix can watch it. */
+  title?: string | null; reference?: string | null; icon?: string | null; autofix?: boolean;
+}
+/** A link's bar and autofix state in one task's chat (`tab_domain::autofix::Watch`). */
+export interface AutofixWatch {
+  item_id: string; url: string; enabled: boolean; dismissed: boolean;
+  active_at: string; next_at: string | null; checked_at: string | null; head: string | null; handled: string[];
+  /** What the last look found: "All clear", "Gave the agent 2 problems". */
+  last: string | null;
+}
 
 export interface DoneGuard { source: string; level: "confirm" | "block"; title: string; detail: string | null; url: string | null }
 

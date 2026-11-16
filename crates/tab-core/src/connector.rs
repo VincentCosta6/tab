@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use std::sync::Arc;
 
+use crate::autofix::FixReport;
 use crate::config::ConnectorConfig;
 use crate::gateway::Gateway;
 use crate::model::{
@@ -74,6 +75,17 @@ pub trait Connector: Send + Sync + 'static {
     /// Keep it quick and cached; the engine gives up on slow answers.
     async fn context_status(&self, _ctx: &ItemContext) -> anyhow::Result<Vec<ContextStatus>> {
         Ok(Vec::new())
+    }
+
+    /// What's wrong with one link this connector knows (failing checks,
+    /// open review threads), for autofix to hand to the task's agent. `None`
+    /// when the link isn't this connector's; set [`ContextStatus::autofix`]
+    /// on the links that have one.
+    ///
+    /// Asked about once a minute while autofix is on, so it should read
+    /// fresh state rather than a long cache.
+    async fn fix_report(&self, _url: &str) -> anyhow::Result<Option<FixReport>> {
+        Ok(None)
     }
 
     /// True when the thing behind an item is finished upstream, e.g. its pull
