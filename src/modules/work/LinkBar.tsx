@@ -59,9 +59,8 @@ function Bar({ status: s, watch, onAutofix, onDismiss }: { status: ContextStatus
         <span className={cx("link-bar-state", `tone-${s.tone}`)}>{s.label}</span>
       </button>
       {s.autofix && (
-        <button className={cx("link-bar-btn", "link-bar-autofix", on && "on")} aria-pressed={on} title={autofixTitle} onClick={() => onAutofix(!on)}>
-          <Icon name={on ? "check-circle" : "check"} size={14} />
-          <span>Autofix</span>
+        <button className={cx("link-bar-btn", "link-bar-autofix", on && "on")} aria-pressed={on} aria-label="Autofix" title={autofixTitle} onClick={() => onAutofix(!on)}>
+          <Icon name="check" size={14} />
         </button>
       )}
       <button className="link-bar-btn" title="Hide this bar (turns autofix off)" aria-label="Dismiss" onClick={onDismiss}>
