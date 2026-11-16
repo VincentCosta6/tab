@@ -1,29 +1,75 @@
 //! ACP adapter programs (claude-agent-acp, codex-acp) that tab keeps itself,
-//! so a harness's chats work without the person installing anything. An
-//! adapter with release builds (`acp.adapter.release`) is downloaded from
-//! its GitHub release and checked against the digest GitHub publishes, so
-//! it needs no Node; the rest go in with npm. Either way into
-//! `<tools>/acp/<harness id>`, never globally. One already on PATH is used
-//! when tab has no copy of its own.
+//! so a harness's chats work without the person installing anything, and
+//! only ever runs a build pinned in tab's own source:
+//!
+//! - An adapter with release builds (`acp.adapter.release`) is downloaded
+//!   and checked against the sha256 in `harnesses.json`. It needs no Node.
+//! - An npm adapter is installed with `npm ci` from
+//!   `adapters/<command>.lock.json`, which pins every package by hash, with
+//!   no install scripts. It runs on a Node that tab downloads the same way
+//!   (`adapters/node.json`), so the person needn't have one.
+//!
+//! Both go in `<tools>/acp`, never globally, with the pinned version beside
+//! them; a copy from an older pin is replaced. One on PATH is used only
+//! when tab can't install its own here.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-use super::catalog::{self, AcpAdapter};
+use super::catalog::{self, AcpAdapter, Pinned};
 use super::{AgentKind, command, resolve, run_streaming};
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Where tab keeps adapters: `<dir>/<harness id>`.
+/// Where tab keeps adapters: `<dir>/<harness id>`, and Node in `<dir>/node`.
 pub fn set_dir(dir: PathBuf) {
     let _ = DIR.set(dir);
 }
 
-fn own_dir(kind: AgentKind) -> Option<PathBuf> {
-    Some(DIR.get()?.join(kind.as_str()))
+/// How to start an adapter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Launch {
+    pub program: PathBuf,
+    /// Before the adapter's own arguments (its script, under Node).
+    pub args: Vec<OsString>,
+    /// Folders the sandbox must let it read: its install and Node's.
+    pub readable: Vec<PathBuf>,
+}
+
+impl Launch {
+    pub fn program(p: PathBuf) -> Self {
+        Self {
+            program: p,
+            args: Vec::new(),
+            readable: Vec::new(),
+        }
+    }
+}
+
+/// Node, pinned: the npm adapters run on it.
+#[derive(serde::Deserialize)]
+struct Node {
+    version: String,
+    builds: std::collections::BTreeMap<String, Pinned>,
+}
+
+fn node_pin() -> &'static Node {
+    static NODE: OnceLock<Node> = OnceLock::new();
+    NODE.get_or_init(|| {
+        serde_json::from_str(include_str!("adapters/node.json")).expect("node.json is valid")
+    })
+}
+
+/// The lockfile that pins an npm adapter and everything it pulls in.
+fn lockfile(command: &str) -> Option<&'static str> {
+    match command {
+        "codex-acp" => Some(include_str!("adapters/codex-acp.lock.json")),
+        _ => None,
+    }
 }
 
 /// The adapter's program and what installs it, when `kind` runs through one.
@@ -32,84 +78,8 @@ fn spec(kind: AgentKind) -> Option<(&'static str, &'static AcpAdapter)> {
     Some((acp.command.as_deref()?, acp.adapter.as_ref()?))
 }
 
-/// tab's own copy, if it has one.
-fn own_exe(kind: AgentKind) -> Option<PathBuf> {
-    let (cmd, _) = spec(kind)?;
-    let dir = own_dir(kind)?;
-    let exts: &[&str] = if cfg!(windows) {
-        &[".exe", ".cmd", ""]
-    } else {
-        &[""]
-    };
-    [dir.clone(), dir.join("node_modules").join(".bin")]
-        .iter()
-        .flat_map(|d| exts.iter().map(move |e| d.join(format!("{cmd}{e}"))))
-        .find(|p| p.is_file())
-}
-
-/// `kind`'s adapter: tab's own copy, then one on PATH. `None` when it has
-/// none, or no adapter program at all.
-pub fn find(kind: AgentKind) -> Option<PathBuf> {
-    let (cmd, _) = spec(kind)?;
-    own_exe(kind).or_else(|| resolve(cmd).ok())
-}
-
-/// Whether tab can put `kind`'s adapter in by itself on this computer.
-pub fn installable(kind: AgentKind) -> bool {
-    spec(kind).is_some_and(|(_, a)| {
-        a.release.is_some() && release_asset(a).is_some()
-            || a.npm.is_some() && which::which("npm").is_ok()
-    })
-}
-
-/// `kind`'s adapter, installed first when it's missing. Chats that start
-/// together wait for one install.
-pub async fn ensure(
-    kind: AgentKind,
-    on_line: impl Fn(String) + Send + Sync + 'static,
-) -> anyhow::Result<PathBuf> {
-    if let Some(p) = find(kind) {
-        return Ok(p);
-    }
-    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-    let _held = LOCK.lock().await;
-    if let Some(p) = find(kind) {
-        return Ok(p);
-    }
-    install(kind, on_line).await
-}
-
-/// Installs `kind`'s adapter into tab's own folder, replacing any copy
-/// there, passing progress to `on_line`.
-pub async fn install(
-    kind: AgentKind,
-    on_line: impl Fn(String) + Send + Sync + 'static,
-) -> anyhow::Result<PathBuf> {
-    let name = catalog::harness(kind).name.as_str();
-    let (cmd, adapter) =
-        spec(kind).ok_or_else(|| anyhow::anyhow!("{name} has no ACP adapter to install."))?;
-    let dir = own_dir(kind).ok_or_else(|| anyhow::anyhow!("tab has no folder for tools yet."))?;
-    tokio::fs::create_dir_all(&dir).await?;
-    if let Some(asset) = release_asset(adapter) {
-        download(cmd, adapter, &asset, &dir, &on_line).await?;
-    } else if let (Some(pkg), Ok(npm)) = (adapter.npm.as_deref(), which::which("npm")) {
-        let mut c = command(&npm);
-        c.arg("install")
-            .arg("--prefix")
-            .arg(&dir)
-            .args(["--no-audit", "--no-fund", pkg]);
-        run_streaming(c, &format!("npm install {pkg}"), on_line).await?;
-    } else {
-        anyhow::bail!(
-            "{name} runs through {cmd}, and setting it up on this computer needs Node.js (https://nodejs.org)."
-        );
-    }
-    own_exe(kind).ok_or_else(|| anyhow::anyhow!("Installed {cmd}, but its program isn't there."))
-}
-
-/// This computer's release build of `adapter`, by file name.
-fn release_asset(adapter: &AcpAdapter) -> Option<String> {
-    let template = adapter.release.as_deref()?;
+/// This computer, as the pins name it.
+fn target() -> Option<String> {
     let os = match std::env::consts::OS {
         "macos" => "darwin",
         "linux" => "linux",
@@ -122,15 +92,253 @@ fn release_asset(adapter: &AcpAdapter) -> Option<String> {
         _ => return None,
     };
     let musl = os == "linux" && Path::new("/etc/alpine-release").exists();
-    let target = format!("{os}-{arch}{}", if musl { "-musl" } else { "" });
-    let ext = if os == "linux" { "tar.gz" } else { "zip" };
-    Some(format!("{}.{ext}", template.replace("{target}", &target)))
+    Some(format!("{os}-{arch}{}", if musl { "-musl" } else { "" }))
 }
 
-/// `owner/name` from the adapter's repository URL.
-fn repo_slug(adapter: &AcpAdapter) -> Option<&str> {
-    let s = adapter.repo.strip_prefix("https://github.com/")?;
-    Some(s.trim_end_matches('/').trim_end_matches(".git"))
+/// How `kind`'s adapter is installed on this computer: a release build, or
+/// npm on tab's Node. `None` when tab can't.
+enum Plan {
+    Release(&'static Pinned),
+    Npm {
+        pkg: &'static str,
+        version: &'static str,
+        lock: &'static str,
+        node: &'static Pinned,
+    },
+}
+
+fn plan(kind: AgentKind) -> Option<(Plan, String)> {
+    let (cmd, a) = spec(kind)?;
+    let t = target()?;
+    if let Some(r) = &a.release {
+        return Some((Plan::Release(r.builds.get(&t)?), r.version.clone()));
+    }
+    let (pkg, version, lock) = (a.npm.as_deref()?, a.version.as_deref()?, lockfile(cmd)?);
+    let node = node_pin();
+    let pin = format!("{version} (node {})", node.version);
+    Some((
+        Plan::Npm {
+            pkg,
+            version,
+            lock,
+            node: node.builds.get(&t)?,
+        },
+        pin,
+    ))
+}
+
+fn own_dir(kind: AgentKind) -> Option<PathBuf> {
+    Some(DIR.get()?.join(kind.as_str()))
+}
+
+fn node_dir() -> Option<PathBuf> {
+    Some(DIR.get()?.join("node").join(&node_pin().version))
+}
+
+/// tab's own copy, whatever pin it came from.
+fn own(kind: AgentKind) -> Option<Launch> {
+    let (cmd, a) = spec(kind)?;
+    let dir = own_dir(kind)?;
+    if a.release.is_some() {
+        let exe = dir.join(format!("{cmd}{}", std::env::consts::EXE_SUFFIX));
+        return exe.is_file().then(|| Launch::program(exe));
+    }
+    let pkg = dir.join("node_modules").join(a.npm.as_deref()?);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(pkg.join("package.json")).ok()?).ok()?;
+    let bin = &manifest["bin"];
+    let script = pkg.join(bin[cmd].as_str().or(bin.as_str())?);
+    let node_root = node_dir()?;
+    let node = node_exe(&node_root);
+    (script.is_file() && node.is_file()).then(|| Launch {
+        program: node,
+        args: vec![script.into()],
+        readable: vec![dir, node_root],
+    })
+}
+
+/// Whether tab's own copy is from the current pin.
+fn current(kind: AgentKind) -> bool {
+    let (Some((_, pin)), Some(dir)) = (plan(kind), own_dir(kind)) else {
+        return false;
+    };
+    std::fs::read_to_string(dir.join("version")).is_ok_and(|v| v.trim() == pin)
+        && own(kind).is_some()
+}
+
+/// `kind`'s adapter as it is now: tab's own copy, then one on PATH. `None`
+/// when it has neither, or no adapter program at all.
+pub fn find(kind: AgentKind) -> Option<Launch> {
+    let (cmd, _) = spec(kind)?;
+    own(kind).or_else(|| resolve(cmd).ok().map(Launch::program))
+}
+
+/// Whether tab can install `kind`'s pinned adapter by itself here.
+pub fn installable(kind: AgentKind) -> bool {
+    plan(kind).is_some()
+}
+
+/// Whether `ensure` would install or update something.
+pub fn needs_install(kind: AgentKind) -> bool {
+    installable(kind) && !current(kind)
+}
+
+/// `kind`'s adapter, installing the pinned one first when tab has no
+/// current copy. If that fails, an older copy or one on PATH still does.
+/// Chats that start together wait for one install.
+pub async fn ensure(
+    kind: AgentKind,
+    on_line: impl Fn(String) + Send + Sync + 'static,
+) -> anyhow::Result<Launch> {
+    if !needs_install(kind)
+        && let Some(l) = find(kind)
+    {
+        return Ok(l);
+    }
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _held = LOCK.lock().await;
+    if !needs_install(kind)
+        && let Some(l) = find(kind)
+    {
+        return Ok(l);
+    }
+    match install(kind, on_line).await {
+        Ok(l) => Ok(l),
+        Err(e) => find(kind).ok_or(e),
+    }
+}
+
+/// Installs `kind`'s pinned adapter into tab's own folder, replacing any
+/// copy there, passing progress to `on_line`.
+pub async fn install(
+    kind: AgentKind,
+    on_line: impl Fn(String) + Send + Sync + 'static,
+) -> anyhow::Result<Launch> {
+    let name = catalog::harness(kind).name.as_str();
+    let (cmd, _) =
+        spec(kind).ok_or_else(|| anyhow::anyhow!("{name} has no ACP adapter to install."))?;
+    let (plan, pin) = plan(kind).ok_or_else(|| {
+        anyhow::anyhow!(
+            "tab has no build of {cmd}, which {name} runs through, for this computer ({}).",
+            target().unwrap_or_else(|| std::env::consts::OS.into())
+        )
+    })?;
+    let dir = own_dir(kind).ok_or_else(|| anyhow::anyhow!("tab has no folder for tools yet."))?;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    tokio::fs::create_dir_all(&dir).await?;
+    match plan {
+        Plan::Release(build) => {
+            let staging = dir.join(".unpack");
+            download_unpack(&format!("{cmd} {pin}"), build, &staging, &on_line).await?;
+            // Just the adapter: claude-agent-acp's archive also carries a
+            // Claude Code of its own, and tab points it at the person's.
+            let exe = format!("{cmd}{}", std::env::consts::EXE_SUFFIX);
+            let found = find_named(&staging, &exe, 2)
+                .ok_or_else(|| anyhow::anyhow!("The download has no {exe} in it."));
+            let r = match found {
+                Ok(p) => tokio::fs::rename(&p, dir.join(&exe))
+                    .await
+                    .map_err(Into::into),
+                Err(e) => Err(e),
+            };
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            r?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::Permissions::from_mode(0o755);
+                tokio::fs::set_permissions(dir.join(&exe), mode).await?;
+            }
+        }
+        Plan::Npm {
+            pkg,
+            version,
+            lock,
+            node,
+        } => {
+            let root = ensure_node(node, &on_line).await?;
+            let manifest = serde_json::json!({
+                "name": "tab-acp-adapter",
+                "private": true,
+                "dependencies": { pkg: version },
+            });
+            tokio::fs::write(
+                dir.join("package.json"),
+                serde_json::to_vec_pretty(&manifest)?,
+            )
+            .await?;
+            tokio::fs::write(dir.join("package-lock.json"), lock).await?;
+            // Exactly the lockfile's packages, each checked against its
+            // hash, without install scripts. Optional ones are Codex's own
+            // binaries, which tab doesn't use (it passes the person's).
+            let mut c = command(&node_exe(&root));
+            c.arg(npm_cli(&root))
+                .args([
+                    "ci",
+                    "--ignore-scripts",
+                    "--omit=optional",
+                    "--no-audit",
+                    "--no-fund",
+                ])
+                .current_dir(&dir);
+            run_streaming(c, &format!("npm ci {pkg}@{version}"), on_line).await?;
+        }
+    }
+    tokio::fs::write(dir.join("version"), &pin).await?;
+    own(kind).ok_or_else(|| anyhow::anyhow!("Installed {cmd}, but its program isn't there."))
+}
+
+/// tab's pinned Node, downloaded the first time an npm adapter needs it.
+async fn ensure_node(
+    build: &Pinned,
+    on_line: &(impl Fn(String) + Send + Sync),
+) -> anyhow::Result<PathBuf> {
+    let root = node_dir().ok_or_else(|| anyhow::anyhow!("tab has no folder for tools yet."))?;
+    if node_exe(&root).is_file() && npm_cli(&root).is_file() {
+        return Ok(root);
+    }
+    let staging = root.with_extension("unpack");
+    download_unpack(
+        &format!("Node {}", node_pin().version),
+        build,
+        &staging,
+        on_line,
+    )
+    .await?;
+    // The archive holds one folder, `node-v<version>-<target>`.
+    let top = std::fs::read_dir(&staging)?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .ok_or_else(|| anyhow::anyhow!("The Node download is empty."))?;
+    let _ = tokio::fs::remove_dir_all(&root).await;
+    tokio::fs::rename(&top, &root).await?;
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    anyhow::ensure!(
+        node_exe(&root).is_file(),
+        "The Node download has no node in it."
+    );
+    Ok(root)
+}
+
+fn node_exe(root: &Path) -> PathBuf {
+    if cfg!(windows) {
+        root.join("node.exe")
+    } else {
+        root.join("bin").join("node")
+    }
+}
+
+fn npm_cli(root: &Path) -> PathBuf {
+    let lib = if cfg!(windows) {
+        root.to_path_buf()
+    } else {
+        root.join("lib")
+    };
+    lib.join("node_modules")
+        .join("npm")
+        .join("bin")
+        .join("npm-cli.js")
 }
 
 fn http() -> &'static reqwest::Client {
@@ -144,68 +352,26 @@ fn http() -> &'static reqwest::Client {
     })
 }
 
-#[derive(serde::Deserialize)]
-struct Release {
-    tag_name: String,
-    assets: Vec<Asset>,
-}
-
-#[derive(serde::Deserialize)]
-struct Asset {
-    name: String,
-    browser_download_url: String,
-    /// `sha256:<hex>`, as GitHub computed it on upload.
-    digest: Option<String>,
-}
-
-/// Downloads the newest release's `asset`, checks its digest and keeps just
-/// the adapter's program from it (the archive also carries a Claude Code of
-/// its own; tab points the adapter at the person's).
-async fn download(
-    cmd: &str,
-    adapter: &AcpAdapter,
-    asset: &str,
-    dir: &Path,
+/// Downloads `build`, refuses it unless it has the pinned sha256, and
+/// unpacks it into `to` (emptied first).
+async fn download_unpack(
+    what: &str,
+    build: &Pinned,
+    to: &Path,
     on_line: &(impl Fn(String) + Send + Sync),
 ) -> anyhow::Result<()> {
-    let slug = repo_slug(adapter)
-        .ok_or_else(|| anyhow::anyhow!("{} isn't a GitHub repository.", adapter.repo))?;
-    let release: Release = http()
-        .get(format!(
-            "https://api.github.com/repos/{slug}/releases/latest"
-        ))
-        .header("Accept", "application/vnd.github+json")
-        .timeout(Duration::from_secs(30))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let a = release
-        .assets
-        .iter()
-        .find(|a| a.name == asset)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "{cmd} {} has no build for this computer ({asset}).",
-                release.tag_name
-            )
-        })?;
-    let want = a
-        .digest
-        .as_deref()
-        .and_then(|d| d.strip_prefix("sha256:"))
-        .ok_or_else(|| anyhow::anyhow!("GitHub lists no checksum for {asset}."))?
-        .to_ascii_lowercase();
-    on_line(format!("Downloading {cmd} {}", release.tag_name));
+    on_line(format!("Downloading {what}"));
     let mut resp = http()
-        .get(&a.browser_download_url)
+        .get(&build.url)
         .timeout(Duration::from_secs(1800))
         .send()
         .await?
         .error_for_status()?;
     let total = resp.content_length();
-    let archive = dir.join(format!(".download-{asset}"));
+    let _ = tokio::fs::remove_dir_all(to).await;
+    tokio::fs::create_dir_all(to).await?;
+    let name = build.url.rsplit('/').next().unwrap_or("download");
+    let archive = to.join(name);
     let mut file = tokio::fs::File::create(&archive).await?;
     let (mut hash, mut got, mut shown) = (Sha256::new(), 0u64, 0u64);
     while let Some(chunk) = resp.chunk().await? {
@@ -216,79 +382,46 @@ async fn download(
             let pct = got * 100 / t;
             if pct >= shown + 10 {
                 shown = pct - pct % 10;
-                on_line(format!("Downloading {cmd} {}: {shown}%", release.tag_name));
+                on_line(format!("Downloading {what}: {shown}%"));
             }
         }
     }
     tokio::io::AsyncWriteExt::flush(&mut file).await?;
     drop(file);
     let have: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    if have != want {
-        let _ = tokio::fs::remove_file(&archive).await;
-        anyhow::bail!("{asset} didn't match its checksum, so tab didn't keep it.");
+    if !have.eq_ignore_ascii_case(&build.sha256) {
+        let _ = tokio::fs::remove_dir_all(to).await;
+        anyhow::bail!("{name} didn't match the checksum tab has for it, so tab didn't keep it.");
     }
-    on_line(format!("Unpacking {cmd}"));
-    let exe_name = format!("{cmd}{}", std::env::consts::EXE_SUFFIX);
-    let staged = dir.join(format!(".new-{exe_name}"));
-    let r = if asset.ends_with(".zip") {
-        let (archive, staged, exe_name) = (archive.clone(), staged.clone(), exe_name.clone());
-        tokio::task::spawn_blocking(move || unzip_one(&archive, &exe_name, &staged)).await?
-    } else {
-        untar_one(&archive, &exe_name, dir, &staged).await
-    };
+    on_line(format!("Unpacking {what}"));
+    let r = unpack(&archive, to).await;
     let _ = tokio::fs::remove_file(&archive).await;
-    r?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).await?;
+    r
+}
+
+/// Unpacks a `.zip` (in-process) or `.tar.gz` (the system's `tar`).
+async fn unpack(archive: &Path, to: &Path) -> anyhow::Result<()> {
+    if archive.extension().is_some_and(|e| e == "zip") {
+        let (archive, to) = (archive.to_path_buf(), to.to_path_buf());
+        return tokio::task::spawn_blocking(move || {
+            zip::ZipArchive::new(std::fs::File::open(&archive)?)?.extract(&to)?;
+            anyhow::Ok(())
+        })
+        .await?;
     }
-    tokio::fs::rename(&staged, dir.join(&exe_name)).await?;
-    let _ = tokio::fs::write(dir.join("version"), &release.tag_name).await;
-    Ok(())
-}
-
-/// Copies the zip's `name` entry (at any depth) to `to`.
-fn unzip_one(archive: &Path, name: &str, to: &Path) -> anyhow::Result<()> {
-    let mut zip = zip::ZipArchive::new(std::fs::File::open(archive)?)?;
-    let path = zip
-        .file_names()
-        .filter_map(Result::ok)
-        .find(|n| n.rsplit('/').next() == Some(name))
-        .map(|n| n.into_owned())
-        .ok_or_else(|| anyhow::anyhow!("The download has no {name} in it."))?;
-    let mut entry = zip.by_name(&path)?;
-    let mut out = std::fs::File::create(to)?;
-    std::io::copy(&mut entry, &mut out)?;
-    Ok(())
-}
-
-/// Unpacks a `.tar.gz` with the system's `tar` and moves its `name` to `to`.
-async fn untar_one(archive: &Path, name: &str, dir: &Path, to: &Path) -> anyhow::Result<()> {
-    let tmp = dir.join(".unpack");
-    let _ = tokio::fs::remove_dir_all(&tmp).await;
-    tokio::fs::create_dir_all(&tmp).await?;
     let out = command(Path::new("tar"))
         .arg("-xzf")
         .arg(archive)
         .arg("-C")
-        .arg(&tmp)
+        .arg(to)
         .output()
         .await?;
-    let found = out
-        .status
-        .success()
-        .then(|| find_named(&tmp, name, 2))
-        .flatten();
-    let r = match found {
-        Some(p) => tokio::fs::rename(&p, to).await.map_err(Into::into),
-        None => Err(anyhow::anyhow!(
-            "Unpacking the download failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
-    };
-    let _ = tokio::fs::remove_dir_all(&tmp).await;
-    r
+    anyhow::ensure!(
+        out.status.success(),
+        "Unpacking the download failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    Ok(())
 }
 
 fn find_named(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
@@ -314,78 +447,132 @@ fn find_named(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn claude_code_has_a_release_build_for_this_computer() {
-        let (cmd, a) = spec(AgentKind::ClaudeCode).expect("claude-agent-acp");
-        assert_eq!(cmd, "claude-agent-acp");
-        assert_eq!(repo_slug(a), Some("agentclientprotocol/claude-agent-acp"));
-        let asset = release_asset(a).expect("a build for this OS and CPU");
-        assert!(asset.starts_with("claude-agent-acp-"), "{asset}");
-        let ext = if cfg!(target_os = "linux") {
-            ".tar.gz"
-        } else {
-            ".zip"
-        };
-        assert!(asset.ends_with(ext), "{asset}");
-    }
-
     fn scratch() -> PathBuf {
         let d = std::env::temp_dir().join(format!("tab-adapter-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
 
+    fn is_sha256(s: &str) -> bool {
+        s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
     #[test]
-    fn unzip_keeps_only_the_program() {
+    fn every_adapter_is_pinned() {
+        for h in catalog::harnesses() {
+            let Some(acp) = h.acp.as_ref() else { continue };
+            let Some(a) = acp.adapter.as_ref() else {
+                continue;
+            };
+            let cmd = acp.command.as_deref().unwrap();
+            if let Some(r) = &a.release {
+                assert!(!r.builds.is_empty(), "{cmd}");
+                for (t, b) in &r.builds {
+                    assert!(is_sha256(&b.sha256), "{cmd} {t}");
+                    assert!(
+                        b.url
+                            .starts_with(&format!("{}/releases/download/v{}/", a.repo, r.version)),
+                        "{cmd} {t}: {}",
+                        b.url
+                    );
+                }
+                continue;
+            }
+            // npm: the lockfile pins exactly the version named, every
+            // package has a hash, and none runs an install script.
+            let (pkg, version) = (
+                a.npm.as_deref().unwrap(),
+                a.version.as_deref().expect("a pinned version"),
+            );
+            let lock: serde_json::Value =
+                serde_json::from_str(lockfile(cmd).expect("a lockfile")).unwrap();
+            assert_eq!(lock["packages"][""]["dependencies"][pkg], version, "{cmd}");
+            assert_eq!(
+                lock["packages"][format!("node_modules/{pkg}")]["version"],
+                version,
+                "{cmd}"
+            );
+            for (path, p) in lock["packages"].as_object().unwrap() {
+                if path.is_empty() {
+                    continue;
+                }
+                assert!(
+                    p["integrity"]
+                        .as_str()
+                        .is_some_and(|i| i.starts_with("sha512-")),
+                    "{path}"
+                );
+                assert!(
+                    p.get("hasInstallScript").is_none(),
+                    "{path} runs an install script"
+                );
+            }
+        }
+        for (t, b) in &node_pin().builds {
+            assert!(is_sha256(&b.sha256), "node {t}");
+            assert!(
+                b.url
+                    .starts_with(&format!("https://nodejs.org/dist/v{}/", node_pin().version)),
+                "node {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn this_computer_has_a_build_of_each() {
+        if target().is_some_and(|t| t.ends_with("musl")) {
+            return;
+        }
+        for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
+            assert!(plan(kind).is_some(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn unpacks_a_zip() {
         use std::io::Write;
         let dir = scratch();
         let archive = dir.join("a.zip");
         let mut w = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
         let opts = zip::write::SimpleFileOptions::default();
-        for (n, body) in [("claude", "other"), ("claude-agent-acp", "adapter")] {
+        for (n, body) in [("claude", "other"), ("pkg/claude-agent-acp", "adapter")] {
             w.start_file(n, opts).unwrap();
             w.write_all(body.as_bytes()).unwrap();
         }
         w.finish().unwrap();
         let to = dir.join("out");
-        unzip_one(&archive, "claude-agent-acp", &to).unwrap();
-        assert_eq!(std::fs::read_to_string(&to).unwrap(), "adapter");
-        assert!(unzip_one(&archive, "missing", &to).is_err());
+        std::fs::create_dir(&to).unwrap();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(unpack(&archive, &to))
+            .unwrap();
+        let exe = find_named(&to, "claude-agent-acp", 2).unwrap();
+        assert_eq!(std::fs::read_to_string(exe).unwrap(), "adapter");
+        assert_eq!(find_named(&to, "claude-agent-acp", 0), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Downloads the real release (about 200 MB): `cargo test -p tab-core
-    /// downloads_claude_agent_acp -- --ignored`.
+    /// Downloads the real pinned builds (a few hundred MB):
+    /// `cargo test -p tab-core installs_pinned_adapters -- --ignored`.
     #[tokio::test]
     #[ignore]
-    async fn downloads_claude_agent_acp() {
+    async fn installs_pinned_adapters() {
         let dir = scratch();
         set_dir(dir.clone());
-        let exe = install(AgentKind::ClaudeCode, |l| eprintln!("{l}"))
-            .await
-            .unwrap();
-        assert_eq!(
-            exe,
-            dir.join("claude_code")
-                .join(format!("claude-agent-acp{}", std::env::consts::EXE_SUFFIX))
-        );
-        assert_eq!(find(AgentKind::ClaudeCode), Some(exe));
+        for kind in [AgentKind::ClaudeCode, AgentKind::Codex] {
+            assert!(needs_install(kind));
+            let l = ensure(kind, |l| eprintln!("{l}")).await.unwrap();
+            assert!(l.program.is_file(), "{l:?}");
+            assert!(current(kind) && !needs_install(kind), "{kind:?}");
+            assert_eq!(find(kind), Some(l));
+        }
+        // Claude's: just the program and its pin.
         let left: Vec<_> = std::fs::read_dir(dir.join("claude_code"))
             .unwrap()
             .flatten()
             .map(|e| e.file_name())
             .collect();
-        assert_eq!(left.len(), 2, "just the program and its version: {left:?}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn finds_a_file_one_folder_down() {
-        let dir = scratch();
-        std::fs::create_dir(dir.join("pkg")).unwrap();
-        std::fs::write(dir.join("pkg").join("x"), "").unwrap();
-        assert_eq!(find_named(&dir, "x", 2), Some(dir.join("pkg").join("x")));
-        assert_eq!(find_named(&dir, "x", 0), None);
+        assert_eq!(left.len(), 2, "{left:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

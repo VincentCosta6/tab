@@ -112,7 +112,7 @@ async fn run(
         )?),
         _ => None,
     };
-    let exe = match &spec.command {
+    let start = match &spec.command {
         // Installed now if it's missing (the first chat after an update).
         Some(c) if spec.adapter.is_some() => {
             super::adapter::ensure(kind, |l| tracing::info!("{l}"))
@@ -124,12 +124,16 @@ async fn run(
                     )
                 })?
         }
-        Some(c) => super::resolve(c)?,
-        None => super::agent_exe(&cfg, kind)?,
+        Some(c) => super::adapter::Launch::program(super::resolve(c)?),
+        None => super::adapter::Launch::program(super::agent_exe(&cfg, kind)?),
     };
+    let exe = start.program;
+    let mut args = start.args;
+    args.extend(spec.args_for(strict));
+    policy.readable.extend(start.readable);
     let cwd = std::path::Path::new(&session.cwd);
     let mut prepared = crate::sandbox::current()
-        .command(&exe, &spec.args_for(strict), cwd, &policy)
+        .command(&exe, &args, cwd, &policy)
         .await?;
     hub.add_shims(session, &mut prepared.cmd);
     for (k, v) in spec.env_for(strict) {

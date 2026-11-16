@@ -2480,15 +2480,19 @@ pub fn command(exe: &std::path::Path) -> tokio::process::Command {
     cmd
 }
 
-/// Starts installing `kind`'s ACP adapter in the background, when tab can
-/// do that by itself. A chat that starts meanwhile waits for it.
+/// Starts installing (or updating to the pinned version) `kind`'s ACP
+/// adapter in the background, when tab can do that by itself. A chat that
+/// starts meanwhile waits for it. Whether tab can.
 pub fn prepare_adapter(kind: AgentKind) -> bool {
     if !adapter::installable(kind) {
         return false;
     }
+    if !adapter::needs_install(kind) {
+        return true;
+    }
     tokio::spawn(async move {
         match adapter::ensure(kind, |l| tracing::debug!("{l}")).await {
-            Ok(p) => tracing::info!(adapter = %p.display(), "ACP adapter ready"),
+            Ok(l) => tracing::info!(adapter = %l.program.display(), "ACP adapter ready"),
             Err(e) => tracing::warn!("setting up {}'s ACP adapter failed: {e:#}", kind.as_str()),
         }
     });
@@ -2536,8 +2540,8 @@ async fn probe(kind: AgentKind, custom: Option<&str>) -> AgentProbe {
             let acp = catalog::harness(kind).acp.as_ref().filter(|a| !a.preview);
             if let Some((cmd, adapter)) =
                 acp.and_then(|a| Some((a.command.as_deref()?, a.adapter.as_ref()?)))
-                && adapter::find(kind).is_none()
                 && !prepare_adapter(kind)
+                && adapter::find(kind).is_none()
             {
                 p.found = false;
                 p.error = Some(format!(
