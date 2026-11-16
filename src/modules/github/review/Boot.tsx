@@ -76,7 +76,7 @@ export function Boot({ pr, loading, boot, onBack }: { pr: PullReview | undefined
         ) : (
           <div className="rv-boot-foot subtle">
             <span>First open clones the repository on this computer; after that it's a quick fetch.</span>
-            {slow && pr && !loading && <button className="rv-link" onClick={boot.goRemote}>Skip and review without it</button>}
+            {slow && (pr && !loading ? <button className="rv-link" onClick={boot.goRemote}>Skip and review without it</button> : <button className="rv-link" onClick={onBack}>Back</button>)}
           </div>
         )}
       </div>

@@ -43,7 +43,14 @@ export const queryClient = new QueryClient({
       refetchOnWindowFocus: false,
       refetchOnReconnect: false,
       retry: 1,
+      // Every query is a call into the local backend, which deals with the
+      // network itself. By default React Query pauses fetches after the
+      // webview reports "offline" and waits for an "online" event that a
+      // sleep/wake or Wi-Fi blip doesn't always send: a PR opened then
+      // sat on "Asking GitHub…" forever.
+      networkMode: "always",
     },
+    mutations: { networkMode: "always" },
   },
 });
 
