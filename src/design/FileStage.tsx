@@ -245,13 +245,6 @@ function FileView({ file, files, index, replaced, fresh, onStep, onPick, onClose
   const local = isLocalPath(file.path);
   const [error, setError] = useState<string | null>(null);
   const [source, setSource] = useState(false);
-  const [outline, setOutline] = useState(() => {
-    try { return localStorage.getItem(OUTLINE_KEY) !== "off"; } catch { return true; }
-  });
-  const toggleOutline = () => setOutline((v) => {
-    try { localStorage.setItem(OUTLINE_KEY, v ? "off" : "on"); } catch { /* private mode */ }
-    return !v;
-  });
   const ref = useRef<HTMLElement>(null);
 
   useEffect(() => { setError(null); setSource(false); }, [file.path]);
@@ -298,11 +291,6 @@ function FileView({ file, files, index, replaced, fresh, onStep, onPick, onClose
             <Icon name={source ? "eye" : "code"} size={14} />
           </button>
         )}
-        {kind === "markdown" && (
-          <button onClick={toggleOutline} title={outline ? "Hide the outline" : "Show the outline"} aria-pressed={outline}>
-            <Icon name="panel-left" size={14} />
-          </button>
-        )}
         {kind === "image" && (
           <button onClick={() => openImages(files.filter((f) => kindOf(f.path) === "image").map((f) => ({ src: f.path, name: f.name })), Math.max(0, files.filter((f) => kindOf(f.path) === "image").findIndex((f) => f.path === file.path)))} title="Full screen"><Icon name="maximize" size={14} /></button>
         )}
@@ -318,7 +306,7 @@ function FileView({ file, files, index, replaced, fresh, onStep, onPick, onClose
         ) : kind === "other" ? (
           <OtherContent name={name} onOpen={() => openExternally(false)} onReveal={() => openExternally(true)} canOpen={local && inTauri} />
         ) : (
-          <ReadContent key={file.path} path={file.path} kind={kind === "html" && source ? "text" : kind} outline={outline} />
+          <ReadContent key={file.path} path={file.path} kind={kind === "html" && source ? "text" : kind} />
         )}
       </div>
       <div className="stage-resize" onMouseDown={onResize} title="Drag to resize the chat" />
@@ -427,7 +415,7 @@ function TextContent({ text }: { text: string }) {
   );
 }
 
-function ReadContent({ path, kind, outline }: { path: string; kind: Exclude<Kind, "image" | "video" | "audio" | "other">; outline: boolean }) {
+function ReadContent({ path, kind }: { path: string; kind: Exclude<Kind, "image" | "video" | "audio" | "other"> }) {
   const { data, error } = useQuery({
     queryKey: ["file", path],
     queryFn: () => api.fileRead(path),
@@ -450,7 +438,7 @@ function ReadContent({ path, kind, outline }: { path: string; kind: Exclude<Kind
   if (kind === "pdf") return <iframe className="stage-pdf" src={url!} title={fileName(path)} />;
   if (kind === "svg") return <div className="stage-image"><img src={url!} alt="" /></div>;
   if (kind === "html") return <HtmlFrame html={text ?? ""} title={fileName(path)} />;
-  if (kind === "markdown") return <MarkdownContent path={path} text={text ?? ""} outline={outline} />;
+  if (kind === "markdown") return <MarkdownContent path={path} text={text ?? ""} />;
   return <TextContent text={text ?? ""} />;
 }
 
@@ -479,15 +467,23 @@ function useHeadings(doc: React.RefObject<HTMLElement | null>, text: string): He
 
 /**
  * A markdown document, with an outline of its headings down the left side
- * (when it has a few and the outline is on). Clicking one scrolls to it; the
- * section being read is marked as you scroll.
+ * (when it has a few). Clicking one scrolls to it; the section being read is
+ * marked as you scroll. It collapses to a button, and stays as it was left.
  */
-function MarkdownContent({ path, text, outline }: { path: string; text: string; outline: boolean }) {
+function MarkdownContent({ path, text }: { path: string; text: string }) {
   const scroller = useRef<HTMLDivElement>(null);
   const doc = useRef<HTMLDivElement>(null);
   const headings = useHeadings(doc, text);
   const [active, setActive] = useState(0);
-  const show = outline && headings.length > 1;
+  const [outline, setOutline] = useState(() => {
+    try { return localStorage.getItem(OUTLINE_KEY) !== "off"; } catch { return true; }
+  });
+  const toggle = () => setOutline((v) => {
+    try { localStorage.setItem(OUTLINE_KEY, v ? "off" : "on"); } catch { /* private mode */ }
+    return !v;
+  });
+  const has = headings.length > 1;
+  const show = outline && has;
 
   useEffect(() => {
     const el = scroller.current;
@@ -512,6 +508,10 @@ function MarkdownContent({ path, text, outline }: { path: string; text: string; 
     <div className="stage-md">
       {show && (
         <nav className="stage-outline" aria-label="Outline">
+          <div className="stage-outline-head">
+            <span>Outline</span>
+            <button onClick={toggle} title="Hide the outline" aria-label="Hide the outline"><Icon name="panel-left" size={14} /></button>
+          </div>
           {headings.map((h, i) => (
             <button
               key={i}
@@ -524,6 +524,11 @@ function MarkdownContent({ path, text, outline }: { path: string; text: string; 
             </button>
           ))}
         </nav>
+      )}
+      {has && !outline && (
+        <button className="stage-outline-open" onClick={toggle} title="Show the outline" aria-label="Show the outline">
+          <Icon name="panel-left" size={14} />
+        </button>
       )}
       <div className="stage-md-scroll" ref={scroller}>
         <div className="stage-doc" ref={doc}>
