@@ -141,7 +141,7 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .queue-list { --thread-line: var(--border); }
 .thread { --indent: calc(var(--depth, 0) * 28px); }
 .thread > .row { padding-left: calc(var(--space-4) + var(--indent)); }
-.thread.has-kids > .row::after { content: ""; position: absolute; left: calc(32px + var(--indent)); top: 42px; bottom: 0; border-left: 1px solid var(--thread-line); pointer-events: none; }
+.thread.has-kids > .row::after { content: ""; position: absolute; left: calc(30px + var(--indent)); top: 42px; bottom: 0; border-left: 1px solid var(--thread-line); pointer-events: none; }
 .thread-kids { position: relative; }
 .thread-kids > .thread { position: relative; }
 .thread-kids > .thread::before { content: ""; position: absolute; z-index: 1; left: calc(4px + var(--indent)); top: 0; width: 10px; height: 24px; border: solid var(--thread-line); border-width: 0 0 1px 1px; border-bottom-left-radius: 8px; pointer-events: none; }
