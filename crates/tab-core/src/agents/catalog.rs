@@ -381,22 +381,39 @@ pub fn options(h: &Harness, listed: &str) -> Vec<ModelOption> {
                 .map(|(p, m)| opt(&format!("{p}/{m}"), &m, false))
                 .collect()
         }
-        // Claude Code lists its aliases (`opus`, `fable`) first, each with
-        // the model it stands for today, then pinned older ones. Chats keep
-        // the model itself, so a new release doesn't change a running chat;
-        // the aliases' models are the common ones. Its `default` is tab's
+        // Claude Code lists its aliases (`opus`, `fable`) with the model each
+        // stands for today, and pinned models, some newer than their alias
+        // (`fable` can still mean Fable 5.1 once 5.2 is out). Chats keep the
+        // model itself, so a new release doesn't change a running chat; each
+        // family's newest model is the common one. Its `default` is tab's
         // "Default model" row.
-        Some("claude_initialize") => answer(listed, format)
-            .and_then(|v| v["response"]["response"]["models"].as_array().cloned())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|m| {
-                let value = m["value"].as_str()?;
-                let id = m["resolvedModel"].as_str().unwrap_or(value);
-                let label = m["displayName"].as_str().unwrap_or(id);
-                (value != "default").then(|| opt(id, label, value != id))
-            })
-            .collect(),
+        Some("claude_initialize") => {
+            let mut models: Vec<ModelOption> = answer(listed, format)
+                .and_then(|v| v["response"]["response"]["models"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|m| {
+                    let value = m["value"].as_str()?;
+                    let id = m["resolvedModel"].as_str().unwrap_or(value);
+                    let label = m["displayName"].as_str().unwrap_or(id);
+                    (value != "default").then(|| opt(id, label, false))
+                })
+                .collect();
+            let newest: Vec<bool> = models
+                .iter()
+                .map(|m| {
+                    let (family, version) = family_version(&m.id);
+                    !models.iter().any(|o| {
+                        let (f, v) = family_version(&o.id);
+                        f == family && v > version
+                    })
+                })
+                .collect();
+            for (m, newest) in models.iter_mut().zip(newest) {
+                m.common = newest;
+            }
+            models
+        }
         // Codex's own picker: every model it doesn't hide.
         Some("codex_model_list") => answer(listed, format)
             .and_then(|v| v["result"]["data"].as_array().cloned())
@@ -424,6 +441,19 @@ pub fn options(h: &Harness, listed: &str) -> Vec<ModelOption> {
     let mut seen = std::collections::HashSet::new();
     out.retain(|m| seen.insert(m.id.clone()));
     out
+}
+
+/// A model id's family and version: `claude-haiku-4-5-20251001` is
+/// `claude-haiku`, `[4, 5, 20251001]`.
+fn family_version(id: &str) -> (&str, Vec<u64>) {
+    let mut family = id;
+    let mut version = Vec::new();
+    while let Some((rest, n)) = family.rsplit_once('-') {
+        let Ok(n) = n.parse() else { break };
+        version.insert(0, n);
+        family = rest;
+    }
+    (family, version)
 }
 
 /// For a protocol listing, the line that answers tab's request.
@@ -632,7 +662,7 @@ mod tests {
     #[test]
     fn claude_codes_models_come_from_its_initialize_answer() {
         let out = r#"{"type":"system","subtype":"other"}
-{"type":"control_response","response":{"subtype":"success","request_id":"tab_models","response":{"models":[{"value":"default","resolvedModel":"claude-opus-5-5","displayName":"Default (recommended)"},{"value":"opus","resolvedModel":"claude-opus-5-5","displayName":"Opus 5.5"},{"value":"fable","resolvedModel":"claude-fable-5-2","displayName":"Fable 5.2"},{"value":"claude-fable-5-1","resolvedModel":"claude-fable-5-1","displayName":"Fable 5.1"},{"value":"claude-opus-4-8","displayName":"Opus 4.8"}]}}}"#;
+{"type":"control_response","response":{"subtype":"success","request_id":"tab_models","response":{"models":[{"value":"default","resolvedModel":"claude-opus-5-5","displayName":"Default (recommended)"},{"value":"opus","resolvedModel":"claude-opus-5-5","displayName":"Opus 5.5"},{"value":"claude-fable-5-2","resolvedModel":"claude-fable-5-2","displayName":"Fable 5.2"},{"value":"fable","resolvedModel":"claude-fable-5-1","displayName":"Fable 5.1"},{"value":"claude-haiku-4-5-20251001","displayName":"Haiku 4.5"},{"value":"claude-opus-4-8","displayName":"Opus 4.8"}]}}}"#;
         let m: Vec<_> = options(harness(AgentKind::ClaudeCode), out)
             .into_iter()
             .map(|m| (m.id, m.label, m.common))
@@ -644,6 +674,7 @@ mod tests {
                 row("claude-opus-5-5", "Opus 5.5", true),
                 row("claude-fable-5-2", "Fable 5.2", true),
                 row("claude-fable-5-1", "Fable 5.1", false),
+                row("claude-haiku-4-5-20251001", "Haiku 4.5", true),
                 row("claude-opus-4-8", "Opus 4.8", false),
             ]
         );
