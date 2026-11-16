@@ -2,11 +2,13 @@
 // PR) opens that view; otherwise a link to something in the queue opens that
 // item; a link no connector previews opens in tab's own browser; anything
 // else (a Slack or Jira link a connector knows but has no view for) goes to
-// the system browser. Every in-app view keeps its own "Open on GitHub" style
+// the system browser. A link to the item already open ("Open in Sentry" on a
+// Sentry issue) has nowhere new to go in tab, so it opens in tab's browser. Every in-app view keeps its own "Open on GitHub" style
 // button, and ⌘, Ctrl or Shift click always goes to the system browser.
 
 import { api, inTauri, openUrl } from "./api";
 import { openInTabBrowser } from "./browser";
+import { whereAmI } from "./nav";
 
 /**
  * What a connector says about a link it recognises (a GitHub PR, a Slack
@@ -96,9 +98,11 @@ export async function openLink(url: string, e?: Modifiers) {
     const link = parseLink(url);
     if (link?.open?.()) return;
     const item = await api.itemByUrl(link?.canonical ?? url).catch(() => null);
-    if (item) return openItem(item.id);
+    const here = whereAmI();
+    const shown = here.tab === "work" && item?.id === here.itemId;
+    if (item && !shown) return openItem(item.id);
     // The web build's browser is an iframe most sites refuse, so it keeps the system browser.
-    if (!link?.preview && inTauri) return openInTabBrowser(url);
+    if ((!link?.preview || shown) && inTauri) return openInTabBrowser(url);
   }
   return openUrl(url);
 }
