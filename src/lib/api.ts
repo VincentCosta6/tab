@@ -356,6 +356,14 @@ export const api = {
   browserVisible: (id: string, visible: boolean) => call<void>("browser_visible", { id, visible }),
   browserNav: (id: string, action: "back" | "forward" | "reload" | "go", url?: string) => call<void>("browser_nav", { id, action, url: url ?? null }),
   browserClose: (id: string) => call<void>("browser_close", { id }),
+  /** Browser profiles on this computer whose logins can be imported. */
+  browserLoginSources: () => call<LoginSource[]>("browser_login_sources"),
+  /** The sites a profile is signed in to, most cookies first. */
+  browserLoginSites: (sourceId: string) => call<LoginSite[]>("browser_login_sites", { sourceId }),
+  /** Copies those sites' cookies into the in-app browser; resolves with how many. macOS may ask for the keychain first. */
+  browserImportLogins: (sourceId: string, sites: string[]) => call<number>("browser_import_logins", { sourceId, sites }),
+  /** Answers "which account?" for a passkey sign-in; null cancels. */
+  browserPasskeyChoose: (request: string, passkey: string | null) => call<void>("browser_passkey_choose", { request, passkey }),
   itemActivity: (id: string) => call<Activity[]>("item_activity", { id }),
 };
 
@@ -366,6 +374,17 @@ export async function onBrowserEvent(cb: (e: { id: string; kind: "url" | "title"
   if (!inTauri) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
   return listen<{ id: string; kind: "url" | "title" | "loading" | "loaded"; value: string }>("tab://browser", (e) => cb(e.payload));
+}
+
+export interface LoginSource { id: string; name: string }
+export interface LoginSite { site: string; cookies: number }
+/** A page asked for one of tab's passkeys: pick an account, there is none, or the question is over. */
+export interface PasskeyEvent { kind: "choose" | "none" | "done"; request: string; tab: string; site: string; accounts: { id: string; name: string }[] }
+
+export async function onPasskeyEvent(cb: (e: PasskeyEvent) => void): Promise<() => void> {
+  if (!inTauri) return () => {};
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<PasskeyEvent>("tab://passkey", (e) => cb(e.payload));
 }
 
 export async function openUrl(url: string) {

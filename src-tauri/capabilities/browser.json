@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "browser-passkeys",
+  "description": "Pages in the in-app browser may ask for tab's passkeys. The command checks the page's address itself and asks for Touch ID; nothing else is open to them.",
+  "webviews": ["browser-*"],
+  "remote": { "urls": ["https://*", "http://localhost:*"] },
+  "permissions": ["passkey:allow-request"]
+}
