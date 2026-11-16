@@ -1327,5 +1327,6 @@ label.import-row { cursor: pointer; }
 .link-bar-state { flex: none; margin-left: auto; padding: 1px 8px; border-radius: 999px; background: var(--tone-bg); color: var(--tone-fg); font-size: var(--text-xs); }
 .link-bar-btn { flex: none; display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 8px; border: 1px solid transparent; border-radius: var(--radius-sm); background: none; color: var(--fg-muted); font: inherit; font-size: var(--text-xs); cursor: pointer; }
 .link-bar-btn:hover { background: var(--bg-hover, var(--tone-neutral-bg)); color: var(--fg); }
-.link-bar-autofix { width: 26px; justify-content: center; padding: 0; }
-.link-bar-autofix.on, .link-bar-autofix.on:hover { color: var(--tone-success-fg); }
+.link-bar-autofix { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; color: var(--fg-muted); font-size: var(--text-xs); cursor: pointer; white-space: nowrap; user-select: none; }
+.link-bar-autofix:hover { color: var(--fg); }
+.link-bar-autofix input { margin: 0; accent-color: var(--tone-accent-fg); cursor: pointer; }

@@ -48,7 +48,7 @@ export function LinkBar({ itemId }: { itemId: string }) {
 function Bar({ status: s, watch, onAutofix, onDismiss }: { status: ContextStatus; watch?: AutofixWatch; onAutofix: (on: boolean) => void; onDismiss: () => void }) {
   const on = !!watch?.enabled;
   const autofixTitle = on
-    ? `Autofix is on: checks every minute, less often when nothing changes.${watch?.last ? ` ${watch.last}` : ""}${watch?.checked_at ? ` (${timeAgo(watch.checked_at)})` : ""}. Click to turn off.`
+    ? `Autofix is on: checks every minute, less often when nothing changes.${watch?.last ? ` ${watch.last}` : ""}${watch?.checked_at ? ` (${timeAgo(watch.checked_at)})` : ""}.`
     : "Autofix: watch for failing checks and review comments and have the agent fix or answer them";
   return (
     <div className="link-bar">
@@ -59,9 +59,10 @@ function Bar({ status: s, watch, onAutofix, onDismiss }: { status: ContextStatus
         <span className={cx("link-bar-state", `tone-${s.tone}`)}>{s.label}</span>
       </button>
       {s.autofix && (
-        <button className={cx("link-bar-btn", "link-bar-autofix", on && "on")} aria-pressed={on} aria-label="Autofix" title={autofixTitle} onClick={() => onAutofix(!on)}>
-          <Icon name="check" size={14} />
-        </button>
+        <label className="link-bar-autofix" title={autofixTitle}>
+          <input type="checkbox" checked={on} onChange={(e) => onAutofix(e.target.checked)} />
+          Autofix PR
+        </label>
       )}
       <button className="link-bar-btn" title="Hide this bar (turns autofix off)" aria-label="Dismiss" onClick={onDismiss}>
         <Icon name="x" size={14} />
