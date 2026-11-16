@@ -730,12 +730,8 @@ function MessageView({ m, result, onSend, rewind }: { m: SessionMessage; result?
   if (m.kind === "tool_result") return <details className="msg-tool"><summary><Icon name="terminal" size={12} /><span className="msg-tool-name">Output</span></summary><pre>{m.content}</pre></details>;
   if (m.kind === "error") return <div className="msg-error"><Icon name="x-circle" size={14} /><span>{m.content}</span></div>;
   if (m.kind === "approval" && m.meta?.answers && typeof m.meta.answers === "object") return <Answers answers={m.meta.answers} />;
-  if (m.kind === "result") {
-    const cost = m.meta?.cost_usd;
-    const secs = m.meta?.duration_ms ? Math.round(m.meta.duration_ms / 1000) : null;
-    if (cost == null && secs == null) return null;
-    return <div className="msg-note">{[secs != null && `${secs}s`, cost != null && `$${Number(cost).toFixed(3)}`].filter(Boolean).join(" · ")}</div>;
-  }
+  // A turn's time and cost are in the context meter, not between turns.
+  if (m.kind === "result") return null;
   return <div className="msg-note">{m.content}</div>;
 }
 
