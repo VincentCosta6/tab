@@ -61,7 +61,7 @@ function suggestions(item: QueueItem): string[] {
  * The chat for one item. With `body`, that replaces the transcript (e.g. an
  * email being read) and `onSent` fires after a message goes out.
  */
-export function ChatView({ item, body, showBody = true, onSent }: { item: QueueItem; body?: React.ReactNode; showBody?: boolean; onSent?: () => void }) {
+export function ChatView({ item, body, showBody = true, onSent, focus }: { item: QueueItem; body?: React.ReactNode; showBody?: boolean; onSent?: () => void; focus?: number }) {
   const { data: chat } = useChat(item.id);
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
@@ -109,7 +109,7 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
       {(!body || !showBody) && <Transcript chat={chat} suggestions={suggestions(item)} onSuggest={send} onSend={send} />}
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
       <LinkBar itemId={item.id} />
-      <Composer chat={chat} onSend={send} onShell={shell} placeholder={`Ask about this, or tell the agent what to do…`} />
+      <Composer chat={chat} onSend={send} onShell={shell} placeholder={`Ask about this, or tell the agent what to do…`} autoFocus={focus} />
     </div>
   );
 }
@@ -1431,7 +1431,7 @@ function remember(text: string) {
   }
 }
 
-export function Composer({ chat, onSend, onShell, placeholder, autoFocus, extra }: { chat: Chat | undefined; onSend: (text: string, attachments: string[]) => void; onShell?: (command: string) => void; placeholder: string; autoFocus?: boolean; extra?: React.ReactNode }) {
+export function Composer({ chat, onSend, onShell, placeholder, autoFocus, extra }: { chat: Chat | undefined; onSend: (text: string, attachments: string[]) => void; onShell?: (command: string) => void; placeholder: string; autoFocus?: boolean | number; extra?: React.ReactNode }) {
   const { data: config } = useConfig();
   const [text, setText] = useState("");
   const [caret, setCaret] = useState(0);
@@ -1531,6 +1531,7 @@ export function Composer({ chat, onSend, onShell, placeholder, autoFocus, extra 
     return () => ro.disconnect();
   }, [fit]);
 
+  // A number focuses the box again each time it changes (each click on the item).
   useEffect(() => {
     if (autoFocus) ref.current?.focus();
   }, [autoFocus]);

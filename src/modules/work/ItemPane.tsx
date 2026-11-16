@@ -29,10 +29,12 @@ import { ItemWorkflows, WorkflowPill } from "./WorkflowStatus";
 const ReviewView = lazy(() => import("../github/review/Workspace"));
 
 /** An item: header and actions, its rolled-up context, and a chat with an agent about it. */
-export function ItemPane({ id, arrived, onAct, onSelect }: {
+export function ItemPane({ id, arrived, focusChat, onAct, onSelect }: {
   id: string;
   /** Opened because the item before it was closed: it rises in. */
   arrived?: boolean;
+  /** Set (and bumped) when the item is clicked open: the chat box takes focus. */
+  focusChat?: number;
   /** Done and Snooze go through Work, which animates the row out and opens the next item. */
   onAct: (item: QueueItem, action: ItemAction) => void;
   onSelect: (id: string) => void;
@@ -179,7 +181,7 @@ export function ItemPane({ id, arrived, onAct, onSelect }: {
       />
       {/* A file opened from the chat takes the middle; the chat docks on its right. */}
       <StageHost className="item-body" title={item.title} files={files}>
-        <ChatView item={item} body={tab === "timeline" ? <Timeline itemId={item.id} /> : <Reader item={item} mode={readMode} />} showBody={tab !== "chat"} onSent={() => setTab("chat")} />
+        <ChatView item={item} body={tab === "timeline" ? <Timeline itemId={item.id} /> : <Reader item={item} mode={readMode} />} showBody={tab !== "chat"} onSent={() => setTab("chat")} focus={focusChat} />
         <ContextRail key={item.id} item={item} onSelect={onSelect} />
       </StageHost>
     </div>
