@@ -26,7 +26,7 @@
 .hub-error, .hub-card-error { display: block; margin-top: 2px; font-size: var(--text-xs); word-break: break-word; color: var(--tone-warning-fg); }
 /* A page's toolbar in the title bar (Work's queue), lined up over its
    sidebar so that column runs to the top of the window. */
-.app-header-lead { display: flex; align-self: stretch; margin-bottom: -1px; }
+.app-header-lead { display: flex; align-self: stretch; }
 .app-header-lead:empty, .shell:has(.bdock.expanded) .app-header-lead { display: none; }
 .app-header:has(.app-header-lead:not(:empty)) { padding-left: 84px; }
 .app-header-title { display: flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); font-weight: 600; color: var(--fg); min-width: 0; }
@@ -80,7 +80,7 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .queue { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); background: var(--bg-raised); }
 .queue-top { border-bottom: 1px solid var(--border); }
 /* The queue's one-line toolbar: project, source, search, view, new. */
-.queue-bar { display: flex; align-items: center; gap: 2px; min-width: 0; padding: 0 var(--space-2) 0 var(--space-3); background: var(--bg-raised); border-right: 1px solid var(--border); }
+.queue-bar { display: flex; align-items: center; gap: 2px; min-width: 0; padding: 0 var(--space-2) 0 var(--space-3); background: var(--bg-sunken); border-right: 1px solid var(--border); }
 .queue-top .queue-bar { height: 40px; border-right: 0; }
 .queue-bar-gap { flex: 1; align-self: stretch; }
 .queue-bar .pj-picker { min-width: 0; display: flex; }
@@ -90,7 +90,10 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .queue-search { flex: 1; min-width: 0; display: flex; align-items: center; gap: 2px; }
 .queue-search > :first-child { flex: 1; min-width: 0; }
 .queue-search input { height: 28px; }
-.queue-new.active { color: var(--fg); background: var(--bg-selected); }
+.queue-new { flex: none; display: inline-flex; align-items: center; gap: 5px; height: 26px; margin-left: var(--space-1); padding: 0 6px 0 8px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); color: var(--fg); font: inherit; font-size: var(--text-sm); cursor: pointer; white-space: nowrap; }
+.queue-new:hover { background: var(--bg-hover); }
+.queue-new.active { background: var(--bg-selected); }
+.queue-new .kbd { margin-left: 2px; }
 .bar-menu { flex: none; display: flex; }
 .bar-trigger { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 6px 0 8px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg-muted); font: inherit; font-size: var(--text-sm); cursor: pointer; white-space: nowrap; }
 .bar-trigger:hover, .bar-trigger.active { background: var(--bg-hover); color: var(--fg); }

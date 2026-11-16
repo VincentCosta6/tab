@@ -1,7 +1,7 @@
 import { createPortal, flushSync } from "react-dom";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, EmptyState, TextInput, cx } from "../../design/components";
+import { Badge, Button, EmptyState, Kbd, TextInput, cx } from "../../design/components";
 import { Brand, SourceGlyph, hasBrand } from "../../design/brands";
 import { FlapTitle } from "../../design/FlapTitle";
 import { Icon } from "../../design/icons";
@@ -381,8 +381,10 @@ export function WorkTab() {
         onChange={(v) => v && setView(v)}
         options={(Object.keys(viewLabel) as ItemState[]).map((v) => ({ value: v, label: viewLabel[v] }))}
       />
-      <button className={cx("icon-btn queue-new", selected === NEW && "active")} title="New chat  N" aria-label="New chat" onClick={() => setSelected(NEW)}>
-        <Icon name="plus" size={15} />
+      <button className={cx("queue-new", selected === NEW && "active")} title="New chat" onClick={() => setSelected(NEW)}>
+        <Icon name="plus" size={13} />
+        <span>New</span>
+        <Kbd>N</Kbd>
       </button>
     </div>
   );
