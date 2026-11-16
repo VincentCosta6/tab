@@ -10,7 +10,17 @@
     "description": "Unresolved issues come into your queue, from every organization you're in: yours and unassigned ones, unless you pick otherwise. Resolved or ignored issues are marked done here.",
     "interval": "5m",
     "kinds": [
-      { "kind": "sentry.issue", "label": "Sentry issue", "icon": "alert", "tone": "danger" }
+      {
+        "kind": "sentry.issue",
+        "label": "Sentry issue",
+        "icon": "alert",
+        "tone": "danger",
+        "container": {
+          "kind": "sentry.project",
+          "key": "sentry:{$org.slug}/{projectSlug ?? project.slug ?? project|name}",
+          "label": "{projectSlug ?? project.slug ?? project|name}"
+        }
+      }
     ],
     "choices": [
       {
@@ -76,6 +86,12 @@
           "kind": "project",
           "key": "sentry:{$org.slug}/{projectSlug ?? project.slug ?? project|name}",
           "label": "{projectSlug ?? project.slug ?? project|name}"
+        },
+        {
+          "kind": "sentry.project_id",
+          "key": "sentry:{project.id ?? projectId}",
+          "label": "{projectSlug ?? project.slug ?? project|name}",
+          "rel": "about"
         }
       ],
       "metadata": {

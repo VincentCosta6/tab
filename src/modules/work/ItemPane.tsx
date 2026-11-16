@@ -12,7 +12,7 @@ import { useChat, useItem, useWorkflowActivity } from "../../lib/hooks";
 import { isPinned, useThreadFiles } from "../../lib/threadFiles";
 import { offerDone } from "../../lib/nav";
 import { keys } from "../../lib/query";
-import type { QueueItem } from "../../lib/types";
+import type { EntityRef, QueueItem } from "../../lib/types";
 import { CloudGaps } from "../connections/CloudGaps";
 import { parsePullUrl } from "../github/pulls";
 import { ChatView, DevicePill, SandboxPill, StrictPill } from "./Chat";
@@ -21,6 +21,7 @@ import { ContextRail } from "./ContextRail";
 import { actOnItem, type ItemAction } from "./optimistic";
 import { ReadModeSwitch, Reader, useHasRich, useReadMode } from "./Reader";
 import { ProjectPicker, useProjectTint } from "./Projects";
+import { RouteOffer } from "./Routing";
 import { SnoozeMenu } from "./SnoozeMenu";
 import { Timeline } from "./Timeline";
 import { ItemWorkflows, WorkflowPill } from "./WorkflowStatus";
@@ -41,6 +42,8 @@ export function ItemPane({ id, arrived, onAct, onSelect }: {
   const { data: item } = useItem(id);
   const [snoozeOpen, setSnoozeOpen] = useState(false);
   const [reviewing, setReviewing] = useState(false);
+  // After filing it by hand: offer to send the rest of its container there too.
+  const [offer, setOffer] = useState<{ itemId: string; projectId: string; container: EntityRef } | null>(null);
   const { data: chat } = useChat(id);
   const workflow = useWorkflowActivity().get(id);
   const all = useThreadFiles(chat);
@@ -67,6 +70,11 @@ export function ItemPane({ id, arrived, onAct, onSelect }: {
     const next = await api.itemSetProject(i.id, projectId);
     if (next) qc.setQueryData(keys.item(i.id), next);
     qc.invalidateQueries({ queryKey: keys.allItems });
+    setOffer(null);
+    if (projectId) {
+      const container = await api.routeOffer(i.id).catch(() => null);
+      if (container) setOffer({ itemId: i.id, projectId, container });
+    }
   };
   const reopen = (i: QueueItem) => void actOnItem(qc, i, "reopen").catch((e) => console.warn("item action failed", e));
 
@@ -110,7 +118,9 @@ export function ItemPane({ id, arrived, onAct, onSelect }: {
         </div>
         <ItemTitle item={item} />
         <div className="item-meta">
-              <ProjectPicker value={item.project_id ?? null} onChange={(p) => move(item, p)} compact />
+              <span className="item-project" title={item.routed_by ? `tab filed it here: ${item.routed_by}` : undefined}>
+                <ProjectPicker value={item.project_id ?? null} onChange={(p) => move(item, p)} compact />
+              </span>
               <Badge tone={k.tone}>{k.label}</Badge>
               {r && <UrgencyLabel urgency={r.urgency} />}
               {item.actor && <span className="item-who" title={item.actor}>{item.actor}</span>}
@@ -140,6 +150,9 @@ export function ItemPane({ id, arrived, onAct, onSelect }: {
           )}
         </div>
       </header>
+      {offer?.itemId === item.id && item.project_id === offer.projectId && (
+        <RouteOffer projectId={offer.projectId} container={offer.container} onDone={() => setOffer(null)} />
+      )}
       <div className="item-cloud-gaps"><CloudGaps itemId={item.id} /></div>
       <div id={`wf-runs-${item.id}`}><ItemWorkflows itemId={item.id} /></div>
       <ContextDrawer

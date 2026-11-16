@@ -10,8 +10,26 @@
     "description": "Pages matching a search come into your queue. Notion has no list of what's assigned to you, so tab runs a search you pick.",
     "interval": "15m",
     "kinds": [
-      { "kind": "notion.page", "label": "Notion page", "icon": "notion" },
-      { "kind": "notion.database", "label": "Notion database", "icon": "notion" }
+      {
+        "kind": "notion.page",
+        "label": "Notion page",
+        "icon": "notion",
+        "container": {
+          "kind": "notion.parent",
+          "key": "notion:{parent.page_id ?? parent.database_id ?? parent.data_source_id ?? parent_id}",
+          "label": "{parent_title ?? parent.title ?? parent.page_id ?? parent.database_id ?? parent_id}"
+        }
+      },
+      {
+        "kind": "notion.database",
+        "label": "Notion database",
+        "icon": "notion",
+        "container": {
+          "kind": "notion.parent",
+          "key": "notion:{parent.page_id ?? parent.database_id ?? parent.data_source_id ?? parent_id}",
+          "label": "{parent_title ?? parent.title ?? parent.page_id ?? parent.database_id ?? parent_id}"
+        }
+      }
     ],
     "search": { "hint": "tasks assigned to me" },
     "steps": [

@@ -216,6 +216,14 @@ pub async fn index_pending(store: &Arc<Store>, model: &Arc<dyn Embed>) -> anyhow
         let vecs = tokio::task::spawn_blocking(move || model.encode(&texts)).await?;
         let pairs: Vec<_> = docs.into_iter().map(|d| d.key).zip(vecs).collect();
         store.vectors_store(&pairs, Utc::now())?;
+        // New items with a vector: suggest a project when one reads alike.
+        let items: Vec<String> = pairs
+            .iter()
+            .filter_map(|(k, _)| k.strip_prefix("item:").map(str::to_string))
+            .collect();
+        if let Err(e) = store.suggest_by_similarity(&items) {
+            tracing::warn!(error = %e, "couldn't suggest projects");
+        }
         total += pairs.len();
         // Leave the database to the UI between batches.
         tokio::time::sleep(Duration::from_millis(50)).await;

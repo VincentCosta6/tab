@@ -270,6 +270,7 @@ impl Store {
         anyhow::ensure!(!repo.is_empty(), "a repo needs a name or URL");
         let path = path.map(str::trim).filter(|p| !p.is_empty());
         let _wake = WakeAfter(&self.knowledge_wake);
+        let _route = WakeAfter(&self.routing_wake);
         let conn = self.conn();
         Ok(conn.query_row(
             &format!(
@@ -466,12 +467,16 @@ impl Store {
         tx.execute("DELETE FROM project_notes WHERE project_id = ?1", [id])?;
         tx.execute("DELETE FROM project_repos WHERE project_id = ?1", [id])?;
         tx.execute("DELETE FROM project_resources WHERE project_id = ?1", [id])?;
+        tx.execute("DELETE FROM project_anchors WHERE project_id = ?1", [id])?;
+        tx.execute(
+            "UPDATE items SET suggested_project_id = NULL, suggested_by = NULL WHERE suggested_project_id = ?1",
+            [id],
+        )?;
         tx.execute("DELETE FROM projects WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Puts an item in a project, or takes it out (`None`).
     /// Files `attached` under `owner`'s project when it has none of its own,
     /// for things attached as context to a chat. Returns the moved item.
     pub fn adopt_project(
@@ -489,6 +494,8 @@ impl Store {
         }
     }
 
+    /// Puts an item in a project, or takes it out (`None`), for the person:
+    /// tab won't route it again (see `super::routing`).
     pub fn item_set_project(
         &self,
         item_id: &str,
@@ -507,28 +514,12 @@ impl Store {
             ),
             None => None,
         };
+        super::routing::filed_by_person(&tx, item_id, project_id, now)?;
         tx.execute(
             "UPDATE items SET project_id = ?2, updated_at = ?3 WHERE id = ?1",
             params![item_id, project.as_ref().map(|p| &p.0), ts(now)],
         )?;
-        tx.execute(
-            "DELETE FROM item_entities WHERE item_id = ?1
-               AND entity_id IN (SELECT id FROM entities WHERE kind = 'project')",
-            [item_id],
-        )?;
-        if let Some((id, name)) = project {
-            let entity: i64 = tx.query_row(
-                "INSERT INTO entities (kind, key, label, created_at, updated_at) VALUES ('project', ?1, ?2, ?3, ?3)
-                 ON CONFLICT (kind, key) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at
-                 RETURNING id",
-                params![format!("project:{id}"), name, ts(now)],
-                |r| r.get(0),
-            )?;
-            tx.execute(
-                "INSERT OR IGNORE INTO item_entities (item_id, entity_id, rel) VALUES (?1, ?2, 'in')",
-                params![item_id, entity],
-            )?;
-        }
+        super::routing::link_project(&tx, item_id, project.as_ref(), now)?;
         tx.commit()?;
         get_item(&conn, item_id)
     }

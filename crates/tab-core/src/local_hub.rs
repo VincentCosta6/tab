@@ -582,14 +582,16 @@ impl LocalHub {
                         .and_then(|v| v.as_str().map(str::to_string))
                         .unwrap_or_default(),
                 ),
-                "project_notes" | "project_repos" | "project_resources" => Some(
-                    store
-                        .hub_row(table, key)
-                        .ok()
-                        .flatten()
-                        .and_then(|r| r["project_id"].as_str().map(str::to_string))
-                        .unwrap_or_default(),
-                ),
+                "project_notes" | "project_repos" | "project_resources" | "project_anchors" => {
+                    Some(
+                        store
+                            .hub_row(table, key)
+                            .ok()
+                            .flatten()
+                            .and_then(|r| r["project_id"].as_str().map(str::to_string))
+                            .unwrap_or_default(),
+                    )
+                }
                 _ => None,
             };
             if let Some(id) = project {

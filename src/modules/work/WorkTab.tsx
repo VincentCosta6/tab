@@ -18,6 +18,7 @@ import { takePendingOpen } from "./Chat";
 import { ItemPane } from "./ItemPane";
 import { NewChat } from "./NewChat";
 import { ProjectDot, ProjectPicker, useRememberedProject } from "./Projects";
+import { SuggestionChip } from "./Routing";
 import { useHeaderSlot } from "../shell/AppHeader";
 import { SnoozeMenu, snoozeOptions } from "./SnoozeMenu";
 import { ScoreBreakdown } from "./ScoreBreakdown";
@@ -483,7 +484,7 @@ export function QueueRow({ item, agent, workflow, status, waiting, hideProject, 
   const by = byline(item);
   const snippet = !compact && item.body ? item.body : "";
   const sub = by || snippet;
-  const project = hideProject ? null : <ProjectDot id={item.project_id} />;
+  const project = hideProject ? null : item.project_id ? <ProjectDot id={item.project_id} /> : item.suggestion ? <SuggestionChip item={item} /> : null;
   const pill = status ? <StatusPill status={agent ? { ...status, title: `${status.title} · chat updated ${timeAgo(agent.updated_at)}` } : status} />
     : agent ? <SessionPill status={agent.status} title={`Chat ${sessionLook[agent.status].label.toLowerCase()} · updated ${timeAgo(agent.updated_at)}`} /> : null;
   const waitingOn = !!waiting?.length && item.state !== "done" && (
