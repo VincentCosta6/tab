@@ -115,17 +115,17 @@ export function ChatView({ item, body, showBody = true, onSent }: { item: QueueI
 /**
  * Where this chat runs, as small as it gets: a computer or cloud, the
  * device's name, and a dot for whether it's connected (the rest on hover).
+ * Nothing for a chat on this computer: that's the default, and always live.
  */
 export function DevicePill({ session }: { session: Session }) {
   const hub = useQuery({ queryKey: ["hub-status"], queryFn: api.hubStatus, refetchInterval: 5000 });
   const runners = useQuery({ queryKey: ["runners"], queryFn: api.runners, refetchInterval: 30_000 });
-  const list = runners.data ?? [];
-  const l = sessionLook(session, list, hub.data ?? null);
-  const name = l.place === "This computer" ? list.find((r) => r.this_app)?.name || "This computer" : l.place;
+  const l = sessionLook(session, runners.data ?? [], hub.data ?? null);
+  if (l.place === "This computer") return null;
   return (
     <span className="device-pill" title={`${l.label}. ${l.detail}`}>
       <Icon name={l.icon} size={11} />
-      <span className="device-pill-name">{name}</span>
+      <span className="device-pill-name">{l.place}</span>
       <span className={cx("header-chip-state", `tone-${l.tone}`)}><i className="header-dot" aria-hidden="true" /></span>
     </span>
   );
