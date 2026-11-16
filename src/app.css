@@ -1379,4 +1379,4 @@ label.import-row { cursor: pointer; }
 .link-bar-btn:hover { background: var(--bg-hover, var(--tone-neutral-bg)); color: var(--fg); }
 .link-bar-autofix { flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 0 8px; color: var(--fg-muted); font-size: var(--text-xs); cursor: pointer; white-space: nowrap; user-select: none; }
 .link-bar-autofix:hover { color: var(--fg); }
-.link-bar-autofix input { margin: 0; accent-color: var(--tone-accent-fg); cursor: pointer; }
+.link-bar-autofix input { margin: 0; accent-color: var(--accent-solid); cursor: pointer; }
