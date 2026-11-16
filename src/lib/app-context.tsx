@@ -26,6 +26,7 @@ const appLabels: Record<string, { label: string; icon: string }> = {
   linear: { label: "Linear", icon: "linear" },
   notion: { label: "Notion", icon: "notion" },
   sentry: { label: "Sentry", icon: "sentry" },
+  grafana: { label: "Grafana", icon: "grafana" },
   agent: { label: "Agents", icon: "bot" },
 };
 

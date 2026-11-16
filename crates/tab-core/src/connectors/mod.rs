@@ -5,6 +5,7 @@ mod demo;
 pub mod email;
 mod github;
 pub mod github_review;
+pub mod grafana;
 pub mod tab;
 
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 pub use demo::{DemoConnector, DemoFactory};
 pub use email::{EmailConnector, EmailFactory};
 pub use github::{GithubConnector, GithubFactory};
+pub use grafana::{GrafanaConnector, GrafanaFactory};
 pub use tab::{TabConnector, TabFactory};
 
 use crate::TabConfig;
@@ -26,6 +28,7 @@ pub fn registry() -> Vec<Box<dyn ConnectorFactory>> {
         Box::new(TabFactory),
         Box::new(GithubFactory),
         Box::new(EmailFactory),
+        Box::new(GrafanaFactory),
     ];
     // Sample data only feeds the engine's tests.
     #[cfg(test)]
