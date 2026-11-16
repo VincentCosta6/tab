@@ -1511,8 +1511,12 @@ export function Composer({ chat, onSend, onShell, placeholder, autoFocus, extra 
     const t = ref.current;
     if (!t) return;
     t.style.height = "auto";
+    // An empty box is sized to its placeholder (e.g. a long suggested reply),
+    // which WebKit leaves out of scrollHeight.
+    if (!text && t.placeholder) t.value = t.placeholder;
     t.style.height = `${Math.min(220, t.scrollHeight)}px`;
-  }, [text]);
+    if (!text) t.value = "";
+  }, [text, suggestion, running, placeholder]);
 
   useEffect(() => {
     if (autoFocus) ref.current?.focus();

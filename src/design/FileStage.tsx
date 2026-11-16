@@ -11,6 +11,7 @@ import { MarkdownFiles } from "./markdown";
 import { RichMarkdown } from "./richMarkdown";
 
 const WIDTH_KEY = "tab.stage.chatWidth";
+const OUTLINE_KEY = "tab.stage.outline";
 const clampChat = (w: number) => Math.max(320, Math.min(w, Math.round(window.innerWidth * 0.6)));
 
 const MARKDOWN = new Set(["md", "markdown"]);
@@ -244,6 +245,13 @@ function FileView({ file, files, index, replaced, fresh, onStep, onPick, onClose
   const local = isLocalPath(file.path);
   const [error, setError] = useState<string | null>(null);
   const [source, setSource] = useState(false);
+  const [outline, setOutline] = useState(() => {
+    try { return localStorage.getItem(OUTLINE_KEY) !== "off"; } catch { return true; }
+  });
+  const toggleOutline = () => setOutline((v) => {
+    try { localStorage.setItem(OUTLINE_KEY, v ? "off" : "on"); } catch { /* private mode */ }
+    return !v;
+  });
   const ref = useRef<HTMLElement>(null);
 
   useEffect(() => { setError(null); setSource(false); }, [file.path]);
@@ -290,6 +298,11 @@ function FileView({ file, files, index, replaced, fresh, onStep, onPick, onClose
             <Icon name={source ? "eye" : "code"} size={14} />
           </button>
         )}
+        {kind === "markdown" && (
+          <button onClick={toggleOutline} title={outline ? "Hide the outline" : "Show the outline"} aria-pressed={outline}>
+            <Icon name="panel-left" size={14} />
+          </button>
+        )}
         {kind === "image" && (
           <button onClick={() => openImages(files.filter((f) => kindOf(f.path) === "image").map((f) => ({ src: f.path, name: f.name })), Math.max(0, files.filter((f) => kindOf(f.path) === "image").findIndex((f) => f.path === file.path)))} title="Full screen"><Icon name="maximize" size={14} /></button>
         )}
@@ -305,7 +318,7 @@ function FileView({ file, files, index, replaced, fresh, onStep, onPick, onClose
         ) : kind === "other" ? (
           <OtherContent name={name} onOpen={() => openExternally(false)} onReveal={() => openExternally(true)} canOpen={local && inTauri} />
         ) : (
-          <ReadContent key={file.path} path={file.path} kind={kind === "html" && source ? "text" : kind} />
+          <ReadContent key={file.path} path={file.path} kind={kind === "html" && source ? "text" : kind} outline={outline} />
         )}
       </div>
       <div className="stage-resize" onMouseDown={onResize} title="Drag to resize the chat" />
@@ -414,7 +427,7 @@ function TextContent({ text }: { text: string }) {
   );
 }
 
-function ReadContent({ path, kind }: { path: string; kind: Exclude<Kind, "image" | "video" | "audio" | "other"> }) {
+function ReadContent({ path, kind, outline }: { path: string; kind: Exclude<Kind, "image" | "video" | "audio" | "other">; outline: boolean }) {
   const { data, error } = useQuery({
     queryKey: ["file", path],
     queryFn: () => api.fileRead(path),
@@ -437,15 +450,90 @@ function ReadContent({ path, kind }: { path: string; kind: Exclude<Kind, "image"
   if (kind === "pdf") return <iframe className="stage-pdf" src={url!} title={fileName(path)} />;
   if (kind === "svg") return <div className="stage-image"><img src={url!} alt="" /></div>;
   if (kind === "html") return <HtmlFrame html={text ?? ""} title={fileName(path)} />;
-  if (kind === "markdown")
-    return (
-      <div className="stage-doc">
-        <MarkdownFiles.Provider value={{ base: dirOf(path) }}>
-          <RichMarkdown text={text ?? ""} />
-        </MarkdownFiles.Provider>
-      </div>
-    );
+  if (kind === "markdown") return <MarkdownContent path={path} text={text ?? ""} outline={outline} />;
   return <TextContent text={text ?? ""} />;
+}
+
+type Heading = { el: HTMLElement; text: string; depth: number };
+
+/** The document's headings, read from what's rendered so they match it exactly. */
+function useHeadings(doc: React.RefObject<HTMLElement | null>, text: string): Heading[] {
+  const [headings, setHeadings] = useState<Heading[]>([]);
+  useLayoutEffect(() => {
+    const root = doc.current;
+    if (!root) return;
+    const read = () => {
+      const els = [...root.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")];
+      const levels = els.map((el) => Number(el.tagName[1]));
+      const top = Math.min(...levels);
+      setHeadings(els.map((el, i) => ({ el, text: el.textContent?.trim() ?? "", depth: levels[i] - top })).filter((h) => h.text));
+    };
+    read();
+    // Parts of the document (code, images) can render after the first pass.
+    const mo = new MutationObserver(read);
+    mo.observe(root, { childList: true, subtree: true });
+    return () => mo.disconnect();
+  }, [doc, text]);
+  return headings;
+}
+
+/**
+ * A markdown document, with an outline of its headings down the left side
+ * (when it has a few and the outline is on). Clicking one scrolls to it; the
+ * section being read is marked as you scroll.
+ */
+function MarkdownContent({ path, text, outline }: { path: string; text: string; outline: boolean }) {
+  const scroller = useRef<HTMLDivElement>(null);
+  const doc = useRef<HTMLDivElement>(null);
+  const headings = useHeadings(doc, text);
+  const [active, setActive] = useState(0);
+  const show = outline && headings.length > 1;
+
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || !show) return;
+    let frame = 0;
+    const update = () => {
+      frame = 0;
+      const top = el.getBoundingClientRect().top + 24;
+      let at = 0;
+      headings.forEach((h, i) => { if (h.el.getBoundingClientRect().top <= top) at = i; });
+      // Scrolled to the end: the last heading is the one being read even if it can't reach the top.
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2) at = headings.length - 1;
+      setActive(at);
+    };
+    const onScroll = () => { if (!frame) frame = requestAnimationFrame(update); };
+    update();
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => (el.removeEventListener("scroll", onScroll), cancelAnimationFrame(frame));
+  }, [headings, show]);
+
+  return (
+    <div className="stage-md">
+      {show && (
+        <nav className="stage-outline" aria-label="Outline">
+          {headings.map((h, i) => (
+            <button
+              key={i}
+              className={cx("stage-outline-item", i === active && "active")}
+              style={{ paddingLeft: `${8 + Math.min(h.depth, 3) * 12}px` }}
+              title={h.text}
+              onClick={() => h.el.scrollIntoView({ block: "start", behavior: "smooth" })}
+            >
+              {h.text}
+            </button>
+          ))}
+        </nav>
+      )}
+      <div className="stage-md-scroll" ref={scroller}>
+        <div className="stage-doc" ref={doc}>
+          <MarkdownFiles.Provider value={{ base: dirOf(path) }}>
+            <RichMarkdown text={text} />
+          </MarkdownFiles.Provider>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function OtherContent({ name, canOpen, onOpen, onReveal }: { name: string; canOpen: boolean; onOpen: () => void; onReveal: () => void }) {
