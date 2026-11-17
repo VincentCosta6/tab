@@ -60,10 +60,7 @@ pub(super) async fn run_turn(
     system: &str,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    // Messages sent mid-turn: agents that take them (`acp.steering`) get
-    // them now; the rest, and anything left over, run as the next turn.
-    hub.steering_close(&session.id);
-    let mut queued = hub.steering_open(&session.id);
+    let mut queued = open_steering(hub, &session.id);
     let result = run(hub, session, prompt, system, &mut queued, cancel).await;
     // What's sent from now on runs as the next turn.
     hub.steering_close(&session.id);
@@ -83,6 +80,15 @@ pub(super) async fn run_turn(
             .extend(later);
     }
     result
+}
+
+/// Messages sent mid-turn: agents that take them (`acp.steering`) get
+/// them now; the rest, and anything left over, run as the next turn. This
+/// is the channel `start_turn` opened: closing it first would leave the
+/// person's messages nothing to go on, and each would wait for the turn
+/// to end.
+fn open_steering(hub: &AgentHub, session_id: &str) -> mpsc::UnboundedReceiver<Steer> {
+    hub.steering_open(session_id)
 }
 
 async fn run(
@@ -1768,6 +1774,31 @@ mod tests {
         let n: acp::SessionNotification =
             serde_json::from_value(json!({ "sessionId": "s1", "update": v })).unwrap();
         t.update(&n.update);
+    }
+
+    /// A message sent mid-turn reaches the running turn, not the queue for
+    /// after it.
+    #[test]
+    fn a_turns_steering_takes_messages() {
+        let (hub, store, s) = hub_and_session("tab-acp-test-open");
+        // As `start_turn` does.
+        hub.running
+            .lock()
+            .unwrap()
+            .insert(s.id.clone(), CancellationToken::new());
+        hub.steering_prepare(&s.id);
+        let mut rx = open_steering(&hub, &s.id);
+        assert!(hub.can_steer(&s.id));
+        assert!(hub.steer(&s.id, "and the e2e").unwrap());
+        assert!(matches!(rx.try_recv(), Ok(Steer::Message(m)) if m == "and the e2e"));
+        assert!(hub.followups.lock().unwrap().get(&s.id).is_none());
+        assert!(
+            store
+                .messages(&s.id)
+                .unwrap()
+                .iter()
+                .any(|m| m.meta["steer"] == true)
+        );
     }
 
     #[test]
