@@ -127,12 +127,20 @@ export function WorkTab() {
     return m;
   }, [stacks]);
   const openStack = isStackId(selected) ? [...stacks.values()].find((st) => st.id === selected) : undefined;
+  const activity = useAgentActivity();
+  // Threads with an agent at work on them are today's business, whatever they scored.
+  const busy = [...activity.values()].filter((a) => a.status === "working" || a.status === "needs_input").map((a) => a.item_id).sort().join(" ");
   const grouped = useMemo(() => {
     if (!nested) return [{ urgency: null as Urgency | null, items: top }];
+    const atWork = new Set(busy.split(" "));
+    const urgency = (i: QueueItem): Urgency => {
+      const u = i.ranking?.urgency ?? "today";
+      return atWork.has(i.id) && (u === "this_week" || u === "whenever") ? "today" : u;
+    };
     return urgencyOrder
-      .map((u) => ({ urgency: u as Urgency | null, items: afterBlockers(top.filter((i) => (i.ranking?.urgency ?? "today") === u)) }))
+      .map((u) => ({ urgency: u as Urgency | null, items: afterBlockers(top.filter((i) => urgency(i) === u)) }))
       .filter((g) => g.items.length);
-  }, [top, nested]);
+  }, [top, nested, busy]);
   const titles = useMemo(() => new Map(all.map((i) => [i.id, i.title])), [all]);
   const [openFollowups, setOpenFollowups] = useState<ReadonlySet<string>>(() => {
     try {
@@ -360,7 +368,6 @@ export function WorkTab() {
     return () => window.removeEventListener("keydown", onKey);
   }, [move]);
 
-  const activity = useAgentActivity();
   const workflows = useWorkflowActivity();
   const seen = useSeen();
   // Opening a chat reads its latest reply.

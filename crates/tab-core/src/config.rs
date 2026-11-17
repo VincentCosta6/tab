@@ -552,6 +552,7 @@ impl TabConfig {
             }
         }
         cfg.apply_env();
+        cfg.ranking.rules.upgrade();
         // Older configs kept one model, for the harness in use.
         if let (Some(kind), Some(m)) = (cfg.agent.kind, cfg.agent.model.clone()) {
             cfg.agent.models.entry(kind.as_str().into()).or_insert(m);

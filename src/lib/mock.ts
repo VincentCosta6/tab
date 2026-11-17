@@ -1335,7 +1335,7 @@ function createTask(title: string, body: string | null, projectId: string | null
   const item: QueueItem = {
     id: `task-${Date.now()}`, source: "tab", external_id: String(Date.now()), kind: "tab.task", title, body, url: null, actor: "you", context: "tab",
     occurred_at: now, blocks: [], entities: [], metadata: {}, state: "open", snoozed_until: null, project_id: projectId, created_at: now, updated_at: now,
-    ranking: { score: 62, base_score: 62, ai_adjustment: null, urgency: "today", reason: "A task you created", ranked_by: "rules", fired: ["kind tab.task = 62"] },
+    ranking: { score: 70, base_score: 70, ai_adjustment: null, urgency: "today", reason: "A task you created", ranked_by: "rules", fired: ["kind tab.task = 70"] },
   };
   items = [item, ...items];
   emit({ type: "item_changed", change: "ingested", item });

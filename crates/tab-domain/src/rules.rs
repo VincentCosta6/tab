@@ -68,7 +68,7 @@ impl Default for RankingRules {
             kinds: vec![
                 k("agent.needs_input", 75, "An agent is blocked on you"),
                 k("tab.scheduled", 72, "Something you scheduled is due"),
-                k("tab.task", 62, "A task you created"),
+                k("tab.task", TASK_SCORE, "A task you created"),
                 k(
                     "github.review_requested",
                     70,
@@ -119,7 +119,23 @@ impl Default for RankingRules {
     }
 }
 
+/// Base score for a task you created. High enough in Today that the AI
+/// layer's small nudges don't push it into This week.
+pub const TASK_SCORE: u8 = 70;
+/// What tasks scored before [`TASK_SCORE`]; saved configs still carry it.
+const OLD_TASK_SCORE: u8 = 62;
+
 impl RankingRules {
+    /// Brings defaults an older version saved up to date. Scores the person
+    /// changed themselves are left alone.
+    pub fn upgrade(&mut self) {
+        for k in &mut self.kinds {
+            if k.kind == "tab.task" && k.score == OLD_TASK_SCORE {
+                k.score = TASK_SCORE;
+            }
+        }
+    }
+
     fn kind_rule(&self, kind: &str) -> Option<&KindScore> {
         // Exact match first, then the longest matching prefix.
         self.kinds.iter().find(|k| k.kind == kind).or_else(|| {
@@ -220,6 +236,32 @@ mod tests {
             title: title.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn upgrade_raises_old_task_default_only() {
+        let mut r = RankingRules::default();
+        r.kinds
+            .iter_mut()
+            .find(|k| k.kind == "tab.task")
+            .unwrap()
+            .score = 62;
+        r.upgrade();
+        assert_eq!(
+            r.score(&ev("tab.task", "x"), &UserProfile::default()).score,
+            TASK_SCORE
+        );
+        r.kinds
+            .iter_mut()
+            .find(|k| k.kind == "tab.task")
+            .unwrap()
+            .score = 50;
+        r.upgrade();
+        assert_eq!(
+            r.score(&ev("tab.task", "x"), &UserProfile::default()).score,
+            50,
+            "the person's own score stays"
+        );
     }
 
     #[test]
