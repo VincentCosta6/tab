@@ -267,7 +267,10 @@ function LiveEvents() {
           const m = e.message;
           const key = chatKeyForSession(qc, m.session_id);
           if (key)
-            qc.setQueryData<Chat>(key, (c) => (c && !c.messages.some((x) => x.id === m.id) ? { ...c, messages: [...c.messages, m] } : c));
+            // A message already shown comes again when it changes (a steer the agent has now seen).
+            qc.setQueryData<Chat>(key, (c) =>
+              !c ? c : c.messages.some((x) => x.id === m.id) ? { ...c, messages: c.messages.map((x) => (x.id === m.id ? m : x)) } : { ...c, messages: [...c.messages, m] },
+            );
           // A stored assistant message replaces the streamed text so far.
           if (m.role === "assistant" || m.kind === "result") qc.setQueryData(keys.stream(m.session_id), "");
           break;

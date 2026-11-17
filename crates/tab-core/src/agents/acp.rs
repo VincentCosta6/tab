@@ -841,7 +841,7 @@ where
     use futures_util::StreamExt;
     use futures_util::stream::FuturesUnordered;
     type Steered = std::pin::Pin<
-        Box<dyn std::future::Future<Output = (String, Result<Value, RpcError>)> + Send>,
+        Box<dyn std::future::Future<Output = (String, bool, Result<Value, RpcError>)> + Send>,
     >;
     let (mut steering, extension) = match steering {
         Some((rx, ext)) => (Some(rx), ext),
@@ -859,19 +859,28 @@ where
         let open = answer.is_none() && steering.is_some();
         tokio::select! {
             r = &mut fut, if answer.is_none() => answer = Some(r),
-            Some((text, r)) = steered.next(), if !steered.is_empty() => match r {
+            Some((text, person, r)) = steered.next(), if !steered.is_empty() => match r {
                 Ok(Value::Object(o)) if extension => {
                     // `injected` joined the turn; anything else wasn't taken.
                     if o.get("outcome").and_then(Value::as_str) != Some("injected") {
                         events.later(text);
+                    } else if person {
+                        events.steer_seen();
                     }
                 }
                 Ok(Value::Object(o)) => {
                     if let Some(u) = o.get("usage") {
                         events.more_usage.push(u.clone());
                     }
+                    if person {
+                        events.steer_seen();
+                    }
                 }
-                Ok(_) => {}
+                Ok(_) => {
+                    if person {
+                        events.steer_seen();
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "steering failed; the message runs next");
                     events.later(text);
@@ -900,6 +909,7 @@ where
                         unreachable!()
                     };
                     let text = text.clone();
+                    let person = matches!(steer, Steer::Message(_));
                     // The person's message is owed an answer; tab's reminders aren't.
                     if let (Some(p), Steer::Message(_)) = (&events.raw, &steer) {
                         p.steered(&text);
@@ -922,7 +932,7 @@ where
                                 .unwrap_or_default(),
                         )
                     };
-                    steered.push(Box::pin(async move { (text, r.await) }));
+                    steered.push(Box::pin(async move { (text, person, r.await) }));
                 }
                 // Nothing in ACP stops one tool and keeps the turn; a steer
                 // during one moves it to the background (claude-agent-acp).
@@ -1529,6 +1539,15 @@ impl Translator {
     }
 
     /// A message the agent couldn't take mid-turn: it runs as the next turn.
+    /// The agent took one of the person's mid-turn messages. Claude Code's
+    /// own messages say when the model is shown it (see
+    /// [`super::claude::Unanswered`]), so for it that counts instead.
+    fn steer_seen(&self) {
+        if self.raw.is_none() {
+            self.hub.steers_seen(&self.session_id, Some(1));
+        }
+    }
+
     fn later(&self, text: String) {
         self.hub
             .followups
@@ -1702,6 +1721,27 @@ mod tests {
         let n: acp::SessionNotification =
             serde_json::from_value(json!({ "sessionId": "s1", "update": v })).unwrap();
         t.update(&n.update);
+    }
+
+    #[test]
+    fn steers_are_marked_seen_oldest_first_and_only_this_turns() {
+        let (hub, store, s) = hub_and_session("tab-acp-test-seen");
+        let steer = || json!({ "steer": true });
+        hub.post(&s.id, "user", "text", "old steer", steer());
+        hub.post(&s.id, "user", "text", "start", Value::Null);
+        hub.post(&s.id, "user", "text", "first", steer());
+        hub.post(&s.id, "user", "text", "second", steer());
+        let seen = |store: &Store| -> Vec<String> {
+            let ms = store.messages(&s.id).unwrap();
+            ms.iter()
+                .filter(|m| m.meta["seen"] == true)
+                .map(|m| m.content.clone())
+                .collect()
+        };
+        hub.steers_seen(&s.id, Some(1));
+        assert_eq!(seen(&store), ["first"]);
+        hub.steers_seen(&s.id, None);
+        assert_eq!(seen(&store), ["first", "second"]);
     }
 
     #[tokio::test]

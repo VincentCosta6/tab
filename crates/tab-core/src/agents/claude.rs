@@ -65,9 +65,12 @@ impl Unanswered {
     }
 
     /// A tool result came back: queued messages go to the model with it.
-    fn shown(&mut self) {
+    /// Returns how many it was shown.
+    fn shown(&mut self) -> usize {
+        let n = self.sent.len();
         self.shown.append(&mut self.sent);
         self.holding = false;
+        n
     }
 
     /// The agent said something visible: that answers what it was shown.
@@ -950,7 +953,10 @@ impl Parser {
                         self.interrupted = true;
                     }
                     if block["type"] == "tool_result" {
-                        self.unanswered.lock().unwrap().shown();
+                        let seen = self.unanswered.lock().unwrap().shown();
+                        if seen > 0 {
+                            hub.steers_seen(&sid, Some(seen));
+                        }
                         if let Some(id) = block["tool_use_id"].as_str() {
                             self.open_tools.lock().unwrap().remove(id);
                             if self.waits.remove(id) && self.waits.is_empty() {
