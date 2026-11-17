@@ -982,12 +982,19 @@ impl AgentHub {
         let (Some(mcp), true) = (self.mcp(), sb.config().enabled && self.brokers()) else {
             return false;
         };
-        let Ok(exe) = std::env::current_exe() else {
+        static EXE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        let exe = EXE.get_or_init(|| {
+            let exe = std::env::current_exe().ok()?;
+            Some(crate::sandbox::broker::pin_exe(&exe, &self.dir.join("cli")))
+        });
+        let Some(exe) = exe else {
             return false;
         };
         let Ok(dir) = self.session_dir(&session.id) else {
             return false;
         };
+        // The chat's sandbox only shows it its own folder: link it there too.
+        let exe = crate::sandbox::broker::pin_exe(exe, &dir);
         let url = mcp.url.trim_end_matches("/mcp").to_string() + "/cli";
         let chat_token = crate::mcp::chat_token(&mcp.token, &session.id);
         let ep = crate::sandbox::broker::Endpoint {
