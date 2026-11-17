@@ -65,6 +65,8 @@ pub(super) async fn run_turn(
     hub.steering_close(&session.id);
     let mut queued = hub.steering_open(&session.id);
     let result = run(hub, session, prompt, system, &mut queued, cancel).await;
+    // What's sent from now on runs as the next turn.
+    hub.steering_close(&session.id);
     hub.watch_unanswered(&session.id, None);
     let mut later = Vec::new();
     while let Ok(s) = queued.try_recv() {
