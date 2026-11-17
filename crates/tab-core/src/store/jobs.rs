@@ -7,6 +7,7 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Map, Value};
 
 use super::{Store, ts};
+use tab_domain::lease::Fence;
 use tab_domain::runner::{Job, JobState, RunnerCaps};
 
 fn state_name(s: &JobState) -> &'static str {
@@ -27,25 +28,73 @@ pub struct CloudConnection {
     pub settings: Map<String, Value>,
 }
 
+fn put_job(conn: &rusqlite::Connection, job: &Job, now: DateTime<Utc>) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO jobs (id, run_id, workflow_id, state, body, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT (id) DO UPDATE SET state = excluded.state, body = excluded.body,
+             updated_at = excluded.updated_at",
+        params![
+            job.id,
+            job.run_id,
+            job.workflow_id,
+            state_name(&job.state),
+            serde_json::to_string(job)?,
+            ts(job.created_at),
+            ts(now)
+        ],
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// Inserts or replaces a job.
     pub fn job_put(&self, job: &Job, now: DateTime<Utc>) -> anyhow::Result<()> {
-        self.conn().execute(
-            "INSERT INTO jobs (id, run_id, workflow_id, state, body, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT (id) DO UPDATE SET state = excluded.state, body = excluded.body,
-                 updated_at = excluded.updated_at",
-            params![
-                job.id,
-                job.run_id,
-                job.workflow_id,
-                state_name(&job.state),
-                serde_json::to_string(job)?,
-                ts(job.created_at),
-                ts(now)
-            ],
-        )?;
+        put_job(&self.conn(), job, now)
+    }
+
+    /// [`Store::job_put`] by the runner holding the job's lease with
+    /// `fence`'s token: the hub takes the change only while that's still
+    /// so, and puts the job back to its own version here if not (someone
+    /// else owns the job now).
+    pub fn job_put_fenced(
+        &self,
+        job: &Job,
+        now: DateTime<Utc>,
+        fence: &Fence,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        put_job(&tx, job, now)?;
+        let key = serde_json::to_string(&[&job.id])?;
+        super::hub_sync::fence_last_change(&tx, "jobs", &key, fence)?;
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Deletes the jobs [`Job::prunable`] at `now` (ended more than
+    /// [`tab_domain::runner::JOB_KEEP`] ago), here and, through sync, in the hub and on every
+    /// other device. A job that hasn't ended is never pruned. Returns how
+    /// many went.
+    pub fn jobs_prune(&self, now: DateTime<Utc>) -> anyhow::Result<usize> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let ended: Vec<(String, String)> = tx
+            .prepare("SELECT id, body FROM jobs WHERE state IN ('done', 'failed')")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut n = 0;
+        for (id, body) in ended {
+            // A body this version can't read isn't judged.
+            let Ok(job) = serde_json::from_str::<Job>(&body) else {
+                continue;
+            };
+            if job.prunable(now) {
+                n += tx.execute("DELETE FROM jobs WHERE id = ?1", [id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(n)
     }
 
     pub fn job_get(&self, id: &str) -> anyhow::Result<Option<Job>> {
@@ -235,6 +284,108 @@ mod tests {
         let open: Vec<_> = s.jobs_open().unwrap().into_iter().map(|j| j.id).collect();
         assert_eq!(open, ["b"]);
         assert_eq!(s.jobs_recent(10).unwrap()[0].id, "b");
+    }
+
+    fn outbox(s: &Store) -> Vec<(String, String, Option<String>, Option<i64>)> {
+        s.conn()
+            .prepare("SELECT tbl, pk, fence_key, fence_token FROM hub_outbox ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_runners_job_write_goes_to_the_hub_with_its_lease() {
+        let t0 = Utc::now();
+        // Without sync set up, it's a plain write.
+        let plain = Store::in_memory().unwrap();
+        let j = job("a", t0).claimed("laptop", 3, t0);
+        plain
+            .job_put_fenced(&j, t0, &Fence::new("job:a", 3))
+            .unwrap();
+        assert_eq!(plain.job_get("a").unwrap().unwrap(), j);
+
+        let s = Store::in_memory().unwrap();
+        s.hub_sync_install().unwrap();
+        s.job_put(&job("a", t0), t0).unwrap();
+        s.job_put_fenced(&j, t0, &Fence::new("job:a", 3)).unwrap();
+        s.job_put(&job("b", t0), t0).unwrap();
+        let key = |id: &str| format!("[\"{id}\"]");
+        assert_eq!(
+            outbox(&s),
+            [
+                ("jobs".into(), key("a"), None, None),
+                ("jobs".into(), key("a"), Some("job:a".into()), Some(3)),
+                ("jobs".into(), key("b"), None, None),
+            ]
+        );
+        let out = s.hub_outbox_take(10).unwrap();
+        assert_eq!(out[1].fence, Some(Fence::new("job:a", 3)));
+        assert_eq!(out[0].fence, None);
+        assert_eq!(s.job_get("a").unwrap().unwrap(), j);
+    }
+
+    #[test]
+    fn jobs_that_ended_over_30_days_ago_are_pruned_through_sync() {
+        let s = Store::in_memory().unwrap();
+        s.hub_sync_install().unwrap();
+        let t0 = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let now = t0 + chrono::Duration::days(45);
+        let ended = |id: &str, at: DateTime<Utc>, ok: bool| {
+            let mut j = job(id, t0).claimed("laptop", 1, t0);
+            j.state = if ok {
+                JobState::Done {
+                    runner: "laptop".into(),
+                    result: JobResult::default(),
+                    finished_at: at,
+                }
+            } else {
+                JobState::Failed {
+                    error: "boom".into(),
+                    finished_at: at,
+                    usage: None,
+                }
+            };
+            j
+        };
+        s.job_put(&ended("old-done", t0, true), t0).unwrap();
+        s.job_put(
+            &ended("old-failed", t0 + chrono::Duration::days(1), false),
+            t0,
+        )
+        .unwrap();
+        s.job_put(&ended("recent", now - chrono::Duration::days(29), true), t0)
+            .unwrap();
+        // Never pruned while open, however old.
+        s.job_put(&job("waiting", t0), t0).unwrap();
+        s.job_put(&job("running", t0).claimed("laptop", 1, t0), t0)
+            .unwrap();
+        // Written long ago but ended recently: kept.
+        s.job_put(&ended("late", now - chrono::Duration::days(2), false), t0)
+            .unwrap();
+        let queued = s.hub_outbox_len().unwrap();
+        assert_eq!(s.jobs_prune(now).unwrap(), 2);
+        let mut left: Vec<_> = s
+            .jobs_recent(100)
+            .unwrap()
+            .into_iter()
+            .map(|j| j.id)
+            .collect();
+        left.sort();
+        assert_eq!(left, ["late", "recent", "running", "waiting"]);
+        // Deleted the synced way: the hub (and every other device) gets a
+        // Delete for each.
+        let out = s.hub_outbox_take(100).unwrap();
+        assert_eq!(out.len() as u64, queued + 2);
+        let gone: Vec<_> = out[queued as usize..]
+            .iter()
+            .map(|r| (r.key.as_str(), r.row.is_none()))
+            .collect();
+        assert!(gone.contains(&("[\"old-done\"]", true)), "{gone:?}");
+        assert!(gone.contains(&("[\"old-failed\"]", true)), "{gone:?}");
+        assert_eq!(s.jobs_prune(now).unwrap(), 0);
     }
 
     #[test]

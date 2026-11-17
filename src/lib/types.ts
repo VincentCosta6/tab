@@ -1262,4 +1262,6 @@ export interface HubStatus {
   pulled_to: number;
   /** What this computer holds that syncs, by kind. */
   synced: { what: string; count: number }[];
+  /** Changes from the hub this computer couldn't apply since the app started, by table. Older apps don't send it. */
+  skipped?: { table: string; count: number; last_error: string }[];
 }

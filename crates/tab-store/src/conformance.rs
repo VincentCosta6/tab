@@ -22,7 +22,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
-use tab_domain::lease::{Claim, MAX_TTL, MIN_TTL};
+use tab_domain::lease::{Claim, Fence, MAX_TTL, MIN_TTL};
 use tab_domain::ops::{Edge, MAX_BATCH, MAX_BODY_BYTES, Op, SearchHit};
 
 use crate::{HubStore, StoreError, StoreStats};
@@ -118,6 +118,19 @@ macro_rules! conformance_tests {
             leases_are_per_key,
             leases_do_not_touch_the_log,
             stale_tokens_lose_after_takeover,
+            // Fenced writes
+            a_fenced_write_by_the_live_holder_goes_through,
+            a_fenced_write_after_takeover_writes_nothing,
+            a_fenced_write_is_refused_once_the_lease_lapses,
+            a_fenced_write_after_release_is_refused,
+            a_fenced_write_on_an_unknown_lease_is_refused,
+            a_fenced_write_needs_the_holder_itself,
+            a_fenced_write_needs_the_exact_token,
+            every_fence_in_a_batch_must_hold,
+            a_refused_fenced_batch_does_not_use_up_seqs,
+            a_fenced_write_does_not_touch_the_lease,
+            validation_comes_before_the_fence,
+            unfenced_writes_ignore_leases,
             // Stats
             stats_of_an_empty_store_are_zero,
             stats_count_records_and_edges,
@@ -1183,6 +1196,211 @@ pub fn stale_tokens_lose_after_takeover<S: HubStore>(s: &mut S) {
     assert!(new.token > old.token);
     assert!(!fence_ok(Some(&new), old.token, t(TTL + 2)));
     assert!(fence_ok(Some(&new), new.token, t(TTL + 2)));
+}
+
+// ---- fenced writes ----
+
+fn fenced<S: HubStore>(
+    s: &mut S,
+    by: &str,
+    ops: &[Op],
+    fences: &[(&str, u64)],
+    at: DateTime<Utc>,
+) -> crate::Result<Vec<tab_domain::ops::Applied>> {
+    let fences: Vec<Fence> = fences.iter().map(|(k, t)| Fence::new(*k, *t)).collect();
+    s.apply_fenced(by, ops, &fences, at)
+}
+
+/// The batch was refused for its fence on `key` with `token`, and nothing
+/// was written.
+fn refused_for<S: HubStore>(
+    s: &S,
+    r: crate::Result<Vec<tab_domain::ops::Applied>>,
+    key: &str,
+    token: u64,
+    head: u64,
+) {
+    match r {
+        Err(StoreError::Fenced(e)) => assert_eq!((e.key.as_str(), e.token), (key, token)),
+        other => panic!("expected a fenced refusal, got {other:?}"),
+    }
+    assert_eq!(s.head().unwrap(), head, "a refused batch wrote something");
+}
+
+pub fn a_fenced_write_by_the_live_holder_goes_through<S: HubStore>(s: &mut S) {
+    let l = claim(s, "job:1", "mac", 0).lease().clone();
+    let a = fenced(s, "mac", &[item("1", "done")], &[("job:1", l.token)], t(1)).unwrap();
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].by, "mac");
+    assert_eq!(s.get("item", "1").unwrap().unwrap().body["title"], "done");
+    // Right up to the moment it lapses.
+    let last = t(TTL) - Duration::nanoseconds(1);
+    fenced(s, "mac", &[item("1", "later")], &[("job:1", l.token)], last).unwrap();
+    assert_eq!(s.head().unwrap(), 2);
+}
+
+pub fn a_fenced_write_after_takeover_writes_nothing<S: HubStore>(s: &mut S) {
+    let old = claim(s, "job:1", "mac", 0).lease().clone();
+    let new = claim(s, "job:1", "phone", TTL + 1).lease().clone();
+    apply(s, &[item("1", "phone's")], t(TTL + 2));
+    let late = fenced(
+        s,
+        "mac",
+        &[item("1", "mac's late result")],
+        &[("job:1", old.token)],
+        t(TTL + 3),
+    );
+    refused_for(s, late, "job:1", old.token, 1);
+    assert_eq!(
+        s.get("item", "1").unwrap().unwrap().body["title"],
+        "phone's"
+    );
+    // The new holder's own fenced write still goes through.
+    fenced(
+        s,
+        "phone",
+        &[item("1", "done")],
+        &[("job:1", new.token)],
+        t(TTL + 4),
+    )
+    .unwrap();
+    assert_eq!(s.get("item", "1").unwrap().unwrap().body["title"], "done");
+}
+
+pub fn a_fenced_write_is_refused_once_the_lease_lapses<S: HubStore>(s: &mut S) {
+    // Lapsed at `now`, though nothing has expired it or taken it yet.
+    let l = claim(s, "job:1", "mac", 0).lease().clone();
+    let r = fenced(s, "mac", &[item("1", "x")], &[("job:1", l.token)], t(TTL));
+    refused_for(s, r, "job:1", l.token, 0);
+    let r = fenced(
+        s,
+        "mac",
+        &[item("1", "x")],
+        &[("job:1", l.token)],
+        t(TTL + 100),
+    );
+    refused_for(s, r, "job:1", l.token, 0);
+    // Nor after the hub expires it.
+    s.expire_leases(t(TTL + 101)).unwrap();
+    let r = fenced(
+        s,
+        "mac",
+        &[item("1", "x")],
+        &[("job:1", l.token)],
+        t(TTL + 102),
+    );
+    refused_for(s, r, "job:1", l.token, 0);
+    assert!(s.get("item", "1").unwrap().is_none());
+}
+
+pub fn a_fenced_write_after_release_is_refused<S: HubStore>(s: &mut S) {
+    let l = claim(s, "job:1", "mac", 0).lease().clone();
+    assert!(s.release_lease("job:1", "mac", t(1)).unwrap());
+    let r = fenced(s, "mac", &[item("1", "x")], &[("job:1", l.token)], t(2));
+    refused_for(s, r, "job:1", l.token, 0);
+}
+
+pub fn a_fenced_write_on_an_unknown_lease_is_refused<S: HubStore>(s: &mut S) {
+    let r = fenced(s, "mac", &[item("1", "x")], &[("job:nope", 1)], t(0));
+    refused_for(s, r, "job:nope", 1, 0);
+    let r = fenced(s, "mac", &[item("1", "x")], &[("", 0)], t(0));
+    refused_for(s, r, "", 0, 0);
+}
+
+pub fn a_fenced_write_needs_the_holder_itself<S: HubStore>(s: &mut S) {
+    // Tokens are visible in synced records, so knowing one isn't enough.
+    let l = claim(s, "job:1", "mac", 0).lease().clone();
+    let r = fenced(s, "phone", &[item("1", "x")], &[("job:1", l.token)], t(1));
+    refused_for(s, r, "job:1", l.token, 0);
+}
+
+pub fn a_fenced_write_needs_the_exact_token<S: HubStore>(s: &mut S) {
+    claim(s, "job:1", "mac", 0);
+    claim(s, "job:1", "mac", TTL + 1);
+    let r = fenced(s, "mac", &[item("1", "x")], &[("job:1", 1)], t(TTL + 2));
+    refused_for(s, r, "job:1", 1, 0);
+    let r = fenced(s, "mac", &[item("1", "x")], &[("job:1", 3)], t(TTL + 2));
+    refused_for(s, r, "job:1", 3, 0);
+    fenced(s, "mac", &[item("1", "x")], &[("job:1", 2)], t(TTL + 2)).unwrap();
+}
+
+pub fn every_fence_in_a_batch_must_hold<S: HubStore>(s: &mut S) {
+    let a = claim(s, "job:a", "mac", 0).lease().clone();
+    let b = claim(s, "job:b", "mac", 0).lease().clone();
+    assert!(s.release_lease("job:b", "mac", t(1)).unwrap());
+    let r = fenced(
+        s,
+        "mac",
+        &[item("1", "x"), item("2", "y")],
+        &[("job:a", a.token), ("job:b", b.token)],
+        t(2),
+    );
+    refused_for(s, r, "job:b", b.token, 0);
+    assert!(s.get("item", "1").unwrap().is_none());
+    fenced(
+        s,
+        "mac",
+        &[item("1", "x"), item("2", "y")],
+        &[("job:a", a.token), ("job:a", a.token)],
+        t(2),
+    )
+    .unwrap();
+    assert_eq!(s.head().unwrap(), 2);
+}
+
+pub fn a_refused_fenced_batch_does_not_use_up_seqs<S: HubStore>(s: &mut S) {
+    apply(s, &[item("1", "a")], t(0));
+    let r = fenced(
+        s,
+        "mac",
+        &[item("2", "b"), link("item:2", "x:y", "r")],
+        &[("k", 9)],
+        t(1),
+    );
+    refused_for(s, r, "k", 9, 1);
+    let a = s.apply("mac", &[item("3", "c")], t(2)).unwrap();
+    assert_eq!(a[0].seq, 2);
+    assert!(s.graph_neighbors("item:2", 10).unwrap().is_empty());
+    assert!(find(s, "b").is_empty());
+    assert_eq!(s.changes_since(0, 100).unwrap().len(), 2);
+}
+
+pub fn a_fenced_write_does_not_touch_the_lease<S: HubStore>(s: &mut S) {
+    let l = claim(s, "job:1", "mac", 0).lease().clone();
+    fenced(
+        s,
+        "mac",
+        &[item("1", "x")],
+        &[("job:1", l.token)],
+        t(TTL - 1),
+    )
+    .unwrap();
+    // Not renewed: it still lapses when it did.
+    let gone = s.expire_leases(t(TTL)).unwrap();
+    assert_eq!(gone, [l]);
+    // And a refused one doesn't take it either.
+    let r = fenced(s, "phone", &[item("1", "y")], &[("job:1", 2)], t(TTL + 1));
+    refused_for(s, r, "job:1", 2, 1);
+    assert!(granted(&claim(s, "job:1", "phone", TTL + 2)));
+    assert_eq!(s.stats(t(TTL + 2)).unwrap().live_leases, 1);
+}
+
+pub fn validation_comes_before_the_fence<S: HubStore>(s: &mut S) {
+    let bad = put("Bad", "1", json!({}));
+    match fenced(s, "mac", &[item("1", "ok"), bad], &[("nope", 1)], t(0)) {
+        Err(StoreError::Invalid(e)) => assert_eq!(e.index, 1),
+        other => panic!("expected the batch to be invalid, got {other:?}"),
+    }
+    assert_eq!(s.head().unwrap(), 0);
+}
+
+pub fn unfenced_writes_ignore_leases<S: HubStore>(s: &mut S) {
+    // What every client sent before fences existed: unchanged.
+    claim(s, "job:1", "phone", 0);
+    fenced(s, "mac", &[item("1", "x")], &[], t(1)).unwrap();
+    apply(s, &[item("1", "y")], t(2));
+    assert_eq!(s.head().unwrap(), 2);
+    assert_eq!(s.get("item", "1").unwrap().unwrap().body["title"], "y");
 }
 
 // ---- stats ----

@@ -1,7 +1,8 @@
 //! Property tests: random workloads run against every backend at once, and
 //! they must agree on everything observable. Plus invariants that hold for
-//! any workload: replaying the change log rebuilds the same state, and a
-//! key never has two live lease holders.
+//! any workload: replaying the change log rebuilds the same state, a key
+//! never has two live lease holders, and a fenced write lands only for the
+//! live holder with its token.
 //!
 //! Slow-ish by design, so not run in CI: `scripts/storage-tests.sh`.
 //! `PROPTEST_CASES=2000 cargo test -p tab-store --test properties` digs deeper.
@@ -9,7 +10,7 @@
 use chrono::{DateTime, Duration, Utc};
 use proptest::prelude::*;
 use serde_json::json;
-use tab_domain::lease::Claim;
+use tab_domain::lease::{Claim, Fence};
 use tab_domain::ops::Op;
 use tab_store::HubStore;
 use tab_store::mem::MemStore;
@@ -156,6 +157,16 @@ enum LeaseStep {
     Release(&'static str, &'static str),
     Expire,
     Wait(i64),
+    /// A write by a holder, fenced on a key with the last token handed out
+    /// for it plus this offset (-1: an older one, 0: the latest, 1: one
+    /// nobody has yet), and maybe a second fence.
+    Fenced(
+        &'static str,
+        &'static str,
+        i64,
+        Option<(&'static str, i64)>,
+        Op,
+    ),
 }
 
 fn lease_step() -> impl Strategy<Value = LeaseStep> {
@@ -164,6 +175,14 @@ fn lease_step() -> impl Strategy<Value = LeaseStep> {
         2 => (pick(KEYS), pick(HOLDERS)).prop_map(|(k, h)| LeaseStep::Release(k, h)),
         1 => Just(LeaseStep::Expire),
         2 => (0i64..40).prop_map(LeaseStep::Wait),
+        3 => (
+            pick(HOLDERS),
+            pick(KEYS),
+            prop_oneof![1 => Just(-1i64), 4 => Just(0i64), 1 => Just(1i64)],
+            prop::option::of((pick(KEYS), prop_oneof![1 => Just(-1i64), 4 => Just(0i64)])),
+            op(),
+        )
+            .prop_map(|(h, k, off, second, op)| LeaseStep::Fenced(h, k, off, second, op)),
     ]
 }
 
@@ -232,6 +251,33 @@ proptest! {
                     }
                 }
                 LeaseStep::Wait(s) => now += s,
+                LeaseStep::Fenced(h, k, off, second, op) => {
+                    let fence = |k: &str, off: i64| {
+                        Fence::new(k, (top.get(k).copied().unwrap_or(0) as i64 + off).max(0) as u64)
+                    };
+                    let mut fences = vec![fence(k, off)];
+                    fences.extend(second.map(|(k, off)| fence(k, off)));
+                    let batch = std::slice::from_ref(&op);
+                    let a = mem.apply_fenced(h, batch, &fences, t(now)).map_err(|e| e.to_string());
+                    let b = lite.apply_fenced(h, batch, &fences, t(now)).map_err(|e| e.to_string());
+                    let c = cloud.apply_fenced(h, batch, &fences, t(now)).map_err(|e| e.to_string());
+                    prop_assert_eq!(&a, &b);
+                    prop_assert_eq!(&a, &c);
+                    prop_assert_eq!(observe(&mem), observe(&lite));
+                    prop_assert_eq!(observe(&mem), observe(&cloud));
+                    // It lands only if every fence names a lease `h` holds,
+                    // live now, with exactly that token (and the op is valid).
+                    let holds = fences.iter().all(|f| {
+                        holder.get(f.key.as_str()).is_some_and(|(who, tok, until)| {
+                            who == h && *tok == f.token && t(now) < *until
+                        })
+                    });
+                    let valid = tab_domain::ops::validate(batch).is_ok();
+                    prop_assert_eq!(a.is_ok(), holds && valid, "{:?}", a);
+                    if valid && !holds {
+                        prop_assert!(a.unwrap_err().starts_with("refused: lease"));
+                    }
+                }
             }
         }
     }

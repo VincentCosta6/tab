@@ -124,6 +124,138 @@ async fn repeated_writes_of_the_same_row_are_sent_once() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A runner's late result, written under a lease another runner has taken
+/// since: the hub refuses it (a fence error, told apart from others), the
+/// rest of the batch goes through, and this copy goes back to the hub's
+/// version of the job instead of trying again.
+#[tokio::test]
+async fn a_late_result_under_a_lost_lease_is_dropped() {
+    use crate::leases::Leases;
+    use tab_domain::lease::Fence;
+    use tab_domain::runner::{Job, JobResult, JobSpec, JobState};
+    let (hub, dir) = temp_hub("fenced");
+    let store = Arc::new(Store::in_memory().unwrap());
+    store.hub_sync_install().unwrap();
+    store.hub_backfill_once().unwrap();
+    let me = hub.holder();
+    let job = Job {
+        id: "j1".into(),
+        run_id: "r1".into(),
+        step_id: "fix".into(),
+        workflow_id: "w1".into(),
+        spec: JobSpec::default(),
+        state: JobState::Waiting,
+        attempts: 0,
+        max_attempts: 2,
+        created_at: when(),
+        deadline: when() + chrono::Duration::days(1),
+        missing: vec![],
+        claimed_at: None,
+        interventions: vec![],
+    };
+    let mine = hub
+        .claim_blocking("job:j1", chrono::Duration::seconds(60))
+        .unwrap();
+    assert!(mine.won);
+    let running = job.claimed(&me, mine.token, Utc::now());
+    let fence = Fence::new("job:j1", mine.token);
+    store.job_put_fenced(&running, Utc::now(), &fence).unwrap();
+    hub.flush_blocking().unwrap(); // not following: a no-op
+    hub.push_once(&store).unwrap();
+    let key = json!(["j1"]).to_string();
+    let in_hub = |hub: &LocalHub| hub.hub_record("jobs", &key).unwrap().unwrap();
+    assert_eq!(in_hub(&hub)["state"], "running");
+
+    // This runner goes quiet; the laptop takes the job over.
+    hub.release_blocking("job:j1").unwrap();
+    let laptop: ConnId = 77;
+    let theirs = {
+        let mut h = hub.hub.lock().unwrap();
+        h.connect(laptop, "test", Utc::now());
+        h.handle(
+            laptop,
+            1,
+            Req::Hello(pb::Hello {
+                device: "laptop".into(),
+                ..Default::default()
+            }),
+            Utc::now(),
+        );
+        let claimed = h.handle(
+            laptop,
+            2,
+            Req::ClaimLease(pb::ClaimLease {
+                key: "job:j1".into(),
+                ttl_secs: 60,
+            }),
+            Utc::now(),
+        );
+        let Some(Res::LeaseClaim(c)) = claimed.reply.body else {
+            panic!("{claimed:?}")
+        };
+        c.lease.unwrap().token
+    };
+    assert!(theirs > mine.token);
+    // The laptop's own write of the job, as its copy sends it.
+    let other = Store::in_memory().unwrap();
+    other.hub_sync_install().unwrap();
+    other
+        .job_put(&job.claimed("laptop", theirs, Utc::now()), Utc::now())
+        .unwrap();
+    let laptops = other.hub_row("jobs", &key).unwrap().unwrap();
+    let wrote = hub.hub.lock().unwrap().handle(
+        laptop,
+        3,
+        Req::Apply(pb::Apply {
+            ops: vec![
+                (&Op::Put {
+                    kind: "jobs".into(),
+                    id: key.clone(),
+                    body: laptops.clone(),
+                })
+                    .into(),
+            ],
+            fences: vec![pb::Fence {
+                key: "job:j1".into(),
+                token: theirs,
+            }],
+        }),
+        Utc::now(),
+    );
+    assert!(
+        matches!(wrote.reply.body, Some(Res::Applied(_))),
+        "{wrote:?}"
+    );
+
+    // This runner finishes late, before it heard; something else changes too.
+    let mut done = running.clone();
+    done.state = JobState::Done {
+        runner: me.clone(),
+        result: JobResult {
+            summary: "mine".into(),
+            ..Default::default()
+        },
+        finished_at: Utc::now(),
+    };
+    store.job_put_fenced(&done, Utc::now(), &fence).unwrap();
+    let it = add(&store, "1", "unrelated");
+    let e = hub
+        .apply_fenced(&[], &[&fence])
+        .expect_err("the hub refuses the old token");
+    assert!(crate::leases::lost_lease(&e), "{e}");
+    assert!(!crate::leases::lost_lease(&anyhow::anyhow!("hub: offline")));
+    hub.push_once(&store).unwrap();
+    // The hub kept the laptop's job; the rest went through.
+    assert_eq!(in_hub(&hub), laptops);
+    assert!(hub_item(&hub, &it.id).is_some());
+    // And this copy dropped its result for the hub's version.
+    assert_eq!(store.hub_row("jobs", &key).unwrap().unwrap(), laptops);
+    let here = store.job_get("j1").unwrap().unwrap();
+    assert!(matches!(&here.state, JobState::Running { runner, .. } if runner == "laptop"));
+    assert_eq!(store.hub_outbox_len().unwrap(), 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn status_reports_this_process() {
     let (hub, dir) = temp_hub("resources");
@@ -251,6 +383,7 @@ async fn another_device_syncs_both_ways() {
         3,
         Req::Apply(pb::Apply {
             ops: vec![(&put).into()],
+            ..Default::default()
         }),
     ))
     .await
@@ -750,6 +883,7 @@ async fn this_app_watches_and_steers_a_session_another_device_runs() {
             2,
             Req::Apply(pb::Apply {
                 ops: vec![(&session).into()],
+                ..Default::default()
             }),
         ))
         .await
@@ -866,6 +1000,7 @@ async fn this_app_watches_and_steers_a_session_another_device_runs() {
             3,
             Req::Apply(pb::Apply {
                 ops: vec![(&done).into()],
+                ..Default::default()
             }),
         ))
         .await

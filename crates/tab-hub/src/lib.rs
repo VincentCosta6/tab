@@ -6,7 +6,8 @@
 //! - **In the desktop app**, on local SQLite, for people running tab
 //!   entirely on their own machine.
 //! - **In the cloud**, one per person or team inside a Cloudflare Durable
-//!   Object on its built-in SQLite (the `cloud/worker` crate, to come).
+//!   Object on its built-in SQLite (the hub Worker, in the private
+//!   `tab-infra` repo).
 //!
 //! It holds no sockets and reads no clock. Its host tells it when a
 //! connection opens or closes ([`Hub::connect`], [`Hub::disconnect`]), hands
@@ -127,6 +128,7 @@ fn store_error(id: u64, e: StoreError) -> ServerEnvelope {
     let code = match e {
         StoreError::Invalid(_) => pb::error::Code::BadRequest,
         StoreError::Backend(_) => pb::error::Code::Internal,
+        StoreError::Fenced(_) => pb::error::Code::Fenced,
     };
     ServerEnvelope::error(id, code, e.to_string())
 }
@@ -340,8 +342,14 @@ impl<S: HubStore> Hub<S> {
                     .map_err(|e| {
                         ServerEnvelope::error(id, pb::error::Code::BadRequest, e.to_string())
                     })?;
+                // Made under leases: written only while `device` holds
+                // each with its token (checked with the write, atomically).
+                let fences: Vec<_> = a.fences.into_iter().map(Into::into).collect();
                 let before = self.store.head().map_err(err)?;
-                let applied = self.store.apply(device, &ops, now).map_err(err)?;
+                let applied = self
+                    .store
+                    .apply_fenced(device, &ops, &fences, now)
+                    .map_err(err)?;
                 let push = self.wrote(conn, before, &applied).map_err(err)?;
                 Handled {
                     reply: ServerEnvelope::new(

@@ -38,6 +38,12 @@
 //!   same user can read it from `/proc`.
 //! - It goes by the device id its hub gives it (`runner-<hub id>`) and
 //!   starts from an empty data folder each time, keeping only clones.
+//!
+//! Claude Code and Codex run through ACP adapters (claude-agent-acp,
+//! codex-acp), which tab installs itself at the versions pinned in its
+//! source, the way the desktop app does: here into `tools/acp` in the data
+//! folder (see [`adapter_dir`]), fetched when this runner starts. The
+//! harnesses themselves (`claude`, `codex`) come from the image.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -304,6 +310,38 @@ fn start_clean(data: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Where tab installs the ACP adapters and the Node codex-acp runs on, as
+/// the desktop app does in its data folder (`tools/acp`).
+///
+/// Outside `work/`, so it's in no agent's writable checkout: the data folder
+/// is protected (and confined) in every agent's sandbox, and each adapter's
+/// folder is let back in read-only when it starts (`Launch::readable`).
+/// `start_clean` empties it with the rest: the container's disk goes with
+/// the container anyway, and this way every copy a run uses is one it
+/// downloaded and checked against its pin itself.
+fn adapter_dir(data: &Path) -> PathBuf {
+    data.join("tools").join("acp")
+}
+
+/// Starts fetching the ACP adapter of the harness `config` sets up, in the
+/// background, when it runs through one tab installs. Does nothing when
+/// it's already here, or no harness is set up (jobs that name none fail).
+fn prepare_adapter(config: &TabConfig) {
+    if let Some(kind) = config.agent.kind {
+        tab_core::agents::prepare_adapter(kind);
+    }
+}
+
+/// Makes the adapter folder and points tab at it. The sandbox matches paths
+/// as the kernel sees them, so it's resolved once it exists.
+fn use_adapter_dir(data: &Path) -> anyhow::Result<PathBuf> {
+    let dir = adapter_dir(data);
+    std::fs::create_dir_all(&dir)?;
+    let dir = std::fs::canonicalize(&dir)?;
+    tab_core::agents::adapter::set_dir(dir.clone());
+    Ok(dir)
+}
+
 fn main() -> anyhow::Result<()> {
     // Inside an agent's sandbox: the bridge to tab's proxy.
     let mut args = std::env::args_os().skip(1);
@@ -334,6 +372,8 @@ async fn run(env: Env) -> anyhow::Result<()> {
     start_clean(&env.data)?;
     let work = env.data.join("work");
     std::fs::create_dir_all(&work)?;
+    let adapters = use_adapter_dir(&env.data)?;
+    tracing::info!(dir = %adapters.display(), "cloud runner: ACP adapters go here");
 
     // Nothing starts outside the sandbox here, and tab's own files in the
     // data folder are hidden from whatever does.
@@ -400,6 +440,9 @@ async fn run(env: Env) -> anyhow::Result<()> {
     );
     // Every job here works on a clone of someone's repo.
     agents.review_under(&work);
+    // The person's harness's adapter, fetched now so the first job needn't
+    // wait for it; another harness's is fetched when a job first needs it.
+    prepare_adapter(&current.config);
 
     // The MCP connections the person allowed here, through tab's MCP
     // server on this container's loopback. Their sign-ins live in the data
@@ -481,6 +524,7 @@ async fn run(env: Env) -> anyhow::Result<()> {
             sb.set_spawn_env(next.env.clone());
             jobs.set_git_token(next.git_token.clone());
             agents.set_config(next.config.agent.clone()).await;
+            prepare_adapter(&next.config);
             apply_mcp(&remote, &next);
             engine.shutdown();
             engine = start(&next.config);
@@ -612,6 +656,10 @@ mod tests {
         std::fs::create_dir_all(d.join("agents/sessions")).unwrap();
         std::fs::write(d.join("tab.db"), "old").unwrap();
         std::fs::write(d.join("hub.db-wal"), "old").unwrap();
+        // Adapters too: each run downloads and checks its own.
+        let claude = adapter_dir(&d).join("claude_code");
+        std::fs::create_dir_all(&claude).unwrap();
+        std::fs::write(claude.join("claude-agent-acp"), "old").unwrap();
         start_clean(&d).unwrap();
         let left: Vec<_> = std::fs::read_dir(&d)
             .unwrap()
@@ -619,6 +667,61 @@ mod tests {
             .collect();
         assert_eq!(left, vec![std::ffi::OsString::from("work")]);
         assert!(d.join("work/repos/acme__api").is_dir());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn adapters_are_kept_apart_from_the_clones() {
+        let data = Path::new("/data");
+        let dir = adapter_dir(data);
+        assert_eq!(dir, Path::new("/data/tools/acp"));
+        assert!(dir.starts_with(data));
+        assert!(!dir.starts_with(data.join("work")));
+    }
+
+    /// What an agent's sandbox makes of an adapter: it can read (and so
+    /// start) it, but not change it, and its checkout doesn't reach it.
+    #[test]
+    fn agents_can_start_adapters_but_not_change_them() {
+        use tab_core::sandbox::Access;
+        let d = std::env::temp_dir().join(format!("tab-runner-adapters-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let checkout = d.join("work/repos/acme__api");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let d = std::fs::canonicalize(&d).unwrap();
+        let (work, checkout) = (d.join("work"), d.join("work/repos/acme__api"));
+        let claude = adapter_dir(&d).join("claude_code");
+        let codex = adapter_dir(&d).join("codex");
+        let node = adapter_dir(&d).join("node/26.13.1");
+        for p in [&claude, &codex, &node.join("bin")] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let exe = claude.join("claude-agent-acp");
+        let script = codex.join("node_modules/@agentclientprotocol/codex-acp/dist/index.js");
+        std::fs::write(&exe, "").unwrap();
+
+        let sb = Sandbox::new(SandboxConfig::default(), Some(d.clone()), Some(d.clone()));
+        let mut p = sb.review_policy(&checkout, &work);
+        // Nothing of the adapters is writable from the job's checkout.
+        for f in [&exe, &script, &node.join("bin/node")] {
+            assert!(!p.allows(f, Access::Write), "{}", f.display());
+        }
+        // The data folder is confined: an adapter shows only once let in.
+        if sb.confines() {
+            assert!(!p.allows(&exe, Access::Read));
+        }
+        // What `acp::run` adds when it starts one: the folders of its
+        // `Launch` (codex-acp's install and Node), and the program's own
+        // folder (`Sandbox::starting_in`).
+        p.readable
+            .extend([codex.clone(), node.clone(), claude.clone()]);
+        for f in [&exe, &script, &node.join("bin/node")] {
+            assert!(p.allows(f, Access::Read), "{}", f.display());
+            assert!(!p.allows(f, Access::Write), "{}", f.display());
+        }
+        // And tab's own files beside them stay hidden.
+        assert!(!p.allows(&d.join("tab.db"), Access::Read));
+        assert!(p.allows(&checkout.join("src/lib.rs"), Access::Write));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

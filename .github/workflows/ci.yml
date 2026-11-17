@@ -8,6 +8,16 @@ on:
   workflow_call:
 
 jobs:
+  # Every Rust crate's license and source against deny.toml (see CLAUDE.md,
+  # "Third-party code"), git dependencies like Zed's crates included.
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+
   # The macOS sandbox (Seatbelt) for real: the Linux job runs bubblewrap
   # only, and without TAB_REQUIRE_SANDBOX these tests would skip instead of
   # failing.
@@ -49,6 +59,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Every npm package's license against deny.toml's list.
+      - run: pnpm licenses:check
       - run: pnpm typecheck
       - run: pnpm build
       - run: cargo test -p tab-core
@@ -64,5 +76,14 @@ jobs:
       - name: Shared crates build for Wasm (Cloudflare Workers)
         run: cargo check --target wasm32-unknown-unknown -p tab-domain -p tab-protocol -p tab-hub -p tab-store --features tab-store/sql
       - run: pnpm proto:lint
+      # A renumbered, retyped or removed-without-reserving field fails here
+      # (buf.yaml's `breaking` rules), against the branch the PR merges into.
+      - name: Protobuf changes are additive
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          pnpm exec buf breaking --against ".git#branch=origin/$BASE_REF"
       - name: Generated TypeScript matches hub.proto
         run: pnpm proto && git diff --exit-code src/lib/protocol

@@ -294,6 +294,76 @@ fn remote_rows_tolerate_unknown_tables_and_extra_columns() {
 }
 
 #[test]
+fn remote_rows_that_fail_are_counted_and_the_rest_still_apply() {
+    let s = store();
+    assert!(s.hub_skipped().is_empty());
+    let project = |id: &str| {
+        json!({"id": id, "name": id, "color": "red", "icon": "x",
+        "created_at": "2026-11-07T00:00:00.000Z", "updated_at": "2026-11-07T00:00:00.000Z"})
+    };
+    let changed = s
+        .hub_apply_remote(&[
+            (
+                "projects".into(),
+                json!(["p1"]).to_string(),
+                Some(project("p1")),
+            ),
+            // Missing NOT NULL columns: can't be written here.
+            (
+                "projects".into(),
+                json!(["bad"]).to_string(),
+                Some(json!({"id": "bad"})),
+            ),
+            (
+                "projects".into(),
+                json!(["p2"]).to_string(),
+                Some(project("p2")),
+            ),
+        ])
+        .unwrap();
+    assert_eq!(changed.len(), 2, "{changed:?}");
+    let mut names: Vec<String> = s.projects().unwrap().into_iter().map(|p| p.name).collect();
+    names.sort();
+    assert_eq!(names, ["p1", "p2"]);
+    let skipped = s.hub_skipped();
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(
+        (skipped[0].table.as_str(), skipped[0].count),
+        ("projects", 1)
+    );
+    assert!(
+        skipped[0].last_error.contains("NOT NULL"),
+        "{}",
+        skipped[0].last_error
+    );
+
+    // Another one adds to the count; a table that isn't known here (a newer
+    // app syncs more) is ignored, not counted.
+    s.hub_apply_remote(&[
+        (
+            "projects".into(),
+            json!(["bad2"]).to_string(),
+            Some(json!("nope")),
+        ),
+        (
+            "future_table".into(),
+            json!(["x"]).to_string(),
+            Some(json!({"id": "x"})),
+        ),
+    ])
+    .unwrap();
+    let skipped = s.hub_skipped();
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0].count, 2);
+    assert!(
+        skipped[0].last_error.contains("isn't an object"),
+        "{}",
+        skipped[0].last_error
+    );
+    assert_eq!(s.hub_outbox_len().unwrap(), 0);
+}
+
+#[test]
 fn children_arriving_before_their_parents_still_land() {
     let (a, b) = (store(), store());
     populate(&a);

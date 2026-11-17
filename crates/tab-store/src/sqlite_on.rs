@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use sea_query::{SqliteQueryBuilder, Values};
-use tab_domain::lease::{self, Claim, Lease};
+use tab_domain::lease::{self, Claim, Fence, Lease};
 use tab_domain::ops::{self, Applied, Edge, Op, Record, SearchHit, Seq};
 
 use crate::sql;
@@ -285,11 +285,24 @@ impl<C: SqliteConn> HubStore for SqliteOn<C> {
         Ok(max.flatten().unwrap_or(0) as Seq)
     }
 
-    fn apply(&mut self, by: &str, batch: &[Op], now: DateTime<Utc>) -> Result<Vec<Applied>> {
+    fn apply_fenced(
+        &mut self,
+        by: &str,
+        batch: &[Op],
+        fences: &[Fence],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Applied>> {
         ops::validate(batch)?;
         let seq = self.head()?;
-        self.conn
-            .transaction(|tx| apply_in(tx, by, batch, seq, now))
+        self.conn.transaction(|tx| {
+            // In the write's own transaction, so the lease can't change
+            // hands between the check and the write.
+            for f in fences {
+                let current = one(tx, &sql::get_lease(&f.key), row_lease)?;
+                lease::check_fence(current.as_ref(), f, by, now)?;
+            }
+            apply_in(tx, by, batch, seq, now)
+        })
     }
 
     fn changes_since(&self, since: Seq, limit: usize) -> Result<Vec<Applied>> {

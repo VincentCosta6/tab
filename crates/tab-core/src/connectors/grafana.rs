@@ -395,9 +395,11 @@ impl Connector for GrafanaConnector {
                 Err(GatewayError::Http {
                     status: 401 | 403, ..
                 }) => {
-                    anyhow::bail!(
+                    return Err(crate::connector::NeedsReconnect(
                         "Grafana rejected the token. Check it can read alerts, then reconnect."
+                            .into(),
                     )
+                    .into());
                 }
                 Err(GatewayError::RateLimited { until, .. }) => {
                     ctx.set_status(ConnectorStatus::RateLimited { until }).await;

@@ -29,6 +29,53 @@ pub trait Leases: Send + Sync + 'static {
     fn holder(&self) -> String;
     fn claim_blocking(&self, key: &str, ttl: Duration) -> anyhow::Result<Claimed>;
     fn release_blocking(&self, key: &str) -> anyhow::Result<()>;
+    /// Sends the changes this side has queued for the hub now, and waits
+    /// for the hub's answer. A runner calls it after a write fenced by a
+    /// lease ([`crate::store::Store::job_put_fenced`]) and before releasing
+    /// that lease, since the hub checks the fence when the write arrives.
+    fn flush_blocking(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// The hub said no to a request: its error code and message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// A `tab_protocol::pb::error::Code`.
+    pub code: i32,
+    /// Including which hub said it ("hub: ...", "cloud hub: ...").
+    pub message: String,
+}
+
+impl Refused {
+    pub fn new(hub: &str, e: &tab_protocol::pb::Error) -> Self {
+        Self {
+            code: e.code,
+            message: format!("{hub}: {}", e.message),
+        }
+    }
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Whether the hub refused a write because its fence failed: the lease it
+/// was made under isn't this side's any more. Someone else owns that work
+/// now, so the write is dropped rather than tried again.
+pub fn lost_lease(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Refused>()
+        .is_some_and(|r| r.code == tab_protocol::pb::error::Code::Fenced as i32)
+}
+
+/// [`Leases::flush_blocking`] on a blocking thread.
+pub async fn flush(leases: &Arc<dyn Leases>) -> anyhow::Result<()> {
+    let l = leases.clone();
+    tokio::task::spawn_blocking(move || l.flush_blocking()).await?
 }
 
 /// Claims `key` for `ttl` on a blocking thread.

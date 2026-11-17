@@ -129,6 +129,13 @@ message Lease {
   google.protobuf.Timestamp expires_at = 4;
 }
 
+// "This write is made under lease `key`, which I hold with fencing token
+// `token`." See Apply.fences.
+message Fence {
+  string key = 1;
+  uint64 token = 2;
+}
+
 message SearchHit {
   string kind = 1;
   string id = 2;
@@ -150,6 +157,17 @@ message Hello {
 // Writes a batch, all or nothing.
 message Apply {
   repeated Op ops = 1;
+  // Leases the batch is made under. When any are given, the hub writes the
+  // batch only if the sender holds every one of them, not yet expired, with
+  // exactly that token, checked in the same transaction as the write;
+  // otherwise nothing is written and the reply is CODE_FENCED. This is how
+  // a runner whose lease lapsed (and was taken by another) is kept from
+  // overwriting the new holder's work. Fences apply to the whole batch, as
+  // the batch is all or nothing; send writes made under different leases
+  // (or none) separately if one refusal shouldn't hold up the rest. Empty
+  // (what clients sent before this field) checks no lease. A hub older
+  // than this field ignores it.
+  repeated Fence fences = 2;
 }
 
 // Copies another hub's history into this one, oldest first, keeping each
@@ -306,6 +324,10 @@ message Error {
     CODE_CONFLICT = 3;
     // Storage failed; retrying may work.
     CODE_INTERNAL = 4;
+    // An Apply's fence failed: the sender doesn't hold that lease with that
+    // token any more (it expired, was released or was taken over). Nothing
+    // was written. Don't retry: someone else owns that work now.
+    CODE_FENCED = 5;
   }
   Code code = 1;
   string message = 2;

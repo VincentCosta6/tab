@@ -36,6 +36,9 @@ pub const CONNECTION_RENEW: Duration = Duration::seconds(60);
 pub const DEFAULT_JOB_MINUTES: u32 = 24 * 60;
 /// Attempts a job gets before it fails, by default.
 pub const DEFAULT_JOB_ATTEMPTS: u32 = 2;
+/// How long a job is kept after it ends (done or failed), like the
+/// workflow run log ([`crate::workflow::rollup::RUN_LOG_DAYS`]).
+pub const JOB_KEEP: Duration = Duration::days(30);
 
 /// The lease that lets one runner start a workflow for one trigger.
 pub fn workflow_run_lease(workflow_id: &str, trigger_key: &str) -> String {
@@ -465,6 +468,23 @@ impl Job {
         matches!(self.state, JobState::Done { .. } | JobState::Failed { .. })
     }
 
+    /// When it ended, if it has.
+    pub fn finished_at(&self) -> Option<DateTime<Utc>> {
+        match &self.state {
+            JobState::Done { finished_at, .. } | JobState::Failed { finished_at, .. } => {
+                Some(*finished_at)
+            }
+            JobState::Waiting | JobState::Running { .. } => None,
+        }
+    }
+
+    /// Whether it may be deleted at `now`: it ended (done or failed) more
+    /// than [`JOB_KEEP`] ago. A job that's waiting or running never is,
+    /// however old.
+    pub fn prunable(&self, now: DateTime<Utc>) -> bool {
+        self.finished_at().is_some_and(|at| at < now - JOB_KEEP)
+    }
+
     /// Why no runner will take it any more, if so: past its deadline, or
     /// out of attempts with nobody holding it.
     pub fn given_up(&self, lease_live: bool, now: DateTime<Utc>) -> Option<String> {
@@ -637,6 +657,36 @@ mod tests {
         assert!(!j.accepts_result_from("laptop", 7));
         assert!(!j.accepts_result_from("cloud", 7));
         assert!(j.accepts_result_from("cloud", 8));
+    }
+
+    #[test]
+    fn only_jobs_that_ended_over_30_days_ago_are_pruned() {
+        let mut j = job(Placement::Anywhere);
+        let now = t(0) + Duration::days(60);
+        // Waiting or running, however old: kept.
+        assert!(!j.prunable(now));
+        j = j.claimed("laptop", 1, t(0));
+        assert!(!j.prunable(now + Duration::days(365)));
+        // Done: kept for 30 days from when it ended, then pruned.
+        let ended = t(0) + Duration::days(10);
+        j.state = JobState::Done {
+            runner: "laptop".into(),
+            result: JobResult::default(),
+            finished_at: ended,
+        };
+        assert!(!j.prunable(ended + Duration::days(29)));
+        assert!(!j.prunable(ended + JOB_KEEP));
+        assert!(j.prunable(ended + JOB_KEEP + Duration::seconds(1)));
+        // Failed too.
+        j.state = JobState::Failed {
+            error: "boom".into(),
+            finished_at: ended,
+            usage: None,
+        };
+        assert!(!j.prunable(ended + Duration::days(1)));
+        assert!(j.prunable(ended + Duration::days(31)));
+        // Age is from when it ended, not when it was made.
+        assert!(!j.prunable(ended + Duration::days(20)));
     }
 
     #[test]

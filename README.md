@@ -2,7 +2,7 @@
 
 **TAB Annihilates Backlogs.**
 
-A modular work queue for engineers, designers and PMs. Connectors bring in everything that needs you (GitHub reviews and CI failures, Slack mentions, email, meeting action items, AI agents waiting on input). tab ranks it deterministically, refines it with your own instructions through Claude Haiku, and gives you one keyboard-driven place to work through it.
+A modular work queue for engineers, designers and PMs. Connectors bring in everything that needs you (GitHub reviews and CI failures, email, Grafana alerts, work from Linear, Sentry and Notion, your own tasks, AI agents waiting on input). tab ranks it deterministically, refines it with your own instructions through Claude Haiku, and gives you one keyboard-driven place to work through it.
 
 Built with [Tauri 2](https://tauri.app) (Rust core) and React.
 
@@ -10,18 +10,18 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design and the phased p
 
 ## What works today
 
-- **Work**: a ranked queue grouped by urgency, with search (SQLite FTS5 trigram), filters by app, and real product marks (Slack, GitHub, Gmail, Zoom, Jira). Hover a row to snooze or finish it; the actions overlay the right edge so nothing shifts. Keyboard: `j`/`k` move, `e` done, `s` snooze (then `1`–`4`), `o` open, `r` review a PR, `n` new chat, `/` search.
+- **Work**: a ranked queue grouped by urgency, with search (SQLite FTS5 trigram), filters by app, and real product marks for each source. Hover a row to snooze or finish it; the actions overlay the right edge so nothing shifts. Keyboard: `j`/`k` move, `e` done, `s` snooze (then `1`–`4`), `o` open, `r` review a PR, `n` new chat, `/` search.
 - **Chat on any item**: opening an item shows a chat with your agent. The context bar above it rolls up everything around the item: the item itself with its cached rich preview, pinned and attached **Context** (sent with every message), and **Found** (things the agent filed through MCP, plus knowledge-graph neighbors) that you promote with one click. The first message starts a session for that item; later messages resume it. Tool approvals appear in the chat.
 - **New chat**: "work on the checkout incident" becomes a tab task with its own session. The agent can find the ticket or PR in your queue and attach it as context.
 - **Agents**: Claude Code (driven through its official CLI with your own login) or OpenCode (tab starts `opencode serve` and follows its event stream). Streaming text, tool calls and results, cost, stop, and approvals routed to you.
 - **tab's own connection**: tasks and scheduled tasks with priority (low → urgent) and due times, created by you or by agents.
 - **MCP server**: local, token-protected: `tab_search`, `tab_get_item`, `tab_add_found`, `tab_attach_context`, `tab_create_task`, and `approve` (Claude Code's permission prompt tool).
-- **Connections**: Installed and Marketplace tabs, a detail page per connection (settings, kinds of work, declared rate budget), and API usage: live budgets per bucket, provider-reported limits, usage by caller and purpose, and the full audit log.
+- **Connections**: tab (tasks), GitHub, email (IMAP) and Grafana are built in; Linear, Notion, Sentry, Atlassian (Jira and Confluence), Stripe and Vercel connect through their remote MCP servers with one sign-in, from built-in manifests (Linear, Notion and Sentry also fill the queue; the rest give agents tools). Installed and Marketplace tabs, a detail page per connection (settings, kinds of work, declared rate budget), and API usage: live budgets per bucket, provider-reported limits, usage by caller and purpose, and the full audit log.
 - **Rate budgets for every connector**: connectors declare their provider's limits; the gateway tracks a sliding window of real usage and bursts, keeps interactive calls flowing, and defers background work when headroom drops below 30% or after a burst.
 - **Cached rich previews**: previews live in SQLite and in a persisted React Query cache, so rendering never waits on an API. A background refresher updates stale previews only when budgets allow.
 - **GitHub module**: a Reviews tab and a built-in VS Code (Monaco) side-by-side diff with line comments posted to the PR. Sample PRs work without a token.
 - **Onboarding**: first launch walks through picking and checking an agent, then connections.
-- **Hub**: the app runs its own hub (`hub.db`), whose change log is the source of truth; `tab.db` is this device's copy, synced as each change commits and rebuilt from the hub if lost. Other devices can sync over a local WebSocket. Settings → Hub shows CPU, memory, storage, pending changes and connected devices.
+- **Hub**: the app runs its own hub (`hub.db`), whose change log is the source of truth; `tab.db` is this device's copy, synced as each change commits and rebuilt from the hub if lost. Its listener is on localhost only; to sync with your other computers, move the hub to tab cloud. Settings → Hub shows CPU, memory, storage, pending changes and connected devices.
 - **Settings**: profile, deterministic ranking rules, the AI layer, agent, and MCP details.
 
 ## Develop
@@ -80,6 +80,7 @@ crates/tab-protocol  hub messages: Protobuf, no gRPC (builds for Wasm)
 crates/tab-store     hub storage trait, SQLite and in-memory backends, conformance suite
 crates/tab-hub       the hub: answers clients on any store; local <-> cloud migration
 crates/tab-core      desktop engine: connectors, gateway, ranking, SQLite store (no Tauri dependency)
+crates/tab-runner    tab, headless: a hub's cloud runner (runs in tab cloud)
 src-tauri         desktop shell: commands + event forwarding
 src               React UI: design system (src/design) and modules (src/modules)
 docs              architecture and plan

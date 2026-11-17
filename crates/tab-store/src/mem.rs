@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
-use tab_domain::lease::{self, Claim, Lease};
+use tab_domain::lease::{self, Claim, Fence, Lease};
 use tab_domain::ops::{self, Applied, Edge, Op, Record, SearchHit, Seq};
 
 use crate::{HubStore, Result, StoreStats};
@@ -30,8 +30,17 @@ impl HubStore for MemStore {
         Ok(self.log.last().map_or(0, |a| a.seq))
     }
 
-    fn apply(&mut self, by: &str, batch: &[Op], now: DateTime<Utc>) -> Result<Vec<Applied>> {
+    fn apply_fenced(
+        &mut self,
+        by: &str,
+        batch: &[Op],
+        fences: &[Fence],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Applied>> {
         ops::validate(batch)?;
+        for f in fences {
+            lease::check_fence(self.leases.get(&f.key), f, by, now)?;
+        }
         let head = self.head()?;
         let mut out = Vec::with_capacity(batch.len());
         for (seq, op) in (head + 1..).zip(batch) {

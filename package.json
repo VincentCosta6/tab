@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit",
     "proto": "buf generate",
     "proto:lint": "buf lint",
+    "proto:breaking": "buf breaking --against .git#branch=origin/main",
     "licenses:check": "node scripts/licenses/check-js.mjs",
     "licenses:notices": "sh scripts/licenses/notices.sh"
   },

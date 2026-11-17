@@ -59,6 +59,8 @@ pub struct Store {
     /// Woken when items arrive or a repo changes, so routing proposals
     /// (`crate::routing`) look again.
     routing_wake: std::sync::Arc<tokio::sync::Notify>,
+    /// Rows from the hub that couldn't be written, by table.
+    hub_skipped: Mutex<Vec<hub_sync::SkippedRows>>,
 }
 
 /// Ordered migrations; `PRAGMA user_version` records how many have run.
@@ -153,6 +155,7 @@ impl Store {
             embedder: std::sync::RwLock::new(None),
             index_status: Mutex::new(Default::default()),
             workflows_rev: std::sync::atomic::AtomicU64::new(0),
+            hub_skipped: Mutex::new(Vec::new()),
         })
     }
 

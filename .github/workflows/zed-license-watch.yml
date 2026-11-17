@@ -1,0 +1,43 @@
+name: Zed license watch
+
+# tab may only use Zed's Apache-2.0 crates (CLAUDE.md, "Third-party code").
+# Once a week, check that each Zed crate in Cargo.lock is still Apache-2.0 on
+# Zed's main, and open an issue (or update the open one) if one isn't.
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check Zed crate licenses
+        run: python3 scripts/zed-license-watch.py "$RUNNER_TEMP/report.md"
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "Zed relicensed a crate tab pins"
+        run: |
+          report="$RUNNER_TEMP/report.md"
+          if [ ! -s "$report" ]; then
+            echo "Every pinned Zed crate is still Apache-2.0."
+            exit 0
+          fi
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$TITLE\" in:title" \
+            --json number,title --jq "map(select(.title == env.TITLE)) | .[0].number // empty")
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --body-file "$report"
+            echo "Updated #$number."
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$report"
+          fi
