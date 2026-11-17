@@ -122,7 +122,11 @@ impl Ranker for Pipeline {
                 Err(e) => tracing::warn!(item = %item.id, error = %e, "AI layer skipped"),
             }
         }
-        if let Some((v, model)) = verdict {
+        if let Some((mut v, model)) = verdict {
+            if !may_lower(&item.event.kind) && v.adjustment < 0 {
+                v.adjustment = 0;
+                v.reason = base.reason.clone();
+            }
             let score = (base.score as i16 + v.adjustment).clamp(0, 100) as u8;
             ranking.score = score;
             ranking.ai_adjustment = Some(v.adjustment);
@@ -131,5 +135,23 @@ impl Ranker for Pipeline {
             ranking.ranked_by = format!("rules+{model}");
         }
         Ok(ranking)
+    }
+}
+
+/// A task you created is your own call that it matters: the AI layer may
+/// raise it but never bury it.
+fn may_lower(kind: &str) -> bool {
+    kind != "tab.task"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ai_never_lowers_your_tasks() {
+        assert!(!may_lower("tab.task"));
+        assert!(may_lower("tab.scheduled"));
+        assert!(may_lower("github.comment"));
     }
 }
