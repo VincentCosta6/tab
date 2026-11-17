@@ -625,7 +625,7 @@ function groupTools(messages: SessionMessage[], paired: Set<SessionMessage>, fol
     if (m.kind === "tool_result" && paired.has(m)) continue;
     if (m.kind === "tool" && isStepTool(m.meta?.tool)) continue;
     if (m.kind === "suggestion") continue;
-    if (isRow(m) || folded.has(m.id)) {
+    if (isRow(m) || folded.has(m.id) || m.kind === "thinking") {
       if (!run) out.push((run = []));
       run.push(m);
       continue;
@@ -643,6 +643,7 @@ function ToolGroup({ calls: run, results }: { calls: SessionMessage[]; results: 
   const names = [...new Set(calls.map((c) => toolName(c.meta?.tool ?? c.content)))];
   const failed = calls.filter((c) => results.get(c.id)?.meta?.is_error).length;
   const note = run.find((m) => m.kind === "text");
+  if (!calls.length && !note) return <Thinking run={run} />;
   return (
     <details className={cx("msg-tool msg-tool-group", failed > 0 && "failed")}>
       <summary>
@@ -657,7 +658,24 @@ function ToolGroup({ calls: run, results }: { calls: SessionMessage[]; results: 
       <div className="msg-tool-list">
         {run.map((c) => c.kind === "text"
           ? <div key={c.id} className="msg-thought"><Markdown text={c.content} /></div>
-          : <ToolRow key={c.id} m={c} result={results.get(c.id)} />)}
+          : c.kind === "thinking"
+            ? <div key={c.id} className="msg-thought msg-thinking"><Markdown text={c.content} /></div>
+            : <ToolRow key={c.id} m={c} result={results.get(c.id)} />)}
+      </div>
+    </details>
+  );
+}
+
+/** The agent's thinking with no tool calls around it: one folded line, as in Claude Code's terminal. */
+function Thinking({ run }: { run: SessionMessage[] }) {
+  return (
+    <details className="msg-tool msg-tool-group">
+      <summary>
+        <Icon name="sparkles" size={12} />
+        <span className="msg-tool-name">Thinking</span>
+      </summary>
+      <div className="msg-tool-list">
+        {run.map((c) => <div key={c.id} className="msg-thought msg-thinking"><Markdown text={c.content} /></div>)}
       </div>
     </details>
   );
@@ -717,6 +735,7 @@ function MessageView({ m, result, onSend, rewind }: { m: SessionMessage; result?
   if (m.kind === "compacted") return <CompactedDivider m={m} />;
   if (m.kind === "wake") return <div className="msg-note msg-wake"><Icon name="clock" size={12} /> {m.content}</div>;
   if (m.kind === "text") return <div className="msg msg-assistant"><RichMarkdown text={m.content} /></div>;
+  if (m.kind === "thinking") return <Thinking run={[m]} />;
   if (m.kind === "tool" && m.meta?.tool === "AskUserQuestion") {
     // Answered through tab (or still waiting on its card): the card did the talking.
     if (!result || !result.meta?.is_error) return null;

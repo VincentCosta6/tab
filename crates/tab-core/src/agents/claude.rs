@@ -55,8 +55,9 @@ pub(super) struct Unanswered {
 }
 
 /// Rounds of tool calls held for an unanswered message before tab lets the
-/// agent go on anyway.
-const HOLDS: usize = 2;
+/// agent go on anyway. One: a held call already tells the agent what it
+/// missed, and holding more breaks its flow for little gain.
+const HOLDS: usize = 1;
 
 impl Unanswered {
     /// The person's message went to the agent.
@@ -244,6 +245,102 @@ pub(super) struct AcpSetup {
     /// The permission mode to start in. A loaded conversation otherwise
     /// carries on in the mode its transcript last had.
     pub mode: String,
+    /// tab's instructions for this chat, with the person's own `CLAUDE.md`
+    /// when strict mode keeps Claude Code from loading it.
+    pub system: String,
+    /// The task's context in tab, when it changed since the conversation's
+    /// last turn: Claude Code keeps a conversation's system prompt from its
+    /// first request, so the update goes with the message instead.
+    pub context_update: Option<String>,
+}
+
+/// The most of the person's own `CLAUDE.md` tab carries into a strict chat.
+const PERSONAL_INSTRUCTIONS: usize = 16_000;
+
+/// The reasoning efforts Claude Code takes.
+pub(crate) const EFFORTS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// What a strict chat keeps of the person's own Claude Code setup. Strict
+/// mode stops Claude Code loading their user settings, so their MCP
+/// servers, hooks and plugins stay out; these few choose how well it works,
+/// not what it can reach, so tab passes them on itself.
+#[derive(Debug, Default, PartialEq)]
+pub(super) struct Personal {
+    /// `model` in their `settings.json`.
+    pub model: Option<String>,
+    /// `effortLevel` in their `settings.json`.
+    pub effort: Option<String>,
+    /// `alwaysThinkingEnabled` in their `settings.json`.
+    pub always_thinking: Option<bool>,
+    /// Their `CLAUDE.md`, cut to [`PERSONAL_INSTRUCTIONS`].
+    pub instructions: Option<String>,
+}
+
+impl Personal {
+    /// Reads them from Claude Code's folder (`~/.claude`). Anything missing
+    /// or unreadable is left out.
+    pub(super) fn read(dir: &std::path::Path) -> Self {
+        let settings: Value = std::fs::read(dir.join("settings.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or(Value::Null);
+        let text = |k: &str| {
+            settings[k]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let instructions = std::fs::read_to_string(dir.join("CLAUDE.md"))
+            .ok()
+            .map(|t| {
+                t.trim()
+                    .chars()
+                    .take(PERSONAL_INSTRUCTIONS)
+                    .collect::<String>()
+            })
+            .filter(|t| !t.is_empty());
+        Self {
+            model: text("model"),
+            effort: text("effortLevel").filter(|e| EFFORTS.contains(&e.as_str())),
+            always_thinking: settings["alwaysThinkingEnabled"].as_bool(),
+            instructions,
+        }
+    }
+}
+
+/// The effort a chat runs at: tab's setting, else (in a strict chat, which
+/// doesn't load their settings) the person's own, else Claude Code's default.
+fn effort(cfg: &crate::config::AgentConfig, personal: &Personal) -> Option<String> {
+    let own = cfg.effort.trim();
+    if EFFORTS.contains(&own) {
+        return Some(own.to_string());
+    }
+    personal.effort.clone()
+}
+
+/// The person's own instructions, for a strict chat's system prompt.
+fn with_personal(system: &str, personal: &Personal) -> String {
+    match &personal.instructions {
+        Some(i) => format!(
+            "{system}\n# The person's own instructions (from their ~/.claude/CLAUDE.md)\n\n{i}\n"
+        ),
+        None => system.to_string(),
+    }
+}
+
+/// What to tell a resumed conversation about its task's context, when that
+/// changed since its last turn (`last` is what it was told then).
+fn context_update(last: Option<&str>, now: &str) -> Option<String> {
+    let last = last?;
+    if last.trim() == now.trim() || now.trim().is_empty() {
+        return None;
+    }
+    Some(format!(
+        "<tab-context-update>\nThis task's details or context in tab changed since your last turn. \
+         This is the current version; it replaces the one in your instructions.\n{}\n</tab-context-update>",
+        now.trim()
+    ))
 }
 
 /// Sets up a Claude Code turn over ACP the way `run_turn` sets up the CLI:
@@ -294,6 +391,16 @@ pub(super) fn acp_setup(
     };
     // The adapter starts in the settings' default mode.
     settings["permissions"]["defaultMode"] = json!(mode);
+    let strict = strict(cfg.strict, policy.trust);
+    let personal = if strict {
+        claude_dir().map(|d| Personal::read(&d)).unwrap_or_default()
+    } else {
+        // Claude Code loads their settings itself.
+        Personal::default()
+    };
+    if let Some(on) = personal.always_thinking {
+        settings["alwaysThinkingEnabled"] = json!(on);
+    }
     if let Some(mcp) = hub.mcp().filter(|_| !hub.remote_mcp().in_cloud()) {
         settings["hooks"]["PreToolUse"] = hold_hook(&mcp, &session.id);
     }
@@ -301,7 +408,6 @@ pub(super) fn acp_setup(
         dir.join("settings.json"),
         serde_json::to_vec_pretty(&settings)?,
     )?;
-    let strict = strict(cfg.strict, policy.trust);
     let mut options = serde_json::Map::new();
     options.insert("settings".into(), settings);
     if strict {
@@ -321,8 +427,14 @@ pub(super) fn acp_setup(
     }
     allowed.extend(remote.iter().map(|(n, _)| format!("mcp__{n}")));
     options.insert("allowedTools".into(), json!(allowed));
-    if let Some(m) = cfg.model_for(AgentKind::ClaudeCode) {
+    if let Some(m) = cfg
+        .model_for(AgentKind::ClaudeCode)
+        .or(personal.model.as_deref())
+    {
         options.insert("model".into(), json!(m));
+    }
+    if let Some(e) = effort(cfg, &personal) {
+        options.insert("effort".into(), json!(e));
     }
     if let Some(cap) = cfg.budget.per_turn_usd.filter(|c| *c > 0.0) {
         options.insert("maxBudgetUsd".into(), json!(cap));
@@ -368,6 +480,9 @@ pub(super) fn acp_setup(
             "MCP_TOOL_TIMEOUT".into(),
             super::APPROVAL_TIMEOUT.as_millis().to_string(),
         ),
+        // Summaries of the model's thinking, which the chat shows folded,
+        // rather than none.
+        ("CLAUDE_CODE_THINKING_DISPLAY".into(), "summarized".into()),
     ];
     if strict {
         env.push(("ENABLE_CLAUDEAI_MCP_SERVERS".into(), "false".into()));
@@ -376,15 +491,29 @@ pub(super) fn acp_setup(
     parser.strict = strict;
     parser.cwd = Some(session.cwd.clone().into());
     parser.allowed_mcp = remote.into_iter().map(|(name, _)| name).collect();
+    // Their own instructions only in a chat on their own work.
+    let system = if policy.trust == Trust::Person {
+        with_personal(system, &personal)
+    } else {
+        system.to_string()
+    };
     parser.tab_context_tokens = (system.len() / 4) as i64;
     parser.learn_prompt_uuid = true;
-    let _ = std::fs::write(dir.join("system.md"), system);
+    let _ = std::fs::write(dir.join("system.md"), &system);
+    let context = hub.task_context(session);
+    let last = std::fs::read_to_string(dir.join(CONTEXT_FILE)).ok();
+    let context_update = resume
+        .as_ref()
+        .and_then(|_| context_update(last.as_deref(), &context));
+    let _ = std::fs::write(dir.join(CONTEXT_FILE), &context);
     Ok(AcpSetup {
         resume,
         meta,
         env,
         parser,
         mode: mode.to_string(),
+        system,
+        context_update,
     })
 }
 
@@ -462,6 +591,9 @@ pub(super) enum Rewind {
 }
 
 const REWIND_FILE: &str = "rewind.json";
+
+/// The task context the conversation was last told, to notice changes.
+const CONTEXT_FILE: &str = "context.md";
 
 /// Leaves word for the chat's next turn to pick up from `rewind`.
 pub(super) fn set_rewind(dir: &std::path::Path, rewind: &Rewind) -> anyhow::Result<()> {
@@ -924,6 +1056,17 @@ impl Parser {
                                 hub.post(&sid, "assistant", "text", text, Value::Null);
                             }
                         }
+                        // Shown folded in the chat, so the person can follow
+                        // the agent's reasoning as in Claude Code's terminal.
+                        // It is not a reply: a mid-turn message stays unanswered.
+                        Some("thinking") => {
+                            let text = block["thinking"].as_str().unwrap_or_default();
+                            if !text.trim().is_empty()
+                                && self.once(format!("{msg_id}:{i}:think:{text}"))
+                            {
+                                hub.post(&sid, "assistant", "thinking", text, Value::Null);
+                            }
+                        }
                         Some("tool_use") => {
                             let id = block["id"].as_str().unwrap_or_default().to_string();
                             if self.once(format!("tool:{id}")) {
@@ -1367,8 +1510,6 @@ mod tests {
 
     const RESULT_2: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Not run"}]}}"#;
     const CALL_3: &str = r#"{"type":"assistant","message":{"id":"m3","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"pwd"}}]}}"#;
-    const RESULT_3: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t3","content":"Not run"}]}}"#;
-    const CALL_4: &str = r#"{"type":"assistant","message":{"id":"m4","content":[{"type":"tool_use","id":"t4","name":"Bash","input":{"command":"pwd"}}]}}"#;
 
     #[tokio::test]
     async fn a_steer_that_cuts_in_is_seen_at_its_echo_and_steering_stays_open() {
@@ -1415,12 +1556,10 @@ mod tests {
                 .count()
         };
         assert_eq!(notes(&store), 1);
-        // Held again, once more, then let go: it won't answer.
+        // Held once, then let go: it won't answer.
         feed(&mut p, &[RESULT_2, CALL_3]);
-        assert!(hub.hold_tool(&sid, "t3").await.is_some());
-        assert_eq!(notes(&store), 2);
-        feed(&mut p, &[RESULT_3, CALL_4]);
-        assert!(hub.hold_tool(&sid, "t4").await.is_none());
+        assert!(hub.hold_tool(&sid, "t3").await.is_none());
+        assert_eq!(notes(&store), 1);
     }
 
     #[tokio::test]
@@ -1576,6 +1715,84 @@ mod tests {
         );
         bash_calls(&mut p, 100, STALE_STEPS * 2);
         assert!(steering.try_recv().is_err());
+    }
+
+    /// A fresh empty folder.
+    fn scratch() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("tab-claude-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn strict_chats_keep_the_persons_model_effort_and_instructions() {
+        let dir = scratch();
+        std::fs::write(
+            dir.as_path().join("settings.json"),
+            r#"{"model":"opus","effortLevel":"xhigh","alwaysThinkingEnabled":true,"mcpServers":{"x":{}}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.as_path().join("CLAUDE.md"), "  Use pnpm.\n").unwrap();
+        let p = Personal::read(dir.as_path());
+        assert_eq!(
+            p,
+            Personal {
+                model: Some("opus".into()),
+                effort: Some("xhigh".into()),
+                always_thinking: Some(true),
+                instructions: Some("Use pnpm.".into()),
+            }
+        );
+        assert!(with_personal("tab's", &p).ends_with("Use pnpm.\n"));
+        // Nothing there: nothing carried.
+        let empty = scratch();
+        assert_eq!(Personal::read(empty.as_path()), Personal::default());
+        assert_eq!(with_personal("tab's", &Personal::default()), "tab's");
+    }
+
+    #[test]
+    fn tabs_effort_wins_over_the_persons_and_unknown_ones_are_dropped() {
+        let mut cfg = crate::config::AgentConfig::default();
+        let personal = Personal {
+            effort: Some("medium".into()),
+            ..Default::default()
+        };
+        assert_eq!(effort(&cfg, &personal).as_deref(), Some("medium"));
+        cfg.effort = "max".into();
+        assert_eq!(effort(&cfg, &personal).as_deref(), Some("max"));
+        cfg.effort = "turbo".into();
+        assert_eq!(effort(&cfg, &Personal::default()), None);
+        // An effort Claude Code doesn't know isn't read from settings either.
+        let bad = scratch();
+        std::fs::write(
+            bad.as_path().join("settings.json"),
+            r#"{"effortLevel":"turbo"}"#,
+        )
+        .unwrap();
+        assert_eq!(Personal::read(bad.as_path()).effort, None);
+    }
+
+    #[test]
+    fn a_resumed_conversation_hears_only_about_changed_context() {
+        // The first turn has it in the system prompt.
+        assert_eq!(context_update(None, "Item: fix it"), None);
+        assert_eq!(context_update(Some("Item: fix it"), "Item: fix it\n"), None);
+        let update = context_update(Some("Item: fix it"), "Item: fix it\nContext: PR 2").unwrap();
+        assert!(update.starts_with("<tab-context-update>"));
+        assert!(update.contains("Context: PR 2"));
+        assert_eq!(context_update(Some("Item: fix it"), ""), None);
+    }
+
+    #[tokio::test]
+    async fn thinking_shows_in_the_chat_but_is_not_a_reply() {
+        let (store, sid, mut p, _steering) = steered_turn();
+        feed(&mut p, &[CALL_1]);
+        p.unanswered.lock().unwrap().sent("what is shot.png?");
+        feed(&mut p, &[RESULT_1, THINK_2]);
+        let ms = store.messages(&sid).unwrap();
+        let t = ms.iter().find(|m| m.kind == "thinking").expect("posted");
+        assert_eq!(t.content, "It's a made-up path.");
+        assert!(p.unanswered.lock().unwrap().hold().is_some());
     }
 
     #[test]

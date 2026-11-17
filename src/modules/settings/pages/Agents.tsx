@@ -12,6 +12,16 @@ import { AgentVersionRow } from "./AgentVersion";
 import { ModelFamiliesSettings } from "./ModelFamilies";
 import { SandboxSettings } from "./Sandbox";
 
+/** Claude Code's efforts, as `config::AgentConfig::effort` takes them. */
+const EFFORTS: [string, string][] = [
+  ["", "Your Claude Code setting"],
+  ["low", "Low"],
+  ["medium", "Medium"],
+  ["high", "High"],
+  ["xhigh", "Extra high"],
+  ["max", "Max"],
+];
+
 export function AgentsPage() {
   const { draft, set } = useDraft();
   const titlerRules = useQuery({ queryKey: ["titler-rules"], queryFn: api.titlerDefaultRules, staleTime: Infinity });
@@ -51,13 +61,20 @@ export function AgentsPage() {
               />
             </FormRow>
           )}
-          <FormRow label="Strict mode" help="Chats load only tab's connections, never your personal MCP servers, connectors, plugins, hooks or user settings. The repo's own config still loads, and review chats are always strict.">
+          <FormRow label="Strict mode" help="Chats load only tab's connections, never your personal MCP servers, connectors, plugins or hooks. Your model, effort, thinking setting and personal CLAUDE.md still come along, the repo's own config still loads, and review chats are always strict.">
             <Toggle label="Strict mode" checked={draft.agent.strict !== false} onChange={(v) => set((c) => void (c.agent.strict = v))} />
           </FormRow>
           {!!harness?.capabilities.permission_modes.length && (
             <FormRow label="Permission mode" help="Anything that still needs approval is asked in the chat.">
               <select className="select" value={draft.agent.permission_mode} onChange={(e) => set((c) => void (c.agent.permission_mode = e.target.value))}>
                 {harness.capabilities.permission_modes.map((m) => <option key={m.value} value={m.value}>{m.label}{m.help ? ` (${m.help})` : ""}</option>)}
+              </select>
+            </FormRow>
+          )}
+          {draft.agent.kind === "claude_code" && (
+            <FormRow label="Effort" help="How hard Claude thinks before answering. Higher is slower and uses more of your plan, and gives better work on hard tasks.">
+              <select className="select" value={draft.agent.effort ?? ""} onChange={(e) => set((c) => void (c.agent.effort = e.target.value))}>
+                {EFFORTS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </FormRow>
           )}

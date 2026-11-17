@@ -612,7 +612,7 @@ export interface SessionMessage {
   id: number;
   session_id: string;
   role: "user" | "assistant" | "tool" | "system";
-  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request" | "suggestion" | "note" | "wake" | "compacted" | "shell";
+  kind: "text" | "tool" | "tool_result" | "status" | "error" | "approval" | "result" | "secret_request" | "suggestion" | "note" | "wake" | "compacted" | "shell" | "thinking";
   content: string;
   meta: any;
   created_at: string;
@@ -1164,6 +1164,8 @@ export interface AgentConfig {
   models?: Record<string, string>;
   workdir: string | null;
   permission_mode: string;
+  /** Claude Code's reasoning effort (low … max). Empty uses the person's own Claude Code setting. */
+  effort?: string;
   suggest_replies?: boolean;
   titler?: TitlerConfig;
   /** Only tab's connections load in chats, never the person's own agent setup. On unless turned off. */

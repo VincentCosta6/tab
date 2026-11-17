@@ -1195,6 +1195,8 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
 /* The agent's working-out between tool calls, inside a folded work group. */
 .msg-thought { color: var(--fg-muted); font-size: var(--text-sm); padding: 2px 0 2px 8px; }
 .msg-thought .markdown p { margin: 0; }
+.msg-thinking { font-style: italic; border-left: 2px solid var(--border); }
+.msg-thinking .markdown p + p { margin-top: 4px; }
 /* What the agent showed in a turn, at the turn's end. */
 .turn-files { display: grid; gap: 6px; justify-items: start; }
 .turn-files .md-image { margin: 0; }

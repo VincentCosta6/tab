@@ -79,6 +79,11 @@ pub struct AgentConfig {
     /// routed to tab's chat either way.
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    /// Claude Code's reasoning effort (`low`, `medium`, `high`, `xhigh`,
+    /// `max`). Empty uses the person's own Claude Code setting, or Claude
+    /// Code's default when they have none.
+    #[serde(default)]
+    pub effort: String,
     #[serde(default)]
     pub budget: BudgetConfig,
     /// Offer a likely next reply after each turn (Tab fills it, Enter sends).
@@ -89,9 +94,11 @@ pub struct AgentConfig {
     pub titler: TitlerConfig,
     /// Strict mode: chats load only tab's own MCP server (every tool comes
     /// through a connection), never the person's personal agent setup: their
-    /// MCP servers and claude.ai connectors, user settings, hooks, plugins
-    /// and personal instructions. The repo's own config still loads. On by
-    /// default; review chats are always strict.
+    /// MCP servers and claude.ai connectors, user settings, hooks and
+    /// plugins. The repo's own config still loads, and tab carries over the
+    /// few personal choices that decide how well the agent works rather than
+    /// what it can reach: model, effort, thinking and (in chats on their own
+    /// work) their `CLAUDE.md`. On by default; review chats are always strict.
     #[serde(default = "default_true")]
     pub strict: bool,
     /// Harnesses (`opencode`) whose chats run through the Agent Client
@@ -248,6 +255,7 @@ impl Default for AgentConfig {
             models: BTreeMap::new(),
             workdir: None,
             permission_mode: default_permission_mode(),
+            effort: String::new(),
             budget: BudgetConfig::default(),
             suggest_replies: true,
             titler: TitlerConfig::default(),

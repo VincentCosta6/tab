@@ -202,6 +202,8 @@ async fn run(
     let session_meta = claude.as_ref().map(|c| c.meta.clone());
     let claude_resume = claude.as_ref().map(|c| c.resume.clone());
     let claude_mode = claude.as_ref().map(|c| c.mode.clone());
+    let claude_system = claude.as_ref().map(|c| c.system.clone());
+    let context_update = claude.as_ref().and_then(|c| c.context_update.clone());
     // Claude Code's chat comes from its own messages (`_claude/sdkMessage`).
     events.raw = claude.take().map(|c| c.parser);
     hub.watch_unanswered(&session.id, events.raw.as_ref().map(|p| p.unanswered()));
@@ -245,6 +247,8 @@ async fn run(
                 ));
             }
         }
+        // Claude Code's may carry the person's own instructions too.
+        let system = claude_system.as_deref().unwrap_or(system);
         let system_prompt = caps
             .session_capabilities
             .system_prompt
@@ -340,6 +344,8 @@ async fn run(
         let first = session.agent_session_id.is_none();
         let text = if system_prompt.is_none() && first && !system.trim().is_empty() {
             format!("<tab-instructions>\n{system}\n</tab-instructions>\n\n{prompt}")
+        } else if let Some(update) = &context_update {
+            format!("{update}\n\n{prompt}")
         } else {
             prompt.to_string()
         };
