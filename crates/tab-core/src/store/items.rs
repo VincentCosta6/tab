@@ -10,6 +10,10 @@ pub enum Upsert {
     Inserted(QueueItem),
     /// New activity on something we already had. It is reopened and needs re-ranking.
     Updated(QueueItem),
+    /// Same content as last poll, but its entities differ (a newer manifest
+    /// names a container it didn't before). Only those are rewritten: it
+    /// isn't reopened or re-ranked.
+    Retagged(QueueItem),
     /// Same content as last poll; nothing to do.
     Unchanged,
 }
@@ -187,11 +191,11 @@ impl Store {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let fp = fingerprint(e);
-        let existing: Option<(String, String)> = tx
+        let existing: Option<(String, String, String)> = tx
             .query_row(
-                "SELECT id, fingerprint FROM items WHERE source = ?1 AND external_id = ?2",
+                "SELECT id, fingerprint, entities FROM items WHERE source = ?1 AND external_id = ?2",
                 params![e.source, e.external_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
         let blocks = serde_json::to_string(&e.blocks)?;
@@ -199,8 +203,22 @@ impl Store {
         let metadata = serde_json::to_string(&e.metadata)?;
 
         let (id, inserted) = match existing {
-            Some((_, old)) if old == fp => return Ok(Upsert::Unchanged),
-            Some((id, _)) => {
+            Some((_, old, had)) if old == fp && had == entities => return Ok(Upsert::Unchanged),
+            // Same activity, new entities: take them without reopening, so
+            // items from before a manifest named a container still stack
+            // and route by it.
+            Some((id, old, _)) if old == fp => {
+                tx.execute(
+                    "UPDATE items SET entities = ?2 WHERE id = ?1",
+                    params![id, entities],
+                )?;
+                super::graph::link_item(&tx, &id, &e.entities, now)?;
+                super::routing::route_item(&tx, &id, now)?;
+                let item = get_item(&tx, &id)?.expect("row just written");
+                Transaction::commit(tx)?;
+                return Ok(Upsert::Retagged(item));
+            }
+            Some((id, _, _)) => {
                 tx.execute(
                     "UPDATE items SET kind = ?2, title = ?3, body = ?4, url = ?5, actor = ?6, context = ?7,
                          occurred_at = ?8, blocks = ?9, entities = ?10, metadata = ?11, fingerprint = ?12,
@@ -546,6 +564,35 @@ pub(crate) mod tests {
             Upsert::Inserted(i) => i.id,
             other => panic!("expected insert, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn new_entities_alone_retag_without_reopening() {
+        let s = Store::in_memory().unwrap();
+        let now = Utc::now();
+        let id = insert(&s, "1", "a");
+        s.set_ranking(&id, &rank(70)).unwrap();
+        s.set_state(&id, ItemState::Done, None, now).unwrap();
+
+        let mut e = ev("1", "a");
+        e.entities.push(EntityRef::new(
+            "sentry.project",
+            "sentry:acme/web",
+            "web",
+            crate::model::CONTAINER_REL,
+        ));
+        let Upsert::Retagged(item) = s.upsert(&e, now).unwrap() else {
+            panic!()
+        };
+        assert_eq!(item.state, ItemState::Done);
+        assert!(item.ranking.is_some(), "nothing new to rank");
+        assert!(
+            item.event
+                .entities
+                .iter()
+                .any(|x| x.key == "sentry:acme/web")
+        );
+        assert_eq!(s.upsert(&e, now).unwrap(), Upsert::Unchanged);
     }
 
     #[test]

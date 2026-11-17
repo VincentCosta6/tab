@@ -32,7 +32,7 @@ fn add(store: &Store, id: &str, title: &str) -> QueueItem {
         ..Default::default()
     };
     match store.upsert(&e, when()).unwrap() {
-        Upsert::Inserted(i) | Upsert::Updated(i) => i,
+        Upsert::Inserted(i) | Upsert::Updated(i) | Upsert::Retagged(i) => i,
         Upsert::Unchanged => panic!("expected a write"),
     }
 }

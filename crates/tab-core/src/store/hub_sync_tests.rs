@@ -82,7 +82,9 @@ fn sync(from: &Store, to: &Store) -> usize {
 
 fn inserted(u: crate::store::Upsert) -> crate::model::QueueItem {
     match u {
-        crate::store::Upsert::Inserted(i) | crate::store::Upsert::Updated(i) => i,
+        crate::store::Upsert::Inserted(i)
+        | crate::store::Upsert::Updated(i)
+        | crate::store::Upsert::Retagged(i) => i,
         crate::store::Upsert::Unchanged => panic!("expected a write"),
     }
 }
