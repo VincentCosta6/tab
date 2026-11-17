@@ -89,6 +89,10 @@ pub struct AgentConfig {
     /// Offer a likely next reply after each turn (Tab fills it, Enter sends).
     #[serde(default = "default_true")]
     pub suggest_replies: bool,
+    /// When a chat task is marked done, a small model asks whether it could
+    /// have been a workflow and, if so, leaves the idea on the task.
+    #[serde(default = "default_true")]
+    pub workflow_ideas: bool,
     /// Names chats started in tab with a small model as the work comes into focus.
     #[serde(default)]
     pub titler: TitlerConfig,
@@ -258,6 +262,7 @@ impl Default for AgentConfig {
             effort: String::new(),
             budget: BudgetConfig::default(),
             suggest_replies: true,
+            workflow_ideas: true,
             titler: TitlerConfig::default(),
             strict: true,
             acp: Vec::new(),

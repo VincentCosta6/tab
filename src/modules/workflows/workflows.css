@@ -244,3 +244,9 @@
 .wf-seg button.active { background: var(--bg-selected); color: var(--fg); font-weight: 500; }
 .wf-list-head { gap: var(--space-2); padding-left: var(--space-3); }
 .wf-list-head h2 { font-size: var(--text-md); white-space: nowrap; }
+
+/* Workflow ideas from finished tasks. */
+.wf-idea-row { position: relative; }
+.wf-idea-row .wf-template { width: 100%; padding-right: 26px; }
+.wf-idea-drop { position: absolute; top: 6px; right: 6px; border: 0; background: none; color: var(--fg-muted); cursor: pointer; padding: 2px; border-radius: var(--radius-sm); }
+.wf-idea-drop:hover { color: var(--fg); background: var(--bg-hover, var(--bg-raised)); }

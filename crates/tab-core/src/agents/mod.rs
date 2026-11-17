@@ -29,6 +29,7 @@ mod small;
 pub mod steward;
 mod suggest;
 mod titler;
+pub mod workflow_idea;
 
 pub use titler::DEFAULT_RULES as TITLER_DEFAULT_RULES;
 

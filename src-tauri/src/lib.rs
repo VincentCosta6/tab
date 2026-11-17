@@ -1229,6 +1229,22 @@ async fn item_set_project(
     Ok(item)
 }
 
+/// Stops showing a task's workflow idea, once the person builds or drops it.
+#[tauri::command]
+async fn workflow_idea_dismiss(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Option<QueueItem>> {
+    let item = tab_core::agents::workflow_idea::dismiss(&state.store, &id).map_err(err)?;
+    if let Some(i) = &item {
+        let _ = state.events.send(EngineEvent::ItemChanged {
+            change: tab_core::engine::Change::Updated,
+            item: i.clone(),
+        });
+    }
+    Ok(item)
+}
+
 #[tauri::command]
 async fn chat_stop(state: State<'_, AppState>, session_id: String) -> CmdResult<()> {
     let remote = state
@@ -3630,6 +3646,13 @@ pub fn run() {
                 data_dir.clone(),
             );
             dev::report_status(hub.clone());
+            // Finished chat tasks that could have been workflows.
+            {
+                let hub = hub.clone();
+                tauri::async_runtime::spawn(async move {
+                    tab_core::agents::workflow_idea::watch(hub);
+                });
+            }
             // The ACP adapter the person's agent runs through, so their
             // first chat doesn't have to wait for it.
             if let Some(kind) = config.agent.kind {
@@ -3828,6 +3851,7 @@ pub fn run() {
             sandbox_status,
             rename_item,
             titler_default_rules,
+            workflow_idea_dismiss,
             browser_open,
             browser_bounds,
             browser_visible,

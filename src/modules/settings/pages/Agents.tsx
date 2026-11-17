@@ -123,6 +123,14 @@ export function AgentsPage() {
         </Card>
       </Section>
 
+      <Section title="Workflow ideas" description="When you mark a chat task done, a small model (the chat titles model) asks whether it could have been a workflow, looking at your other finished tasks and the workflows you have. A fit shows on the task and in Workflows, ready to hand to the builder. Nothing is built or turned on without you.">
+        <Card>
+          <FormRow label="Enabled">
+            <Toggle label="Suggest workflows from finished tasks" checked={draft.agent.workflow_ideas !== false} onChange={(v) => set((c) => void (c.agent.workflow_ideas = v))} />
+          </FormRow>
+        </Card>
+      </Section>
+
       <Section title="Spend limits" description="Costs come from what the agent reports: real spend on an API key, or the API-equivalent figure on a Claude plan. Leave a limit empty for none.">
         <Card>
           <FormRow label="Daily limit" help="New chat turns are refused once today's spend reaches this.">

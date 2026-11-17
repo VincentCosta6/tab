@@ -24,6 +24,7 @@ import { ProjectPicker, useProjectTint } from "./Projects";
 import { RouteOffer } from "./Routing";
 import { SnoozeMenu } from "./SnoozeMenu";
 import { Timeline } from "./Timeline";
+import { WorkflowIdeaCard } from "./WorkflowIdea";
 import { ItemWorkflows, WorkflowPill } from "./WorkflowStatus";
 
 const ReviewView = lazy(() => import("../github/review/Workspace"));
@@ -157,6 +158,7 @@ export function ItemPane({ id, arrived, focusChat, onAct, onSelect }: {
       )}
       <div className="item-cloud-gaps"><CloudGaps itemId={item.id} /></div>
       <div id={`wf-runs-${item.id}`}><ItemWorkflows itemId={item.id} /></div>
+      <WorkflowIdeaCard item={item} />
       <ContextDrawer
         item={item}
         onSelect={onSelect}

@@ -114,6 +114,7 @@ export const api = {
   projectSave: (p: { id?: string; name: string; color: string; icon: string }) =>
     call<Project>("project_save", { id: p.id ?? null, name: p.name, color: p.color, icon: p.icon }),
   projectDelete: (id: string) => call<void>("project_delete", { id }),
+  workflowIdeaDismiss: (id: string) => call<QueueItem | null>("workflow_idea_dismiss", { id }),
   itemSetProject: (id: string, projectId: string | null) => call<QueueItem | null>("item_set_project", { id, projectId }),
   projectNotes: (projectId: string) => call<ProjectNote[]>("project_notes", { projectId }),
   projectNoteSave: (projectId: string, note: { id?: string; topic: string; text: string }) =>
