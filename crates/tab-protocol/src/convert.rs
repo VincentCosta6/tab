@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use prost_types::Timestamp;
-use tab_domain::lease::{Claim, Lease};
+use tab_domain::lease::{Claim, Fence, Lease};
 use tab_domain::ops::{Applied, Edge, Op, Record, SearchHit};
 
 use crate::pb;
@@ -102,6 +102,24 @@ impl TryFrom<pb::Op> for Op {
                 rel: u.rel,
             },
         })
+    }
+}
+
+impl From<&Fence> for pb::Fence {
+    fn from(f: &Fence) -> Self {
+        pb::Fence {
+            key: f.key.clone(),
+            token: f.token,
+        }
+    }
+}
+
+impl From<pb::Fence> for Fence {
+    fn from(f: pb::Fence) -> Self {
+        Fence {
+            key: f.key,
+            token: f.token,
+        }
     }
 }
 

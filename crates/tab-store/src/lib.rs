@@ -37,7 +37,7 @@
 use std::collections::BTreeSet;
 
 use chrono::{DateTime, Duration, Utc};
-use tab_domain::lease::{Claim, Lease};
+use tab_domain::lease::{Claim, Fence, FenceError, Lease};
 use tab_domain::ops::{Applied, Edge, Op, OpError, Record, SearchHit, Seq};
 
 pub mod blob;
@@ -61,6 +61,9 @@ pub enum StoreError {
     Invalid(OpError),
     /// The database failed.
     Backend(String),
+    /// A fenced batch named a lease the writer doesn't hold with that token
+    /// any more (see [`HubStore::apply_fenced`]). Nothing was written.
+    Fenced(FenceError),
 }
 
 impl std::fmt::Display for StoreError {
@@ -68,11 +71,18 @@ impl std::fmt::Display for StoreError {
         match self {
             StoreError::Invalid(e) => write!(f, "invalid change: {e}"),
             StoreError::Backend(e) => write!(f, "storage failed: {e}"),
+            StoreError::Fenced(e) => write!(f, "refused: {e}"),
         }
     }
 }
 
 impl std::error::Error for StoreError {}
+
+impl From<FenceError> for StoreError {
+    fn from(e: FenceError) -> Self {
+        StoreError::Fenced(e)
+    }
+}
 
 impl From<OpError> for StoreError {
     fn from(e: OpError) -> Self {
@@ -101,7 +111,25 @@ pub trait HubStore {
 
     /// Validates and applies a batch in one transaction, giving each op the
     /// next sequence number. All or nothing.
-    fn apply(&mut self, by: &str, ops: &[Op], now: DateTime<Utc>) -> Result<Vec<Applied>>;
+    fn apply(&mut self, by: &str, ops: &[Op], now: DateTime<Utc>) -> Result<Vec<Applied>> {
+        self.apply_fenced(by, ops, &[], now)
+    }
+
+    /// [`HubStore::apply`], made under leases: the batch is written only if
+    /// `by` holds every lease in `fences`, live at `now`, with exactly that
+    /// fencing token ([`tab_domain::lease::check_fence`]). Otherwise it's
+    /// [`StoreError::Fenced`] and nothing is written. The check reads the
+    /// leases in the same transaction as the write, so a lease can't change
+    /// hands between them. The ops are validated first, and the leases are
+    /// left as they are (a fenced write doesn't renew them). No fences is
+    /// plain [`HubStore::apply`].
+    fn apply_fenced(
+        &mut self,
+        by: &str,
+        ops: &[Op],
+        fences: &[Fence],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Applied>>;
 
     /// Changes after `since`, oldest first, at most `limit`.
     fn changes_since(&self, since: Seq, limit: usize) -> Result<Vec<Applied>>;
@@ -155,6 +183,14 @@ mod tests {
         assert_eq!(
             StoreError::Backend("disk full".into()).to_string(),
             "storage failed: disk full"
+        );
+        assert_eq!(
+            StoreError::Fenced(FenceError {
+                key: "job:1".into(),
+                token: 3
+            })
+            .to_string(),
+            "refused: lease job:1 isn't held with token 3 any more"
         );
     }
 }

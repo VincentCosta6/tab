@@ -17,13 +17,16 @@ pub struct Maintained {
     pub deleted: usize,
     pub runs_pruned: usize,
     pub rollups_pruned: usize,
+    /// Jobs that ended more than 30 days ago ([`tab_domain::runner::Job::prunable`]).
+    pub jobs_pruned: usize,
 }
 
 /// The hourly pass: rolls up every complete UTC day the run log holds,
 /// then prunes runs before [`rollup::run_log_start`] (whole UTC days, and
 /// only days this pass just rolled up or had already frozen), then rollups
-/// older than 13 months. Safe to run on every device sharing a hub: the
-/// rows it writes are the same everywhere (see the rollup module).
+/// older than 13 months, and jobs that ended more than 30 days ago. Safe to
+/// run on every device sharing a hub: the rows it writes are the same
+/// everywhere (see the rollup module), and its deletes sync like any other.
 pub fn maintain(store: &Store, now: DateTime<Utc>) -> anyhow::Result<Maintained> {
     let today = now.date_naive();
     let runs: Vec<Run> = store
@@ -44,6 +47,7 @@ pub fn maintain(store: &Store, now: DateTime<Utc>) -> anyhow::Result<Maintained>
         deleted: plan.delete.len(),
         runs_pruned: store.workflow_runs_prune(rollup::run_log_start(now))?,
         rollups_pruned: store.workflow_rollups_prune(rollup::keep_rollups_from(now))?,
+        jobs_pruned: store.jobs_prune(now)?,
     })
 }
 

@@ -72,6 +72,7 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
         2,
         Req::Apply(pb::Apply {
             ops: vec![put("1", "Fix login"), put("2", "Review docs")],
+            ..Default::default()
         }),
         t(1),
     );
@@ -175,6 +176,7 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
         8,
         Req::Apply(pb::Apply {
             ops: vec![put("3", "ok"), bad],
+            ..Default::default()
         }),
         t(5),
     );
@@ -187,6 +189,7 @@ fn session<S: HubStore>(mut hub: Hub<S>) {
         9,
         Req::Apply(pb::Apply {
             ops: vec![put("", "no id")],
+            ..Default::default()
         }),
         t(5),
     );
@@ -266,6 +269,95 @@ fn history<S: HubStore>(s: &mut S) {
         .unwrap();
 }
 
+/// Two runners, one job: the one whose lease lapsed and was taken over
+/// can't write its late result, and is told so in a way it can tell apart.
+fn fenced_writes<S: HubStore>(mut hub: Hub<S>) {
+    hub.connect(MAC, "test", t(0));
+    hub.connect(PHONE, "test", t(0));
+    send(&mut hub, MAC, 1, hello("mac", 0), t(0));
+    send(&mut hub, PHONE, 1, hello("phone", 0), t(0));
+    let claim = |hub: &mut Hub<S>, conn, now| {
+        let h = send(
+            hub,
+            conn,
+            2,
+            Req::ClaimLease(pb::ClaimLease {
+                key: "job:j1".into(),
+                ttl_secs: 30,
+            }),
+            now,
+        );
+        match body(&h) {
+            Res::LeaseClaim(c) => c.lease.clone().unwrap().token,
+            other => panic!("{other:?}"),
+        }
+    };
+    let fenced = |hub: &mut Hub<S>, conn, title: &str, token, now| {
+        send(
+            hub,
+            conn,
+            3,
+            Req::Apply(pb::Apply {
+                ops: vec![put("j1", title)],
+                fences: vec![pb::Fence {
+                    key: "job:j1".into(),
+                    token,
+                }],
+            }),
+            now,
+        )
+    };
+    let mac = claim(&mut hub, MAC, t(0));
+    let h = fenced(&mut hub, MAC, "running on mac", mac, t(1));
+    assert!(matches!(body(&h), Res::Applied(a) if a.first == 1), "{h:?}");
+    // mac goes quiet; its lease lapses and phone takes the job.
+    let phone = claim(&mut hub, PHONE, t(31));
+    assert!(phone > mac);
+    let h = fenced(&mut hub, PHONE, "running on phone", phone, t(32));
+    assert!(matches!(body(&h), Res::Applied(_)));
+    // mac wakes up and finishes: refused, typed, nothing written or pushed.
+    let h = fenced(&mut hub, MAC, "done by mac", mac, t(33));
+    assert_eq!(h.reply.request_id, 3);
+    let Res::Error(e) = body(&h) else {
+        panic!("{h:?}")
+    };
+    assert_eq!(e.code, pb::error::Code::Fenced as i32);
+    assert!(e.message.contains("job:j1"), "{}", e.message);
+    assert!(h.push.is_none());
+    assert_eq!(hub.store().head().unwrap(), 2);
+    // Phone can't borrow mac's token either, nor fence with one it doesn't hold.
+    let h = fenced(&mut hub, PHONE, "x", mac, t(33));
+    assert!(matches!(body(&h), Res::Error(e) if e.code == pb::error::Code::Fenced as i32));
+    let h = fenced(&mut hub, MAC, "x", phone, t(33));
+    assert!(matches!(body(&h), Res::Error(e) if e.code == pb::error::Code::Fenced as i32));
+    let h = fenced(&mut hub, PHONE, "done by phone", phone, t(34));
+    assert!(matches!(body(&h), Res::Applied(a) if a.first == 3));
+    let rec = hub.store().get("item", "j1").unwrap().unwrap();
+    assert_eq!(rec.body["title"], "done by phone");
+    // A write with no fences (every client before them) isn't checked.
+    let h = send(
+        &mut hub,
+        MAC,
+        4,
+        Req::Apply(pb::Apply {
+            ops: vec![put("other", "unfenced")],
+            ..Default::default()
+        }),
+        t(35),
+    );
+    assert!(matches!(body(&h), Res::Applied(a) if a.first == 4));
+}
+
+#[test]
+fn fenced_writes_in_memory() {
+    fenced_writes(Hub::new(MemStore::new(), "local", t(0)));
+}
+
+#[test]
+fn fenced_writes_on_sqlite() {
+    fenced_writes(Hub::new(SqliteStore::in_memory().unwrap(), "local", t(0)));
+}
+
 #[test]
 fn migrating_local_to_cloud_and_back_keeps_everything() {
     // "Local" is SQLite; the in-memory store stands in for the cloud's.
@@ -329,6 +421,7 @@ fn sync_positions_follow_what_each_connection_was_sent() {
         2,
         Req::Apply(pb::Apply {
             ops: vec![put("1", "a"), put("2", "b")],
+            ..Default::default()
         }),
         t(1),
     );
@@ -341,6 +434,7 @@ fn sync_positions_follow_what_each_connection_was_sent() {
         3,
         Req::Apply(pb::Apply {
             ops: vec![put("3", "c")],
+            ..Default::default()
         }),
         t(2),
     );
@@ -363,6 +457,7 @@ fn sync_positions_follow_what_each_connection_was_sent() {
         4,
         Req::Apply(pb::Apply {
             ops: vec![put("4", "d")],
+            ..Default::default()
         }),
         t(4),
     );
@@ -433,6 +528,7 @@ fn live_hub<S: HubStore>(store: S) -> Hub<S> {
         2,
         Req::Apply(pb::Apply {
             ops: vec![session_row("s1", "mac")],
+            ..Default::default()
         }),
         t(1),
     );
@@ -571,6 +667,7 @@ fn live_steering<S: HubStore>(store: S) {
         6,
         Req::Apply(pb::Apply {
             ops: vec![session_row("s1", "laptop")],
+            ..Default::default()
         }),
         t(3),
     );
@@ -789,6 +886,7 @@ fn device_ids_belong_to_the_user_who_said_them_first() {
         2,
         Req::Apply(pb::Apply {
             ops: vec![session_row("s1", "mac")],
+            ..Default::default()
         }),
         t(1),
     );

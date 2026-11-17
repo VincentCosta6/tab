@@ -220,7 +220,7 @@ impl CloudLink {
         self.waiting.lock().unwrap().remove(&id);
         use std::sync::mpsc::RecvTimeoutError;
         match reply {
-            Ok(Res::Error(e)) => anyhow::bail!("cloud hub: {}", e.message),
+            Ok(Res::Error(e)) => Err(crate::leases::Refused::new("cloud hub", &e).into()),
             Ok(body) => Ok(body),
             Err(RecvTimeoutError::Disconnected) => {
                 anyhow::bail!("cloud hub: not connected right now")

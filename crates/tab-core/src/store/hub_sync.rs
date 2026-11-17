@@ -133,6 +133,17 @@ pub struct SyncedCount {
     pub count: u64,
 }
 
+/// Rows from the hub that couldn't be written here, for one table: what
+/// [`Store::hub_apply_remote`] skipped since the app started, so a copy
+/// that has drifted from the hub says so instead of staying quiet.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SkippedRows {
+    pub table: String,
+    pub count: u64,
+    /// Why the most recent one couldn't be written.
+    pub last_error: String,
+}
+
 /// One row to send to the hub: its current contents, or `None` if it's gone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutRow {
@@ -141,6 +152,10 @@ pub struct OutRow {
     /// The primary key as a JSON array, e.g. `["abc"]` or `["i1", 4, "about"]`.
     pub key: String,
     pub row: Option<Value>,
+    /// The lease this change was made under ([`fence_last_change`]): the hub
+    /// takes it only while this device still holds that lease with that
+    /// token.
+    pub fence: Option<tab_domain::lease::Fence>,
 }
 
 fn pk_of(table: &str) -> Option<&'static [&'static str]> {
@@ -233,6 +248,19 @@ impl Store {
         if !has_pulled {
             conn.execute_batch(
                 "ALTER TABLE hub_sync ADD COLUMN pulled_to INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+        // The lease a queued change was made under, if any (added with
+        // fenced writes).
+        let has_fence: bool = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('hub_outbox') WHERE name = 'fence_key'",
+            [],
+            |r| r.get::<_, i64>(0).map(|n| n > 0),
+        )?;
+        if !has_fence {
+            conn.execute_batch(
+                "ALTER TABLE hub_outbox ADD COLUMN fence_key TEXT;
+                 ALTER TABLE hub_outbox ADD COLUMN fence_token INTEGER;",
             )?;
         }
         Ok(())
@@ -359,12 +387,17 @@ impl Store {
     /// the same (latest) contents; the hub skips repeats.
     pub fn hub_outbox_take(&self, limit: usize) -> anyhow::Result<Vec<OutRow>> {
         let conn = self.conn.lock().unwrap();
-        let pending: Vec<(i64, String, String)> = conn
-            .prepare_cached("SELECT seq, tbl, pk FROM hub_outbox ORDER BY seq LIMIT ?1")?
-            .query_map([limit as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        type Pending = (i64, String, String, Option<String>, Option<i64>);
+        let pending: Vec<Pending> = conn
+            .prepare_cached(
+                "SELECT seq, tbl, pk, fence_key, fence_token FROM hub_outbox ORDER BY seq LIMIT ?1",
+            )?
+            .query_map([limit as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         let mut out = Vec::with_capacity(pending.len());
-        for (seq, table, key) in pending {
+        for (seq, table, key, fence_key, fence_token) in pending {
             if pk_of(&table).is_none() {
                 continue;
             }
@@ -374,6 +407,9 @@ impl Store {
                 table,
                 key,
                 row,
+                fence: fence_key
+                    .zip(fence_token)
+                    .map(|(k, t)| tab_domain::lease::Fence::new(k, t as u64)),
             });
         }
         Ok(out)
@@ -408,6 +444,32 @@ impl Store {
             .collect()
     }
 
+    /// Rows from the hub skipped since the app started, by table (see
+    /// [`SkippedRows`]). Empty while every row has applied.
+    pub fn hub_skipped(&self) -> Vec<SkippedRows> {
+        self.hub_skipped.lock().unwrap().clone()
+    }
+
+    fn hub_note_skipped(&self, skipped: Vec<(String, String)>) {
+        if skipped.is_empty() {
+            return;
+        }
+        let mut all = self.hub_skipped.lock().unwrap();
+        for (table, error) in skipped {
+            match all.iter_mut().find(|s| s.table == table) {
+                Some(s) => {
+                    s.count += 1;
+                    s.last_error = error;
+                }
+                None => all.push(SkippedRows {
+                    table,
+                    count: 1,
+                    last_error: error,
+                }),
+            }
+        }
+    }
+
     pub fn hub_outbox_len(&self) -> anyhow::Result<u64> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.query_row("SELECT COUNT(*) FROM hub_outbox", [], |r| {
@@ -419,13 +481,16 @@ impl Store {
     /// to delete it. Rows already the same here are left alone, rows
     /// changed here that the hub hasn't seen yet keep the local change
     /// (it's on its way, and the hub will order it after this), and
-    /// unknown tables are ignored (a newer device may sync more). Doesn't
-    /// echo back into the outbox. Returns the rows it changed.
+    /// unknown tables are ignored (a newer device may sync more). A row
+    /// that can't be written is skipped and counted ([`Self::hub_skipped`]),
+    /// so an older app keeps working against newer data. Doesn't echo back
+    /// into the outbox. Returns the rows it changed.
     pub fn hub_apply_remote(
         &self,
         changes: &[(String, String, Option<Value>)],
     ) -> anyhow::Result<Vec<(String, String)>> {
         let mut changed = vec![];
+        let mut skipped = vec![];
         let mut conn = self.conn.lock().unwrap();
         let mut tx = conn.transaction()?;
         tx.execute("UPDATE hub_sync SET applying = 1 WHERE id = 1", [])?;
@@ -476,6 +541,7 @@ impl Store {
                     Err(e) if last_try => {
                         drop(sp);
                         tracing::warn!(error = %e, table = %table, key = %key, "hub: couldn't write a row from the hub; skipped");
+                        skipped.push((table.clone(), e.to_string()));
                     }
                     Err(_) => {
                         drop(sp);
@@ -489,11 +555,40 @@ impl Store {
         }
         tx.execute("UPDATE hub_sync SET applying = 0 WHERE id = 1", [])?;
         tx.commit()?;
+        drop(conn);
+        self.hub_note_skipped(skipped);
         if changed.iter().any(|(t, _)| t.starts_with("workflow")) {
             self.workflows_bump();
         }
         Ok(changed)
     }
+}
+
+/// Marks the change just made to `table`'s row `key` (inside the same
+/// transaction, after the write whose trigger queued it) as made under
+/// `fence`: the hub refuses it unless this device still holds that lease
+/// with that token when the change arrives. Does nothing when sync isn't
+/// set up (no outbox), or when nothing was queued.
+pub(super) fn fence_last_change(
+    conn: &rusqlite::Connection,
+    table: &str,
+    key: &str,
+    fence: &tab_domain::lease::Fence,
+) -> anyhow::Result<()> {
+    let has_outbox: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_info('hub_outbox') WHERE name = 'fence_key')",
+        )?
+        .query_row([], |r| r.get(0))?;
+    if !has_outbox {
+        return Ok(());
+    }
+    conn.prepare_cached(
+        "UPDATE hub_outbox SET fence_key = ?3, fence_token = ?4 WHERE seq =
+             (SELECT MAX(seq) FROM hub_outbox WHERE tbl = ?1 AND pk = ?2)",
+    )?
+    .execute(rusqlite::params![table, key, fence.key, fence.token as i64])?;
+    Ok(())
 }
 
 fn is_unique_conflict(e: &anyhow::Error) -> bool {

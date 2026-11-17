@@ -11,7 +11,9 @@
 //!
 //! The fencing token only goes up for a key. A holder whose lease expired and
 //! was taken by someone else still has its old token, so the hub can refuse
-//! its late writes.
+//! its late writes: a write can name a [`Fence`] (a lease key and the token
+//! it was made under), and the hub applies it only while [`check_fence`]
+//! passes, in the same transaction as the write.
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -109,6 +111,64 @@ pub fn fence_ok(current: Option<&Lease>, token: u64, now: DateTime<Utc>) -> bool
     current.is_some_and(|l| l.token == token && l.is_live(now))
 }
 
+/// A write's claim to be made under a lease: "I hold `key` with `token`".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Fence {
+    /// The lease key, such as `job:<id>`.
+    pub key: String,
+    /// The fencing token the writer was granted for it.
+    pub token: u64,
+}
+
+impl Fence {
+    pub fn new(key: impl Into<String>, token: u64) -> Self {
+        Self {
+            key: key.into(),
+            token,
+        }
+    }
+}
+
+/// Why a fenced write was refused: the lease it names isn't held by the
+/// writer with that token at the time of the write (it expired, was
+/// released, or someone else took it over). Not worth retrying: someone
+/// else owns the work now.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FenceError {
+    pub key: String,
+    pub token: u64,
+}
+
+impl std::fmt::Display for FenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "lease {} isn't held with token {} any more",
+            self.key, self.token
+        )
+    }
+}
+
+impl std::error::Error for FenceError {}
+
+/// Checks a fenced write by `writer` against the lease stored for
+/// `fence.key`: it passes only if that lease is live at `now`, held by
+/// `writer`, with exactly `fence.token`.
+pub fn check_fence(
+    current: Option<&Lease>,
+    fence: &Fence,
+    writer: &str,
+    now: DateTime<Utc>,
+) -> Result<(), FenceError> {
+    if current.is_some_and(|l| l.holder == writer) && fence_ok(current, fence.token, now) {
+        return Ok(());
+    }
+    Err(FenceError {
+        key: fence.key.clone(),
+        token: fence.token,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,6 +211,30 @@ mod tests {
         // Released keys have no stored lease, but the last token is kept.
         let g = claim(None, 7, "k", "a", Duration::seconds(10), t(0));
         assert_eq!(g.lease().token, 8);
+    }
+
+    #[test]
+    fn a_fence_passes_only_for_the_live_holder_with_its_token() {
+        let ttl = Duration::seconds(30);
+        let g = claim(None, 0, "job:1", "mac", ttl, t(0));
+        let f = Fence::new("job:1", 1);
+        assert_eq!(check_fence(Some(g.lease()), &f, "mac", t(29)), Ok(()));
+        // Expired, even if nobody took it yet.
+        assert!(check_fence(Some(g.lease()), &f, "mac", t(30)).is_err());
+        // Another writer, with the right token.
+        assert!(check_fence(Some(g.lease()), &f, "phone", t(1)).is_err());
+        // An older or newer token.
+        assert!(check_fence(Some(g.lease()), &Fence::new("job:1", 2), "mac", t(1)).is_err());
+        // No lease at all (released, or never claimed).
+        let e = check_fence(None, &f, "mac", t(1)).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "lease job:1 isn't held with token 1 any more"
+        );
+        // Taken over after it lapsed: the old token fails, the new one passes.
+        let h = claim(Some(g.lease()), 1, "job:1", "phone", ttl, t(31));
+        assert!(check_fence(Some(h.lease()), &f, "mac", t(32)).is_err());
+        assert!(check_fence(Some(h.lease()), &Fence::new("job:1", 2), "phone", t(32)).is_ok());
     }
 
     #[test]

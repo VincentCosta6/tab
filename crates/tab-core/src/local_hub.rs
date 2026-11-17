@@ -182,6 +182,9 @@ pub struct HubStatusView {
     pub pulled_to: u64,
     /// What this copy holds that syncs, by kind (projects, notes, graph…).
     pub synced: Vec<crate::store::hub_sync::SyncedCount>,
+    /// Changes from the hub this copy couldn't apply, by table, so a copy
+    /// that differs from the hub shows it.
+    pub skipped: Vec<crate::store::hub_sync::SkippedRows>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -276,7 +279,9 @@ impl LocalHub {
         let handled = self.hub.lock().unwrap().handle(APP, id, req, Utc::now());
         self.deliver(APP, handled.push.as_ref(), handled.direct);
         match handled.reply.body {
-            Some(pb::server_envelope::Body::Error(e)) => Err(anyhow::anyhow!("hub: {}", e.message)),
+            Some(pb::server_envelope::Body::Error(e)) => {
+                Err(crate::leases::Refused::new("hub", &e).into())
+            }
             Some(body) => Ok(body),
             None => Err(anyhow::anyhow!("hub: empty reply")),
         }
@@ -329,9 +334,20 @@ impl LocalHub {
         }
     }
 
+    #[cfg(test)]
     fn apply(&self, ops: &[Op]) -> anyhow::Result<()> {
+        self.apply_fenced(ops, &[])
+    }
+
+    /// Writes `ops` only while this app holds every lease in `fences` with
+    /// its token (see `Apply.fences` in hub.proto).
+    fn apply_fenced(&self, ops: &[Op], fences: &[&tab_domain::lease::Fence]) -> anyhow::Result<()> {
+        let mut fences: Vec<pb::Fence> = fences.iter().map(|f| (*f).into()).collect();
+        fences.sort_by(|a, b| (&a.key, a.token).cmp(&(&b.key, b.token)));
+        fences.dedup();
         self.up(Req::Apply(pb::Apply {
             ops: ops.iter().map(Into::into).collect(),
+            fences,
         }))
         .map(|_| ())
     }
@@ -397,10 +413,13 @@ impl LocalHub {
             return Ok(0);
         };
         let mut ops = Vec::with_capacity(rows.len());
+        // The lease each op was made under, if any.
+        let mut fences = Vec::with_capacity(rows.len());
         let mut seen = std::collections::HashSet::new();
         let cloud = self.cloud_link().is_some();
         for r in rows.iter().rev() {
-            // The same row queued twice carries the same contents: send it once.
+            // The same row queued twice carries the same contents: send it
+            // once, under the lease of its latest change (if any).
             if !seen.insert((r.table.as_str(), r.key.as_str())) {
                 continue;
             }
@@ -412,8 +431,8 @@ impl LocalHub {
                 Some(self.hub_record(&r.table, &r.key)?)
             };
             match (&r.row, old) {
-                (Some(row), Some(Some(old))) if *row == old => {}
-                (None, Some(None)) => {}
+                (Some(row), Some(Some(old))) if *row == old => continue,
+                (None, Some(None)) => continue,
                 (Some(row), _) => ops.push(Op::Put {
                     kind: r.table.clone(),
                     id: r.key.clone(),
@@ -424,8 +443,10 @@ impl LocalHub {
                     id: r.key.clone(),
                 }),
             }
+            fences.push(r.fence.as_ref());
         }
         ops.reverse();
+        fences.reverse();
         // The files these records mention go up first, so a device that
         // gets the record can fetch what it names.
         if let Some(link) = self.cloud_link() {
@@ -439,15 +460,23 @@ impl LocalHub {
             self.upload(&link, refs, false);
         }
         let mut refused = vec![];
-        if !ops.is_empty() && self.apply(&ops).is_err() {
+        let all: Vec<_> = fences.iter().flatten().copied().collect();
+        if !ops.is_empty() && self.apply_fenced(&ops, &all).is_err() {
             // Find which ones the hub won't take; the rest go through.
-            for op in &ops {
-                if let Err(e) = self.apply(std::slice::from_ref(op)) {
+            for (op, fence) in ops.iter().zip(&fences) {
+                let one: Vec<_> = fence.iter().copied().collect();
+                if let Err(e) = self.apply_fenced(std::slice::from_ref(op), &one) {
                     let (kind, id) = match op {
                         Op::Put { kind, id, .. } | Op::Delete { kind, id } => (kind, id),
                         _ => continue,
                     };
-                    tracing::warn!(error = %e, table = %kind, key = %id, "hub: refused a change; undoing it here");
+                    if crate::leases::lost_lease(&e) {
+                        // Someone else holds the lease now: their work
+                        // counts, and this change is dropped, not retried.
+                        tracing::info!(table = %kind, key = %id, lease = ?fence.map(|f| &f.key), "hub: lost the lease this change was made under; dropping it here");
+                    } else {
+                        tracing::warn!(error = %e, table = %kind, key = %id, "hub: refused a change; undoing it here");
+                    }
                     refused.push((kind.clone(), id.clone()));
                 }
             }
@@ -1153,6 +1182,11 @@ impl LocalHub {
                 .get()
                 .and_then(|(s, _)| s.hub_synced_counts().ok())
                 .unwrap_or_default(),
+            skipped: self
+                .local
+                .get()
+                .map(|(s, _)| s.hub_skipped())
+                .unwrap_or_default(),
         })
     }
 
@@ -1844,5 +1878,21 @@ impl crate::leases::Leases for LocalHub {
     fn release_blocking(&self, key: &str) -> anyhow::Result<()> {
         self.up(Req::ReleaseLease(pb::ReleaseLease { key: key.into() }))
             .map(|_| ())
+    }
+
+    /// Sends `tab.db`'s queued changes, so a fenced write reaches the hub
+    /// while its lease is still held.
+    fn flush_blocking(&self) -> anyhow::Result<()> {
+        let Some((store, _)) = self.local.get() else {
+            return Ok(());
+        };
+        let _turn = self.syncing.lock().unwrap();
+        // Not introduced yet, or waiting on the cloud hub: the sync loop
+        // sends it when it can, and the hub checks the fence then.
+        if self.awaiting_cloud.load(Ordering::Relaxed) || !store.hub_backfilled()? {
+            return Ok(());
+        }
+        while self.push_once(store)? > 0 {}
+        Ok(())
     }
 }

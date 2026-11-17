@@ -1049,18 +1049,7 @@ impl Engine {
         for c in &self.connectors {
             let c = c.clone();
             let ctx = ConnectorContext::new(c.id().to_string(), tx.clone(), cancel.child_token());
-            tokio::spawn(async move {
-                let status = match c.run(ctx.clone()).await {
-                    Ok(()) => ConnectorStatus::Stopped,
-                    Err(e) => {
-                        tracing::error!(connector = c.id(), error = %e, "connector failed");
-                        ConnectorStatus::Error {
-                            message: e.to_string(),
-                        }
-                    }
-                };
-                ctx.set_status(status).await;
-            });
+            tokio::spawn(crate::connector::supervise(c, ctx));
         }
         drop(tx);
 

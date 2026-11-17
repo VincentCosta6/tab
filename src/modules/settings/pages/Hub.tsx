@@ -395,6 +395,8 @@ function WhatSyncsSection() {
   const h = status.data;
   if (!h) return null;
   const where = h.cloud_hub ? "tab cloud" : "this computer's hub";
+  const skipped = (h.skipped ?? []).reduce((n, s) => n + s.count, 0);
+  const lastSkip = (h.skipped ?? []).map((s) => `${s.table}: ${s.last_error}`).join("; ");
   return (
     <Section title="What syncs" description={`Everything here is kept in ${where}, so every device on it sees the same.`}>
       <Card>
@@ -408,6 +410,13 @@ function WhatSyncsSection() {
             ? <Badge tone="success">Up to date · change {h.pulled_to.toLocaleString()}</Badge>
             : <Badge tone="warning">{h.pending.toLocaleString()} waiting</Badge>}
         </FormRow>
+        {skipped > 0 && (
+          <FormRow label="Not applied" help={lastSkip ? `Last error: ${lastSkip}` : undefined}>
+            <Badge tone="warning">
+              {skipped.toLocaleString()} {skipped === 1 ? "change" : "changes"} from other devices could not be applied
+            </Badge>
+          </FormRow>
+        )}
         <p className="subtle" style={{ margin: "var(--space-2) 0 0" }}>
           Stays on this computer: caches, search indexes (rebuilt on each device), usage counts, and agents' tool output.
         </p>

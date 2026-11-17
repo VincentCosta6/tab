@@ -6,16 +6,16 @@ This document describes what exists today and the design for what comes next. Se
 
 ## Principles
 
-1. **Local first.** One SQLite file holds the queue, the knowledge graph, the HTTP cache and the audit log. A server comes later for sync and webhooks; the data model is already sync-ready (UUID ids, `updated_at` everywhere, append-only audit).
+1. **Local first.** One SQLite file holds the queue, the knowledge graph, the HTTP cache and the audit log. tab cloud (a hosted hub, below) adds sync across devices; the data model was built sync-ready for it (UUID ids, `updated_at` everywhere, append-only audit).
 2. **Metadata driven.** Connectors describe themselves (settings form, kinds, icons, tones) and their content (`Block`s). Adding a connector should need no UI code unless it brings a whole new surface, like code review.
 3. **Deterministic core, AI on top.** Rules always produce the same score for the same item. The AI layer is optional, bounded, and cached by its inputs, so it is repeatable too.
-4. **Every outbound call goes through the gateway.** One place for caching, rate limits, retries and audit. Nothing calls `reqwest` directly.
+4. **Every connector call goes through the gateway.** One place for caching, rate limits, retries and audit: connectors (their polls, previews and actions), the AI ranking and decision-model calls, and the knowledge crawler never call `reqwest` directly. The rest use HTTP clients of their own: the account and tab cloud (`account`, `cloud`, `cloud_link`), MCP and remote MCP sign-in (`mcp`, `remote_mcp`), the marketplace, the embedding model download (`embed`), adapter downloads and version checks (`agents`), and mail sign-in and server discovery (`mail_oauth`, `connectors/email`).
 5. **One event stream.** Every state change is an `EngineEvent`. The UI, automations and the MCP server all subscribe to the same stream.
 6. **Same capability, three ways in.** Anything you can configure in the UI you can configure over MCP (talk to the app) or by editing JSON (build it yourself).
 
 ## Layout (built)
 
-One repo holds the app and the hub. The hub is the part of tab that owns work state (records, the knowledge graph, leases, the change log every device syncs from). The same hub code runs inside the desktop app on local SQLite, and later in the cloud inside a Cloudflare Durable Object, one per person or team. Only the storage backend and a thin host differ.
+One repo holds the app and the hub. The hub is the part of tab that owns work state (records, the knowledge graph, leases, the change log every device syncs from). The same hub code runs inside the desktop app on local SQLite, and in tab cloud inside a Cloudflare Durable Object, one per person or team. Only the storage backend and a thin host differ.
 
 ```
 crates/tab-domain/      Pure logic. No I/O, no clock, no threads; builds for wasm32.
@@ -26,7 +26,9 @@ crates/tab-domain/      Pure logic. No I/O, no clock, no threads; builds for was
   workflow/             Workflow definitions, validation, templates, run records
   decision.rs           Questions for decision models (choice, score, yes/no), typed answers, ranking nudge
   links.rs              Recognizing links agents create or mention
-crates/tab-protocol/    The shared API layer. Protobuf (proto/tab/hub/v1/hub.proto), no gRPC; builds for wasm32.
+  runner.rs             Runners and jobs: work a workflow hands to a machine, raced for by lease
+crates/tab-protocol/    The shared API layer. Protobuf (proto/tab/hub/v1/hub.proto, and tab cloud's account API in
+                        proto/tab/cloud/v1/account.proto), no gRPC; builds for wasm32.
 crates/tab-store/       HubStore trait + backends (in-memory reference, SQLite), sea-query statements,
                         and the conformance suite every backend must pass. BlobStore (files) with its
                         own suite: in-memory and local-folder backends.
@@ -42,12 +44,19 @@ crates/tab-core/        The desktop engine. No Tauri dependency, fully unit test
   mcp.rs                tab's MCP server for agents, plus /mcp/<id> (remote servers,
                         signed in by tab) and /oauth/callback
   engine.rs             Wires connectors → store → ranker → events
-  gateway.rs            Cache, rate limits, audit for every API call
+  gateway.rs            Cache, rate limits, audit for every connector call
   ranker/               ai.rs (Haiku layer) and decision.rs (decision-model layer) over tab-domain's rules
   decisions/            Decision model providers as data (decisions.json) + one adapter per wire format
   store/                SQLite: items, graph, http cache, audit; migrations/
   workflow/runtime.rs   Runs workflows off the engine's event stream
+  jobs.rs, jobs/        The job runner: takes agent jobs workflows hand out, on this runner
+  sandbox/              Sandbox for agents, language servers and command steps (Seatbelt,
+                        bubblewrap, or a container), with a scrubbed environment and a network proxy
+  e2e/                  The end-to-end encrypted vault (keys per device, sealed entries and files)
+  local_hub.rs          The hub inside the app (hub.db) and its localhost listener
+  cloud.rs, cloud_link.rs  tab cloud: setting up hubs (account.proto), and syncing with one
   config.rs             TabConfig (profile, ranking, connectors map)
+crates/tab-runner/      tab, headless: a hub's cloud runner, in a container tab cloud starts next to the hub
 src-tauri/              Desktop shell: Tauri commands + event forwarding
 src/                    React UI
   design/               Design system: tokens.css, components, icons, blocks, markdown
@@ -58,7 +67,9 @@ buf.yaml, buf.gen.yaml  Protobuf lint/breaking rules and TypeScript generation (
 scripts/storage-tests.sh  The full storage suite, outside CI (see Storage tests)
 ```
 
-Coming next (designed): `apps/mobile/`, `cloud/worker/` (workers-rs host for tab-hub on Durable Objects), `crates/tab-hub-org/` (org features).
+**tab cloud (built)** is the private `tab-infra` repo, all workers-rs: an edge Worker (`api.tabqueue.com`, the only public route: verifies the caller and routes to their hubs), a hub Durable Object per person or team running `tab-hub` on its built-in SQLite, accounts in D1, files in R2, and, on paid plans, a container running `tab-runner` beside the hub. The two repos share the API in `tab-protocol` (see CLAUDE.md).
+
+Coming next (designed): `apps/mobile/`, `crates/tab-hub-org/` (org features).
 
 **Where things run today.** The desktop app runs its own hub (`tab_core::local_hub::LocalHub`): a `tab-hub` on SQLite in `hub.db` next to `tab.db`. The hub's change log is the source of truth; `tab.db` is this device's copy, kept because it holds the indexes, full-text search and vectors every screen reads. The engine keeps its SQL, and `store::hub_sync` keeps the copy and the hub in step:
 
@@ -67,10 +78,10 @@ Coming next (designed): `apps/mobile/`, `cloud/worker/` (workers-rs host for tab
 - **In, from the log.** The app then reads the hub's log with `GetChanges` from where this copy last got to (`hub_sync.pulled_to`) and writes the hub's rows into `tab.db` with the triggers off, so nothing echoes. Rows changed here that the hub hasn't seen yet keep the local change. Rows already identical are skipped, and the UI is told about the rest. Other devices' changes arrive this way, and a fresh or deleted `tab.db` is rebuilt from the hub.
 - **Twins.** Two devices can ingest the same thing (one GitHub notification) under different ids. When a hub row collides with a local row on a natural key, the one later in the log wins. Every device replays the same order, so they keep the same one.
 - **First meeting.** An empty hub gets everything in `tab.db`. A `tab.db` meeting a hub that already has data takes the hub's rows, then sends only what the hub lacked. If `hub.db` is replaced by one that's behind this copy, they're introduced again.
-- **Other devices.** The hub listens on `wss://127.0.0.1:47850/hub` (binary Protobuf frames; the next free port if taken), and their changes wake the same sync loop. See *Transport* below.
+- **Other devices.** The hub listens on `wss://127.0.0.1:47850/hub` (binary Protobuf frames; the next free port if taken), on localhost only, so other computers can't reach it. Sync between devices goes through tab cloud: the app moves its hub there (`LocalHub::move_to_cloud`) and syncs `tab.db` with the cloud hub instead (`cloud_link`). See *Transport* below.
 - **Status.** Settings → Hub shows where the hub runs, its address, the app process's CPU and memory, the size of the log and store, changes still waiting to sync, and each connected device with how far behind it is.
 
-The sync speaks only the hub protocol (`Apply`, `GetChanges`), so pointing the app at a cloud hub replaces the in-process call with the WebSocket and nothing else. Not synced, on purpose: caches (HTTP, AI, previews, embeddings), the API audit log and usage counters.
+The sync speaks only the hub protocol (`Apply`, `GetChanges`), so pointing the app at a cloud hub replaces the in-process call with the WebSocket and nothing else (that is how tab cloud works). Not synced, on purpose: caches (HTTP, AI, previews, embeddings), the API audit log and usage counters.
 
 **Chats sync too** (`sessions`, `session_messages`), so other devices can watch and steer them. Each session names the device that runs it (`sessions.device`, this install's id from `this_device`); only that device runs its turns. Messages sync by a `uid` (their local `id` only orders this copy). Only what the person reads in a chat travels: replies, their own messages, prompts, notes and errors. Tool output stays on the device that ran it, and a tool call syncs as its one-line summary without its input, except the step list and questions for the person, whose input is what they read. A message's text is cut at 64 KB in the hub.
 
@@ -78,19 +89,19 @@ The sync speaks only the hub protocol (`Apply`, `GetChanges`), so pointing the a
 
 Even on localhost, the hub only speaks **TLS 1.3**: no plain HTTP, no TLS 1.2 (refused with a `protocol_version` alert).
 
-- **Certificate.** No public CA signs certificates for `127.0.0.1` or LAN addresses, so each install makes its own (ECDSA P-256, in `hub-tls/` next to `hub.db`, key readable only by the user). Devices don't trust it through a CA: they **pin** its fingerprint (`sha256/<hex>`, shown on the Hub page), learned at pairing along with the token (`tab_core::hub_tls::pinned_client`). Nobody else can mint a certificate a paired device accepts.
+- **Certificate.** No public CA signs certificates for `127.0.0.1`, so each install makes its own (ECDSA P-256, in `hub-tls/` next to `hub.db`, key readable only by the user). Clients don't trust it through a CA: they **pin** its fingerprint (`sha256/<hex>`, shown on the Hub page) along with the token (`tab_core::hub_tls::pinned_client`). Nobody else can mint a certificate such a client accepts.
 - **TCP** carries HTTP/2 and HTTP/1.1 (ALPN). The sync WebSocket works over either: an HTTP/1.1 upgrade, or HTTP/2 extended CONNECT (RFC 8441).
 - **QUIC** on the same port (UDP) carries **HTTP/3** for files, advertised with `Alt-Svc: h3=":<port>"`, so clients that speak it switch. No 0-RTT, since early data can be replayed.
 - **Auth** is `Authorization: Bearer <token>`, or the WebSocket subprotocol `tab.token.<token>` for browsers (they can't set headers on a WebSocket). A token in the URL is ignored, since URLs end up in logs. Tokens compare in constant time.
 - **Not yet over QUIC: the sync stream.** WebSockets over HTTP/3 (RFC 9220) isn't supported by the Rust HTTP/3 stack (`h3`) or, as far as we know, by Cloudflare yet; WebTransport is the QUIC-native replacement to move to once the cloud side supports it. Its frames are already compact Protobuf.
-- **In the cloud (designed)**, Cloudflare terminates TLS and HTTP/3 at the edge; the zone's minimum TLS version is to be set to 1.3 so the cloud hub matches.
+- **In the cloud**, Cloudflare terminates TLS and HTTP/3 at the edge; the zone's minimum TLS version is to be set to 1.3 so the cloud hub matches.
 
 ### Files (built)
 
-Attachments live in the hub's file store, beside the records: `tab_store::blob::BlobStore`, content-addressed by SHA-256 (`sha256:<hex>`), so the same file attached twice is stored once. Backends: in memory, and a local folder (`hub-files/` next to `hub.db`, sharded by the first two hex digits, written via a temp file and rename). An R2 backend comes with the cloud hub.
+Attachments live in the hub's file store, beside the records: `tab_store::blob::BlobStore`, content-addressed by SHA-256 (`sha256:<hex>`), so the same file attached twice is stored once. Backends: in memory, and a local folder (`hub-files/` next to `hub.db`, sharded by the first two hex digits, written via a temp file and rename). In tab cloud, the hub Worker keeps them in R2.
 
 - **Records refer to files by hash**, anywhere in their body (a message's `meta.files`). `HubStore::blob_refs` lists every hash a current record mentions, and `tab_hub::blobs::collect` deletes files nothing refers to once they're a day old (the grace period covers an upload whose record hasn't arrived yet). The desktop runs it hourly. The hub owns cleanup; each device's `attachments/` folder is a cache.
-- **Bytes go over HTTP, not the sync socket**: `PUT /files` returns `{hash, size}`, `GET /files/<hash>` returns the bytes (immutable, so cacheable forever), over HTTP/3 or HTTP/2. In the cloud these become signed R2 URLs.
+- **Bytes go over HTTP, not the sync socket**: `PUT /files` returns `{hash, size}`, `GET /files/<hash>` returns the bytes (immutable, so cacheable forever), over HTTP/3 or HTTP/2. In the cloud the same routes go through the edge Worker (`/v1/hubs/<hub_id>/files`), which checks membership and passes them to the hub.
 - **On the desktop** a pasted file goes into the hub and is copied into `attachments/<hash hex>/<name>`, so the path itself names the file. A path that isn't there (swept from the cache, or from a chat another device runs) is fetched from the hub when shown.
 
 ### Watch and steer (built)
@@ -116,7 +127,7 @@ Clients and hubs exchange Protobuf messages from `crates/tab-protocol/proto/tab/
 
 We use Protobuf messages but **not gRPC**: browsers and the webview can only reach gRPC through a gRPC-Web proxy, Workers can't host a gRPC server (tonic needs tokio and raw HTTP/2), and the hub's channel is a long-lived WebSocket on a Durable Object. Protobuf over Rust-only formats like postcard because the protocol crosses Rust and TypeScript and old and new app versions.
 
-Compatibility: fields and messages are only added, removed ones are `reserved`, `buf lint` runs in CI and `buf breaking` will once the proto is on `main`. A hub answers every version from `MIN_PROTOCOL_VERSION` to `PROTOCOL_VERSION`; unknown fields are skipped and unknown requests get an `UNSUPPORTED` error rather than being dropped.
+Compatibility: fields and messages are only added, removed ones are `reserved`, `buf lint` runs in CI, and on pull requests `buf breaking` checks the proto against the base branch (`pnpm proto:breaking` locally). A hub answers every version from `MIN_PROTOCOL_VERSION` to `PROTOCOL_VERSION`; unknown fields are skipped and unknown requests get an `UNSUPPORTED` error rather than being dropped.
 
 ### Storage layer (built)
 
@@ -138,7 +149,7 @@ The desktop and the cloud hub are both SQLite, so they share one store, `tab_sto
 - **Volume and timing** (`tests/perf.rs`, ignored by default): 100k items plus edges, paging the log, gets, searches, neighbors and 10k lease claims, each with a time budget. It already caught one problem: without WAL every lease claim waited on an fsync.
 - **New behavior lands with its check. A storage bug gets a failing check before the fix.** A new backend runs `conformance_tests!` and joins the property tests.
 
-These are too slow to run on every CI build, so they run with `scripts/storage-tests.sh` (add `--perf` for volume, `--cov` for coverage with a 95% line target) whenever tab-store changes, and on a cadence. CI only builds the hub crates for Wasm, lints the proto, and runs the fast domain, protocol and hub tests.
+These are too slow to run on every CI build, so they run with `scripts/storage-tests.sh` (add `--perf` for volume, `--cov` for coverage with a 95% line target) whenever tab-store changes, and on a cadence. CI only builds the hub crates for Wasm, lints the proto and checks it for breaking changes, and runs the fast domain, protocol and hub tests.
 
 ## Data flow (built)
 
@@ -185,7 +196,7 @@ A `Connector` instance:
 
 **PR bar and autofix (built).** A task's chat shows a bar above the composer for each link in its Context that a connector reports on (`ContextStatus` with `title`, `reference` and `icon`): state icon, `#12`, title, the status pill, and on the right **Autofix** (only when the connector sets `autofix`) and dismiss. Autofix is connector-driven: `Connector::fix_report(url)` returns a `tab_domain::autofix::FixReport` (failing checks, unresolved threads, changes-requested reviews, conflicts, each with a stable id, plus a `guide` saying how to act on that service; GitHub's is in `connectors/github_autofix.rs`). The rules are pure in `tab_domain::autofix`: look every minute for 30 minutes after the last activity (turning it on, a push, a new problem), then back off by doubling up to 4 hours (`next_check`); hand each problem to the agent once (`fresh`/`remember`); `prompt` tells the agent to fix what comes from the PR, ask the person about checks that don't, investigate review threads, reply, and resolve only after the fixing commit is pushed. `src-tauri/src/autofix.rs` runs the loop, only on the device that runs the chat and only when its agent is idle. State (on, dismissed, schedule, handled ids) is the local `autofix` table, not synced. Turning it on looks right away. The last choice is kept as `agent.autofix` in the config: while it's on, a PR that shows up in a task's Context with no row yet gets autofix turned on (and looked at) when the queue reads its status (`autofix::adopt`); one the person turned off or dismissed keeps its row and is left alone.
 
-**Remote MCP connections (built).** Services with a remote MCP server (Linear, Notion, Sentry, Vercel, Stripe, Atlassian, or any URL) connect with one browser sign-in: tab finds the authorization server (RFC 9728 / 8414), registers itself (RFC 7591), signs in with PKCE back to `/oauth/callback` on its MCP server, and keeps the tokens out of `config.json` (DPAPI on Windows, the keychain on macOS, a private file elsewhere). Agents in chats the person drives get each server as `--mcp-config` entry `http://127.0.0.1:<port>/mcp/<id>`: tab adds the token, refreshes it, hides tools set to off and asks the person before tools set to ask. Because they come in through tab's own config, they work in strict chats. They give agents tools; they don't fill the queue yet. See `docs/connect-via-mcp.md`.
+**Remote MCP connections (built).** Services with a remote MCP server (Linear, Notion, Sentry, Vercel, Stripe, Atlassian, or any URL) connect with one browser sign-in: tab finds the authorization server (RFC 9728 / 8414), registers itself (RFC 7591), signs in with PKCE back to `/oauth/callback` on its MCP server, and keeps the tokens out of `config.json` (DPAPI on Windows, the keychain on macOS, a private file elsewhere). Agents in chats the person drives get each server as `--mcp-config` entry `http://127.0.0.1:<port>/mcp/<id>`: tab adds the token, refreshes it, hides tools set to off and asks the person before tools set to ask. Because they come in through tab's own config, they work in strict chats. They give agents tools, and a manifest with a `queue` section also fills the queue (Linear, Notion and Sentry's do; see below). See `docs/connect-via-mcp.md`.
 
 **Third-party connectors (built for MCP connections).** Each service tab knows the MCP server of is a JSON manifest (`remote_mcp::manifest`): its catalog entry and how its tools fill the queue. The person adds their own in `<app data>/recipes`, or installs signed ones from the marketplace (`remote_mcp::marketplace`). What a manifest can't express runs as a plugin (`remote_mcp::plugin`): a program in the sandbox that speaks JSON-RPC over stdio and calls the connection's tools through tab. See `docs/recipe-manifests.md`.
 
@@ -262,7 +273,7 @@ Rule of thumb: a new screen should be composable from these; if it isn't, add th
 
 **Actions are connector metadata.** Next to `kinds` (what a connector emits), every `ConnectorDescriptor` lists `actions`: `ActionInfo { id, label, description, icon, effect, inputs, outputs, spends, for_kinds }`. `effect` is `read`, `write` or `destructive`; `inputs`/`outputs` are typed fields (`text`, `long_text`, `number`, `bool`, `select`, `list`) with defaults like `{{item.metadata.repo}}`. `Connector::act(action, input)` runs one, through the gateway like every other call. Built in: GitHub (`pr.get`, `issue.comment`, `issue.add_labels`, `pr.request_reviewers`, `issue.create`, `pr.merge`, `issue.close`), email (`message.mark_read`, `message.flag`, `message.move`) and tab (`task.create`, `item.snooze`, `item.done`, `item.reopen`, `item.set_project`, run by the engine itself). Adding an action needs no UI work: the builder's forms come from the descriptor.
 
-**A workflow is data** (`workflow/mod.rs`): one trigger (`item` change from chosen connections and kinds with conditions, `signal` from another workflow, `schedule`, or `manual`) and ordered steps: `action`, `filter` (stop unless conditions hold), `set` (compute values), `emit` (signal other workflows) and `command` (run a program in the sandbox; see Sandbox). Each step can have `when` conditions. Templates (`{{item.title}}`, `{{steps.pr.additions}}`, `{{signal.repo}}`) let steps feed each other; a value that is exactly one template keeps its type. There's no model call anywhere in a run, so runs are deterministic.
+**A workflow is data** (`workflow/mod.rs`): one trigger (`item` change from chosen connections and kinds with conditions, `signal` from another workflow, `schedule`, or `manual`) and ordered steps: `action`, `filter` (stop unless conditions hold), `set` (compute values), `emit` (signal other workflows), `command` (run a program in the sandbox, `tab_core::sandbox`) and `agent` (hand a prompt to an agent on one of the person's runners as a job, and wait; see `tab_domain::runner`). Each step can have `when` conditions. Templates (`{{item.title}}`, `{{steps.pr.additions}}`, `{{signal.repo}}`) let steps feed each other; a value that is exactly one template keeps its type. Apart from `agent` steps, nothing in a run calls a model, so the rest of a run is deterministic.
 
 **Runtime** (`workflow/runtime.rs`) is one more subscriber to the engine's event stream. Stored in `workflows` (JSON definition) with every save kept in `workflow_versions`; runs in `workflow_runs` with each step's inputs, outputs, status and timing, for 30 whole UTC days before today (pruned at a UTC midnight, after the day is rolled up; see below).
 

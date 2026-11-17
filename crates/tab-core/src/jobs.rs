@@ -13,6 +13,12 @@
 //! of it (its last message, and any pull request it mentions), but only if
 //! it still holds the lease with the same fencing token: a runner whose
 //! lease lapsed and was taken by another can't overwrite that one's work.
+//! The runner checks that itself ([`Job::accepts_result_from`]), and every
+//! write it makes to a job it holds is fenced with the lease
+//! ([`Store::job_put_fenced`]), so the hub refuses a late one too and this
+//! copy goes back to the hub's version: the result is dropped, since the
+//! job is someone else's now. The runner sends its writes to the hub
+//! before handing the lease back.
 //!
 //! A cloud runner's agents work on code nobody at the keyboard checked, in
 //! a sandbox with no git host token. The runner clones the job's GitHub
@@ -27,6 +33,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use tab_domain::families::model_trouble;
+use tab_domain::lease::Fence;
 pub use tab_domain::runner::RunnerKind as Kind;
 use tab_domain::runner::{
     Candidate, CloudGap, JOB_LEASE, JOB_RENEW, Job, JobResult, JobState, JobUsage, RunnerCaps,
@@ -279,7 +286,8 @@ impl JobRunner {
                 continue;
             }
             let job = fresh.claimed(&caps.id, claim.token, Utc::now());
-            if let Err(e) = self.store.job_put(&job, Utc::now()) {
+            let fence = Fence::new(job_lease(&job.id), claim.token);
+            if let Err(e) = self.store.job_put_fenced(&job, Utc::now(), &fence) {
                 tracing::warn!(error = %e, "couldn't mark a job taken");
                 let _ = leases::release(&self.leases, &job_lease(&job.id)).await;
                 continue;
@@ -323,8 +331,20 @@ impl JobRunner {
         }
         job.interventions.extend(stepped_in);
         job.state = state;
-        self.store.job_put(&job, Utc::now())?;
+        self.store
+            .job_put_fenced(&job, Utc::now(), &Fence::new(job_lease(id), token))?;
         Ok(true)
+    }
+
+    /// Hands a job's lease back once what this runner wrote under it has
+    /// gone to the hub, which checks each write's fence as it arrives. If
+    /// the hub refused one (the lease lapsed and someone else took the
+    /// job), sync already put the job back to the hub's version here.
+    async fn hand_back(&self, key: &str) {
+        if let Err(e) = leases::flush(&self.leases).await {
+            tracing::debug!(error = %e, "couldn't send a job's result yet; sync will");
+        }
+        let _ = leases::release(&self.leases, key).await;
     }
 
     async fn work(self: &Arc<Self>, job: Job, token: u64) -> anyhow::Result<()> {
@@ -365,7 +385,7 @@ impl JobRunner {
                                     usage: None,
                                 },
                             )?;
-                            let _ = leases::release(&self.leases, &key).await;
+                            self.hand_back(&key).await;
                             return Ok(());
                         }
                     }
@@ -403,7 +423,7 @@ impl JobRunner {
                         usage: None,
                     },
                 )?;
-                let _ = leases::release(&self.leases, &key).await;
+                self.hand_back(&key).await;
                 return Ok(());
             }
         };
@@ -566,7 +586,7 @@ impl JobRunner {
                 }
             }
         }
-        let _ = leases::release(&self.leases, &key).await;
+        self.hand_back(&key).await;
         Ok(())
     }
 
@@ -596,7 +616,8 @@ impl JobRunner {
             if let JobState::Running { session: s, .. } = &mut j.state {
                 *s = Some(session.to_string());
             }
-            self.store.job_put(&j, Utc::now())?;
+            self.store
+                .job_put_fenced(&j, Utc::now(), &Fence::new(job_lease(id), token))?;
         }
         Ok(())
     }

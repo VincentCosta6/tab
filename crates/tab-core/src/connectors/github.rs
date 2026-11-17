@@ -739,7 +739,10 @@ impl Connector for GithubConnector {
                     wait
                 }
                 Err(GatewayError::Http { status: 401, .. }) => {
-                    anyhow::bail!("GitHub rejected the token (401). Check it and reconnect.")
+                    return Err(crate::connector::NeedsReconnect(
+                        "GitHub rejected the token (401). Check it and reconnect.".into(),
+                    )
+                    .into());
                 }
                 Err(GatewayError::RateLimited { until, .. }) => {
                     ctx.set_status(ConnectorStatus::RateLimited { until }).await;
