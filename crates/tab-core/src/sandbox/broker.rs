@@ -234,14 +234,7 @@ pub fn write_shims(dir: &Path, ep: &Endpoint, tab_exe: &Path) -> std::io::Result
             ("TAB_CLI_REAL", real.clone()),
         ];
         // A POSIX script on every OS: Claude Code's shell on Windows is Git Bash.
-        let mut sh = String::from("#!/bin/sh\n");
-        for (k, v) in &vars {
-            sh.push_str(&format!("{k}={}; export {k}\n", sh_quote(v)));
-        }
-        sh.push_str(&format!(
-            "exec {} __tab_cli {sub} \"$@\"\n",
-            sh_quote(&posix_path(tab_exe)),
-        ));
+        let sh = sh_shim(&vars, tool, sub, tab_exe);
         let f = bin.join(tool);
         std::fs::write(&f, sh)?;
         #[cfg(unix)]
@@ -255,6 +248,11 @@ pub fn write_shims(dir: &Path, ep: &Endpoint, tab_exe: &Path) -> std::io::Result
             for (k, v) in &vars {
                 cmd.push_str(&format!("set \"{k}={v}\"\r\n"));
             }
+            cmd.push_str(&format!(
+                "if not exist \"{}\" (\r\n  echo {} 1>&2\r\n  exit /b 127\r\n)\r\n",
+                tab_exe.display(),
+                missing_exe(tool, tab_exe),
+            ));
             cmd.push_str(&format!(
                 "\"{}\" __tab_cli {sub} %*\r\nexit /b %ERRORLEVEL%\r\n",
                 tab_exe.display(),
@@ -288,6 +286,70 @@ pub fn write_shims(dir: &Path, ep: &Endpoint, tab_exe: &Path) -> std::io::Result
         env_file,
         git_env,
     }))
+}
+
+/// A shim's POSIX script: set `vars` and run `tab __tab_cli <sub>`.
+fn sh_shim(vars: &[(&str, String)], tool: &str, sub: &str, tab_exe: &Path) -> String {
+    let mut sh = String::from("#!/bin/sh\n");
+    for (k, v) in vars {
+        sh.push_str(&format!("{k}={}; export {k}\n", sh_quote(v)));
+    }
+    // tab's binary can go while the chat lives on (a dev build's `target/`
+    // cleaned, the app moved): say so rather than a bare "No such file or
+    // directory".
+    let exe = sh_quote(&posix_path(tab_exe));
+    sh.push_str(&format!(
+        "if [ ! -x {exe} ]; then\n  echo {} >&2\n  exit 127\nfi\n",
+        sh_quote(&missing_exe(tool, tab_exe)),
+    ));
+    sh.push_str(&format!("exec {exe} __tab_cli {sub} \"$@\"\n"));
+    sh
+}
+
+/// What a shim says when tab's binary isn't where it was.
+fn missing_exe(tool: &str, tab_exe: &Path) -> String {
+    format!(
+        // No parentheses: the Windows shim echoes it inside an `if (...)`.
+        "tab: {tool} goes through tab, but tab's program is no longer at {}: \
+         it was moved, rebuilt or deleted since tab started. Restart tab to fix this chat's {tool}.",
+        tab_exe.display()
+    )
+}
+
+/// The binary a chat's shims should run: `exe`, or in a dev build a hard
+/// link to it in `dir`. A dev build runs from `target/`, which `cargo clean`
+/// or a fresh checkout removes under the running app; the link keeps the
+/// binary as long as it stays. A release app runs from its bundle, which
+/// updates replace in place, so it keeps its own path. Without a link (`dir`
+/// on another volume) it's `exe`, and the shim says if that's gone.
+pub fn pin_exe(exe: &Path, dir: &Path) -> PathBuf {
+    if !cfg!(debug_assertions) {
+        return exe.to_path_buf();
+    }
+    link_exe(exe, dir).unwrap_or_else(|e| {
+        tracing::debug!(error = %e, "couldn't link tab's binary for the chat shims");
+        exe.to_path_buf()
+    })
+}
+
+fn link_exe(exe: &Path, dir: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let name = if cfg!(windows) {
+        "tab-cli.exe"
+    } else {
+        "tab-cli"
+    };
+    let link = dir.join(name);
+    // Replace the last start's link: a new name first, then a rename over
+    // it, so a shim running right now never finds no file.
+    let tmp = dir.join(format!("{name}.{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::hard_link(exe, &tmp)?;
+    if let Err(e) = std::fs::rename(&tmp, &link) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(link)
 }
 
 fn sh_quote(s: &str) -> String {
@@ -905,6 +967,91 @@ mod tests {
     fn v(tool: &str, s: &str) -> CliEffect {
         let args: Vec<String> = s.split_whitespace().map(String::from).collect();
         find(tool).unwrap().classify(&args).effect
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("tab-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[cfg(unix)]
+    fn run_shim(script: &str, dir: &Path) -> std::process::Output {
+        use std::os::unix::fs::PermissionsExt;
+        let f = dir.join("gh");
+        std::fs::write(&f, script).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::process::Command::new(&f)
+            .arg("pr")
+            .arg("list")
+            .output()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shim_says_when_tabs_binary_is_gone() {
+        let dir = scratch("shim-gone");
+        let gone = dir.join("target/debug/tab");
+        let out = run_shim(&sh_shim(&[], "gh", "gh", &gone), &dir);
+        assert_eq!(out.status.code(), Some(127));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("tab's program is no longer at"), "{err}");
+        assert!(err.contains(&gone.display().to_string()), "{err}");
+        assert!(err.contains("Restart tab"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shim_runs_tabs_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("shim-runs");
+        let tab = dir.join("tab");
+        std::fs::write(&tab, "#!/bin/sh\necho \"$TAB_CLI_SESSION $*\"\n").unwrap();
+        std::fs::set_permissions(&tab, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let vars = [("TAB_CLI_SESSION", "s1".to_string())];
+        let out = run_shim(&sh_shim(&vars, "gh", "gh", &tab), &dir);
+        assert!(out.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "s1 __tab_cli gh pr list\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pinned_binary_outlives_the_build() {
+        let dir = scratch("pin");
+        let target = dir.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let exe = target.join("tab");
+        std::fs::write(&exe, b"build 1").unwrap();
+        let chat = dir.join("sessions/one");
+        let pinned = pin_exe(&exe, &dir.join("cli"));
+        let linked = pin_exe(&pinned, &chat);
+        if !cfg!(debug_assertions) {
+            assert_eq!(linked, exe);
+            return;
+        }
+        assert_eq!(
+            linked,
+            chat.join(if cfg!(windows) {
+                "tab-cli.exe"
+            } else {
+                "tab-cli"
+            })
+        );
+        // `cargo clean` while tab runs.
+        std::fs::remove_dir_all(&target).unwrap();
+        assert_eq!(std::fs::read(&linked).unwrap(), b"build 1");
+        // The next turn links again, over the last one.
+        assert_eq!(pin_exe(&pinned, &chat), linked);
+        assert_eq!(std::fs::read(&linked).unwrap(), b"build 1");
+        // No link to make: the path itself, for the shim to report.
+        let missing = dir.join("gone");
+        assert_eq!(pin_exe(&missing, &chat.join("x")), missing);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
