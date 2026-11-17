@@ -672,6 +672,11 @@ impl Core {
                 tokio::spawn(self.clone().rank(item.clone()));
                 Some(item)
             }
+            // Nothing new happened, so no note and no re-ranking.
+            Upsert::Retagged(item) => {
+                self.publish(Change::Updated, item.clone());
+                Some(item)
+            }
             Upsert::Unchanged => None,
         })
     }

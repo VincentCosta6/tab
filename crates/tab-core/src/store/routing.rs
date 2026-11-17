@@ -892,7 +892,7 @@ mod tests {
             ..Default::default()
         };
         match s.upsert(&e, Utc::now()).unwrap() {
-            Upsert::Inserted(i) | Upsert::Updated(i) => i,
+            Upsert::Inserted(i) | Upsert::Updated(i) | Upsert::Retagged(i) => i,
             Upsert::Unchanged => panic!("unchanged"),
         }
     }
