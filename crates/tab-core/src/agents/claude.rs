@@ -65,9 +65,25 @@ impl Unanswered {
     }
 
     /// A tool result came back: queued messages go to the model with it.
-    fn shown(&mut self) {
+    /// Returns how many it was shown.
+    fn shown(&mut self) -> usize {
+        let n = self.sent.len();
         self.shown.append(&mut self.sent);
         self.holding = false;
+        n
+    }
+
+    /// Claude Code echoed a message into the conversation (a steer taken
+    /// at once, cutting in on what the model was writing). Returns how many
+    /// of the person's messages it carried.
+    fn echoed(&mut self, text: &str) -> usize {
+        let (shown, sent): (Vec<String>, Vec<String>) = std::mem::take(&mut self.sent)
+            .into_iter()
+            .partition(|m| !m.trim().is_empty() && text.contains(m.trim()));
+        self.sent = sent;
+        let n = shown.len();
+        self.shown.extend(shown);
+        n
     }
 
     /// The agent said something visible: that answers what it was shown.
@@ -941,7 +957,20 @@ impl Parser {
                 }
             }
             "user" => {
-                for block in v["message"]["content"].as_array().into_iter().flatten() {
+                let content = &v["message"]["content"];
+                let blocks = content.as_array().map(Vec::as_slice).unwrap_or_default();
+                if v["isReplay"] == true && !blocks.iter().any(|b| b["type"] == "tool_result") {
+                    // A steer reaching the model now: the echo of what was sent.
+                    let text = match content.as_str() {
+                        Some(t) => t.to_string(),
+                        None => blocks.iter().filter_map(|b| b["text"].as_str()).collect(),
+                    };
+                    let seen = self.unanswered.lock().unwrap().echoed(&text);
+                    if seen > 0 {
+                        hub.steers_seen(&sid, Some(seen));
+                    }
+                }
+                for block in blocks {
                     if block["type"] == "text"
                         && block["text"]
                             .as_str()
@@ -950,7 +979,10 @@ impl Parser {
                         self.interrupted = true;
                     }
                     if block["type"] == "tool_result" {
-                        self.unanswered.lock().unwrap().shown();
+                        let seen = self.unanswered.lock().unwrap().shown();
+                        if seen > 0 {
+                            hub.steers_seen(&sid, Some(seen));
+                        }
                         if let Some(id) = block["tool_use_id"].as_str() {
                             self.open_tools.lock().unwrap().remove(id);
                             if self.waits.remove(id) && self.waits.is_empty() {
@@ -1026,9 +1058,12 @@ impl Parser {
                 );
             }
             "result" => {
+                // Not the turn's end yet when a steer cut in on it: Claude
+                // Code ends that cycle with a result and runs the steer as
+                // the next. The turn ends with `session/prompt`'s answer, so
+                // steering stays open until then.
                 self.finished = true;
                 self.open_tools.lock().unwrap().clear();
-                hub.steering_close(&sid);
                 crate::usage::record_claude_result(
                     &hub.store,
                     v,
@@ -1336,6 +1371,30 @@ mod tests {
     const CALL_4: &str = r#"{"type":"assistant","message":{"id":"m4","content":[{"type":"tool_use","id":"t4","name":"Bash","input":{"command":"pwd"}}]}}"#;
 
     #[tokio::test]
+    async fn a_steer_that_cuts_in_is_seen_at_its_echo_and_steering_stays_open() {
+        let (store, sid, mut p, _steering) = steered_turn();
+        p.hub.post(&sid, "user", "text", "start", Value::Null);
+        p.hub
+            .post(&sid, "user", "text", "use b.txt", json!({ "steer": true }));
+        p.steered("use b.txt");
+        // The steer cuts in: the cut-off cycle's result, then its echo.
+        feed(
+            &mut p,
+            &[
+                r#"{"type":"result","subtype":"success","is_error":false,"result":""}"#,
+                r#"{"type":"user","isReplay":true,"uuid":"u2","message":{"content":[{"type":"text","text":"use b.txt"}]}}"#,
+            ],
+        );
+        let ms = store.messages(&sid).unwrap();
+        let steer = ms.iter().find(|m| m.content == "use b.txt").unwrap();
+        assert_eq!(steer.meta["seen"], true);
+        // Later messages still reach the running turn.
+        assert!(p.hub.can_steer(&sid));
+        // And it now owes the person a visible answer.
+        assert!(p.unanswered.lock().unwrap().hold().is_some());
+    }
+
+    #[tokio::test]
     async fn a_message_answered_only_in_thinking_holds_the_next_call() {
         let (store, sid, mut p, _steering) = steered_turn();
         watched(&p, &sid);
@@ -1634,7 +1693,8 @@ mod tests {
             r#"{"type":"result","session_id":"abc","is_error":false,"stop_reason":"end_turn"}"#,
         );
         assert!(p.finished);
-        assert!(!hub.can_steer(&s.id));
+        // Steering closes when `session/prompt` answers (`acp::run_turn`).
+        assert!(hub.can_steer(&s.id));
     }
 
     #[tokio::test]

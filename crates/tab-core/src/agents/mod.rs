@@ -1246,6 +1246,33 @@ impl AgentHub {
         self.store.message_set_meta(m.id, &meta)
     }
 
+    /// The agent got the person's oldest `count` mid-turn messages it hadn't
+    /// yet (all of them with `None`): marked `seen`, which the chat shows
+    /// with a thumbs up so the person knows it wasn't lost.
+    pub(crate) fn steers_seen(&self, session_id: &str, count: Option<usize>) {
+        let messages = match self.store.messages(session_id) {
+            Ok(m) => m,
+            Err(e) => return tracing::warn!(error = %e, "reading messages failed"),
+        };
+        // Only this turn's: the steers after the message that started it.
+        let start = messages
+            .iter()
+            .rposition(|m| m.role == "user" && m.kind == "text" && m.meta["steer"] != true)
+            .map_or(0, |i| i + 1);
+        let unseen = messages[start..]
+            .iter()
+            .filter(|m| m.role == "user" && m.meta["steer"] == true && m.meta["seen"] != true)
+            .take(count.unwrap_or(usize::MAX));
+        for m in unseen {
+            let mut message = m.clone();
+            message.meta["seen"] = serde_json::json!(true);
+            match self.store.message_set_meta(m.id, &message.meta) {
+                Ok(()) => self.emit(EngineEvent::SessionMessage { message }),
+                Err(e) => tracing::warn!(error = %e, "marking a steer seen failed"),
+            }
+        }
+    }
+
     pub(crate) fn remind(&self, session_id: &str, text: String) {
         if let Some(tx) = self.steering.lock().unwrap().get(session_id) {
             let _ = tx.send(Steer::Reminder(text));
@@ -1622,8 +1649,11 @@ impl AgentHub {
                 }
                 Ok(()) if !followups.is_empty() => {
                     // Already shown in the chat when they were sent.
-                    if let Err(e) = hub.start_turn(&session.id, &followups.join("\n\n"), false, &[])
-                    {
+                    let started = hub.start_turn(&session.id, &followups.join("\n\n"), false, &[]);
+                    if started.is_ok() {
+                        hub.steers_seen(&session.id, None);
+                    }
+                    if let Err(e) = started {
                         hub.post(
                             &session.id,
                             "system",

@@ -704,6 +704,7 @@ function MessageView({ m, result, onSend, rewind }: { m: SessionMessage; result?
       <div className="msg msg-user">
         {images.length > 0 && <Attachments paths={images} size={96} />}
         {/```|\]\(/.test(m.content) ? <Markdown text={m.content} /> : m.content}
+        {m.meta?.steer && m.meta?.seen && <span className="msg-seen" title="The agent got this message" aria-label="The agent got this message">👍</span>}
         {rewind && m.meta?.agent_uuid && (
           <button className="msg-rewind" onClick={() => openRewind(rewind, m.id)} title="Rewind: go back to before this message (the conversation, the code, or both)" aria-label="Rewind to before this message">
             <Icon name="refresh" size={11} /> Rewind
