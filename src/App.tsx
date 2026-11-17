@@ -1,6 +1,7 @@
 import { setReviewsOpener } from "./modules/github/pulls";
 import { BrowserDock } from "./design/BrowserDock";
 import { ImageViewer } from "./design/ImageViewer";
+import { ConfirmDialog } from "./design/ConfirmDialog";
 import { DropOverlay } from "./modules/work/DropZone";
 import { useEffect, useState } from "react";
 import { Icon } from "./design/icons";
@@ -26,6 +27,7 @@ export default function App() {
         <ErrorBoundary label="tab">
           <Shell />
           <ImageViewer />
+          <ConfirmDialog />
         </ErrorBoundary>
       </AppProvider>
     </QueryProvider>
