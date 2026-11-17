@@ -60,10 +60,7 @@ pub(super) async fn run_turn(
     system: &str,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    // Messages sent mid-turn: agents that take them (`acp.steering`) get
-    // them now; the rest, and anything left over, run as the next turn.
-    hub.steering_close(&session.id);
-    let mut queued = hub.steering_open(&session.id);
+    let mut queued = open_steering(hub, &session.id);
     let result = run(hub, session, prompt, system, &mut queued, cancel).await;
     // What's sent from now on runs as the next turn.
     hub.steering_close(&session.id);
@@ -83,6 +80,15 @@ pub(super) async fn run_turn(
             .extend(later);
     }
     result
+}
+
+/// Messages sent mid-turn: agents that take them (`acp.steering`) get
+/// them now; the rest, and anything left over, run as the next turn. This
+/// is the channel `start_turn` opened: closing it first would leave the
+/// person's messages nothing to go on, and each would wait for the turn
+/// to end.
+fn open_steering(hub: &AgentHub, session_id: &str) -> mpsc::UnboundedReceiver<Steer> {
+    hub.steering_open(session_id)
 }
 
 async fn run(
@@ -343,49 +349,52 @@ async fn run(
         } else {
             prompt.to_string()
         };
-        let request = acp::PromptRequest::new(acp_session.clone(), vec![text_block(&text)]);
-        let r = prompt_turn(
-            &conn,
-            &mut incoming,
-            &mut events,
-            &cancel,
-            conn.request("session/prompt", request),
-            match spec.steering {
-                // An agent that says it takes `_session/steering` gets it.
-                catalog::Steering::Extension if steers => Some((&mut *steering, true)),
-                catalog::Steering::Prompt => Some((&mut *steering, false)),
-                _ => None,
-            },
-            &acp_session,
-        )
-        .await?;
-        // Background work Claude Code started (a command, a subagent, a
-        // watcher) runs on after the reply, and may start a turn of its own
-        // when it ends: the chat shows Monitoring until it's all done.
-        if r.as_ref().is_some_and(|r| r.is_ok())
-            && events
-                .raw
-                .as_ref()
-                .is_some_and(|p| !p.background.is_empty())
-        {
-            hub.update(&session.id, Some(SessionStatus::Monitoring), None);
-            loop {
-                let busy = events
+        let mut text = text;
+        let r = loop {
+            let request = acp::PromptRequest::new(acp_session.clone(), vec![text_block(&text)]);
+            let r = prompt_turn(
+                &conn,
+                &mut incoming,
+                &mut events,
+                &cancel,
+                conn.request("session/prompt", request),
+                match spec.steering {
+                    // An agent that says it takes `_session/steering` gets it.
+                    catalog::Steering::Extension if steers => Some((&mut *steering, true)),
+                    catalog::Steering::Prompt => Some((&mut *steering, false)),
+                    _ => None,
+                },
+                &acp_session,
+            )
+            .await?;
+            // Background work Claude Code started (a command, a subagent, a
+            // watcher) runs on after the reply, and may start a turn of its
+            // own when it ends: the chat shows Monitoring until it's all done.
+            if !r.as_ref().is_some_and(|r| r.is_ok())
+                || !events
                     .raw
                     .as_ref()
-                    .is_some_and(|p| !p.background.is_empty() || !p.finished());
-                if !busy {
-                    break;
-                }
-                tokio::select! {
-                    m = incoming.recv() => if !handle(&conn, &mut events, m)? { break },
-                    _ = cancel.cancelled() => break,
-                }
+                    .is_some_and(|p| !p.background.is_empty())
+            {
+                break r;
             }
-            if !cancel.is_cancelled() {
-                hub.update(&session.id, Some(SessionStatus::Idle), None);
+            hub.update(&session.id, Some(SessionStatus::Monitoring), None);
+            let next = monitor(&conn, &mut incoming, &mut events, steering, &cancel).await?;
+            let Some(next) = next else {
+                if !cancel.is_cancelled() {
+                    hub.update(&session.id, Some(SessionStatus::Idle), None);
+                }
+                break r;
+            };
+            // The person wrote while it waited: answered now, as a prompt
+            // of its own, with the background work left running.
+            hub.update(&session.id, Some(SessionStatus::Working), None);
+            hub.steers_seen(&session.id, None);
+            if let Some(u) = r.as_ref().and_then(|r| r.as_ref().ok()?.get("usage")) {
+                events.more_usage.push(u.clone());
             }
-        }
+            text = next;
+        };
         match r {
             Some(r) => Ok(Some(r)),
             None => {
@@ -780,6 +789,48 @@ where
 /// arrive on separate channels, so an answer can be picked first while
 /// what came before it (Claude Code's result) still waits; one reader keeps
 /// them in order, so it's all queued by then.
+/// Waits out Claude Code's background work after its reply. Returns the
+/// person's messages sent meanwhile, joined, as soon as one comes: they
+/// mustn't wait for a watch that can run for an hour. `None` once the
+/// work is done, the agent goes, or the turn is stopped.
+async fn monitor(
+    conn: &Conn,
+    incoming: &mut mpsc::UnboundedReceiver<Incoming>,
+    events: &mut Translator,
+    steering: &mut mpsc::UnboundedReceiver<Steer>,
+    cancel: &CancellationToken,
+) -> anyhow::Result<Option<String>> {
+    let mut open = true;
+    loop {
+        let busy = events
+            .raw
+            .as_ref()
+            .is_some_and(|p| !p.background.is_empty() || !p.finished());
+        if !busy {
+            return Ok(None);
+        }
+        tokio::select! {
+            m = incoming.recv() => if !handle(conn, events, m)? { return Ok(None) },
+            s = steering.recv(), if open => match s {
+                Some(Steer::Message(first)) => {
+                    let mut texts = vec![first];
+                    while let Ok(s) = steering.try_recv() {
+                        if let Steer::Message(t) = s {
+                            texts.push(t);
+                        }
+                    }
+                    drain(conn, events, incoming)?;
+                    return Ok(Some(texts.join("\n\n")));
+                }
+                // tab's reminders are for a running turn; there is none.
+                Some(_) => {}
+                None => open = false,
+            },
+            _ = cancel.cancelled() => return Ok(None),
+        }
+    }
+}
+
 fn drain(
     conn: &Conn,
     events: &mut Translator,
@@ -1725,6 +1776,31 @@ mod tests {
         t.update(&n.update);
     }
 
+    /// A message sent mid-turn reaches the running turn, not the queue for
+    /// after it.
+    #[test]
+    fn a_turns_steering_takes_messages() {
+        let (hub, store, s) = hub_and_session("tab-acp-test-open");
+        // As `start_turn` does.
+        hub.running
+            .lock()
+            .unwrap()
+            .insert(s.id.clone(), CancellationToken::new());
+        hub.steering_prepare(&s.id);
+        let mut rx = open_steering(&hub, &s.id);
+        assert!(hub.can_steer(&s.id));
+        assert!(hub.steer(&s.id, "and the e2e").unwrap());
+        assert!(matches!(rx.try_recv(), Ok(Steer::Message(m)) if m == "and the e2e"));
+        assert!(hub.followups.lock().unwrap().get(&s.id).is_none());
+        assert!(
+            store
+                .messages(&s.id)
+                .unwrap()
+                .iter()
+                .any(|m| m.meta["steer"] == true)
+        );
+    }
+
     #[test]
     fn steers_are_marked_seen_oldest_first_and_only_this_turns() {
         let (hub, store, s) = hub_and_session("tab-acp-test-seen");
@@ -2269,6 +2345,57 @@ mod tests {
                 .as_deref(),
             Some("conv-1")
         );
+    }
+
+    /// After the reply, a background watch keeps the chat Monitoring. A
+    /// message the person sends then is handed back at once, not when the
+    /// watch ends; with nothing sent, the wait ends with the work.
+    #[tokio::test]
+    async fn a_message_while_monitoring_doesnt_wait_for_the_background_work() {
+        let (hub, _store, s) = hub_and_session("tab-acp-test-monitor");
+        let (client_io, _agent_io) = tokio::io::duplex(1 << 10);
+        let (cr, cw) = tokio::io::split(client_io);
+        let (conn, _) = Conn::start(cw, cr);
+        let (tx, mut incoming) = mpsc::unbounded_channel();
+        let raw = |m: Value| Incoming::Notification {
+            method: "_claude/sdkMessage".into(),
+            params: json!({ "sessionId": "s", "message": m }),
+        };
+        let mut t = Translator::new(hub.clone(), s.id.clone(), AgentKind::ClaudeCode);
+        t.raw = Some(super::super::claude::Parser::new(hub, s.id.clone()));
+        for m in [
+            json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [{ "task_id": "b1", "task_type": "local_bash", "description": "watch" }] }),
+            json!({ "type": "result", "is_error": false }),
+        ] {
+            tx.send(raw(m)).unwrap();
+        }
+        let (steer_tx, mut steer_rx) = mpsc::unbounded_channel();
+        steer_tx.send(Steer::Reminder("from tab".into())).unwrap();
+        steer_tx
+            .send(Steer::Message("also check e2e".into()))
+            .unwrap();
+        steer_tx
+            .send(Steer::Message("and open the card".into()))
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let next = tokio::time::timeout(
+            Duration::from_secs(5),
+            monitor(&conn, &mut incoming, &mut t, &mut steer_rx, &cancel),
+        )
+        .await
+        .expect("it doesn't wait for the watch")
+        .unwrap();
+        assert_eq!(next.as_deref(), Some("also check e2e\n\nand open the card"));
+        assert!(t.raw.as_ref().unwrap().background.contains("b1"));
+        // The watch ends with nothing more sent: the wait is over.
+        tx.send(raw(
+            json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [] }),
+        ))
+        .unwrap();
+        let next = monitor(&conn, &mut incoming, &mut t, &mut steer_rx, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(next, None);
     }
 
     #[tokio::test]
