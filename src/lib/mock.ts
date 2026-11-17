@@ -1411,6 +1411,7 @@ function showcase() {
     if (result !== undefined) post(session, "tool", "tool_result", result);
   };
   post(session, "user", "text", "What changed in the 14:10 deploy? Is the cart cache the cause?");
+  post(session, "assistant", "thinking", "The slowdown starts at 14:10, so the deploy is the first suspect. I'll check what it shipped before looking at the cache itself.");
   tool("mcp__tab__tab_search: 14:10 deploy checkout", "mcp__tab__tab_search", { query: "14:10 deploy checkout" }, "3 results");
   post(session, "assistant", "text", "The incident thread puts the slowdown right at 14:10. Checking what that deploy shipped.");
   tool("git log --oneline --since=13:30 origin/main", "Bash", { command: "git log --oneline --since=13:30 origin/main", description: "List commits in the deploy" }, "a41c2e9 Cut cart cache TTL to 5s for price freshness (#488)\n7be0d13 Bump tracing to 0.1.41");
