@@ -1167,6 +1167,8 @@ export interface AgentConfig {
   /** Claude Code's reasoning effort (low … max). Empty uses the person's own Claude Code setting. */
   effort?: string;
   suggest_replies?: boolean;
+  /** When a chat task is marked done, suggest a workflow when the work could have been one. On unless turned off. */
+  workflow_ideas?: boolean;
   titler?: TitlerConfig;
   /** Only tab's connections load in chats, never the person's own agent setup. On unless turned off. */
   strict?: boolean;

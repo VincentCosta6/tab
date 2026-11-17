@@ -495,6 +495,15 @@ export const mockApi = {
           emit({ type: "item_changed", change: "updated", item: i });
           return i;
         }
+        case "workflow_idea_dismiss": {
+          const i = items.find((x) => x.id === args.id);
+          const meta = i?.metadata as Record<string, unknown> | null | undefined;
+          if (!i || !meta?.workflow_idea) return null;
+          const { workflow_idea: _, ...rest } = meta;
+          i.metadata = rest;
+          emit({ type: "item_changed", change: "updated", item: i });
+          return i;
+        }
         case "rename_item": {
           const i = items.find((x) => x.id === args.id);
           if (!i) return null;

@@ -32,6 +32,7 @@ import { isDeclined, RerunButton, RerunOf, StepMetricsView } from "./RunStepDeta
 import type { Prepared } from "./fixMessage";
 import { duration } from "./insights/format";
 import { takePendingRun } from "./runLinks";
+import { ideaMessage, ideaOf, takePendingIdea } from "./ideas";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -342,6 +343,34 @@ export function WorkflowsTab() {
     setPanel("assistant");
   };
 
+  // A workflow idea from a finished task: a new draft, with the idea ready
+  // for the assistant.
+  const buildIdea = (p: Prepared) => {
+    askAi();
+    setPrepared(p);
+  };
+  useEffect(() => {
+    const on = () => { const p = takePendingIdea(); if (p) buildIdea(p); };
+    on();
+    window.addEventListener("tab:open-idea", on);
+    return () => window.removeEventListener("tab:open-idea", on);
+    // buildIdea reads the latest state through askAi's own checks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const { data: ideas = [] } = useQuery({
+    queryKey: ["workflow-ideas"],
+    queryFn: async () =>
+      (await api.listItems(["done"]))
+        .flatMap((item) => { const idea = ideaOf(item); return idea ? [{ item, idea }] : []; })
+        .sort((a, b) => b.idea.at.localeCompare(a.idea.at))
+        .slice(0, 5),
+    staleTime: 0,
+  });
+  const dropIdea = async (id: string) => {
+    await api.workflowIdeaDismiss(id).catch(() => null);
+    await qc.invalidateQueries({ queryKey: ["workflow-ideas"] });
+  };
+
   const dryById = useMemo(() => new Map((dry?.steps ?? []).map((s) => [s.id, s])), [dry]);
   const issuesAt = (at: string | null) => issues.filter((i) => i.at === at);
   const errors = issues.filter((i) => i.error).length;
@@ -388,6 +417,22 @@ export function WorkflowsTab() {
           })}
           {!list.length && <p className="subtle wf-empty-note">No workflows yet. Start from a template, describe one to the assistant, or build one.</p>}
         </div>
+        {ideas.length > 0 && (
+          <>
+            <h4 className="label-sm wf-templates-head" title="Tasks you finished by hand that could run by themselves next time">Ideas from your tasks</h4>
+            <div className="wf-templates">
+              {ideas.map(({ item, idea }) => (
+                <div key={item.id} className="wf-idea-row">
+                  <button className="wf-template" title={idea.why} onClick={() => { buildIdea(ideaMessage(item, idea)); void dropIdea(item.id); }}>
+                    <strong>{idea.name}</strong>
+                    <span className="subtle">From “{item.title}”</span>
+                  </button>
+                  <button className="wf-idea-drop" title="Not now" aria-label={`Dismiss ${idea.name}`} onClick={() => void dropIdea(item.id)}><Icon name="x" size={12} /></button>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
         <h4 className="label-sm wf-templates-head">Start from a template</h4>
         <div className="wf-templates">
           {templates.map((t) => (
