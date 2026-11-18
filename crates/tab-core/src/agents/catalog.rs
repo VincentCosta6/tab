@@ -48,6 +48,15 @@ pub struct Harness {
     /// PATH doesn't include them yet.
     #[serde(default)]
     pub bin_dirs: Vec<String>,
+    /// The project instruction files it loads by itself (`AGENTS.md`,
+    /// `CLAUDE.md`, ...). tab gives it a project's other one (see
+    /// `agents::project_instructions`).
+    #[serde(default)]
+    pub instruction_files: Vec<String>,
+    /// Those it still loads in a strict chat, when strict mode turns some
+    /// off. `None` means the same as `instruction_files`.
+    #[serde(default)]
+    pub strict_instruction_files: Option<Vec<String>>,
     /// How to run it over the Agent Client Protocol (see `agents::acp`),
     /// for harnesses whose chats can go through it.
     #[serde(default)]

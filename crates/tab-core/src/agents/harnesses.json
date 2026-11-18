@@ -65,6 +65,7 @@
       "brew": "brew upgrade --cask claude-code",
       "native": "claude update"
     },
+    "instruction_files": ["CLAUDE.md", "AGENTS.md"],
     "bin_dirs": [
       ".local/bin",
       ".claude/local"
@@ -160,6 +161,8 @@
       "brew": "brew upgrade opencode",
       "native": "opencode upgrade"
     },
+    "instruction_files": ["AGENTS.md", "CLAUDE.md"],
+    "strict_instruction_files": ["AGENTS.md"],
     "bin_dirs": [
       ".opencode/bin",
       ".local/bin"
@@ -223,6 +226,7 @@
       "brew": "brew upgrade codex",
       "native": null
     },
+    "instruction_files": ["AGENTS.md"],
     "bin_dirs": [
       ".local/bin",
       ".codex/bin"
@@ -282,6 +286,7 @@
       "native": "agy update",
       "latest": "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{os}_{arch}.json"
     },
+    "instruction_files": ["AGENTS.md", "GEMINI.md"],
     "bin_dirs": [
       ".local/bin",
       "AppData/Local/agy/bin"
@@ -338,6 +343,7 @@
       "brew": null,
       "native": "pi update"
     },
+    "instruction_files": ["AGENTS.md", "CLAUDE.md"],
     "bin_dirs": [
       ".local/bin",
       ".pi/bin"

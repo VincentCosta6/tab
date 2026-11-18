@@ -24,6 +24,7 @@ pub mod coordinator;
 mod opencode;
 mod per_turn;
 mod pi;
+mod project_instructions;
 pub mod slash_args;
 mod small;
 pub mod steward;
@@ -1630,9 +1631,19 @@ impl AgentHub {
 
         let hub = self.clone();
         tokio::spawn(async move {
-            let system = hub.system_prompt(&session);
+            let mut system = hub.system_prompt(&session);
             let cfg = hub.config_for(&session);
-            let strict = cfg.strict || hub.policy(&session).trust != crate::sandbox::Trust::Person;
+            let own = hub.policy(&session).trust == crate::sandbox::Trust::Person;
+            let strict = cfg.strict || !own;
+            // The repo's instructions in a file this harness doesn't load,
+            // only on the person's own work: someone else's checkout is data.
+            if own {
+                if let Some(s) =
+                    project_instructions::for_chat(session.agent, strict, Path::new(&session.cwd))
+                {
+                    system.push_str(&s);
+                }
+            }
             let acp = acp::enabled(&cfg, session.agent, strict);
             let result = match session.agent {
                 _ if acp => acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await,
