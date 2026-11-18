@@ -233,6 +233,11 @@ pub struct Upgrade {
     pub npm: Option<String>,
     pub brew: Option<String>,
     pub native: Option<String>,
+    /// Where its own updater looks for the newest release, when that isn't
+    /// npm: a JSON manifest with a `version`, `{os}` and `{arch}` filled in
+    /// for this computer (darwin/linux/windows, amd64/arm64).
+    #[serde(default)]
+    pub latest: Option<String>,
 }
 
 impl Harness {

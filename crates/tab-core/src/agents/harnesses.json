@@ -279,7 +279,8 @@
       "winget": null,
       "npm": null,
       "brew": null,
-      "native": "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+      "native": "agy update",
+      "latest": "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/{os}_{arch}.json"
     },
     "bin_dirs": [
       ".local/bin",

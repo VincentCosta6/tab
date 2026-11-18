@@ -194,9 +194,10 @@ export const api = {
   agentAcpAdapter: (kind: AgentKind) => call<boolean | null>("agent_acp_adapter", { kind }),
   /** Installs a harness's ACP adapter; its output arrives through `onAgentUpgrade`. */
   agentInstallAdapter: (kind: AgentKind) => call<void>("agent_install_adapter", { kind }),
-  agentHealth: () => call<AgentProbe | null>("agent_health"),
-  /** Runs the agent's own update command; its output arrives through `onAgentUpgrade`. */
-  agentUpgrade: () => call<void>("agent_upgrade"),
+  /** An agent's version and newest release: `kind`'s, or the default agent's. */
+  agentHealth: (kind?: AgentKind) => call<AgentProbe | null>("agent_health", { kind: kind ?? null }),
+  /** Runs an agent's own update command (`kind`, or the default's); its output arrives through `onAgentUpgrade`. */
+  agentUpgrade: (kind?: AgentKind) => call<void>("agent_upgrade", { kind: kind ?? null }),
   appVersion: () => call<AppVersion>("app_version"),
   /** A newer release of tab, or null when this is the newest. */
   appUpdateCheck: () => call<AppUpdate | null>("app_update_check"),
