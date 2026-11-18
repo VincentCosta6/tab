@@ -978,6 +978,8 @@ function SecretCard({ m, onSend }: { m: SessionMessage; onSend?: (text: string) 
 function ApprovalCard({ approval }: { approval: Approval }) {
   if (approval.tool === "AskUserQuestion") return <QuestionApproval approval={approval} />;
   if (approval.tool === "tab_vault") return <VaultApproval approval={approval} />;
+  if (approval.tool === "tab_browser_plan") return <BrowserPlanApproval approval={approval} />;
+  if (approval.tool === "tab_browser") return <BrowserActionApproval approval={approval} />;
   return <ToolApproval approval={approval} />;
 }
 
@@ -1019,6 +1021,62 @@ function VaultApproval({ approval }: { approval: Approval }) {
       <div className="toolbar">
         <Button size="sm" variant="primary" icon="check" disabled={busy} onClick={allow}>{input.kind === "unlock" ? "Unlock" : input.kind === "release" ? "Show to the coordinator" : "Share"}</Button>
         <Button size="sm" variant="ghost" icon="x" disabled={busy} onClick={deny}>Deny</Button>
+      </div>
+    </div>
+  );
+}
+
+interface PlanStep { do: "navigate" | "click" | "type" | "submit" | "select"; what?: string; field?: string; value?: string; url?: string; where?: string }
+interface BrowserPlan { goal: string; write: string[]; read: string[]; steps: PlanStep[]; needs_login: string[] }
+
+/** An agent's browser plan (docs/agent-browser.md): the sites it changes, and each step with its exact value. */
+function BrowserPlanApproval({ approval }: { approval: Approval }) {
+  const input = approval.input as { plan: BrowserPlan; diff?: { added_write_sites: string[]; added_steps: PlanStep[] } | null; critic?: string | null; flow?: string | null; can_lend?: boolean };
+  const [busy, setBusy] = useState(false);
+  const answer = async (d: "allow" | "always" | "deny") => (setBusy(true), await api.approvalResolve(approval.id, d));
+  const p = input.plan;
+  const added = new Set((input.diff?.added_steps ?? []).map((s) => JSON.stringify(s)));
+  const step = (s: PlanStep) => {
+    switch (s.do) {
+      case "navigate": return <>Go to {s.url ? <code>{s.url}</code> : s.where}</>;
+      case "click": return <>Click <q>{s.what}</q></>;
+      case "submit": return <>Submit with <q>{s.what}</q></>;
+      case "type": return <>Type <code className="bplan-value">{s.value}</code> into <q>{s.field}</q></>;
+      case "select": return <>Pick <code className="bplan-value">{s.value}</code> in <q>{s.field}</q></>;
+    }
+  };
+  return (
+    <div className="approval bplan">
+      <div className="approval-head"><Icon name="globe" size={14} /> {approval.summary}</div>
+      {p.write.length > 0 && <p className="bplan-sites"><span className="subtle">Can change:</span> {p.write.map((w) => <span key={w} className="vault-chip">{w}</span>)}{input.diff?.added_write_sites?.length ? <span className="subtle"> (new: {input.diff.added_write_sites.join(", ")})</span> : null}</p>}
+      {p.read.length > 0 && <p className="bplan-sites subtle">Reads: {p.read.join(", ")}</p>}
+      <ol className="bplan-steps">
+        {p.steps.map((s, i) => <li key={i} className={cx(added.has(JSON.stringify(s)) && "added")}>{step(s)}</li>)}
+      </ol>
+      {input.critic && <div className="chat-error"><Icon name="alert" size={14} /> {input.critic}</div>}
+      <p className="subtle bplan-note">Only these steps, with these exact values, go through on their own. Anything else asks you; deleting, paying or granting access always asks; secrets are yours to type.{input.flow ? " From a saved flow." : ""}</p>
+      <div className="toolbar">
+        <Button size="sm" variant="primary" icon="check" disabled={busy} onClick={() => answer("allow")}>Approve</Button>
+        {input.can_lend && <Button size="sm" disabled={busy} title={`Copies your login for ${p.needs_login.join(", ")} from your browser into the agent's tab only`} onClick={() => answer("always")}>Approve and lend my login</Button>}
+        <Button size="sm" variant="ghost" icon="x" disabled={busy} onClick={() => answer("deny")}>Decline</Button>
+      </div>
+    </div>
+  );
+}
+
+/** One browser action that needs the person: off the plan, or consequential. Shows the real element. */
+function BrowserActionApproval({ approval }: { approval: Approval }) {
+  const input = approval.input as { kind: "ask" | "confirm"; why: string; page: string; site?: string; element?: { role: string; page_label: string } | null; shot?: string | null };
+  const [busy, setBusy] = useState(false);
+  const answer = async (d: "allow" | "deny") => (setBusy(true), await api.approvalResolve(approval.id, d));
+  return (
+    <div className={cx("approval bplan", input.kind === "confirm" && "confirm")}>
+      <div className="approval-head"><Icon name={input.kind === "confirm" ? "alert" : "shield"} size={14} /> {approval.summary}</div>
+      {input.element && <p className="subtle bplan-note">The {input.element.role} the page labels <q>{input.element.page_label}</q>, on <code>{input.site ?? input.page}</code>. It's outlined in the agent's tab.</p>}
+      {input.shot && <img className="bplan-shot" src={input.shot} alt="The agent's tab, with the element outlined" />}
+      <div className="toolbar">
+        <Button size="sm" variant="primary" icon="check" disabled={busy} onClick={() => answer("allow")}>{input.kind === "confirm" ? "Confirm" : "Allow"}</Button>
+        <Button size="sm" variant="ghost" icon="x" disabled={busy} onClick={() => answer("deny")}>Deny</Button>
       </div>
     </div>
   );

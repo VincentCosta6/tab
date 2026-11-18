@@ -557,7 +557,7 @@ export type EngineEvent =
   /** The things behind these pages changed: refresh what shows them. */
   | { type: "pages_changed"; connector: string; pages: string[] }
   /** An agent opened, moved or closed one of its browser tabs. */
-  | { type: "browser_agent"; session_id: string; tab_id: string; action: "open" | "navigate" | "close"; url: string };
+  | { type: "browser_agent"; session_id: string; tab_id: string; action: "open" | "navigate" | "close" | "status" | "handover" | "waiting"; url: string; detail: unknown };
 
 /** Something an agent changed through a connection's CLI (`gh pr merge`, `git push`). */
 export interface CliChange {
@@ -877,7 +877,11 @@ export interface TabConfig {
   browser?: {
     import_logins?: boolean | null;
     /** What agents may do with the browser: off until the person turns it on. */
-    agents?: "off" | "read_only";
+    agents?: "off" | "read_only" | "plan" | "ask";
+    /** Ports on this computer agents may open (the person's dev servers). */
+    agent_dev_ports?: number[];
+    /** Turns off the second check on plans and near-matches. */
+    agent_critic_off?: boolean;
   };
   onboarded: boolean;
 }

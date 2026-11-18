@@ -20,8 +20,8 @@ See `docs/ARCHITECTURE.md` for the crate map. Standing rules:
 
 ## Agents in the browser
 
-- `docs/agent-browser.md` holds the plan and the rules for agents using tab's browser (`crates/tab-core/src/browser_agent.rs`, the `tab_browser_*` tools, agent tabs in `src-tauri`). Read it before touching any of them, the browser dock, Tauri capabilities or `tauri.conf.json`'s `security`.
-- Its numbered rules are guarantees: don't loosen one (who may browse, logged out, URL rules, redaction, no raw JS, no IPC for dock pages, model checks only escalate) without the person's sign-off, and update the doc and its tests in the same PR.
+- `docs/agent-browser.md` holds the plan and the rules for agents using tab's browser (`crates/tab-core/src/browser_agent/`, the `tab_browser_*` tools, `src-tauri/src/agent_browser.rs` and agent tabs in `src-tauri`). Read it before touching any of them, the browser dock, Tauri capabilities or `tauri.conf.json`'s `security`.
+- Its numbered rules are guarantees: don't loosen one (who may browse, logged out unless lent, URL rules, plans bind exact values, consequential actions confirm, redaction and taint, no raw JS, no IPC for dock pages, model checks only escalate) without the person's sign-off, and update the doc and its tests in the same PR.
 
 ## tab cloud and `tab-infra`
 

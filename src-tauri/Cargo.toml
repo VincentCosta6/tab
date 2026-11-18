@@ -44,5 +44,7 @@ libc = "0.2"
 objc2 = "0.6"
 # Imported logins go straight into WebKit's cookie store (browser_logins).
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDate", "NSDictionary", "NSHTTPCookie", "NSObject"] }
-objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "WKWebsiteDataStore", "WKHTTPCookieStore"] }
+# Agents' tabs (agent_browser): tab's script in an isolated world, screenshots.
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDate", "NSDictionary", "NSHTTPCookie", "NSObject", "NSError", "NSData", "NSValue"] }
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-app-kit", "WKWebsiteDataStore", "WKHTTPCookieStore", "WKWebView", "WKContentWorld", "WKFrameInfo", "WKSnapshotConfiguration", "WKWebViewConfiguration"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSResponder", "NSView"] }

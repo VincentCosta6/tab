@@ -31,6 +31,7 @@ use tab_core::{Engine, EngineEvent, EngineHandle, Gateway, Store, TabConfig};
 use tauri::{Emitter, Manager, State};
 
 mod account;
+mod agent_browser;
 mod autofix;
 mod browser_logins;
 mod bundle_update;
@@ -246,8 +247,28 @@ impl EngineAccess for LiveEngine {
     fn gateway(&self) -> Option<Arc<Gateway>> {
         Some(self.0.gateway.clone())
     }
-    async fn agent_browsing(&self) -> tab_core::browser_agent::AgentBrowsing {
-        self.0.config.lock().await.browser.agents
+    async fn browser_config(&self) -> tab_core::config::BrowserConfig {
+        self.0.config.lock().await.browser.clone()
+    }
+    fn live_pages(&self) -> bool {
+        cfg!(target_os = "macos")
+    }
+    async fn browser_page(
+        &self,
+        tab_id: &str,
+        op: &tab_core::browser_agent::page::Op,
+    ) -> anyhow::Result<serde_json::Value> {
+        agent_browser::run_op(tab_id, op).await
+    }
+    async fn browser_screenshot(&self, tab_id: &str, width: f64) -> anyhow::Result<Vec<u8>> {
+        agent_browser::screenshot(tab_id, width).await
+    }
+    async fn browser_lend(&self, tab_id: &str, site: &str) -> anyhow::Result<usize> {
+        anyhow::ensure!(
+            self.0.config.lock().await.browser.import_logins == Some(true),
+            "importing logins is off (Settings → Browser), so the person signs in in the tab instead"
+        );
+        agent_browser::lend(tab_id, site).await
     }
 }
 
@@ -3423,8 +3444,12 @@ fn browser_open(
             // shared with the person's tabs, and nothing kept.
             .incognito(true)
             // Every load, redirects included: no file:, no tab:, nothing on
-            // this computer or its network.
-            .on_navigation(|u| tab_core::browser_agent::check_static(u).is_ok())
+            // this computer or its network;
+            // and with a lent login, only the plan's write sites.
+            .on_navigation({
+                let id = id.clone();
+                move |u| tab_core::browser_agent::navigation_allowed(&id, u)
+            })
             .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
             .on_download(|_, _| false);
     }
@@ -3509,14 +3534,52 @@ fn browser_nav(
             if !matches!(u.scheme(), "http" | "https") {
                 return Err("only web addresses open in the browser".into());
             }
-            if tab_core::browser_agent::agent_tab(&id).is_some() {
-                tab_core::browser_agent::check_static(&u).map_err(err)?;
+            if tab_core::browser_agent::agent_tab(&id).is_some()
+                && !tab_core::browser_agent::navigation_allowed(&id, &u)
+            {
+                return Err("an agent's tab can't open that".into());
             }
             wv.navigate(u)
         }
         _ => return Err("unknown action".into()),
     }
     .map_err(|e| e.to_string())
+}
+
+/// Which agent tab the person is looking at (the dock's active tab, while
+/// it's open, tab is in front and the page is visible), for watch mode.
+#[tauri::command]
+fn browser_agent_watch(tab: Option<String>) {
+    tab_core::browser_agent::state::set_watched(tab);
+}
+
+/// The person hands an agent tab back after taking it over or doing a step.
+#[tauri::command]
+fn browser_agent_resume(tab: String) -> Result<(), String> {
+    use tab_core::browser_agent as ba;
+    let t = ba::agent_tab(&tab).ok_or("that tab is gone")?;
+    ba::set_tab(&tab, |t| t.handover = false);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    ba::state::with(&t.session_id, |c| {
+        c.paused.remove(&tab);
+        c.last_agent_ms.insert(tab.clone(), now);
+    });
+    Ok(())
+}
+
+/// Stop: the agent's plan, lent logins and tabs in this chat are gone.
+#[tauri::command]
+fn browser_agent_stop(app: tauri::AppHandle, session_id: String) {
+    use tab_core::browser_agent as ba;
+    for id in ba::close_session(&session_id) {
+        if let Some(wv) = app.get_webview(&browser_label(&id)) {
+            let _ = wv.close();
+        }
+    }
+    ba::state::forget(&session_id);
 }
 
 #[tauri::command]
@@ -3606,6 +3669,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updates::PendingUpdate::default())
         .setup(|app| {
+            agent_browser::init(app.handle());
             // On Windows tab draws its own title bar, window buttons and
             // all (see AppHeader); macOS keeps its traffic lights over it.
             #[cfg(target_os = "windows")]
@@ -3894,6 +3958,9 @@ pub fn run() {
             browser_logins::browser_login_sources,
             browser_logins::browser_login_sites,
             browser_logins::browser_import_logins,
+            browser_agent_watch,
+            browser_agent_resume,
+            browser_agent_stop,
             list_items,
             search_items,
             item_detail,

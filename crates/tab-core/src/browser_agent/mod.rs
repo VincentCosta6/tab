@@ -23,6 +23,15 @@ use crate::gateway::{Call, Gateway};
 use crate::knowledge::extract;
 use crate::sandbox::Network;
 
+pub mod critic;
+pub mod flows;
+pub mod gate;
+pub mod page;
+pub mod plan;
+pub mod state;
+pub mod taint;
+pub mod tools;
+
 /// What agents may do with the browser (Settings → Browser). Off until the
 /// person turns it on.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +41,11 @@ pub enum AgentBrowsing {
     Off,
     /// Open and read public pages, logged out. Nothing is clicked or typed.
     ReadOnly,
+    /// The main mode: the agent proposes a plan, the person approves it
+    /// once, and only what matches it goes through (see [`gate`]).
+    Plan,
+    /// Every click, typed value and navigation off the plan asks.
+    Ask,
 }
 
 /// Agent tabs open at once, per chat.
@@ -60,6 +74,9 @@ pub fn check_static(u: &Url) -> anyhow::Result<()> {
         u.username().is_empty() && u.password().is_none(),
         "that link has a user name or password in it, which agents can't open"
     );
+    if dev_server(u) {
+        return Ok(());
+    }
     let local = "agents can't open pages on this computer or its network";
     match u.host() {
         None => anyhow::bail!("that link has no host"),
@@ -79,6 +96,36 @@ pub fn check_static(u: &Url) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Ports on this computer the person opened to agents (Settings → Browser,
+/// for their own dev servers), less tab's own (its MCP server, its hub).
+static DEV_PORTS: LazyLock<Mutex<(Vec<u16>, Vec<u16>)>> = LazyLock::new(Default::default);
+
+/// Sets the dev-server ports the person allowed. `own` are tab's own ports,
+/// which never count even if listed.
+pub fn set_dev_ports(allowed: Vec<u16>, own: Vec<u16>) {
+    *DEV_PORTS.lock().unwrap() = (allowed, own);
+}
+
+/// `http://localhost:<port>` (or 127.0.0.1, `[::1]`) on a port the person
+/// allowed. Only with an explicit port, and never one of tab's.
+pub fn dev_server(u: &Url) -> bool {
+    let ports = DEV_PORTS.lock().unwrap().clone();
+    dev_server_in(u, &ports.0, &ports.1)
+}
+
+fn dev_server_in(u: &Url, allowed: &[u16], own: &[u16]) -> bool {
+    let local = match u.host() {
+        Some(Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    let Some(port) = u.port() else {
+        return false;
+    };
+    local && allowed.contains(&port) && !own.contains(&port)
 }
 
 fn is_public(ip: IpAddr) -> bool {
@@ -113,6 +160,9 @@ pub fn network_allows(net: &Network, u: &Url) -> bool {
 /// chat's network, and that the host resolves only to public addresses.
 pub async fn check(u: &Url, net: &Network) -> anyhow::Result<()> {
     check_static(u)?;
+    if dev_server(u) {
+        return Ok(());
+    }
     anyhow::ensure!(
         network_allows(net, u),
         "this chat's sandbox doesn't let it reach {}",
@@ -124,6 +174,9 @@ pub async fn check(u: &Url, net: &Network) -> anyhow::Result<()> {
 /// The site a URL belongs to: its registrable domain (`dash.cloudflare.com`
 /// → `cloudflare.com`; `a.github.io` stays `a.github.io`).
 pub fn site(u: &Url) -> Option<String> {
+    if let Some(Host::Ipv4(_) | Host::Ipv6(_)) = u.host() {
+        return u.host_str().map(str::to_string);
+    }
     let host = u.host_str()?.trim_end_matches('.').to_ascii_lowercase();
     Some(psl::domain_str(&host).unwrap_or(&host).to_string())
 }
@@ -227,7 +280,13 @@ fn looks_secret(tok: &str) -> bool {
 /// text and how many were hidden, so the agent can be told to ask the
 /// person (the vault flow) instead.
 pub fn redact(text: &str) -> (String, usize) {
-    let mut hidden = 0;
+    let (out, found) = redact_collect(text);
+    (out, found.len())
+}
+
+/// [`redact`], returning what it hid, for the taint set (never for the model).
+pub fn redact_collect(text: &str) -> (String, Vec<String>) {
+    let mut hidden: Vec<String> = Vec::new();
     // Private key blocks, whole.
     let mut s = String::with_capacity(text.len());
     let mut rest = text;
@@ -243,12 +302,12 @@ pub fn redact(text: &str) -> (String, usize) {
                     .map(|j| end + 8 + j + 5)
                     .unwrap_or(from.len());
                 s.push_str(HIDDEN);
-                hidden += 1;
+                hidden.push(from[..tail].to_string());
                 rest = &from[tail..];
             }
             (true, None) => {
                 s.push_str(HIDDEN);
-                hidden += 1;
+                hidden.push(from.to_string());
                 rest = "";
             }
             _ => {
@@ -261,10 +320,10 @@ pub fn redact(text: &str) -> (String, usize) {
     // Tokens.
     let mut out = String::with_capacity(s.len());
     let mut tok = String::new();
-    let flush = |tok: &mut String, out: &mut String, hidden: &mut usize| {
+    let flush = |tok: &mut String, out: &mut String, hidden: &mut Vec<String>| {
         if looks_secret(tok) {
             out.push_str(HIDDEN);
-            *hidden += 1;
+            hidden.push(tok.clone());
         } else {
             out.push_str(tok);
         }
@@ -291,6 +350,10 @@ pub struct AgentTab {
     pub url: Url,
     /// The links on the last page read, so the agent can follow one by number.
     pub links: Vec<Url>,
+    /// With a lent login, the sites it may load (the plan's write sites).
+    pub stay_on: Option<Vec<String>>,
+    /// The person is doing a step (signing in, a secret): any site loads.
+    pub handover: bool,
 }
 
 static TABS: LazyLock<Mutex<HashMap<String, AgentTab>>> = LazyLock::new(Default::default);
@@ -310,6 +373,8 @@ pub fn open_tab(session_id: &str, url: Url) -> anyhow::Result<String> {
             session_id: session_id.to_string(),
             url,
             links: Vec::new(),
+            stay_on: None,
+            handover: false,
         },
     );
     Ok(id)
@@ -335,6 +400,30 @@ pub fn update_tab(id: &str, url: Url, links: Vec<Url>) {
     if let Some(t) = TABS.lock().unwrap().get_mut(id) {
         t.url = url;
         t.links = links;
+    }
+}
+
+/// Changes a tab's flags (lent login, handover).
+pub fn set_tab(id: &str, f: impl FnOnce(&mut AgentTab)) {
+    if let Some(t) = TABS.lock().unwrap().get_mut(id) {
+        f(t);
+    }
+}
+
+/// Whether an agent tab may load `u`: the static rules always, and with a
+/// lent login only the plan's write sites, unless the person is doing a
+/// step themselves. The dock's navigation handler asks this on every load.
+pub fn navigation_allowed(id: &str, u: &Url) -> bool {
+    if check_static(u).is_err() {
+        return false;
+    }
+    match agent_tab(id) {
+        Some(AgentTab {
+            stay_on: Some(sites),
+            handover: false,
+            ..
+        }) => site(u).is_some_and(|s| sites.contains(&s)),
+        _ => true,
     }
 }
 
@@ -601,6 +690,21 @@ mod tests {
         ] {
             assert!(check_static(&u(good)).is_ok(), "{good} should pass");
         }
+    }
+
+    #[test]
+    fn dev_servers_open_only_on_allowed_ports_never_tabs_own() {
+        let ok = |s: &str| dev_server_in(&u(s), &[1430, 3000], &[3000]);
+        assert!(ok("http://localhost:1430/"));
+        assert!(ok("http://127.0.0.1:1430/x"));
+        assert!(!ok("http://localhost:3000/"), "tab's own port");
+        assert!(!ok("http://localhost:8080/"));
+        assert!(!ok("http://localhost/"), "needs an explicit port");
+        assert!(!ok("http://192.168.1.5:1430/"));
+        assert!(!ok("http://printer.local:1430/"));
+        assert!(!dev_server_in(&u("http://localhost:1430/"), &[], &[]));
+        // Off by default: nothing on this computer opens.
+        assert!(check_static(&u("http://localhost:1/")).is_err());
     }
 
     #[test]

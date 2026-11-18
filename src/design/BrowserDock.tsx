@@ -1,10 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, inTauri, onBrowserEvent, openUrl } from "../lib/api";
 import {
-  closeBrowser, closeBrowserTab, newBrowserTab, patchBrowserTab, selectBrowserTab, setBrowserExpanded, useBrowser, withHost,
+  closeBrowser, closeBrowserTab, handBack, newBrowserTab, patchBrowserTab, selectBrowserTab, setBrowserExpanded, stopAgent, useBrowser, withHost,
 } from "../lib/browser";
 import { useConfig, useSaveConfig } from "../lib/hooks";
 import { ImportLogins, ImportOffer } from "./BrowserLogins";
+import type { AgentTabState as AgentTab } from "../lib/browser";
 import { Button, cx } from "./components";
 import { Icon } from "./icons";
 
@@ -83,6 +84,26 @@ export function BrowserDock() {
     }
   }, [tabs, active, dragging]);
 
+  // Watch mode: tell tab which agent tab the person can see right now.
+  useEffect(() => {
+    if (!inTauri) return;
+    const report = () => {
+      const t = tabs.find((x) => x.id === active);
+      const seen = !!t?.agent && !dragging && document.visibilityState === "visible" && document.hasFocus();
+      void api.browserAgentWatch(seen ? t!.id : null).catch(() => {});
+    };
+    report();
+    window.addEventListener("focus", report);
+    window.addEventListener("blur", report);
+    document.addEventListener("visibilitychange", report);
+    return () => {
+      window.removeEventListener("focus", report);
+      window.removeEventListener("blur", report);
+      document.removeEventListener("visibilitychange", report);
+      void api.browserAgentWatch(null).catch(() => {});
+    };
+  }, [tabs, active, dragging]);
+
   const open = tabs.length > 0;
   useEffect(() => {
     if (!inTauri || !view.current || !active) return;
@@ -155,16 +176,28 @@ export function BrowserDock() {
       </form>
       {unasked && browsers.length > 0 && <ImportOffer browsers={browsers} onAnswer={answerOffer} />}
       {canImport && importing && !current?.agent && <ImportLogins url={current?.url} onClose={() => setImporting(false)} onImported={() => nav("reload")} />}
-      {current?.agent && (
-        <div className="bagent" role="status">
-          <Icon name="bot" size={13} />
-          <span>An agent opened this tab. It browses logged out and can only read: it can't sign in, click or type.</span>
-          <Button size="sm" type="button" onClick={() => closeBrowserTab(current.id)}>Close</Button>
-        </div>
-      )}
+      {current?.agent && <AgentBanner tabId={current.id} a={current.agent} level={config?.browser?.agents ?? "off"} />}
       <div className={cx("bview", current?.agent && "agent")} ref={view}>
         {!inTauri && current && <iframe key={current.id} src={current.url} title={current.title} />}
       </div>
     </aside>
+  );
+}
+
+/** What an agent's tab is doing, and the person's controls over it. */
+function AgentBanner({ tabId, a, level }: { tabId: string; a: AgentTab; level: string }) {
+  const progress = a.goal ? `${a.goal} · ${a.done ?? 0} of ${a.steps ?? 0} steps` : level === "read_only" ? "Read-only: it can't sign in, click or type." : "No plan approved yet: it can only read.";
+  return (
+    <div className={cx("bagent", (a.paused || a.waiting) && "attention")} role="status">
+      <Icon name="bot" size={13} />
+      <span>
+        {a.paused ? <>You have this tab: {a.paused}.</> : a.waiting ? <>Waiting for you to watch, to {a.waiting}.</> : <>An agent is using this tab. {progress}</>}
+        {a.lent && <> · Your {a.lent} login is lent.</>}
+        {a.actions != null && <span className="sub"> {a.actions}/{a.maxActions} actions</span>}
+      </span>
+      {a.paused && <Button size="sm" variant="primary" type="button" onClick={() => handBack(tabId)}>Hand back</Button>}
+      <Button size="sm" type="button" title="Ends the agent's browsing in this chat: its plan, lent logins and tabs" onClick={() => stopAgent(a.sessionId)}>Stop</Button>
+      <Button size="sm" variant="ghost" type="button" onClick={() => closeBrowserTab(tabId)}>Close</Button>
+    </div>
   );
 }

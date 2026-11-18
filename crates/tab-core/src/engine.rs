@@ -107,6 +107,8 @@ pub enum EngineEvent {
         tab_id: String,
         action: String,
         url: String,
+        /// `status`: progress for the banner; `handover`/`waiting`: why.
+        detail: serde_json::Value,
     },
 }
 

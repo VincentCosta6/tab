@@ -108,3 +108,4 @@ block2 = "0.6"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+proptest = "1"
