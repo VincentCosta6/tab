@@ -11,6 +11,7 @@ const signIn: Record<string, [string, string | null]> = {
   claude_code: ["claude", "/login"],
   opencode: ["opencode auth login", null],
   codex: ["codex login", null],
+  antigravity: ["agy acp --login", null],
   pi: ["pi", "/login"],
 };
 

@@ -245,6 +245,61 @@
     }
   },
   {
+    "id": "antigravity",
+    "name": "Antigravity CLI",
+    "icon": {
+      "brand": "gemini",
+      "svg": null
+    },
+    "command": "agy",
+    "skip_paths": [
+      ".antigravity/"
+    ],
+    "pitch": "Google's coding agent. tab runs the Antigravity CLI over the Agent Client Protocol with your Google sign-in or Gemini API key.",
+    "capabilities": {
+      "strict": false,
+      "permission_modes": [],
+      "budget_cap": false
+    },
+    "model_hint": "e.g. gemini-3.8-flash-medium",
+    "small_model": null,
+    "list_models": {
+      "args": [
+        "models"
+      ],
+      "format": "slug_label_lines"
+    },
+    "families": {},
+    "install": {
+      "npm": null,
+      "unix": "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+      "windows": "irm https://antigravity.google/cli/install.ps1 | iex"
+    },
+    "upgrade": {
+      "winget": null,
+      "npm": null,
+      "brew": null,
+      "native": "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+    },
+    "bin_dirs": [
+      ".local/bin",
+      "AppData/Local/agy/bin"
+    ],
+    "acp": {
+      "command": null,
+      "args": [
+        "acp"
+      ],
+      "env": {},
+      "strict_args": [],
+      "strict_env": {},
+      "mcp_tool_name": null,
+      "adapter": null,
+      "preview": false,
+      "steering": "prompt"
+    }
+  },
+  {
     "id": "pi",
     "name": "Pi",
     "icon": {

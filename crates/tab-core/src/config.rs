@@ -59,9 +59,14 @@ pub struct AgentConfig {
     /// `None` until onboarding picks one.
     #[serde(default)]
     pub kind: Option<AgentKind>,
-    /// Override for the executable (`claude`, `opencode`, or a full path).
+    /// Override for `kind`'s executable, from before each harness kept its
+    /// own (`commands`). Read through [`AgentConfig::command_for`].
     #[serde(default)]
     pub command: Option<String>,
+    /// Override for each harness's executable (`claude`, `agy`, or a
+    /// full path), by harness. Missing finds it on PATH.
+    #[serde(default)]
+    pub commands: BTreeMap<String, String>,
     /// The model for `kind`'s chats, e.g. `sonnet` for Claude Code,
     /// `anthropic/claude-sonnet-5-5` for OpenCode. Kept in step with
     /// `models[kind]`; read through [`AgentConfig::model_for`].
@@ -234,6 +239,15 @@ impl AgentConfig {
         own.or(legacy).map(str::trim).filter(|m| !m.is_empty())
     }
 
+    /// The executable set for `kind`, `None` to find it on PATH.
+    pub fn command_for(&self, kind: AgentKind) -> Option<&str> {
+        let own = self.commands.get(kind.as_str()).map(String::as_str);
+        let legacy = (self.kind == Some(kind))
+            .then_some(self.command.as_deref())
+            .flatten();
+        own.or(legacy).map(str::trim).filter(|c| !c.is_empty())
+    }
+
     /// Sets `kind`'s model (`None` for its default), keeping `model` in step
     /// when `kind` is the harness new chats use.
     pub fn set_model(&mut self, kind: AgentKind, model: Option<String>) {
@@ -255,6 +269,7 @@ impl Default for AgentConfig {
         Self {
             kind: None,
             command: None,
+            commands: BTreeMap::new(),
             model: None,
             models: BTreeMap::new(),
             workdir: None,
@@ -570,6 +585,10 @@ impl TabConfig {
         if let (Some(kind), Some(m)) = (cfg.agent.kind, cfg.agent.model.clone()) {
             cfg.agent.models.entry(kind.as_str().into()).or_insert(m);
         }
+        // And one command, for the same harness.
+        if let (Some(kind), Some(c)) = (cfg.agent.kind, cfg.agent.command.take()) {
+            cfg.agent.commands.entry(kind.as_str().into()).or_insert(c);
+        }
         // Always enabled, but keep its saved settings (search by meaning, etc.).
         cfg.connectors
             .entry("tab".into())
@@ -671,6 +690,19 @@ mod tests {
         };
         assert_eq!(a.model_for(AgentKind::OpenCode), Some("openai/gpt-5"));
         assert_eq!(a.model_for(AgentKind::ClaudeCode), None);
+    }
+
+    #[test]
+    fn each_harness_keeps_its_own_command() {
+        let a = AgentConfig {
+            kind: Some(AgentKind::ClaudeCode),
+            command: Some("/opt/claude".into()),
+            commands: [("antigravity".to_string(), " /opt/agy ".to_string())].into(),
+            ..Default::default()
+        };
+        assert_eq!(a.command_for(AgentKind::ClaudeCode), Some("/opt/claude"));
+        assert_eq!(a.command_for(AgentKind::Antigravity), Some("/opt/agy"));
+        assert_eq!(a.command_for(AgentKind::Codex), None);
     }
 
     #[test]

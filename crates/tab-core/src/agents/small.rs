@@ -55,7 +55,7 @@ pub(super) async fn complete(
                 AgentKind::OpenCode => {
                     super::acp::complete(hub, kind, &system, ask.prompt, model).await?
                 }
-                AgentKind::Codex => {
+                AgentKind::Codex | AgentKind::Antigravity => {
                     super::acp::complete(hub, kind, &system, ask.prompt, model).await?
                 }
                 AgentKind::Pi => super::pi::complete(hub, &system, ask.prompt, model).await?,

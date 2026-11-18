@@ -1201,7 +1201,7 @@ const fallbackSlash = ["compact", "context", "cost", "mcp", "model", "status", "
 /** The `/` menu's groups, in order. */
 const slashGroups: Record<SlashKind | "tab", string> = { builtin: "Built in", tab: "Answered by tab", command: "Your commands", skill: "Skills", mcp: "MCP prompts" };
 const groupOrder = Object.keys(slashGroups) as (SlashKind | "tab")[];
-const harnessNames: Record<AgentKind, string> = { claude_code: "Claude Code", opencode: "OpenCode", codex: "Codex", pi: "Pi" };
+const harnessNames: Record<AgentKind, string> = { claude_code: "Claude Code", opencode: "OpenCode", codex: "Codex", antigravity: "Antigravity CLI", pi: "Pi" };
 /** Headings for argument values, by where they come from. */
 const argGroups: Record<ArgSource, string> = { pr: "Pull requests", branch: "Branches", path: "Files", model: "Models", agent: "Subagents" };
 

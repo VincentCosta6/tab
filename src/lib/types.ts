@@ -587,7 +587,7 @@ export interface ContextEntry {
 export interface NewContext { section: ContextSection; ref_item_id?: string | null; url?: string | null; title: string; summary?: string | null; added_by: string }
 export interface ItemContext { item: QueueItem; entries: ContextEntry[]; related: QueueItem[] }
 
-export type AgentKind = "claude_code" | "opencode" | "codex" | "pi";
+export type AgentKind = "claude_code" | "opencode" | "codex" | "antigravity" | "pi";
 export type SessionStatus = "idle" | "working" | "needs_input" | "monitoring" | "failed";
 export interface Session {
   id: string;
@@ -1158,7 +1158,10 @@ export interface SandboxStatus {
 
 export interface AgentConfig {
   kind: AgentKind | null;
+  /** The default agent's executable, from before each kept its own (`commands`). */
   command: string | null;
+  /** Each harness's executable, by harness id. Missing finds it on PATH. */
+  commands?: Record<string, string>;
   model: string | null;
   /** The model each harness's chats use, by harness id. Missing is the harness's default. */
   models?: Record<string, string>;

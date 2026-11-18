@@ -24,6 +24,10 @@ pub struct Harness {
     pub icon: Icon,
     /// The executable, looked up on PATH and in `bin_dirs`.
     pub command: String,
+    /// Folders of other programs with an executable of the same name, which
+    /// aren't it: the Antigravity editor's `agy` opens an editor window.
+    #[serde(default)]
+    pub skip_paths: Vec<String>,
     pub pitch: String,
     pub capabilities: Capabilities,
     /// Help text for typing a model by hand.
@@ -208,7 +212,8 @@ pub struct ListModels {
     /// first two columns are the provider and the model.
     /// `claude_initialize`: the `models` of Claude Code's stream-json
     /// `initialize` answer. `codex_model_list`: the app server's
-    /// `model/list` answer.
+    /// `model/list` answer. `slug_label_lines`: one model per line, its id,
+    /// two spaces, then its name.
     pub format: String,
 }
 
@@ -333,7 +338,20 @@ pub fn installed_elsewhere(kind: AgentKind) -> Option<PathBuf> {
         .map(|d| home.join(d))
         .chain(system.iter().map(PathBuf::from))
         .flat_map(|d| names.iter().map(|n| d.join(n)).collect::<Vec<_>>())
-        .find(|p| p.is_file())
+        .find(|p| p.is_file() && !someone_elses(kind, p))
+}
+
+/// Whether `path` is another program's executable of the same name (one in
+/// `skip_paths`), links followed.
+pub fn someone_elses(kind: AgentKind, path: &Path) -> bool {
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    [path, real.as_path()].iter().any(|p| {
+        let p = p.to_string_lossy().replace('\\', "/");
+        harness(kind)
+            .skip_paths
+            .iter()
+            .any(|s| p.contains(s.as_str()))
+    })
 }
 
 /// One model a harness can run.
@@ -425,6 +443,18 @@ pub fn options(h: &Harness, listed: &str) -> Vec<ModelOption> {
                 Some(opt(id, m["displayName"].as_str().unwrap_or(id), true))
             })
             .collect(),
+        // Antigravity's `agy models`, in its order: `gemini-3.8-flash-medium
+        // Gemini 3.8 Flash (Medium)`. Headers and notes aren't a lowercase
+        // id followed by a name.
+        Some("slug_label_lines") => listed
+            .lines()
+            .filter_map(|l| {
+                let (id, label) = l.trim().split_once("  ")?;
+                let ok =
+                    |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || "-._/".contains(c);
+                (!id.is_empty() && id.chars().all(ok)).then(|| opt(id, label.trim(), true))
+            })
+            .collect(),
         _ => Vec::new(),
     };
     out.retain(|m| match format {
@@ -434,7 +464,10 @@ pub fn options(h: &Harness, listed: &str) -> Vec<ModelOption> {
         }
         _ => !m.id.is_empty(),
     });
-    if !matches!(format, Some("claude_initialize" | "codex_model_list")) {
+    if !matches!(
+        format,
+        Some("claude_initialize" | "codex_model_list" | "slug_label_lines")
+    ) {
         // Plain listings carry no order of their own.
         out.sort_by(|a, b| a.id.cmp(&b.id));
     }
@@ -519,8 +552,8 @@ async fn list_output(h: &Harness, exe: &Path) -> String {
 }
 
 impl AgentHub {
-    /// Where `kind`'s executable is: the configured command for the harness
-    /// in use, else PATH, else where its installer puts it.
+    /// Where `kind`'s executable is: the command set for it, else PATH,
+    /// else where its installer puts it.
     pub fn executable(&self, kind: AgentKind) -> Option<PathBuf> {
         super::agent_exe(&self.config(), kind).ok()
     }
@@ -692,6 +725,24 @@ mod tests {
     }
 
     #[test]
+    fn antigravitys_models_come_from_agy_models() {
+        let out = "Available models\n\ngemini-4-carbon-high  Gemini 4 Carbon (High)\ngemini-3.8-flash-medium  Gemini 3.8 Flash (Medium)\n  gemini-pro-orchestrator   Orchestrator (Carbon)\n";
+        let m: Vec<_> = options(harness(AgentKind::Antigravity), out)
+            .into_iter()
+            .map(|m| (m.id, m.label))
+            .collect();
+        let row = |id: &str, label: &str| (id.to_string(), label.to_string());
+        assert_eq!(
+            m,
+            [
+                row("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
+                row("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
+                row("gemini-pro-orchestrator", "Orchestrator (Carbon)"),
+            ]
+        );
+    }
+
+    #[test]
     fn no_harness_keeps_a_model_list_of_its_own() {
         for h in harnesses() {
             assert!(h.list_models.is_some(), "{} can't list its models", h.id);
@@ -708,7 +759,8 @@ mod tests {
         for f in &all {
             assert!(tab_domain::families::check(f).is_none(), "{f:?}");
             assert_eq!(f.candidates[0].harness, "claude_code", "{f:?}");
-            assert_eq!(f.candidates.len(), harnesses().len(), "{f:?}");
+            let seeded = harnesses().iter().filter(|h| !h.families.is_empty());
+            assert_eq!(f.candidates.len(), seeded.count(), "{f:?}");
         }
         assert_eq!(all[0].candidates[0].model, "haiku");
     }
