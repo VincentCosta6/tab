@@ -874,6 +874,8 @@ pub enum AgentKind {
     Codex,
     /// Pi, the minimal coding agent.
     Pi,
+    /// Google's Antigravity CLI (`agy`).
+    Antigravity,
 }
 
 impl AgentKind {
@@ -883,13 +885,15 @@ impl AgentKind {
             AgentKind::OpenCode => "opencode",
             AgentKind::Codex => "codex",
             AgentKind::Pi => "pi",
+            AgentKind::Antigravity => "antigravity",
         }
     }
     /// Every harness tab has an adapter for, in the order it suggests them.
-    pub const ALL: [AgentKind; 4] = [
+    pub const ALL: [AgentKind; 5] = [
         AgentKind::ClaudeCode,
         AgentKind::OpenCode,
         AgentKind::Codex,
+        AgentKind::Antigravity,
         AgentKind::Pi,
     ];
     /// From [`Self::as_str`]. Anything unknown (a harness from a newer app)

@@ -8,7 +8,7 @@ import { useSyncExternalStore } from "react";
 import { api, onAgentUpgrade } from "../../lib/api";
 import { HOUR } from "./appUpdate";
 
-export const agentName: Record<string, string> = { claude_code: "Claude Code", opencode: "OpenCode", codex: "Codex", pi: "Pi" };
+export const agentName: Record<string, string> = { claude_code: "Claude Code", opencode: "OpenCode", codex: "Codex", antigravity: "Antigravity CLI", pi: "Pi" };
 
 /** "2.1.91 (Claude Code)" → [2, 1, 91]. */
 function parts(v: string | null | undefined): number[] | null {

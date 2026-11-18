@@ -1609,7 +1609,7 @@ impl AgentHub {
                 AgentKind::OpenCode => {
                     acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
                 }
-                AgentKind::Codex => {
+                AgentKind::Codex | AgentKind::Antigravity => {
                     acp::run_turn(&hub, &session, &prompt, &system, cancel.clone()).await
                 }
                 AgentKind::Pi => {
@@ -2313,7 +2313,7 @@ impl AgentHub {
     pub async fn health(&self) -> Option<AgentProbe> {
         let cfg = self.config();
         let kind = cfg.kind?;
-        let mut p = probe(kind, cfg.command.as_deref()).await;
+        let mut p = probe(kind, cfg.command_for(kind)).await;
         if p.found {
             p.latest = latest_version(kind, p.install.as_deref(), p.upgrade.as_deref()).await;
         }
@@ -2338,7 +2338,8 @@ impl AgentHub {
 
     async fn health_probe(&self) -> Option<AgentProbe> {
         let cfg = self.config();
-        Some(probe(cfg.kind?, cfg.command.as_deref()).await)
+        let kind = cfg.kind?;
+        Some(probe(kind, cfg.command_for(kind)).await)
     }
 
     /// Looks for every harness tab can drive, in `harnesses.json` order, all
@@ -2350,9 +2351,7 @@ impl AgentHub {
             .iter()
             .filter_map(|h| h.kind())
             .map(|kind| {
-                let custom = (cfg.kind == Some(kind))
-                    .then(|| cfg.command.clone())
-                    .flatten();
+                let custom = cfg.command_for(kind).map(str::to_string);
                 async move { probe(kind, custom.as_deref()).await }
             });
         futures_util::future::join_all(probes).await
@@ -2459,14 +2458,10 @@ pub(crate) fn default_command(kind: AgentKind) -> &'static str {
     &catalog::harness(kind).command
 }
 
-/// `kind`'s executable: the configured command for the harness in use, else
-/// PATH, else where its installer puts it.
+/// `kind`'s executable: the command set for it, else PATH, else where its
+/// installer puts it.
 pub(crate) fn agent_exe(cfg: &AgentConfig, kind: AgentKind) -> anyhow::Result<PathBuf> {
-    let custom = cfg
-        .command
-        .as_deref()
-        .filter(|c| !c.trim().is_empty() && cfg.kind == Some(kind));
-    find(kind, custom)
+    find(kind, cfg.command_for(kind))
 }
 
 /// `custom`, else `kind`'s command on PATH, else where its installer puts
@@ -2476,7 +2471,25 @@ fn find(kind: AgentKind, custom: Option<&str>) -> anyhow::Result<PathBuf> {
     let custom = custom
         .map(str::trim)
         .filter(|c| *c != default_command(kind));
-    resolve(custom.unwrap_or(default_command(kind))).or_else(|e| {
+    let on_path = match custom {
+        Some(c) => resolve(c),
+        // The first on PATH that's this harness's, not another program's.
+        None => which::which_all(default_command(kind))
+            .ok()
+            .and_then(|mut all| all.find(|p| !catalog::someone_elses(kind, p)))
+            .ok_or(())
+            .or_else(|()| resolve(default_command(kind)).and_then(|p| {
+                anyhow::ensure!(
+                    !catalog::someone_elses(kind, &p),
+                    "`{}` on PATH is another program's ({}). Install {} or set its full path in Settings → Agents.",
+                    default_command(kind),
+                    p.display(),
+                    catalog::harness(kind).name
+                );
+                Ok(p)
+            })),
+    };
+    on_path.or_else(|e| {
         custom
             .is_none()
             .then(|| catalog::installed_elsewhere(kind))

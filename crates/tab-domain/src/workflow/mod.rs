@@ -715,7 +715,7 @@ pub fn validate(
                 }
                 refs.extend(template::refs(&Value::String(prompt.clone())));
                 refs.extend(template::refs(&Value::String(repo.clone())));
-                let known = ["claude_code", "opencode", "codex", "pi"];
+                let known = ["claude_code", "opencode", "codex", "antigravity", "pi"];
                 if !harness.is_empty() && !known.contains(&harness.as_str()) {
                     out.push(Issue::err(
                         at,

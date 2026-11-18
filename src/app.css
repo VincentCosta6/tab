@@ -1221,6 +1221,13 @@ body.resizing .stage-pdf, body.resizing .stage-html, body.resizing .stage-media 
 .settings-savebar { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); margin: 0 var(--space-8) var(--space-4); max-width: calc(900px - 2 * var(--space-8)); padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-raised); box-shadow: var(--shadow-lg, var(--shadow-sm)); font-size: var(--text-sm); }
 .settings-savebar.quiet { color: var(--fg-muted); }
 .settings-savebar-actions { display: flex; gap: var(--space-2); flex: none; }
+.harness-list { display: grid; gap: var(--space-2); margin-top: var(--space-3); }
+.harness-setup { padding: 0; }
+.harness-setup > summary { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--space-4); cursor: pointer; list-style: none; }
+.harness-setup > summary::-webkit-details-marker { display: none; }
+.harness-setup-status { margin-left: auto; color: var(--fg-muted); font-size: var(--text-sm); }
+.harness-setup-body { display: grid; gap: var(--space-3); padding: 0 var(--space-4) var(--space-4); border-top: 1px solid var(--border); padding-top: var(--space-3); }
+.harness-setup-pitch { margin: 0; color: var(--fg-muted); font-size: var(--text-sm); }
 .settings-version { display: grid; gap: var(--space-2); min-width: 0; }
 .settings-version-line { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
 .settings-error { margin: 0; color: var(--tone-danger-fg); font-size: var(--text-xs); }

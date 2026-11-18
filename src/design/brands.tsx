@@ -3,7 +3,7 @@
 // Very dark marks (GitHub, OpenCode, Notion) follow the text color so they
 // stay visible in dark mode.
 
-import { siApple, siClaude, siFigma, siGithub, siGmail, siGooglecalendar, siGrafana, siJira, siLinear, siNotion, siSentry, siOpencode, siZoom } from "simple-icons";
+import { siApple, siClaude, siFigma, siGithub, siGmail, siGooglecalendar, siGooglegemini, siGrafana, siJira, siLinear, siNotion, siSentry, siOpencode, siZoom } from "simple-icons";
 import type { Tone } from "../lib/types";
 import { Icon } from "./icons";
 
@@ -22,6 +22,7 @@ const simple: Record<string, SimpleIcon> = {
   grafana: siGrafana,
   figma: siFigma,
   calendar: siGooglecalendar,
+  gemini: siGooglegemini,
   apple: siApple,
 };
 
