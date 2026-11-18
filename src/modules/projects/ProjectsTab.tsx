@@ -4,11 +4,13 @@
 // services, email, documents) with who may read each, repos and notes.
 // Agents read the same things with tab_project. See docs/projects-hub.md.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, EmptyState, TextArea, TextInput, cx } from "../../design/components";
+import { SourceGlyph } from "../../design/brands";
 import { Icon } from "../../design/icons";
 import { api } from "../../lib/api";
+import { useApp } from "../../lib/app-context";
 import { timeAgo } from "../../lib/format";
 import { useAgentActivity, useProjectItems, useProjectRepos, useProjectResources, useProjects } from "../../lib/hooks";
 import { keys } from "../../lib/query";
@@ -84,13 +86,12 @@ function ProjectSwitcher({ projects, current, onSelect, onCreate }: { projects: 
   return (
     <div className="pjs" ref={ref}>
       <button className={cx("pjs-trigger", open && "open")} onClick={() => setOpen((v) => !v)} aria-haspopup="menu" aria-expanded={open}>
-        <ProjectMark project={current} size={30} />
+        <ProjectMark project={current} size={24} />
         <span className="pjs-trigger-text">
           <span className="pjs-name">{current.name}<Icon name="chevron-down" size={14} className="pjs-chevron" /></span>
           <span className="pjs-sub">
             {pulse.you > 0 && <span className="pjs-you">{pulse.you} need{pulse.you === 1 ? "s" : ""} you</span>}
             <span>{pulse.open ? `${pulse.open} open` : "Nothing open"}</span>
-            {current.about && <span className="pjs-about" title={current.about}>{current.about}</span>}
           </span>
         </span>
       </button>
@@ -146,6 +147,18 @@ function ProjectPage({ project, switcher }: { project: Project; switcher: React.
   const tint = useProjectTint(project.id);
   const open = items.filter((i) => i.state !== "done").length;
   const openThread = (id: string) => (setFocus({ kind: "item", id }), setView("home"));
+  // In a thread the chat gets the room: the queue folds to a strip that
+  // pops out on hover, and knowledge waits behind a button. Both remembered.
+  const inThread = view === "home" && focus.kind !== "coordinator";
+  const [pinned, setPinned] = useStoredFlag("tab.projects.queuePinned");
+  const [knowledge, setKnowledge] = useStoredFlag("tab.projects.knowledgeInThreads");
+  const slim = inThread && !pinned;
+  const rail = !inThread || knowledge;
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => e.key === "\\" && (e.metaKey || e.ctrlKey) && (e.preventDefault(), setPinned((v) => !v));
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [setPinned]);
 
   const tabs: { id: View; label: string; icon: string; count?: number }[] = [
     { id: "home", label: "Home", icon: "sparkles" },
@@ -159,10 +172,6 @@ function ProjectPage({ project, switcher }: { project: Project; switcher: React.
     <div className={cx("pjt-page", tint.className)} style={{ ...tint.style, "--pc": project.color } as React.CSSProperties}>
       <header className="pjt-head">
         {switcher}
-        <span className="pjt-head-actions">
-          <Button size="sm" icon="plus" onClick={() => setAdding(true)}>Add resource</Button>
-          <Button size="sm" variant="primary" icon="message" onClick={() => (setFocus({ kind: "new" }), setView("home"))}>New thread</Button>
-        </span>
         <nav className="pjt-tabs" role="tablist">
           {tabs.map((t) => (
             <button key={t.id} role="tab" aria-selected={view === t.id} className={cx("pjt-tab", view === t.id && "on")} onClick={() => setView(t.id)}>
@@ -170,17 +179,29 @@ function ProjectPage({ project, switcher }: { project: Project; switcher: React.
             </button>
           ))}
         </nav>
+        <span className="pjt-head-actions">
+          {inThread && (
+            <Button size="sm" variant="ghost" icon="panel-right" className={cx(knowledge && "on")} aria-pressed={knowledge} onClick={() => setKnowledge((v) => !v)}
+              title={knowledge ? "Hide the project's knowledge" : "Show the project's knowledge beside the thread"}>Knowledge</Button>
+          )}
+          <Button size="sm" icon="plus" onClick={() => setAdding(true)}>Add resource</Button>
+          <Button size="sm" variant="primary" icon="message" onClick={() => (setFocus({ kind: "new" }), setView("home"))}>New thread</Button>
+        </span>
       </header>
       <div className="pjt-body">
         {view === "home" && (
-          <div className="pjh">
-            <ProjectQueue project={project} items={items} selected={focus.kind === "item" ? focus.id : null} onOpen={openThread} />
+          <div className={cx("pjh", slim && "slim", !rail && "no-rail")}>
+            {slim ? (
+              <QueueStrip project={project} items={items} focus={focus} onFocus={setFocus} onPin={() => setPinned(() => true)} />
+            ) : (
+              <ProjectQueue project={project} items={items} focus={focus} onFocus={setFocus} onPin={inThread ? () => setPinned(() => false) : undefined} pinned />
+            )}
             <Center project={project} focus={focus} onFocus={setFocus} />
-            <KnowledgeRail project={project} onAdd={() => setAdding(true)} onSeeAll={() => setView("knowledge")} onEditRules={() => setView("settings")} />
+            {rail && <KnowledgeRail project={project} onAdd={() => setAdding(true)} onSeeAll={() => setView("knowledge")} onEditRules={() => setView("settings")} />}
           </div>
         )}
         {view === "queue" && (
-          <div className="pjt-scroll"><div className="pjt-wide"><ProjectQueue project={project} items={items} selected={null} onOpen={openThread} full /></div></div>
+          <div className="pjt-scroll"><div className="pjt-wide"><ProjectQueue project={project} items={items} onFocus={(f) => f.kind === "item" && openThread(f.id)} full /></div></div>
         )}
         {view === "knowledge" && (
           <div className="pjt-scroll">
@@ -226,7 +247,6 @@ function Center({ project, focus, onFocus }: { project: Project; focus: Focus; o
   if (focus.kind === "coordinator") return <Coordinator project={project} />;
   return (
     <div className="pjh-center">
-      <button className="pjh-back" onClick={() => onFocus({ kind: "coordinator" })}><Icon name="arrow-left" size={13} /> Coordinator</button>
       {focus.kind === "item" ? (
         <ItemPane key={focus.id} id={focus.id} onAct={act} onSelect={(id) => onFocus({ kind: "item", id })} />
       ) : (
@@ -299,12 +319,10 @@ function Coordinator({ project }: { project: Project }) {
 type Group = { id: string; label: string; items: { item: QueueItem; status: TaskStatus | null }[] };
 
 /** The project's threads, by what they're waiting on. */
-function ProjectQueue({ project, items, selected, onOpen, full }: { project: Project; items: QueueItem[]; selected: string | null; onOpen: (id: string) => void; full?: boolean }) {
+function useQueueGroups(items: QueueItem[]) {
   const activity = useAgentActivity();
   const seen = useSeen();
   const contextStatus = useContextStatus(items.filter((i) => activity.has(i.id)).map((i) => i.id));
-  const [showDone, setShowDone] = useState(false);
-
   const groups = useMemo(() => {
     const g: Record<string, Group> = {
       you: { id: "you", label: "Needs you", items: [] },
@@ -327,9 +345,35 @@ function ProjectQueue({ project, items, selected, onOpen, full }: { project: Pro
     }
     return Object.values(g).filter((x) => x.items.length);
   }, [items, activity, contextStatus, seen]);
+  return { groups, activity };
+}
+
+/**
+ * The project's threads, by what they're waiting on. On Home it starts with
+ * the coordinator; `onPin` adds the button that folds it back to a strip.
+ */
+function ProjectQueue({ project, items, focus, onFocus, onPin, pinned, full }: {
+  project: Project; items: QueueItem[]; focus?: Focus; onFocus: (f: Focus) => void; onPin?: () => void; pinned?: boolean; full?: boolean;
+}) {
+  const { groups, activity } = useQueueGroups(items);
+  const [showDone, setShowDone] = useState(false);
+  const selected = focus?.kind === "item" ? focus.id : null;
 
   return (
     <section className={cx("pjq", full && "full")}>
+      {focus && (
+        <div className="pjq-top">
+          <button className={cx("pjq-coord", focus.kind === "coordinator" && "on")} onClick={() => onFocus({ kind: "coordinator" })}>
+            <span className="pjh-coord-mark"><Icon name="sparkles" size={13} /></span> Coordinator
+          </button>
+          {onPin && (
+            <button className={cx("icon-btn", pinned && "active")} onClick={onPin} aria-pressed={pinned}
+              title={pinned ? "Fold the list away while in a thread (⌘\\)" : "Keep the list open (⌘\\)"} aria-label={pinned ? "Fold the list" : "Keep the list open"}>
+              <Icon name="panel-left" size={14} />
+            </button>
+          )}
+        </div>
+      )}
       {!items.length && (
         <p className="subtle pjq-empty">Nothing in {project.name} yet. Start a thread here, pick this project when starting a chat in Work, or ask an agent to file things here.</p>
       )}
@@ -341,12 +385,81 @@ function ProjectQueue({ project, items, selected, onOpen, full }: { project: Pro
           </button>
           {(g.id !== "done" || showDone) &&
             g.items.map(({ item, status }) => (
-              <QueueRow key={item.id} item={item} agent={activity.get(item.id)} status={status} selected={item.id === selected} onSelect={() => onOpen(item.id)} compact={!full} />
+              <QueueRow key={item.id} item={item} agent={activity.get(item.id)} status={status} selected={item.id === selected} onSelect={() => onFocus({ kind: "item", id: item.id })} compact={!full} />
             ))}
         </div>
       ))}
     </section>
   );
+}
+
+/**
+ * The queue folded to a strip of glyphs while a thread is open, each with a
+ * dot for what it's waiting on. Bringing the pointer to it slides the whole
+ * list out over the chat; leaving puts it back.
+ */
+function QueueStrip({ project, items, focus, onFocus, onPin }: { project: Project; items: QueueItem[]; focus: Focus; onFocus: (f: Focus) => void; onPin: () => void }) {
+  const { groups } = useQueueGroups(items);
+  const [open, setOpen] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  // A beat before opening so a pointer passing by on its way to the sidebar doesn't flash it.
+  const later = (v: boolean, ms: number) => (window.clearTimeout(timer.current), (timer.current = window.setTimeout(() => setOpen(v), ms)));
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const pick = (f: Focus) => (window.clearTimeout(timer.current), setOpen(false), onFocus(f));
+  const selected = focus.kind === "item" ? focus.id : null;
+
+  return (
+    <div className={cx("pjq-strip", open && "open")} onMouseEnter={() => later(true, 150)} onMouseLeave={() => later(false, 250)}>
+      <div className="pjq-strip-list">
+        <button className="pjq-strip-item" onClick={() => pick({ kind: "coordinator" })} title="Coordinator" aria-label="Coordinator">
+          <span className="pjh-coord-mark"><Icon name="sparkles" size={13} /></span>
+        </button>
+        {groups.filter((g) => g.id !== "done").map((g) => (
+          <div key={g.id} className="pjq-strip-group" title={g.label}>
+            {g.items.map(({ item, status }) => (
+              <StripItem key={item.id} item={item} status={status} selected={item.id === selected} onPick={() => pick({ kind: "item", id: item.id })} />
+            ))}
+          </div>
+        ))}
+      </div>
+      {open && (
+        <div className="pjq-peek">
+          <ProjectQueue project={project} items={items} focus={focus} onFocus={pick} onPin={onPin} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StripItem({ item, status, selected, onPick }: { item: QueueItem; status: TaskStatus | null; selected: boolean; onPick: () => void }) {
+  const k = useApp().kind(item.kind);
+  return (
+    <button className={cx("pjq-strip-item", selected && "on")} onClick={onPick} title={status ? `${item.title} · ${status.label}` : item.title} aria-label={item.title}>
+      <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={24} />
+      {status && <span className={cx("pjq-strip-dot", `tone-${status.tone}`)} />}
+    </button>
+  );
+}
+
+/** A yes/no remembered in localStorage. */
+function useStoredFlag(key: string): [boolean, (f: (v: boolean) => boolean) => void] {
+  const [on, setOn] = useState(() => {
+    try {
+      return localStorage.getItem(key) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const set = useCallback((f: (v: boolean) => boolean) => setOn((v) => {
+    const next = f(v);
+    try {
+      localStorage.setItem(key, next ? "1" : "0");
+    } catch {
+      /* private mode: just not remembered */
+    }
+    return next;
+  }), [key]);
+  return [on, set];
 }
 
 /** About or rules: shown as text, edited in place. */
