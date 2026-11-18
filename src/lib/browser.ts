@@ -11,6 +11,10 @@ export interface BrowserTab {
   url: string;
   title: string;
   loading: boolean;
+  /** Opened by an agent (docs/agent-browser.md): logged out and read-only.
+   * The desktop shell builds its webview from tab-core's registry, not
+   * from this flag. */
+  agent?: { sessionId: string };
 }
 
 interface State {
@@ -58,6 +62,20 @@ export function closeBrowserTab(id: string) {
 
 export function closeBrowser() {
   [...state.tabs].forEach((t) => closeBrowserTab(t.id));
+}
+
+/** An agent opened, moved or closed one of its tabs. */
+export function onAgentBrowser(e: { session_id: string; tab_id: string; action: string; url: string }) {
+  const tab = state.tabs.find((t) => t.id === e.tab_id);
+  if (e.action === "open" && !tab) {
+    const t: BrowserTab = { id: e.tab_id, url: e.url, title: hostOf(e.url), loading: true, agent: { sessionId: e.session_id } };
+    set({ tabs: [...state.tabs, t], active: e.tab_id });
+  } else if (e.action === "navigate" && tab) {
+    patchBrowserTab(tab.id, { url: e.url, loading: true });
+    if (inTauri) void import("./api").then(({ api }) => api.browserNav(tab.id, "go", e.url)).catch(() => {});
+  } else if (e.action === "close" && tab) {
+    closeBrowserTab(tab.id);
+  }
 }
 
 export const selectBrowserTab = (id: string) => set({ active: id });

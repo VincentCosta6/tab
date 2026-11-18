@@ -22,6 +22,7 @@
 
 pub mod account;
 pub mod agents;
+pub mod browser_agent;
 pub mod browser_cookies;
 pub mod cloud;
 pub mod cloud_link;

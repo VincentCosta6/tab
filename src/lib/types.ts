@@ -555,7 +555,9 @@ export type EngineEvent =
   | { type: "workflows_changed"; id: string; by: string }
   | { type: "cli_changed"; session_id: string; change: CliChange }
   /** The things behind these pages changed: refresh what shows them. */
-  | { type: "pages_changed"; connector: string; pages: string[] };
+  | { type: "pages_changed"; connector: string; pages: string[] }
+  /** An agent opened, moved or closed one of its browser tabs. */
+  | { type: "browser_agent"; session_id: string; tab_id: string; action: "open" | "navigate" | "close"; url: string };
 
 /** Something an agent changed through a connection's CLI (`gh pr merge`, `git push`). */
 export interface CliChange {
@@ -872,7 +874,11 @@ export interface TabConfig {
   hub?: { mode: HubMode; cloud_hub?: string };
   /** The in-app browser. Mirrors tab_core::config::BrowserConfig. */
   /** `import_logins`: null until the browser has asked once. */
-  browser?: { import_logins?: boolean | null };
+  browser?: {
+    import_logins?: boolean | null;
+    /** What agents may do with the browser: off until the person turns it on. */
+    agents?: "off" | "read_only";
+  };
   onboarded: boolean;
 }
 

@@ -5,7 +5,7 @@ import {
 } from "../lib/browser";
 import { useConfig, useSaveConfig } from "../lib/hooks";
 import { ImportLogins, ImportOffer } from "./BrowserLogins";
-import { cx } from "./components";
+import { Button, cx } from "./components";
 import { Icon } from "./icons";
 
 const WIDTH_KEY = "tab.browser.width";
@@ -133,8 +133,8 @@ export function BrowserDock() {
       <div className={cx("bdock-grip", dragging && "drag")} onPointerDown={drag} />
       <div className="btabs" role="tablist">
         {tabs.map((t) => (
-          <button key={t.id} role="tab" aria-selected={t.id === active} className={cx("btab", t.id === active && "active")} onClick={() => selectBrowserTab(t.id)} onAuxClick={(e) => e.button === 1 && closeBrowserTab(t.id)} title={t.url}>
-            <Icon name={t.loading ? "refresh" : "globe"} size={12} />
+          <button key={t.id} role="tab" aria-selected={t.id === active} className={cx("btab", t.id === active && "active", t.agent && "agent")} onClick={() => selectBrowserTab(t.id)} onAuxClick={(e) => e.button === 1 && closeBrowserTab(t.id)} title={t.url}>
+            <Icon name={t.loading ? "refresh" : t.agent ? "bot" : "globe"} size={12} />
             <span className="btab-title">{t.title || t.url}</span>
             <span className="btab-x" role="button" aria-label="Close tab" onClick={(e) => (e.stopPropagation(), closeBrowserTab(t.id))}><Icon name="x" size={11} /></span>
           </button>
@@ -150,12 +150,19 @@ export function BrowserDock() {
         <button type="button" className="icon-btn" title="Forward" onClick={() => nav("forward")}><Icon name="arrow-right" size={14} /></button>
         <button type="button" className="icon-btn" title="Reload" onClick={() => nav("reload")}><Icon name="refresh" size={14} /></button>
         <input value={address} onChange={(e) => setAddress(e.target.value)} onFocus={(e) => e.target.select()} spellCheck={false} aria-label="Address" placeholder="Search or enter address" />
-        {canImport && <button type="button" className={cx("icon-btn", importing && "active")} title="Import logins from another browser" onClick={() => setImporting((v) => !v)}><Icon name="download" size={14} /></button>}
+        {canImport && !current?.agent && <button type="button" className={cx("icon-btn", importing && "active")} title="Import logins from another browser" onClick={() => setImporting((v) => !v)}><Icon name="download" size={14} /></button>}
         <button type="button" className="icon-btn" title="Open in your browser" onClick={() => current && void openUrl(current.url)}><Icon name="external" size={14} /></button>
       </form>
       {unasked && browsers.length > 0 && <ImportOffer browsers={browsers} onAnswer={answerOffer} />}
-      {canImport && importing && <ImportLogins url={current?.url} onClose={() => setImporting(false)} onImported={() => nav("reload")} />}
-      <div className="bview" ref={view}>
+      {canImport && importing && !current?.agent && <ImportLogins url={current?.url} onClose={() => setImporting(false)} onImported={() => nav("reload")} />}
+      {current?.agent && (
+        <div className="bagent" role="status">
+          <Icon name="bot" size={13} />
+          <span>An agent opened this tab. It browses logged out and can only read: it can't sign in, click or type.</span>
+          <Button size="sm" type="button" onClick={() => closeBrowserTab(current.id)}>Close</Button>
+        </div>
+      )}
+      <div className={cx("bview", current?.agent && "agent")} ref={view}>
         {!inTauri && current && <iframe key={current.id} src={current.url} title={current.title} />}
       </div>
     </aside>

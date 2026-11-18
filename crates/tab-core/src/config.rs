@@ -51,6 +51,10 @@ pub struct BrowserConfig {
     /// they've been asked, which the browser does once.
     #[serde(default)]
     pub import_logins: Option<bool>,
+    /// What agents may do with the browser ([`crate::browser_agent`]). Off
+    /// until the person turns it on.
+    #[serde(default)]
+    pub agents: crate::browser_agent::AgentBrowsing,
 }
 
 /// Which coding agent tab drives, and how.
