@@ -1375,19 +1375,28 @@ async fn agent_install_adapter(app: tauri::AppHandle, kind: AgentKind) -> CmdRes
     .map_err(err)
 }
 
-/// The configured agent's version, the newest release and how to update it.
+/// An agent's version, the newest release and how to update it: `kind`'s,
+/// or the configured agent's without one.
 #[tauri::command]
-async fn agent_health(state: State<'_, AppState>) -> CmdResult<Option<AgentProbe>> {
-    Ok(state.hub.health().await)
+async fn agent_health(
+    state: State<'_, AppState>,
+    kind: Option<AgentKind>,
+) -> CmdResult<Option<AgentProbe>> {
+    Ok(state.hub.health(kind).await)
 }
 
-/// Updates the agent CLI the way it was installed. Output lines arrive as
-/// `tab://agent-upgrade` events while it runs.
+/// Updates an agent CLI (`kind`, or the configured one) the way it was
+/// installed. Output lines arrive as `tab://agent-upgrade` events while it
+/// runs.
 #[tauri::command]
-async fn agent_upgrade(app: tauri::AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+async fn agent_upgrade(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    kind: Option<AgentKind>,
+) -> CmdResult<()> {
     state
         .hub
-        .upgrade(move |line| {
+        .upgrade(kind, move |line| {
             let _ = app.emit("tab://agent-upgrade", &line);
         })
         .await

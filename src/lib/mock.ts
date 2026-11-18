@@ -783,7 +783,10 @@ export const mockApi = {
         case "chat_stop": return null;
         case "chat_interrupt": return null;
         case "approval_resolve": return true;
-        case "agent_health": return { kind: "claude_code", found: true, path: "/Users/you/.local/bin/claude", version: mockUpgraded ? "2.1.318 (Claude Code)" : "2.1.91 (Claude Code)", error: null, install: "native", upgrade: "claude update", latest: "2.1.318" };
+        case "agent_health":
+          if (args.kind === "antigravity") return { kind: "antigravity", found: true, path: "/Users/you/.local/bin/agy", version: "1.5.8", error: null, install: "native", upgrade: "agy update", latest: "1.5.10" };
+          if (args.kind && args.kind !== "claude_code") return { kind: args.kind, found: true, path: `/usr/local/bin/${args.kind}`, version: "1.0.0", error: null, install: "npm", upgrade: null, latest: "1.0.0" };
+          return { kind: "claude_code", found: true, path: "/Users/you/.local/bin/claude", version: mockUpgraded ? "2.1.318 (Claude Code)" : "2.1.91 (Claude Code)", error: null, install: "native", upgrade: "claude update", latest: "2.1.318" };
         case "agent_upgrade": {
           const steps = ["Checking for updates…", "Downloading 2.1.318 (38%)", "Downloading 2.1.318 (100%)", "Installing…", "Updated to 2.1.318"];
           for (const s of steps) { await new Promise((r) => setTimeout(r, 700)); upgradeListeners.forEach((l) => l(s)); }

@@ -179,7 +179,8 @@ pub fn install_method(kind: AgentKind, path: &str) -> (&'static str, &'static st
 /// install. A winget or Homebrew install updates from that package manager,
 /// which can be a few releases behind npm; comparing it with npm would offer
 /// an update that `winget upgrade` can't find. Everything else (npm, the
-/// agent's own updater) follows npm. Cached for six hours per install
+/// agent's own updater) follows npm, unless the agent's updater has a
+/// manifest of its own (`upgrade.latest`). Cached for six hours per install
 /// method; `None` when offline.
 pub async fn latest_version(
     kind: AgentKind,
@@ -187,9 +188,12 @@ pub async fn latest_version(
     upgrade: Option<&str>,
 ) -> Option<String> {
     use std::time::Instant;
+    let manifest = catalog::harness(kind).upgrade.latest.as_deref();
     let source: &'static str = match install {
         Some("winget") => "winget",
         Some("brew") => "brew",
+        Some("npm") => "npm",
+        _ if manifest.is_some() => "manifest",
         _ => "npm",
     };
     let at_key = (kind, source);
@@ -201,6 +205,7 @@ pub async fn latest_version(
     let version = match source {
         "winget" => winget_latest(upgrade?).await,
         "brew" => brew_latest(upgrade?).await,
+        "manifest" => manifest_latest(manifest?).await,
         _ => npm_latest(kind).await,
     }?;
     LATEST
@@ -228,6 +233,34 @@ async fn npm_latest(kind: AgentKind) -> Option<String> {
         .get(format!("https://registry.npmjs.org/{package}/latest"))
         .send()
         .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    Some(v["version"].as_str()?.to_string())
+}
+
+/// The `version` in an agent updater's manifest for this computer.
+async fn manifest_latest(url: &str) -> Option<String> {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        os => os,
+    };
+    let arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        arch => arch,
+    };
+    let url = url.replace("{os}", os).replace("{arch}", arch);
+    let v: serde_json::Value = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?
+        .get(url)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
         .ok()?
         .json()
         .await
@@ -2308,11 +2341,11 @@ impl AgentHub {
         }
     }
 
-    /// The configured agent: where it is, its version, the newest release
-    /// and how to update it.
-    pub async fn health(&self) -> Option<AgentProbe> {
+    /// An agent (the configured one when `kind` is `None`): where it is, its
+    /// version, the newest release and how to update it.
+    pub async fn health(&self, kind: Option<AgentKind>) -> Option<AgentProbe> {
         let cfg = self.config();
-        let kind = cfg.kind?;
+        let kind = kind.or(cfg.kind)?;
         let mut p = probe(kind, cfg.command_for(kind)).await;
         if p.found {
             p.latest = latest_version(kind, p.install.as_deref(), p.upgrade.as_deref()).await;
@@ -2320,13 +2353,15 @@ impl AgentHub {
         Some(p)
     }
 
-    /// Updates the configured agent the way it was installed.
+    /// Updates an agent (the configured one when `kind` is `None`) the way
+    /// it was installed.
     pub async fn upgrade(
         &self,
+        kind: Option<AgentKind>,
         on_line: impl Fn(String) + Send + Sync + 'static,
     ) -> anyhow::Result<()> {
         let p = self
-            .health_probe()
+            .health_probe(kind)
             .await
             .ok_or_else(|| anyhow::anyhow!("No agent is set up."))?;
         let path = p
@@ -2336,9 +2371,9 @@ impl AgentHub {
         run_upgrade(p.kind, &path, on_line).await
     }
 
-    async fn health_probe(&self) -> Option<AgentProbe> {
+    async fn health_probe(&self, kind: Option<AgentKind>) -> Option<AgentProbe> {
         let cfg = self.config();
-        let kind = cfg.kind?;
+        let kind = kind.or(cfg.kind)?;
         Some(probe(kind, cfg.command_for(kind)).await)
     }
 

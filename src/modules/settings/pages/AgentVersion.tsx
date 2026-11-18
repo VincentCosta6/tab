@@ -1,11 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, FormRow } from "../../../design/components";
+import type { AgentKind } from "../../../lib/types";
 import { useAgentUpdate } from "../../updates/agentUpdate";
 
-/** The agent CLI's version, the newest release, and updating it the way it was installed. */
-export function AgentVersionRow({ label = "Version" }: { label?: string }) {
+/** An agent CLI's version (the default agent's without `kind`), the newest release, and updating it the way it was installed. */
+export function AgentVersionRow({ label = "Version", kind }: { label?: string; kind?: AgentKind }) {
   const qc = useQueryClient();
-  const { health, behind, have, latest, upgrade, update } = useAgentUpdate();
+  const { health, behind, have, latest, upgrade, update } = useAgentUpdate(kind);
   const h = health.data;
   const running = upgrade.phase === "running";
   const lines = upgrade.phase === "running" || upgrade.phase === "failed" ? upgrade.lines : [];

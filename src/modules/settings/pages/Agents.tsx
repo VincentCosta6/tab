@@ -8,6 +8,7 @@ import { HarnessIcon, ModelMenu, modelFor, useInstalled } from "../../work/Model
 import { orderHarnesses } from "../../../lib/harnesses";
 import { useDraft } from "../draft";
 import type { AgentProbe, Harness } from "../../../lib/types";
+import { useAgentUpdate } from "../../updates/agentUpdate";
 import { AgentVersionRow } from "./AgentVersion";
 import { ModelFamiliesSettings } from "./ModelFamilies";
 import { SandboxSettings } from "./Sandbox";
@@ -43,7 +44,6 @@ export function AgentsPage() {
               {orderHarnesses(harnesses, installed).map((h) => <option key={h.id} value={h.id}>{h.name}{installed.has(h.id) ? "" : " (not found on this computer)"}</option>)}
             </select>
           </FormRow>
-          <AgentVersionRow label={`${harnesses.find((h) => h.id === draft.agent.kind)?.name ?? "Default"} version`} />
           <FormRow label="Work folder" help="Where sessions start.">
             <TextInput value={draft.agent.workdir ?? ""} onChange={(e) => set((c) => void (c.agent.workdir = e.target.value || null))} />
             {workdirProblem && <small className="text-danger" role="alert">{workdirProblem}</small>}
@@ -142,6 +142,7 @@ function HarnessSetup({ harness, probe }: { harness: Harness; probe: AgentProbe 
   const id = harness.id;
   const found = !!probe?.found;
   const isDefault = draft.agent.kind === id;
+  const { behind, latest } = useAgentUpdate(id, found);
   // The default starts open; the rest open on a click.
   const shown = useRef(false);
   const opened = (el: HTMLDetailsElement | null) => {
@@ -165,11 +166,13 @@ function HarnessSetup({ harness, probe }: { harness: Harness; probe: AgentProbe 
         {isDefault && <Badge tone="info">Default</Badge>}
         <span className="harness-setup-status">
           {!probe ? "Looking…" : found ? <span className="mono">{probe.version ?? "Installed"}</span> : <Badge>Not installed</Badge>}
+          {behind && <Badge tone="info">{latest} available</Badge>}
         </span>
       </summary>
       <div className="harness-setup-body">
         <p className="harness-setup-pitch">{harness.pitch}</p>
         {probe && !found && <InstallHarness harness={harness} probe={probe} />}
+        {found && <AgentVersionRow kind={id} />}
         <FormRow label="Command" help={found ? probe?.path ?? undefined : "Leave empty to find it on PATH, or give a full path."}>
           <TextInput placeholder={harness.command} value={command} onChange={(e) => setCommand(e.target.value.trim() ? e.target.value : "")} />
         </FormRow>

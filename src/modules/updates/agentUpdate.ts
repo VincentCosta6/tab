@@ -1,11 +1,11 @@
-// The agent CLI's updates: whether the configured harness is behind, and
-// running its update command. Settings, the nav badge and the new-chat
-// prompt share this, so an update started in one shows its progress in the
-// others.
+// The agent CLIs' updates: whether a harness is behind, and running its
+// update command. Settings, the nav badge and the new-chat prompt share
+// this, so an update started in one shows its progress in the others.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSyncExternalStore } from "react";
 import { api, onAgentUpgrade } from "../../lib/api";
+import type { AgentKind } from "../../lib/types";
 import { HOUR } from "./appUpdate";
 
 export const agentName: Record<string, string> = { claude_code: "Claude Code", opencode: "OpenCode", codex: "Codex", antigravity: "Antigravity CLI", pi: "Pi" };
@@ -34,40 +34,45 @@ export type UpgradeState =
   | { phase: "done" }
   | { phase: "failed"; error: string; lines: string[] };
 
-let state: UpgradeState = { phase: "idle" };
+const idle: UpgradeState = { phase: "idle" };
+/** Each agent's update, by kind. Updater output isn't tagged with its agent, so one runs at a time. */
+const states = new Map<AgentKind, UpgradeState>();
 const listeners = new Set<() => void>();
-const set = (next: UpgradeState) => {
-  state = next;
+const get = (kind: AgentKind | undefined) => (kind && states.get(kind)) || idle;
+const set = (kind: AgentKind, next: UpgradeState) => {
+  states.set(kind, next);
   listeners.forEach((l) => l());
 };
+const running = () => [...states.values()].some((s) => s.phase === "running");
 
-/** The configured agent, whether a newer release is out, and updating it. */
-export function useAgentUpdate() {
+/** An agent (the default one without `kind`), whether a newer release is out, and updating it. */
+export function useAgentUpdate(kind?: AgentKind, enabled = true) {
   const qc = useQueryClient();
-  const health = useQuery({ queryKey: ["agent-health"], queryFn: api.agentHealth, staleTime: 30 * 60_000, refetchInterval: HOUR, retry: false });
+  const health = useQuery({ queryKey: ["agent-health", kind ?? "default"], queryFn: () => api.agentHealth(kind), staleTime: 30 * 60_000, refetchInterval: HOUR, retry: false, enabled });
+  const h = health.data;
+  const which = kind ?? h?.kind;
   const upgrade = useSyncExternalStore(
     (l) => (listeners.add(l), () => void listeners.delete(l)),
-    () => state,
+    () => get(which),
   );
-  const h = health.data;
   const behind = !!h?.found && !!h.latest && isOlder(h.version, h.latest);
-  const name = agentName[h?.kind ?? "claude_code"] ?? "The agent";
+  const name = agentName[which ?? "claude_code"] ?? "The agent";
 
   const update = async () => {
-    if (state.phase === "running") return;
+    if (!which || running()) return;
     let lines: string[] = [];
-    set({ phase: "running", lines });
+    set(which, { phase: "running", lines });
     const off = await onAgentUpgrade((l) => {
       lines = [...lines.slice(-199), l];
-      if (state.phase === "running") set({ phase: "running", lines });
+      if (get(which).phase === "running") set(which, { phase: "running", lines });
     });
     try {
-      await api.agentUpgrade();
+      await api.agentUpgrade(which);
       await qc.refetchQueries({ queryKey: ["agent-health"] });
-      set({ phase: "done" });
-      setTimeout(() => state.phase === "done" && set({ phase: "idle" }), 5000);
+      set(which, { phase: "done" });
+      setTimeout(() => get(which).phase === "done" && set(which, idle), 5000);
     } catch (e) {
-      set({ phase: "failed", error: String((e as { message?: string })?.message ?? e), lines });
+      set(which, { phase: "failed", error: String((e as { message?: string })?.message ?? e), lines });
     } finally {
       off();
     }
