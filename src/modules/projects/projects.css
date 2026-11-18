@@ -8,13 +8,11 @@
 .pjs { position: relative; min-width: 0; }
 .pjs-trigger { display: flex; align-items: center; gap: var(--space-3); max-width: 100%; padding: 4px 10px 4px 4px; margin-left: -4px; border: 1px solid transparent; border-radius: var(--radius-lg); background: transparent; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
 .pjs-trigger:hover, .pjs-trigger.open { background: var(--bg-hover); }
-.pjs-trigger-text { display: grid; min-width: 0; }
-.pjs-name { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-xl); font-weight: 600; }
+.pjs-trigger-text { display: flex; align-items: baseline; gap: var(--space-3); min-width: 0; }
+.pjs-name { display: inline-flex; align-items: center; gap: 6px; font-size: var(--text-lg); font-weight: 600; }
 .pjs-chevron { color: var(--fg-subtle); }
 .pjs-sub { display: flex; gap: 8px; min-width: 0; font-size: var(--text-sm); color: var(--fg-subtle); white-space: nowrap; }
 .pjs-you { color: var(--tone-warning-fg); font-weight: 500; }
-.pjs-about { overflow: hidden; text-overflow: ellipsis; }
-.pjs-about::before { content: "·"; margin-right: 8px; }
 .pjs-menu { position: absolute; top: calc(100% + 6px); left: -4px; z-index: 40; width: min(520px, calc(100vw - 120px)); display: grid; background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-md); overflow: hidden; }
 .pjs-search { padding: var(--space-2); border-bottom: 1px solid var(--border); }
 .pjs-list { display: grid; max-height: min(420px, 60vh); overflow: auto; padding: 4px; }
@@ -37,10 +35,13 @@
 
 .pjt-main { min-width: 0; min-height: 0; overflow: hidden; }
 .pjt-page { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; min-height: 0; }
-.pjt-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-3); padding: var(--space-3) var(--space-5) 0; background: var(--bg-raised); border-bottom: 1px solid var(--border); }
-.pjt-head-actions { display: inline-flex; gap: var(--space-2); }
-.pjt-tabs { grid-column: 1 / -1; display: flex; gap: 2px; margin-top: var(--space-2); }
-.pjt-tab { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--fg-muted); font: inherit; cursor: pointer; }
+/* One row: switcher, tabs, actions. Everything below it is the work. */
+.pjt-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: stretch; column-gap: var(--space-4); min-height: 44px; padding: 0 var(--space-4); background: var(--bg-raised); border-bottom: 1px solid var(--border); }
+.pjt-head > .pjs { align-self: center; }
+.pjt-head-actions { display: inline-flex; align-items: center; gap: var(--space-2); }
+.pjt-head-actions .btn.on { background: var(--bg-selected); color: var(--fg); }
+.pjt-tabs { display: flex; gap: 2px; min-width: 0; overflow: hidden; }
+.pjt-tab { display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; white-space: nowrap; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--fg-muted); font: inherit; cursor: pointer; }
 .pjt-tab:hover { color: var(--fg); }
 .pjt-tab.on { color: var(--fg); border-bottom-color: var(--pc, var(--fg)); font-weight: 500; }
 .pjt-tab-count { font-size: var(--text-xs); color: var(--fg-subtle); font-variant-numeric: tabular-nums; }
@@ -56,6 +57,9 @@
 .pjh-center > .item-pane, .pjh-center > .new-chat { flex: 1; min-height: 0; }
 .pjh-back { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; margin: var(--space-2) var(--space-3) 0; padding: 3px 8px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg-muted); font: inherit; font-size: var(--text-sm); cursor: pointer; }
 .pjh-back:hover { background: var(--bg-hover); color: var(--fg); }
+.pjh.no-rail { grid-template-columns: minmax(260px, 300px) minmax(0, 1fr); }
+.pjh.slim { grid-template-columns: 52px minmax(0, 1fr) minmax(260px, 310px); }
+.pjh.slim.no-rail { grid-template-columns: 52px minmax(0, 1fr); }
 .pjh-coord-head { display: flex; align-items: center; gap: var(--space-2); padding: 9px var(--space-5); border-bottom: 1px solid var(--border); background: var(--bg-raised); }
 .pjh-coord-mark { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; color: var(--pc, var(--focus)); background: color-mix(in srgb, var(--pc, var(--focus)) 16%, transparent); }
 .pjh-coord-mark.big { width: 40px; height: 40px; border-radius: 10px; }
@@ -71,6 +75,29 @@
 .pjq-group-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 4px; width: 100%; padding: var(--space-3) var(--space-4) var(--space-1); border: 0; background: var(--bg-raised); text-align: left; font: inherit; font-size: var(--text-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--fg-subtle); }
 .pjq-group-head:not(:disabled) { cursor: pointer; }
 .pjq-group-head:not(:disabled):hover { color: var(--fg); }
+.pjq-top { display: flex; align-items: center; gap: 4px; padding: var(--space-2) var(--space-2) 0; }
+.pjq-coord { flex: 1; display: flex; align-items: center; gap: var(--space-2); padding: 6px 8px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg); font: inherit; font-weight: 500; text-align: left; cursor: pointer; }
+.pjq-coord:hover { background: var(--bg-hover); }
+.pjq-coord.on { background: var(--bg-selected); }
+
+/* The queue folded to a strip while a thread is open; it peeks out on hover. */
+.pjq-strip { position: relative; z-index: 20; min-height: 0; border-right: 1px solid var(--border); background: var(--bg-raised); }
+/* A little past its edge counts as reaching for it. */
+.pjq-strip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 100%; width: 12px; }
+.pjq-strip-list { height: 100%; overflow-y: auto; scrollbar-width: none; display: grid; align-content: start; justify-items: center; gap: 2px; padding: var(--space-2) 0; }
+.pjq-strip-group { display: grid; gap: 2px; padding-top: 6px; margin-top: 4px; border-top: 1px solid var(--border); }
+.pjq-strip-item { position: relative; display: grid; place-items: center; width: 38px; height: 34px; border: 0; border-radius: var(--radius-md); background: transparent; cursor: pointer; }
+.pjq-strip-item:hover { background: var(--bg-hover); }
+.pjq-strip-item.on { background: var(--bg-selected); box-shadow: inset 2px 0 var(--pc, var(--focus)); }
+.pjq-strip-dot { position: absolute; top: 4px; right: 5px; width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 2px var(--bg-raised); background: var(--fg-subtle); }
+.pjq-strip-dot.tone-info { background: var(--tone-info-fg); }
+.pjq-strip-dot.tone-warning { background: var(--tone-warning-fg); }
+.pjq-strip-dot.tone-danger { background: var(--tone-danger-fg); }
+.pjq-strip-dot.tone-success { background: var(--tone-success-fg); }
+.pjq-strip-dot.tone-accent { background: var(--tone-accent-fg); }
+.pjq-peek { position: absolute; top: 0; bottom: 0; left: 0; width: 300px; overflow: auto; background: var(--bg-raised); border-right: 1px solid var(--border); box-shadow: 12px 0 32px rgb(0 0 0 / 0.28); animation: pjq-peek 0.16s ease-out; }
+@keyframes pjq-peek { from { transform: translateX(-24px); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .pjq-peek { animation: none; } }
 .pjq.full { background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
 
 .pjt-section { display: grid; gap: var(--space-2); }
