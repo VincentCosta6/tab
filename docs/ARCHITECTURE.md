@@ -43,6 +43,8 @@ crates/tab-core/        The desktop engine. No Tauri dependency, fully unit test
                         OAuth sign-in (oauth.rs), sign-ins kept out of config (vault.rs)
   mcp.rs                tab's MCP server for agents, plus /mcp/<id> (remote servers,
                         signed in by tab) and /oauth/callback
+  browser_agent/        Agents in the browser dock: URL rules, plans, the gate, taint, the
+                        tab_browser_* tools (read docs/agent-browser.md first)
   engine.rs             Wires connectors → store → ranker → events
   gateway.rs            Cache, rate limits, audit for every connector call
   ranker/               ai.rs (Haiku layer) and decision.rs (decision-model layer) over tab-domain's rules

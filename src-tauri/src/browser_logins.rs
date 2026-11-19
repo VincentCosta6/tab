@@ -140,7 +140,7 @@ async fn put_cookies(app: &AppHandle, cookies: Vec<Cookie>) -> anyhow::Result<us
 }
 
 #[cfg(target_os = "macos")]
-fn ns_cookie(c: &Cookie) -> Option<objc2::rc::Retained<objc2_foundation::NSHTTPCookie>> {
+pub(crate) fn ns_cookie(c: &Cookie) -> Option<objc2::rc::Retained<objc2_foundation::NSHTTPCookie>> {
     use objc2::runtime::AnyObject;
     use objc2_foundation::{
         NSDate, NSHTTPCookie, NSHTTPCookieDomain, NSHTTPCookieExpires, NSHTTPCookieName,

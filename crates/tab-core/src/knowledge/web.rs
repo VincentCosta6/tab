@@ -29,7 +29,9 @@ const NOT_PAGES: &[&str] = &[
     ".mov", ".mp3", ".woff", ".woff2", ".ttf", ".pdf", ".dmg", ".exe", ".xml", ".json",
 ];
 
-fn is_public(ip: IpAddr) -> bool {
+/// Whether `ip` is on the public internet: not this computer, its network,
+/// link-local (cloud metadata) or carrier-grade NAT.
+pub fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {
             !(v.is_private()

@@ -198,6 +198,10 @@ pub struct Capabilities {
     /// It stops a turn past a spend cap (`per_turn_usd`).
     #[serde(default)]
     pub budget_cap: bool,
+    /// Its chat models take images (tool results with screenshots). Unset
+    /// means yes; `false` keeps image tools like `tab_browser_screenshot` away.
+    #[serde(default)]
+    pub vision: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

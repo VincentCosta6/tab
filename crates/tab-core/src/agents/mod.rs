@@ -896,6 +896,11 @@ impl AgentHub {
         }
     }
 
+    /// tab's data folder for agents (saved browser flows live here).
+    pub fn data_dir(&self) -> PathBuf {
+        self.dir.clone()
+    }
+
     /// Each chat's own folder (system prompt, MCP config).
     pub fn sessions_dir(&self) -> PathBuf {
         self.dir.join("sessions")

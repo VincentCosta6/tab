@@ -358,6 +358,10 @@ export const api = {
   browserVisible: (id: string, visible: boolean) => call<void>("browser_visible", { id, visible }),
   browserNav: (id: string, action: "back" | "forward" | "reload" | "go", url?: string) => call<void>("browser_nav", { id, action, url: url ?? null }),
   browserClose: (id: string) => call<void>("browser_close", { id }),
+  /** Which agent tab the person is looking at, for watch mode (null: none). */
+  browserAgentWatch: (tab: string | null) => call<void>("browser_agent_watch", { tab }),
+  browserAgentResume: (tab: string) => call<void>("browser_agent_resume", { tab }),
+  browserAgentStop: (sessionId: string) => call<void>("browser_agent_stop", { sessionId }),
   /** Browsers on this computer logins could be imported from, by name. Reads no cookies, so it works before importing is turned on. */
   browserLoginBrowsers: () => call<string[]>("browser_login_browsers"),
   /** Browser profiles on this computer whose logins can be imported. */

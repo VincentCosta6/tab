@@ -99,6 +99,17 @@ pub enum EngineEvent {
         connector: String,
         pages: Vec<String>,
     },
+    /// An agent opened, moved or closed one of its browser tabs
+    /// ([`crate::browser_agent`]). The dock shows it as an agent tab.
+    /// `action` is `open`, `navigate` or `close`.
+    BrowserAgent {
+        session_id: String,
+        tab_id: String,
+        action: String,
+        url: String,
+        /// `status`: progress for the banner; `handover`/`waiting`: why.
+        detail: serde_json::Value,
+    },
 }
 
 const MAX_CONCURRENT_RANKS: usize = 4;

@@ -18,6 +18,11 @@ See `docs/ARCHITECTURE.md` for the crate map. Standing rules:
 
 - Don't edit the live checkout the app runs from; work in a git worktree. Agents editing the running checkout have crashed the app before.
 
+## Agents in the browser
+
+- `docs/agent-browser.md` holds the plan and the rules for agents using tab's browser (`crates/tab-core/src/browser_agent/`, the `tab_browser_*` tools, `src-tauri/src/agent_browser.rs` and agent tabs in `src-tauri`). Read it before touching any of them, the browser dock, Tauri capabilities or `tauri.conf.json`'s `security`.
+- Its numbered rules are guarantees: don't loosen one (who may browse, logged out unless lent, URL rules, plans bind exact values, consequential actions confirm, redaction and taint, no raw JS, no IPC for dock pages, model checks only escalate) without the person's sign-off, and update the doc and its tests in the same PR.
+
 ## tab cloud and `tab-infra`
 
 The cloud side (edge Worker, hub Durable Object, accounts in D1) is the private `VincentCosta6/tab-infra` repo. The two repos share one API contract, and it lives here:

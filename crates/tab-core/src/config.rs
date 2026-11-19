@@ -51,6 +51,17 @@ pub struct BrowserConfig {
     /// they've been asked, which the browser does once.
     #[serde(default)]
     pub import_logins: Option<bool>,
+    /// What agents may do with the browser ([`crate::browser_agent`]). Off
+    /// until the person turns it on.
+    #[serde(default)]
+    pub agents: crate::browser_agent::AgentBrowsing,
+    /// Ports on this computer agents may open (the person's dev servers).
+    #[serde(default)]
+    pub agent_dev_ports: Vec<u16>,
+    /// Turns off the second check on plans and near-matches
+    /// ([`crate::browser_agent::critic`]); on unless the person turns it off.
+    #[serde(default)]
+    pub agent_critic_off: bool,
 }
 
 /// Which coding agent tab drives, and how.

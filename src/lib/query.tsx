@@ -15,6 +15,7 @@ import { PersistQueryClientProvider, removeOldestQuery } from "@tanstack/react-q
 import { createSyncStoragePersister } from "@tanstack/query-sync-storage-persister";
 import { useEffect, type ReactNode } from "react";
 import { onEngineEvent } from "./api";
+import { onAgentBrowser } from "./browser";
 import type { Chat, ConnectorInfo, ItemContext, QueueItem, Session } from "./types";
 
 /**
@@ -180,6 +181,9 @@ function LiveEvents() {
           }, 120);
           break;
         }
+        case "browser_agent":
+          onAgentBrowser(e);
+          break;
         case "connector_changed":
           qc.setQueryData<ConnectorInfo[]>(keys.connectors, (cs) => cs?.map((c) => (c.id === e.connector.id ? e.connector : c)));
           break;

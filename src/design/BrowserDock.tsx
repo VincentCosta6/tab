@@ -1,11 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, inTauri, onBrowserEvent, openUrl } from "../lib/api";
 import {
-  closeBrowser, closeBrowserTab, newBrowserTab, patchBrowserTab, selectBrowserTab, setBrowserExpanded, useBrowser, withHost,
+  closeBrowser, closeBrowserTab, handBack, newBrowserTab, patchBrowserTab, selectBrowserTab, setBrowserExpanded, stopAgent, useBrowser, withHost,
 } from "../lib/browser";
 import { useConfig, useSaveConfig } from "../lib/hooks";
 import { ImportLogins, ImportOffer } from "./BrowserLogins";
-import { cx } from "./components";
+import type { AgentTabState as AgentTab } from "../lib/browser";
+import { Button, cx } from "./components";
 import { Icon } from "./icons";
 
 const WIDTH_KEY = "tab.browser.width";
@@ -83,6 +84,26 @@ export function BrowserDock() {
     }
   }, [tabs, active, dragging]);
 
+  // Watch mode: tell tab which agent tab the person can see right now.
+  useEffect(() => {
+    if (!inTauri) return;
+    const report = () => {
+      const t = tabs.find((x) => x.id === active);
+      const seen = !!t?.agent && !dragging && document.visibilityState === "visible" && document.hasFocus();
+      void api.browserAgentWatch(seen ? t!.id : null).catch(() => {});
+    };
+    report();
+    window.addEventListener("focus", report);
+    window.addEventListener("blur", report);
+    document.addEventListener("visibilitychange", report);
+    return () => {
+      window.removeEventListener("focus", report);
+      window.removeEventListener("blur", report);
+      document.removeEventListener("visibilitychange", report);
+      void api.browserAgentWatch(null).catch(() => {});
+    };
+  }, [tabs, active, dragging]);
+
   const open = tabs.length > 0;
   useEffect(() => {
     if (!inTauri || !view.current || !active) return;
@@ -133,8 +154,8 @@ export function BrowserDock() {
       <div className={cx("bdock-grip", dragging && "drag")} onPointerDown={drag} />
       <div className="btabs" role="tablist">
         {tabs.map((t) => (
-          <button key={t.id} role="tab" aria-selected={t.id === active} className={cx("btab", t.id === active && "active")} onClick={() => selectBrowserTab(t.id)} onAuxClick={(e) => e.button === 1 && closeBrowserTab(t.id)} title={t.url}>
-            <Icon name={t.loading ? "refresh" : "globe"} size={12} />
+          <button key={t.id} role="tab" aria-selected={t.id === active} className={cx("btab", t.id === active && "active", t.agent && "agent")} onClick={() => selectBrowserTab(t.id)} onAuxClick={(e) => e.button === 1 && closeBrowserTab(t.id)} title={t.url}>
+            <Icon name={t.loading ? "refresh" : t.agent ? "bot" : "globe"} size={12} />
             <span className="btab-title">{t.title || t.url}</span>
             <span className="btab-x" role="button" aria-label="Close tab" onClick={(e) => (e.stopPropagation(), closeBrowserTab(t.id))}><Icon name="x" size={11} /></span>
           </button>
@@ -150,14 +171,33 @@ export function BrowserDock() {
         <button type="button" className="icon-btn" title="Forward" onClick={() => nav("forward")}><Icon name="arrow-right" size={14} /></button>
         <button type="button" className="icon-btn" title="Reload" onClick={() => nav("reload")}><Icon name="refresh" size={14} /></button>
         <input value={address} onChange={(e) => setAddress(e.target.value)} onFocus={(e) => e.target.select()} spellCheck={false} aria-label="Address" placeholder="Search or enter address" />
-        {canImport && <button type="button" className={cx("icon-btn", importing && "active")} title="Import logins from another browser" onClick={() => setImporting((v) => !v)}><Icon name="download" size={14} /></button>}
+        {canImport && !current?.agent && <button type="button" className={cx("icon-btn", importing && "active")} title="Import logins from another browser" onClick={() => setImporting((v) => !v)}><Icon name="download" size={14} /></button>}
         <button type="button" className="icon-btn" title="Open in your browser" onClick={() => current && void openUrl(current.url)}><Icon name="external" size={14} /></button>
       </form>
       {unasked && browsers.length > 0 && <ImportOffer browsers={browsers} onAnswer={answerOffer} />}
-      {canImport && importing && <ImportLogins url={current?.url} onClose={() => setImporting(false)} onImported={() => nav("reload")} />}
-      <div className="bview" ref={view}>
+      {canImport && importing && !current?.agent && <ImportLogins url={current?.url} onClose={() => setImporting(false)} onImported={() => nav("reload")} />}
+      {current?.agent && <AgentBanner tabId={current.id} a={current.agent} level={config?.browser?.agents ?? "off"} />}
+      <div className={cx("bview", current?.agent && "agent")} ref={view}>
         {!inTauri && current && <iframe key={current.id} src={current.url} title={current.title} />}
       </div>
     </aside>
+  );
+}
+
+/** What an agent's tab is doing, and the person's controls over it. */
+function AgentBanner({ tabId, a, level }: { tabId: string; a: AgentTab; level: string }) {
+  const progress = a.goal ? `${a.goal} · ${a.done ?? 0} of ${a.steps ?? 0} steps` : level === "read_only" ? "Read-only: it can't sign in, click or type." : "No plan approved yet: it can only read.";
+  return (
+    <div className={cx("bagent", (a.paused || a.waiting) && "attention")} role="status">
+      <Icon name="bot" size={13} />
+      <span>
+        {a.paused ? <>You have this tab: {a.paused}.</> : a.waiting ? <>Waiting for you to watch, to {a.waiting}.</> : <>An agent is using this tab. {progress}</>}
+        {a.lent && <> · Your {a.lent} login is lent.</>}
+        {a.actions != null && <span className="sub"> {a.actions}/{a.maxActions} actions</span>}
+      </span>
+      {a.paused && <Button size="sm" variant="primary" type="button" onClick={() => handBack(tabId)}>Hand back</Button>}
+      <Button size="sm" type="button" title="Ends the agent's browsing in this chat: its plan, lent logins and tabs" onClick={() => stopAgent(a.sessionId)}>Stop</Button>
+      <Button size="sm" variant="ghost" type="button" onClick={() => closeBrowserTab(tabId)}>Close</Button>
+    </div>
   );
 }
