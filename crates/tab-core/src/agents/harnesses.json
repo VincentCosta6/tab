@@ -224,7 +224,7 @@
       "winget": null,
       "npm": "npm install -g @openai/codex@latest",
       "brew": "brew upgrade codex",
-      "native": null
+      "native": "codex update"
     },
     "instruction_files": ["AGENTS.md"],
     "bin_dirs": [

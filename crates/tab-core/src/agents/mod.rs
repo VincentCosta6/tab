@@ -3116,6 +3116,23 @@ Publisher: Anthropic PBC
     }
 
     #[test]
+    fn standalone_codex_updates_itself() {
+        // install.sh puts Codex in ~/.codex/packages/standalone; `codex update`
+        // knows how to refresh that (and any other install it recognises).
+        let cmd = |p| install_method(AgentKind::Codex, p).1;
+        assert_eq!(
+            cmd(
+                "/Users/v/.codex/packages/standalone/releases/0.154.0-aarch64-apple-darwin/bin/codex"
+            ),
+            "codex update"
+        );
+        assert_eq!(
+            cmd("/Users/v/.nvm/versions/node/v22/lib/node_modules/@openai/codex/bin/codex"),
+            "npm install -g @openai/codex@latest"
+        );
+    }
+
+    #[test]
     fn installer_colour_codes_are_dropped() {
         assert_eq!(
             crate::term::plain("\u{1b}[32mDone\u{1b}[0m in 3s".as_bytes()),
