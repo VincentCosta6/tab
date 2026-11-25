@@ -178,6 +178,16 @@ async fn run(
         .stderr(Stdio::piped());
     tracing::debug!(session = %session.id, harness = harness.name, resume = ?session.agent_session_id, sandboxed = prepared.enforced, "starting ACP turn");
     let sandboxed = prepared.enforced;
+    // Antigravity's auto mode puts each command in its own terminal sandbox,
+    // which can't start inside tab's (`sandbox_apply: Operation not
+    // permitted`), so every command would fail once and be retried outside
+    // it. tab's sandbox bounds the process, as for Codex; Antigravity still
+    // decides which commands to ask about.
+    let system = match kind {
+        AgentKind::Antigravity if sandboxed => format!("{system}{ANTIGRAVITY_SANDBOX}"),
+        _ => system.to_string(),
+    };
+    let system = system.as_str();
     let mut child = prepared.spawn().map_err(|e| {
         anyhow::anyhow!("starting {} ({}) failed: {e}", harness.name, exe.display())
     })?;
@@ -207,7 +217,24 @@ async fn run(
     events.allowed = vec!["tab".to_string()];
     let session_meta = claude.as_ref().map(|c| c.meta.clone());
     let claude_resume = claude.as_ref().map(|c| c.resume.clone());
-    let claude_mode = claude.as_ref().map(|c| c.mode.clone());
+    // The mode the session starts in: Claude Code's from its setup, other
+    // harnesses' in their own ids (a coordinator always asks, as there).
+    let start_mode = match &claude {
+        Some(c) => Some(c.mode.clone()),
+        None => {
+            let coordinator =
+                super::coordinator::project_of(hub.store.session_key(&session.id)?.as_deref())
+                    .is_some();
+            let mode = if coordinator {
+                "default"
+            } else {
+                cfg.permission_mode.as_str()
+            };
+            catalog::agent_mode(kind, mode)
+                .or_else(|| catalog::agent_mode(kind, "default"))
+                .map(str::to_string)
+        }
+    };
     let claude_system = claude.as_ref().map(|c| c.system.clone());
     let context_update = claude.as_ref().and_then(|c| c.context_update.clone());
     // Claude Code's chat comes from its own messages (`_claude/sdkMessage`).
@@ -335,7 +362,7 @@ async fn run(
                 id
             }
         };
-        if let Some(mode) = &claude_mode {
+        if let Some(mode) = &start_mode {
             set_mode(&conn, &acp_session, mode).await;
         }
         // Claude Code's conversation is the one tab named, which its own
@@ -736,8 +763,14 @@ async fn set_model(conn: &Conn, r: &Value, model: &str) {
     }
 }
 
-/// Starts the session in the chat's permission mode, which a loaded Claude
-/// Code conversation would otherwise take from its transcript.
+/// Added to Antigravity's instructions where tab's sandbox bounds it.
+const ANTIGRAVITY_SANDBOX: &str = "\n\nThis session already runs inside tab's sandbox, \
+which confines what commands can touch. Antigravity's own terminal sandbox can't start \
+inside it, so run commands with BypassSandbox set rather than trying the sandbox first.";
+
+/// Starts the session in the chat's permission mode, which a loaded
+/// conversation would otherwise take from its transcript (Claude Code) or
+/// the harness from its default (Antigravity asks before everything).
 async fn set_mode(conn: &Conn, session: &str, mode: &str) {
     if let Err(e) = conn
         .request_value(
@@ -951,7 +984,14 @@ where
                 Some(Steer::Mode(mode))
                     if events.kind == AgentKind::ClaudeCode
                         && !super::claude::MODES.contains(&mode.as_str()) => {}
+                // Other harnesses' modes go by their own ids.
+                Some(Steer::Mode(mode)) if events.kind != AgentKind::ClaudeCode
+                    && catalog::agent_mode(events.kind, &mode).is_none() => {}
                 Some(Steer::Mode(mode)) => {
+                    let mode = match events.kind {
+                        AgentKind::ClaudeCode => mode,
+                        k => catalog::agent_mode(k, &mode).unwrap_or_default().to_string(),
+                    };
                     // Switches at once, as Shift+Tab does in Claude Code.
                     let set = conn.request_value(
                         "session/set_mode",
@@ -1468,6 +1508,27 @@ impl Translator {
                     );
                 }
             }
+            // The agent's plan (Codex's, through codex-acp): shown as the
+            // chat's step list, like a `tab_steps` call.
+            acp::SessionUpdate::Plan(p) => {
+                self.flush();
+                let steps: Vec<Value> = p
+                    .entries
+                    .iter()
+                    .map(|e| json!({ "title": e.content, "status": e.status }))
+                    .collect();
+                self.hub.post(
+                    &sid,
+                    "assistant",
+                    "tool",
+                    "Plan",
+                    json!({
+                        "tool": "plan",
+                        "id": format!("plan-{}", uuid::Uuid::new_v4()),
+                        "input": { "steps": steps },
+                    }),
+                );
+            }
             acp::SessionUpdate::ToolCallUpdate(tu) => {
                 let id = tu.tool_call_id.0.to_string();
                 let f = &tu.fields;
@@ -1869,6 +1930,73 @@ mod tests {
             store.session_get(&s.id).unwrap().unwrap().status,
             SessionStatus::Idle
         );
+    }
+
+    #[tokio::test]
+    async fn an_agents_plan_is_the_chats_step_list() {
+        let (hub, store, s) = hub_and_session("tab-acp-test-plan");
+        let mut t = Translator::new(hub, s.id.clone(), AgentKind::Codex);
+        update(
+            &mut t,
+            json!({ "sessionUpdate": "plan", "entries": [
+                { "content": "Read the config", "priority": "high", "status": "completed" },
+                { "content": "Fix the bug", "priority": "medium", "status": "in_progress" },
+            ] }),
+        );
+        let m = store.messages(&s.id).unwrap();
+        assert_eq!(m[0].kind, "tool");
+        assert_eq!(m[0].meta["tool"], "plan");
+        assert_eq!(
+            m[0].meta["input"]["steps"],
+            json!([
+                { "title": "Read the config", "status": "completed" },
+                { "title": "Fix the bug", "status": "in_progress" },
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn antigravity_switches_modes_by_its_own_ids() {
+        let (hub, _store, s) = hub_and_session("tab-acp-test-agy-modes");
+        let (client_io, agent_io) = tokio::io::duplex(1 << 14);
+        let (cr, cw) = tokio::io::split(client_io);
+        let (conn, mut incoming) = Conn::start(cw, cr);
+        let (ar, mut aw) = tokio::io::split(agent_io);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // Claude Code's bypass isn't one of Antigravity's; acceptEdits is,
+        // under another name.
+        tx.send(Steer::Mode("bypassPermissions".into())).unwrap();
+        tx.send(Steer::Mode("acceptEdits".into())).unwrap();
+        let agent = tokio::spawn(async move {
+            let mut lines = BufReader::new(ar).lines();
+            let prompt: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            let mode: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(mode["method"], "session/set_mode");
+            assert_eq!(mode["params"]["modeId"], "accept-edits");
+            for id in [&mode["id"], &prompt["id"]] {
+                let r =
+                    json!({ "jsonrpc": "2.0", "id": id, "result": { "stopReason": "end_turn" } });
+                aw.write_all(format!("{r}\n").as_bytes()).await.unwrap();
+            }
+        });
+        let mut t = Translator::new(hub, s.id.clone(), AgentKind::Antigravity);
+        prompt_turn(
+            &conn,
+            &mut incoming,
+            &mut t,
+            &CancellationToken::new(),
+            conn.request(
+                "session/prompt",
+                acp::PromptRequest::new("s", vec![text_block("hi")]),
+            ),
+            Some((&mut rx, true)),
+            "s",
+        )
+        .await
+        .unwrap();
+        agent.await.unwrap();
     }
 
     #[tokio::test]

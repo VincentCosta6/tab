@@ -664,8 +664,8 @@ impl AgentHub {
         cfg
     }
 
-    /// Switches one chat's permission mode. A Claude Code turn under way
-    /// switches at once, as Shift+Tab does in its terminal; otherwise it
+    /// Switches one chat's permission mode. A turn under way switches at
+    /// once, as Shift+Tab does in Claude Code's terminal; otherwise it
     /// applies from the next message. Other chats keep theirs.
     pub fn set_session_mode(&self, session_id: &str, mode: &str) -> anyhow::Result<Session> {
         let session = self
@@ -675,7 +675,10 @@ impl AgentHub {
         // A coordinator always asks (see `claude::run_turn`).
         let coordinator =
             coordinator::project_of(self.store.session_key(session_id)?.as_deref()).is_some();
-        if session.agent == AgentKind::ClaudeCode
+        if !catalog::harness(session.agent)
+            .capabilities
+            .permission_modes
+            .is_empty()
             && !coordinator
             && let Some(tx) = self.steering.lock().unwrap().get(session_id)
         {

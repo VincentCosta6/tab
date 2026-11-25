@@ -262,7 +262,29 @@
     "pitch": "Google's coding agent. tab runs the Antigravity CLI over the Agent Client Protocol with your Google sign-in or Gemini API key.",
     "capabilities": {
       "strict": false,
-      "permission_modes": [],
+      "permission_modes": [
+        {
+          "value": "default",
+          "label": "Ask first",
+          "help": "Asks before edits and commands"
+        },
+        {
+          "value": "acceptEdits",
+          "agent_value": "accept-edits",
+          "label": "Accept edits",
+          "help": "Edits files freely, asks before commands"
+        },
+        {
+          "value": "auto",
+          "label": "Auto",
+          "help": "Antigravity runs edits and safe commands, and asks before anything irreversible"
+        },
+        {
+          "value": "plan",
+          "label": "Plan only",
+          "help": "Plans carefully before it changes anything"
+        }
+      ],
       "budget_cap": false
     },
     "model_hint": "e.g. gemini-3.8-flash-medium",
