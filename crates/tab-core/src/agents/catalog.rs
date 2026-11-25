@@ -231,7 +231,7 @@ pub struct ListModels {
     /// `claude_initialize`: the `models` of Claude Code's stream-json
     /// `initialize` answer. `codex_model_list`: the app server's
     /// `model/list` answer. `slug_label_lines`: one model per line, its id,
-    /// two spaces, then its name.
+    /// a tab or two spaces, then its name.
     pub format: String,
 }
 
@@ -478,12 +478,14 @@ pub fn options(h: &Harness, listed: &str) -> Vec<ModelOption> {
             })
             .collect(),
         // Antigravity's `agy models`, in its order: `gemini-3.8-flash-medium
-        // Gemini 3.8 Flash (Medium)`. Headers and notes aren't a lowercase
-        // id followed by a name.
+        // Gemini 3.8 Flash (Medium)` (tab-separated when stdout is piped,
+        // space-padded on a TTY). Headers and notes aren't a lowercase id
+        // followed by a name.
         Some("slug_label_lines") => listed
             .lines()
             .filter_map(|l| {
-                let (id, label) = l.trim().split_once("  ")?;
+                let line = l.trim();
+                let (id, label) = line.split_once('\t').or_else(|| line.split_once("  "))?;
                 let ok =
                     |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || "-._/".contains(c);
                 (!id.is_empty() && id.chars().all(ok)).then(|| opt(id, label.trim(), true))
@@ -789,6 +791,24 @@ mod tests {
             m,
             [
                 row("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
+                row("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
+                row("gemini-pro-orchestrator", "Orchestrator (Carbon)"),
+            ]
+        );
+    }
+
+    #[test]
+    fn antigravitys_models_parse_tab_separated_piped_output() {
+        let out = "Available models\n\ngemini-4-neon-high\tGemini 4 Neon (High)\ngemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\nNot a model\tIgnored\ngemini-pro-orchestrator\tOrchestrator (Carbon)\n";
+        let m: Vec<_> = options(harness(AgentKind::Antigravity), out)
+            .into_iter()
+            .map(|m| (m.id, m.label, m.common))
+            .collect();
+        let row = |id: &str, label: &str| (id.to_string(), label.to_string(), true);
+        assert_eq!(
+            m,
+            [
+                row("gemini-4-neon-high", "Gemini 4 Neon (High)"),
                 row("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
                 row("gemini-pro-orchestrator", "Orchestrator (Carbon)"),
             ]
