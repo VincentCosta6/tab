@@ -7,7 +7,7 @@
 //! (`account.proto`), the same types the Worker is built from:
 //!
 //! - `POST /v1/hub` sets up their personal hub (a Durable Object of their
-//!   own) and creates the account and trial. Idempotent: calling again
+//!   own) and creates the account (and, when the cloud charges, the trial). Idempotent: calling again
 //!   retries a failed setup and leaves a ready hub alone.
 //! - `GET /v1/hub` says where that is.
 //! - `GET /v1/hubs` lists every hub they belong to (personal, and teams').
