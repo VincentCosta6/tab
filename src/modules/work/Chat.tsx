@@ -327,8 +327,15 @@ interface Todo { content: string; status: string; activeForm?: string }
 
 const TODO_TOOLS = new Set(["TodoWrite", "todowrite"]);
 const TASK_TOOLS = new Set(["TaskCreate", "TaskUpdate"]);
-/** tab's own step tool (mcp__tab__tab_steps in Claude Code, tab_tab_steps in opencode). */
-const isStepsTool = (tool?: string) => !!tool && /(^|_)tab_steps$/.test(tool);
+/**
+ * Tools that send the whole step list as `steps: [{title, status}]`: tab's
+ * own (mcp__tab__tab_steps in Claude Code, tab_tab_steps in opencode),
+ * Antigravity's update_steps, and an ACP agent's plan (Codex), which tab
+ * records as a `plan` call.
+ */
+const isStepsTool = (tool?: string) => !!tool && (/(^|_)tab_steps$/.test(tool) || tool === "update_steps" || tool === "plan");
+/** A step's status in tab's words (Antigravity says "done"). */
+const stepStatus = (s: unknown) => (s === "done" ? "completed" : String(s ?? "pending"));
 /** Tools that only update the step list: shown in the step card, not as rows. */
 const isStepTool = (tool?: string) => !!tool && (isStepsTool(tool) || TODO_TOOLS.has(tool) || TASK_TOOLS.has(tool) || tool === "TaskList" || tool === "TaskGet");
 
@@ -342,22 +349,26 @@ const base = (p: unknown) => (typeof p === "string" ? p.split("/").filter(Boolea
 function describeTool(m: SessionMessage): string {
   const tool = toolName(m.meta?.tool ?? m.content);
   const input = m.meta?.input ?? {};
-  const desc = typeof input.description === "string" ? input.description.trim() : "";
+  // Antigravity says what a command is for in toolSummary.
+  const said = [input.description, input.toolSummary].find((d) => typeof d === "string" && d.trim());
+  const desc = typeof said === "string" ? said.trim() : "";
+  // Antigravity names paths Path / AbsolutePath / TargetFile.
+  const file = base(input.file_path ?? input.filePath ?? input.path ?? input.Path ?? input.AbsolutePath ?? input.TargetFile);
   switch (tool) {
     case "Bash":
     case "bash":
       return desc || "Running a command";
     case "Read":
     case "read":
-      return `Reading ${base(input.file_path ?? input.filePath) || "a file"}`;
+      return `Reading ${file || "a file"}`;
     case "Edit":
     case "edit":
     case "MultiEdit":
     case "NotebookEdit":
-      return `Editing ${base(input.file_path ?? input.filePath ?? input.notebook_path) || "a file"}`;
+      return `Editing ${file || base(input.notebook_path) || "a file"}`;
     case "Write":
     case "write":
-      return `Writing ${base(input.file_path ?? input.filePath) || "a file"}`;
+      return `Writing ${file || "a file"}`;
     case "Grep":
     case "grep":
     case "Glob":
@@ -375,6 +386,22 @@ function describeTool(m: SessionMessage): string {
       return desc ? `Delegating: ${desc}` : "Delegating to a helper agent";
     case "ToolSearch":
       return "Loading tools";
+    // An ACP agent's tool call with no name of its own (Codex), by its kind.
+    case "execute":
+      return desc || "Running a command";
+    case "delete":
+      return file ? `Deleting ${file}` : m.content || "Deleting a file";
+    case "move":
+      return m.content || "Moving a file";
+    case "search":
+      return "Searching the code";
+    case "fetch":
+      return "Reading a web page";
+    case "think":
+      return "Thinking it through";
+    case "tool":
+    case "other":
+      return desc || m.content || "Using a tool";
   }
   if (tool.startsWith("tab_")) {
     const what: Record<string, string> = {
@@ -391,6 +418,14 @@ function describeTool(m: SessionMessage): string {
     };
     return what[tool] ?? "Working in tab";
   }
+  // Antigravity's tools (run_command, view_file, grep_search, ...).
+  if (/command|shell|terminal/.test(tool)) return desc || "Running a command";
+  if (/^(read|view)_/.test(tool)) return `Reading ${file || "a file"}`;
+  if (/^(write|create)_/.test(tool)) return `Writing ${file || "a file"}`;
+  if (/^(edit|replace|multi_replace)_/.test(tool)) return `Editing ${file || "a file"}`;
+  if (/^list_dir|^find_by_name/.test(tool)) return "Looking through the folder";
+  if (/grep|search/.test(tool) && !/web/.test(tool)) return "Searching the code";
+  if (/web|url/.test(tool)) return "Reading a web page";
   return desc || tool.replace(/_/g, " ");
 }
 
@@ -416,7 +451,7 @@ function agentSteps(messages: SessionMessage[], results: Map<number, SessionMess
     const m = messages[i];
     if (m.kind === "tool" && isStepsTool(m.meta?.tool)) {
       const steps = m.meta?.input?.steps;
-      return Array.isArray(steps) ? steps.filter((t) => t && typeof t.title === "string").map((t) => ({ content: t.title, status: String(t.status ?? "pending") })) : [];
+      return Array.isArray(steps) ? steps.filter((t) => t && typeof t.title === "string").map((t) => ({ content: t.title, status: stepStatus(t.status) })) : [];
     }
     if (m.kind === "tool" && TODO_TOOLS.has(m.meta?.tool)) {
       const todos = m.meta?.input?.todos;

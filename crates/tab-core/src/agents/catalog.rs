@@ -210,6 +210,11 @@ pub struct Choice {
     pub label: String,
     #[serde(default)]
     pub help: Option<String>,
+    /// For a permission mode: the harness's own id for it, where that isn't
+    /// tab's (Antigravity's `accept-edits` is tab's `acceptEdits`), so one
+    /// setting means the same thing in every harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_value: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -329,6 +334,17 @@ pub fn harness(kind: AgentKind) -> &'static Harness {
         .iter()
         .find(|h| h.kind() == Some(kind))
         .expect("every AgentKind has an entry in harnesses.json")
+}
+
+/// The harness's own id for tab's permission mode `mode` (`auto`,
+/// `acceptEdits`, ...), if it offers that mode.
+pub fn agent_mode(kind: AgentKind, mode: &str) -> Option<&'static str> {
+    harness(kind)
+        .capabilities
+        .permission_modes
+        .iter()
+        .find(|m| m.value == mode)
+        .map(|m| m.agent_value.as_deref().unwrap_or(&m.value))
 }
 
 /// Where a harness's installers put it, for when PATH doesn't have it yet
@@ -729,6 +745,25 @@ mod tests {
                 row("claude-opus-4-8", "Opus 4.8", false),
             ]
         );
+    }
+
+    #[test]
+    fn permission_modes_go_by_the_harnesss_own_ids() {
+        assert_eq!(
+            agent_mode(AgentKind::ClaudeCode, "acceptEdits"),
+            Some("acceptEdits")
+        );
+        assert_eq!(
+            agent_mode(AgentKind::Antigravity, "acceptEdits"),
+            Some("accept-edits")
+        );
+        assert_eq!(agent_mode(AgentKind::Antigravity, "auto"), Some("auto"));
+        assert_eq!(
+            agent_mode(AgentKind::Antigravity, "bypassPermissions"),
+            None
+        );
+        // Codex's mode follows tab's sandbox instead (see `acp::launch`).
+        assert_eq!(agent_mode(AgentKind::Codex, "auto"), None);
     }
 
     #[test]
