@@ -1030,6 +1030,10 @@ const NEEDED: &[(&str, bool, bool)] = &[
         true,
         true,
     ),
+    // Antigravity CLI writes its own folder when it starts (an
+    // installation id, history), but not its settings.
+    (".gemini/antigravity-cli/installation_id", true, true),
+    (".gemini/antigravity-cli/settings.json", true, false),
     // The chat's attachments and its own session folder.
     (
         "Library/Application Support/tab/attachments/ab/shot.png",
@@ -1388,6 +1392,10 @@ fn harness_settings_are_never_writable() {
         ".claude/plugins/x/hooks.json",
         ".codex/config.toml",
         ".config/opencode/opencode.json",
+        ".gemini/antigravity-cli/settings.json",
+        ".gemini/config/mcp_config.json",
+        ".gemini/config/hooks.json",
+        ".gemini/GEMINI.md",
     ] {
         assert!(
             !chat.allows(&f.home.join(rel), Access::Write),
