@@ -706,6 +706,8 @@ const CONFINED_ROOTS: &[&str] = if cfg!(target_os = "linux") {
 const HARNESSES: &[&str] = &[
     ".codex",
     ".config/opencode",
+    // Antigravity CLI (and the Gemini tools it shares a folder with).
+    ".gemini",
     ".local/share/opencode",
     ".local/state/opencode",
     ".pi",
@@ -740,6 +742,15 @@ const HARNESS_SETTINGS: &[&str] = &[
     ".config/opencode/agent",
     ".config/opencode/command",
     ".pi/settings.json",
+    // Antigravity CLI: its settings (permissions too), and what every
+    // Antigravity tool shares: MCP servers, hooks, plugins, skills and
+    // global instructions.
+    ".gemini/antigravity-cli/settings.json",
+    ".gemini/antigravity-cli/skills",
+    ".gemini/config",
+    ".gemini/skills",
+    ".gemini/GEMINI.md",
+    ".gemini/settings.json",
 ];
 
 /// Toolchain folders that are also written to: installs a project asks
