@@ -117,7 +117,7 @@ function HubsSection() {
                 <CloudHubSetup />
               ) : (
                 <>
-                  <p className="subtle">Your own hub in tab cloud. Only your devices can reach it. Takes a few seconds and starts your 14-day free trial.</p>
+                  <p className="subtle">Your own hub in tab cloud. Only your devices can reach it. Takes a few seconds, and tab cloud is free for now.</p>
                   <Button size="sm" variant="primary" onClick={() => setSettingUp(true)}>Set up my private hub</Button>
                 </>
               ))}

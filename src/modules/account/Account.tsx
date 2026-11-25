@@ -242,14 +242,14 @@ export function CloudHubLine({ inUse = false }: { inUse?: boolean }) {
     if (error) return <span className="subtle">Couldn't check your private hub: {asFailure(error).message}</span>;
     if (status?.hub?.state === HubState.READY) return <span className="subtle">Your private hub is set up{whereIs(status.hub)}. {planNote(status.plan)}</span>;
     // Chosen as the hub: set it up straight away, the same as onboarding.
-    // Otherwise ask, since setting up starts the free trial.
+    // Otherwise ask first.
     if (inUse) return <CloudHubSetup />;
     return (
       <div className="cloud-setup">
         <Icon name="cloud" size={14} />
         <div>
           <strong>Your private hub isn't set up yet</strong>
-          <p className="subtle">It takes a few seconds and starts your 14-day free trial.</p>
+          <p className="subtle">It takes a few seconds, and tab cloud is free for now.</p>
           <div className="cloud-setup-actions">
             <Button size="sm" variant="primary" onClick={() => setSettingUp(true)}>Set up my private hub</Button>
           </div>
