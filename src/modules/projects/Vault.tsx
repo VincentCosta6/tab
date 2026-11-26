@@ -98,7 +98,7 @@ function SetUp({ busy, onCreate }: { busy: boolean; onCreate: () => void }) {
       <ul>
         <li>For what agents shouldn't read freely: your EIN, tax returns, bank and ID numbers.</li>
         <li>Encrypted on this device before it syncs. Other devices you add can open it; nobody else can, including tab.</li>
-        <li>Only the project's coordinator searches it, and values stay masked until you release them.</li>
+        <li>Only the project's coordinator searches it, and values stay masked until you release them. Numbers and passwords stay private from agents unless you choose otherwise.</li>
       </ul>
       <Button variant="primary" icon="lock" disabled={busy} onClick={onCreate}>Set up the vault</Button>
     </div>
@@ -207,7 +207,8 @@ function Entries({ project }: { project: Project }) {
               <button className="icon-btn" title="Delete" onClick={() => remove(e)}><Icon name="trash" size={13} /></button>
             </span>
           </span>
-          {e.fields.map((f) => <FieldRow key={f.label} projectId={project.id} entryId={e.id} label={f.label} masked={f.masked} />)}
+          {e.fields.map((f) => <FieldRow key={f.label} projectId={project.id} entryId={e.id} label={f.label} masked={f.masked} revealable={f.revealable} onChange={refresh} />)}
+          {e.file && <FileAgents projectId={project.id} entry={e} onChange={refresh} />}
           {e.note && <p className="vault-entry-note">{e.note}</p>}
         </div>
       ))}
@@ -216,8 +217,37 @@ function Entries({ project }: { project: Project }) {
   );
 }
 
-/** One field, masked; the eye shows it for 20 seconds (and is logged). */
-function FieldRow({ projectId, entryId, label, masked }: { projectId: string; entryId: string; label: string; masked: string }) {
+/** Turning on sharing with agents, after saying what that means. */
+async function setAgents(projectId: string, entryId: string, label: string | null, what: string, on: boolean, onChange: () => void) {
+  if (on && !confirm(`Let agents ask to see ${what}?\n\nEach time, you approve it on a card in the chat. Once you do, the agent sees it in full: it goes to the agent's model provider and stays in its own chat log on this computer.`)) return;
+  await api.vaultSetRevealable(projectId, entryId, label, on);
+  onChange();
+}
+
+function AgentsToggle({ on, onText, offText, title, onClick }: { on: boolean; onText: string; offText: string; title: string; onClick: () => void }) {
+  return (
+    <button className={cx("vault-agents", on && "on")} title={title} aria-pressed={on} onClick={onClick}>
+      <Icon name={on ? "bot" : "lock"} size={11} /> {on ? onText : offText}
+    </button>
+  );
+}
+
+/** Who may read a file's text: agents get its numbers masked unless the person allows the full text. */
+function FileAgents({ projectId, entry, onChange }: { projectId: string; entry: VaultEntry; onChange: () => void }) {
+  const on = !!entry.file_revealable;
+  return (
+    <div className="vault-field">
+      <span className="vault-field-label">Agents</span>
+      <span className="subtle">{on ? "Can ask for the full text" : "Can ask for the text, with numbers masked"}</span>
+      <span />
+      <span />
+      <AgentsToggle on={on} onText="Full text" offText="Numbers masked" title={on ? "Mask numbers for agents" : "Let agents ask for the full text"} onClick={() => setAgents(projectId, entry.id, null, `the full text of ${entry.title}, numbers included`, !on, onChange)} />
+    </div>
+  );
+}
+
+/** One field, masked; the eye shows it for 20 seconds (and is logged). The bot says whether agents may ask for it. */
+function FieldRow({ projectId, entryId, label, masked, revealable, onChange }: { projectId: string; entryId: string; label: string; masked: string; revealable: boolean; onChange: () => void }) {
   const [value, setValue] = useState<string | null>(null);
   useEffect(() => {
     if (value === null) return;
@@ -231,6 +261,7 @@ function FieldRow({ projectId, entryId, label, masked }: { projectId: string; en
       <code className={cx("vault-field-value", value !== null && "shown")}>{value ?? masked}</code>
       <button className="icon-btn" title={value === null ? "Show" : "Hide"} onClick={async () => setValue(value === null ? await get() : null)}><Icon name={value === null ? "eye" : "eye-off"} size={13} /></button>
       <button className="icon-btn" title="Copy" onClick={async () => navigator.clipboard.writeText(value ?? (await get()))}><Icon name="copy" size={13} /></button>
+      <AgentsToggle on={revealable} onText="Agents can ask" offText="Private" title={revealable ? "Agents can ask you for this. Click to keep it private" : "Agents never see this. Click to let them ask you for it"} onClick={() => setAgents(projectId, entryId, label, label, !revealable, onChange)} />
     </div>
   );
 }
@@ -323,7 +354,7 @@ function Devices({ st, busy, run }: { st: VaultStatus; busy: boolean; run: (f: (
 const actionLook: Record<string, string> = {
   create: "set up the vault", unlock: "unlocked", search: "searched", get: "read", reveal: "saw", request: "asked for",
   approve: "released", deny: "declined", add: "added", edit: "edited", delete: "deleted", device_ask: "asked to join",
-  device_approve: "let in a device", device_remove: "removed a device", rotate: "changed the vault key", recover: "used the recovery key", export: "saved a copy of",
+  share_on: "let agents ask for", share_off: "made private from agents", device_approve: "let in a device", device_remove: "removed a device", rotate: "changed the vault key", recover: "used the recovery key", export: "saved a copy of",
 };
 const actorLook: Record<VaultAudit["actor"], string> = { person: "You", coordinator: "Coordinator", thread: "A thread" };
 

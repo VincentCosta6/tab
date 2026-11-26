@@ -239,10 +239,13 @@ button.pjk-row:hover { background: var(--bg-hover); }
 .vault-entry-head .pjk-actions { margin-left: auto; }
 .vault-entry-head .subtle { font-size: var(--text-xs); }
 .vault-entry-note { margin: 2px 0 0; font-size: var(--text-sm); color: var(--fg-muted); }
-.vault-field { display: grid; grid-template-columns: 160px minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-2); font-size: var(--text-sm); padding-left: 21px; }
+.vault-field { display: grid; grid-template-columns: 160px minmax(0, 1fr) auto auto auto; align-items: center; gap: var(--space-2); font-size: var(--text-sm); padding-left: 21px; }
 .vault-field-label { color: var(--fg-muted); }
 .vault-field-value { font-family: var(--font-mono); color: var(--fg-subtle); }
 .vault-field-value.shown { color: var(--fg); }
+.vault-agents { display: inline-flex; align-items: center; gap: 4px; justify-self: end; justify-content: center; min-width: 124px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: none; color: var(--fg-subtle); font-size: var(--text-xs); cursor: pointer; white-space: nowrap; }
+.vault-agents:hover { color: var(--fg); }
+.vault-agents.on { color: var(--accent-solid); border-color: currentColor; }
 .vault-field-edit { display: grid; grid-template-columns: 1fr 1.4fr auto; gap: var(--space-2); align-items: center; margin-bottom: 6px; }
 .vault-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: var(--space-3); }
 .vault-box { display: grid; align-content: start; gap: 6px; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); }

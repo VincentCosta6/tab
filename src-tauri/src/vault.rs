@@ -110,6 +110,21 @@ pub async fn vault_entry_delete(
     vault(&state)?.delete(&project_id, &id).await.map_err(err)
 }
 
+/// Whether agents may be shown a field, or a file's full text (`label: None`).
+#[tauri::command]
+pub async fn vault_set_revealable(
+    state: State<'_, AppState>,
+    project_id: String,
+    id: String,
+    label: Option<String>,
+    on: bool,
+) -> CmdResult<Entry> {
+    vault(&state)?
+        .set_revealable(&project_id, &id, label.as_deref(), on)
+        .await
+        .map_err(err)
+}
+
 /// One field's value, for the eye button.
 #[tauri::command]
 pub async fn vault_reveal(

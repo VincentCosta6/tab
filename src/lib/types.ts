@@ -196,7 +196,8 @@ export interface VaultStatus {
   presence: string | null;
 }
 export interface VaultDevice { id: string; name: string; state: "pending" | "active" | "removed" | "none"; code: string; this: boolean; approved_by: string | null; created_at: string }
-export interface VaultField { label: string; masked: string; value?: string }
+/** `revealable`: whether the person lets agents be shown it (off for numbers and passwords unless they choose). */
+export interface VaultField { label: string; masked: string; revealable: boolean; value?: string }
 export interface VaultEntry {
   id: string;
   project_id: string;
@@ -205,6 +206,8 @@ export interface VaultEntry {
   note: string;
   fields: VaultField[];
   file?: { name: string; size: number };
+  /** Files only: whether agents may read the full text (otherwise its numbers are masked). */
+  file_revealable?: boolean;
   created_at: string;
   updated_at: string;
 }

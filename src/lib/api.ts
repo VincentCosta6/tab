@@ -158,6 +158,8 @@ export const api = {
   vaultEntrySave: (projectId: string, entry: VaultEntryInput) => call<VaultEntry>("vault_entry_save", { projectId, entry }),
   vaultEntryDelete: (projectId: string, id: string) => call<void>("vault_entry_delete", { projectId, id }),
   vaultReveal: (projectId: string, id: string, label: string) => call<string>("vault_reveal", { projectId, id, label }),
+  /** Whether agents may be shown a field, or a file's full text (`label: null`). */
+  vaultSetRevealable: (projectId: string, id: string, label: string | null, on: boolean) => call<VaultEntry>("vault_set_revealable", { projectId, id, label, on }),
   /** Seals a file on this device, then puts it in the hub. */
   vaultFileAdd: async (projectId: string, name: string, bytes: Uint8Array): Promise<VaultEntry> => {
     if (!inTauri) return mockApi.invoke<VaultEntry>("vault_file_add", { projectId, name, bytes });
