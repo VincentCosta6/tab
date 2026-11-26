@@ -124,6 +124,14 @@ pub enum Placement {
     Cloud,
     /// A computer if one takes it within `minutes`, then the cloud too.
     PreferComputer { minutes: u32 },
+    /// The cloud if it takes it within `minutes`, then computers too: how
+    /// a chat the person starts away from a computer runs unless they pick
+    /// (see [`crate::delegate`]).
+    PreferCloud { minutes: u32 },
+    /// Only the runner named in [`JobSpec::runner`], which the person
+    /// picked. Apps from before this variant can't read it, so they leave
+    /// the job alone.
+    Pinned,
 }
 
 /// The work a job asks for.
@@ -150,6 +158,30 @@ pub struct JobSpec {
     /// handed out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<Candidate>,
+    /// With [`Placement::Pinned`], the id of the one runner that may take
+    /// it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runner: String,
+    /// Set when the person started this as a chat of their own (from the
+    /// phone, say) rather than a workflow handing it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<ChatStart>,
+}
+
+/// A chat the person started on one device for a runner to run. The job
+/// ends when the chat's first turn does; after that the chat lives on the
+/// runner that took it, and the person carries on by steering it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChatStart {
+    /// The task the chat belongs to, when it has one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub item: String,
+    /// The chat's title.
+    #[serde(default)]
+    pub title: String,
+    /// The device it was started from.
+    #[serde(default)]
+    pub from: String,
 }
 
 impl JobSpec {
@@ -322,8 +354,10 @@ pub enum NotForYou {
     Taken,
     CloudNotAllowed,
     ComputersNotAllowed,
-    /// A computer still has first refusal.
+    /// A computer, or the cloud, still has first refusal.
     NotYet,
+    /// Pinned to another runner.
+    OtherRunner,
     NoHarness(String),
     NoRepo(String),
 }
@@ -358,9 +392,13 @@ impl Job {
                 return Err(NotForYou::ComputersNotAllowed);
             }
             (Placement::PreferComputer { minutes }, RunnerKind::Cloud)
+            | (Placement::PreferCloud { minutes }, RunnerKind::Computer)
                 if now < self.created_at + Duration::minutes(i64::from(minutes)) =>
             {
                 return Err(NotForYou::NotYet);
+            }
+            (Placement::Pinned, _) if self.spec.runner != runner.id => {
+                return Err(NotForYou::OtherRunner);
             }
             _ => {}
         }
@@ -461,6 +499,26 @@ impl Job {
             attempts: self.attempts,
             fallbacks: u.fallbacks,
         })
+    }
+
+    /// A job for a chat the person started, waiting for a runner. It has no
+    /// workflow run behind it.
+    pub fn chat(id: &str, spec: JobSpec, now: DateTime<Utc>) -> Job {
+        Job {
+            id: id.into(),
+            run_id: String::new(),
+            step_id: String::new(),
+            workflow_id: String::new(),
+            spec,
+            state: JobState::Waiting,
+            attempts: 0,
+            max_attempts: DEFAULT_JOB_ATTEMPTS,
+            created_at: now,
+            deadline: now + Duration::minutes(i64::from(DEFAULT_JOB_MINUTES)),
+            missing: Vec::new(),
+            claimed_at: None,
+            interventions: Vec::new(),
+        }
     }
 
     /// Whether the job has ended, one way or another.
@@ -595,6 +653,74 @@ mod tests {
         assert_eq!(j.can_take(&cloud(), false, t(9)), Err(NotForYou::NotYet));
         assert!(j.can_take(&laptop(), false, t(9)).is_ok());
         assert!(j.can_take(&cloud(), false, t(10)).is_ok());
+    }
+
+    #[test]
+    fn the_cloud_gets_first_refusal_when_preferred() {
+        let j = job(Placement::PreferCloud { minutes: 3 });
+        assert_eq!(j.can_take(&laptop(), false, t(2)), Err(NotForYou::NotYet));
+        assert!(j.can_take(&cloud(), false, t(2)).is_ok());
+        assert!(j.can_take(&laptop(), false, t(3)).is_ok());
+        // With no head start, it's anyone's.
+        let j = job(Placement::PreferCloud { minutes: 0 });
+        assert!(j.can_take(&laptop(), false, t(0)).is_ok());
+    }
+
+    #[test]
+    fn a_pinned_job_is_only_for_its_runner() {
+        let mut j = job(Placement::Pinned);
+        j.spec.runner = "laptop".into();
+        assert!(j.can_take(&laptop(), false, t(1)).is_ok());
+        assert_eq!(
+            j.can_take(&cloud(), false, t(1)),
+            Err(NotForYou::OtherRunner)
+        );
+        // Pinned still needs what the work needs.
+        let mut bare = laptop();
+        bare.repos.clear();
+        assert_eq!(
+            j.can_take(&bare, false, t(1)),
+            Err(NotForYou::NoRepo("acme/api".into()))
+        );
+    }
+
+    #[test]
+    fn apps_from_before_chat_jobs_skip_them_rather_than_misread_them() {
+        // An older app's Placement has no `pinned` or `prefer_cloud`, so
+        // the whole job fails to parse and its job list leaves it out.
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        #[allow(dead_code)]
+        enum Old {
+            Anywhere,
+            Computers,
+            Cloud,
+            PreferComputer { minutes: u32 },
+        }
+        for p in [Placement::Pinned, Placement::PreferCloud { minutes: 3 }] {
+            let json = serde_json::to_value(p).unwrap();
+            assert!(serde_json::from_value::<Old>(json).is_err());
+        }
+    }
+
+    #[test]
+    fn a_chat_job_has_no_workflow_and_round_trips() {
+        let spec = JobSpec {
+            prompt: "Look at the flaky test".into(),
+            placement: Placement::PreferCloud { minutes: 3 },
+            chat: Some(ChatStart {
+                item: "task-1".into(),
+                title: "Flaky test".into(),
+                from: "phone".into(),
+            }),
+            ..Default::default()
+        };
+        let j = Job::chat("j9", spec, t(0));
+        assert!(j.run_id.is_empty() && j.workflow_id.is_empty());
+        assert_eq!(j.state, JobState::Waiting);
+        assert_eq!(j.deadline, t(i64::from(DEFAULT_JOB_MINUTES)));
+        let back: Job = serde_json::from_str(&serde_json::to_string(&j).unwrap()).unwrap();
+        assert_eq!(back, j);
     }
 
     #[test]

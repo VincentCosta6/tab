@@ -11,6 +11,7 @@
 //! - [`decision`]: questions for decision models and their typed answers.
 //! - [`links`]: recognizing links agents create or mention.
 //! - [`runner`]: runners, jobs, and the leases that decide who does what.
+//! - [`delegate`]: which runner a chat started away from a computer runs on.
 //!
 //! Every place a hub runs uses this crate: the desktop engine (`tab-core`),
 //! the hub library (`tab-hub`), and later the Cloudflare Worker. So nothing
@@ -21,6 +22,7 @@ pub mod autofix;
 pub mod blob;
 pub mod cli;
 pub mod decision;
+pub mod delegate;
 pub mod families;
 pub mod lease;
 pub mod links;

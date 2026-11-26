@@ -63,8 +63,9 @@ pub trait Agents: Send + Sync + 'static {
     fn harnesses(&self) -> futures_util::future::BoxFuture<'_, Vec<AgentKind>>;
     /// The folder to work in when the job names no repo.
     fn default_folder(&self) -> String;
-    /// Starts a chat keyed `key` with `kind` in `cwd` and sends it `prompt`.
-    /// Returns the chat's id.
+    /// Starts a chat keyed `key` with `kind` in `cwd`, on task `item` if
+    /// given, and sends it `prompt`. Returns the chat's id.
+    #[allow(clippy::too_many_arguments)]
     fn start(
         &self,
         key: &str,
@@ -73,6 +74,7 @@ pub trait Agents: Send + Sync + 'static {
         title: &str,
         cwd: &str,
         prompt: &str,
+        item: Option<&str>,
     ) -> anyhow::Result<String>;
     /// Stops a chat's agent.
     fn stop(&self, session: &str);
@@ -104,6 +106,7 @@ impl Agents for Arc<AgentHub> {
         title: &str,
         cwd: &str,
         prompt: &str,
+        item: Option<&str>,
     ) -> anyhow::Result<String> {
         let store = &self.store;
         let session = match store.session_for_key(key)? {
@@ -112,7 +115,17 @@ impl Agents for Arc<AgentHub> {
                 let kind = kind
                     .or(self.config().kind)
                     .ok_or_else(|| anyhow::anyhow!("no agent is set up on this runner"))?;
-                let s = store.session_create_keyed(key, kind, title, cwd, Utc::now())?;
+                let mut s = store.session_create_keyed(key, kind, title, cwd, Utc::now())?;
+                // The task may not have synced here yet; the chat still runs.
+                if let Some(item) = item {
+                    match store.session_set_item(&s.id, item) {
+                        Ok(Some(with)) => s = with,
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, "couldn't put a job's chat on its task")
+                        }
+                    }
+                }
                 // Empty: the harness's setting on this runner, set on send.
                 if model.trim().is_empty() {
                     s
@@ -396,7 +409,11 @@ impl JobRunner {
         // has, or its default.
         let plan = job.spec.plan(&self.caps(Utc::now()).await.harnesses);
         let mut at = 0;
-        let title = format!("Workflow job: {}", first_line(&job.spec.prompt));
+        let title = match &job.spec.chat {
+            Some(c) if !c.title.trim().is_empty() => c.title.clone(),
+            Some(_) => first_line(&job.spec.prompt),
+            None => format!("Workflow job: {}", first_line(&job.spec.prompt)),
+        };
         let prompt = match self.kind {
             RunnerKind::Computer => job.spec.prompt.clone(),
             RunnerKind::Cloud => format!("{}{CLOUD_NOTE}", job.spec.prompt),
@@ -600,12 +617,28 @@ impl JobRunner {
         cwd: &str,
         prompt: &str,
     ) -> anyhow::Result<String> {
+        // A chat the person started is theirs (`chat:`), with the trust a
+        // chat they start at the keyboard gets; a workflow's job runs on
+        // text nobody checked (`job:`, the review policy). A cloud runner
+        // gives every chat the review policy either way.
+        let prefix = if job.spec.chat.is_some() {
+            "chat"
+        } else {
+            "job"
+        };
         let key = match n {
-            0 => format!("job:{}", job.id),
-            n => format!("job:{}:{n}", job.id),
+            0 => format!("{prefix}:{}", job.id),
+            n => format!("{prefix}:{}:{n}", job.id),
         };
         let kind = (!c.harness.is_empty()).then(|| AgentKind::parse(&c.harness));
-        self.agents.start(&key, kind, &c.model, title, cwd, prompt)
+        let item = job
+            .spec
+            .chat
+            .as_ref()
+            .map(|c| c.item.as_str())
+            .filter(|i| !i.is_empty());
+        self.agents
+            .start(&key, kind, &c.model, title, cwd, prompt, item)
     }
 
     /// Notes the chat on the job, so the person can open it.
@@ -957,6 +990,7 @@ mod tests {
             title: &str,
             cwd: &str,
             prompt: &str,
+            item: Option<&str>,
         ) -> anyhow::Result<String> {
             self.1.lock().unwrap().push(prompt.to_string());
             let s = self.0.session_create_keyed(
@@ -966,6 +1000,9 @@ mod tests {
                 cwd,
                 Utc::now(),
             )?;
+            if let Some(item) = item {
+                self.0.session_set_item(&s.id, item)?;
+            }
             self.0.message_add(
                 &s.id,
                 "assistant",
@@ -1040,6 +1077,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_chat_the_person_started_runs_as_their_chat_on_its_task() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let crate::store::Upsert::Inserted(task) = store
+            .upsert(
+                &crate::model::IncomingEvent {
+                    source: "tab".into(),
+                    external_id: "t1".into(),
+                    kind: "tab.task".into(),
+                    title: "Flaky test".into(),
+                    occurred_at: Utc::now(),
+                    ..Default::default()
+                },
+                Utc::now(),
+            )
+            .unwrap()
+        else {
+            panic!("not inserted")
+        };
+        let spec = JobSpec {
+            prompt: "Look at the flaky test".into(),
+            placement: Placement::PreferCloud { minutes: 0 },
+            chat: Some(tab_domain::runner::ChatStart {
+                item: task.id.clone(),
+                title: "Flaky test".into(),
+                from: "phone".into(),
+            }),
+            ..Default::default()
+        };
+        store
+            .job_put(&Job::chat("c1", spec, Utc::now()), Utc::now())
+            .unwrap();
+        let agents = Arc::new(Instant(store.clone(), Mutex::new(vec![])));
+        let runner = JobRunner::new(
+            store.clone(),
+            agents,
+            InMemory::new("laptop"),
+            RunnerKind::Computer,
+            "Laptop",
+        );
+        runner.take(Utc::now()).await;
+        let s = store.clone();
+        until(move || s.job_get("c1").unwrap().unwrap().finished()).await;
+        assert!(matches!(
+            store.job_get("c1").unwrap().unwrap().state,
+            JobState::Done { .. }
+        ));
+        // Keyed as the person's chat (not `job:`, which gets the review
+        // policy), titled as they named it, and on its task.
+        let chat = store.session_for_key("chat:c1").unwrap().unwrap();
+        assert_eq!(chat.title, "Flaky test");
+        assert_eq!(chat.item_id.as_deref(), Some(task.id.as_str()));
+        assert!(store.session_for_key("job:c1").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pinned_chat_is_left_to_its_runner() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let spec = JobSpec {
+            prompt: "Hi".into(),
+            placement: Placement::Pinned,
+            runner: "desk".into(),
+            chat: Some(Default::default()),
+            ..Default::default()
+        };
+        store
+            .job_put(&Job::chat("c2", spec, Utc::now()), Utc::now())
+            .unwrap();
+        let runner = JobRunner::new(
+            store.clone(),
+            Arc::new(Instant(store.clone(), Mutex::new(vec![]))),
+            InMemory::new("laptop"),
+            RunnerKind::Computer,
+            "Laptop",
+        );
+        runner.take(Utc::now()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            store.job_get("c2").unwrap().unwrap().state,
+            JobState::Waiting
+        );
+    }
+
+    #[tokio::test]
     async fn a_computer_takes_a_job_runs_it_and_writes_what_came_of_it() {
         let store = Arc::new(Store::in_memory().unwrap());
         store
@@ -1105,6 +1225,7 @@ mod tests {
             title: &str,
             cwd: &str,
             prompt: &str,
+            _item: Option<&str>,
         ) -> anyhow::Result<String> {
             let store = self.0.clone();
             let s = store.session_create_keyed(
@@ -1235,6 +1356,7 @@ mod tests {
             title: &str,
             cwd: &str,
             _prompt: &str,
+            _item: Option<&str>,
         ) -> anyhow::Result<String> {
             let kind = kind.unwrap_or(AgentKind::ClaudeCode);
             self.2
