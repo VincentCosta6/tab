@@ -110,6 +110,14 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 .row { position: relative; display: grid; grid-template-columns: auto 1fr; gap: var(--space-3); align-items: start; padding: 10px var(--space-4); cursor: pointer; border-left: 2px solid transparent; }
 .row:hover { background: var(--bg-hover); }
 .row.selected { background: var(--bg-selected); border-left-color: var(--focus); }
+/* Actively working/monitoring and doesn't need you yet: fade back so items
+   needing your attention stand out; hover actions and menus stay solid. */
+.row.row-quiet > .row-glyph,
+.row.row-quiet > .row-main { opacity: 0.48; transition: opacity 0.15s ease; }
+.row.row-quiet:hover > .row-glyph,
+.row.row-quiet:hover > .row-main { opacity: 0.85; }
+.row.row-quiet.selected > .row-glyph,
+.row.row-quiet.selected > .row-main { opacity: 0.72; }
 .row-main { min-width: 0; display: grid; gap: 2px; }
 .row-title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Title and time, then one muted line (project, byline, snippet), then the

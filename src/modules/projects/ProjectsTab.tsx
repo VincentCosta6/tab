@@ -385,7 +385,7 @@ function ProjectQueue({ project, items, focus, onFocus, onPin, pinned, full }: {
           </button>
           {(g.id !== "done" || showDone) &&
             g.items.map(({ item, status }) => (
-              <QueueRow key={item.id} item={item} agent={activity.get(item.id)} status={status} selected={item.id === selected} onSelect={() => onFocus({ kind: "item", id: item.id })} compact={!full} />
+              <QueueRow key={item.id} item={item} agent={activity.get(item.id)} status={status} quiet={g.id === "working"} selected={item.id === selected} onSelect={() => onFocus({ kind: "item", id: item.id })} compact={!full} />
             ))}
         </div>
       ))}

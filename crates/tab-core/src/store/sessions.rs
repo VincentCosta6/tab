@@ -240,6 +240,34 @@ impl Store {
         Ok(rows)
     }
 
+    /// The current chat of every non-done item that has one, ordered like
+    /// [`Self::session_for_item`] (last opened wins). Avoids dropping older
+    /// open tasks behind a recent-session cap.
+    pub fn sessions_for_active_items(&self) -> anyhow::Result<Vec<Session>> {
+        let conn = self.conn();
+        let cols = COLS
+            .split(", ")
+            .map(|c| format!("s.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT {cols}
+             FROM sessions s
+             JOIN items i ON i.id = s.item_id
+             WHERE i.state != 'done'
+             ORDER BY COALESCE(s.opened_at, s.created_at) DESC, s.created_at DESC"
+        );
+        let all: Vec<Session> = conn
+            .prepare(&sql)?
+            .query_map([], row_to_session)?
+            .collect::<Result<_, _>>()?;
+        let mut seen = std::collections::HashSet::new();
+        Ok(all
+            .into_iter()
+            .filter(|s| s.item_id.as_ref().is_some_and(|id| seen.insert(id.clone())))
+            .collect())
+    }
+
     pub fn session_update(
         &self,
         id: &str,
@@ -625,5 +653,46 @@ mod several_chats {
         s.session_open(&newer.id, t0 + Duration::seconds(4))
             .unwrap();
         assert_eq!(s.session_for_item(&item.id).unwrap().unwrap().id, newer.id);
+    }
+
+    #[test]
+    fn sessions_for_active_items_returns_current_chat_and_skips_done() {
+        let s = Store::in_memory().unwrap();
+        let t0 = Utc::now();
+        let Upsert::Inserted(open) = s.upsert(&ev("1", "Open task"), t0).unwrap() else {
+            panic!()
+        };
+        let Upsert::Inserted(done) = s.upsert(&ev("2", "Done task"), t0).unwrap() else {
+            panic!()
+        };
+        let first = s
+            .session_create(Some(&open.id), AgentKind::ClaudeCode, "Open", "/w", t0)
+            .unwrap();
+        let second = s
+            .session_create(
+                Some(&open.id),
+                AgentKind::ClaudeCode,
+                "Open",
+                "/w",
+                t0 + Duration::seconds(2),
+            )
+            .unwrap();
+        s.session_create(Some(&done.id), AgentKind::ClaudeCode, "Done", "/w", t0)
+            .unwrap();
+        s.session_create(None, AgentKind::ClaudeCode, "Keyed", "/w", t0)
+            .unwrap();
+        s.set_state(&done.id, crate::model::ItemState::Done, None, t0)
+            .unwrap();
+
+        let active = s.sessions_for_active_items().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, second.id);
+
+        // Resuming the earlier chat makes it the active one reported for the item.
+        s.session_open(&first.id, t0 + Duration::seconds(5))
+            .unwrap();
+        let active = s.sessions_for_active_items().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, first.id);
     }
 }

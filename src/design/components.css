@@ -55,6 +55,7 @@
   color: var(--bg-raised); background: var(--u);
 }
 .score-pill.pending { background: var(--bg-sunken); color: var(--fg-subtle); }
+.urgency-in_progress { --u: var(--urgency-in_progress); }
 .urgency-now { --u: var(--urgency-now); }
 .urgency-today { --u: var(--urgency-today); }
 .urgency-this_week { --u: var(--urgency-this_week); }

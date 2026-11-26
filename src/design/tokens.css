@@ -57,6 +57,7 @@
   --tone-danger-fg: #c2261d;
   --tone-danger-bg: #fde9e7;
 
+  --urgency-in_progress: var(--tone-accent-fg);
   --urgency-now: var(--tone-danger-fg);
   --urgency-today: var(--tone-warning-fg);
   --urgency-this_week: var(--tone-info-fg);

@@ -1366,6 +1366,7 @@ function post(session: Session, role: SessionMessage["role"], kind: SessionMessa
 
 function status(session: Session, s: Session["status"]) {
   session.status = s;
+  session.updated_at = new Date().toISOString();
   session.agent_session_id = session.agent_session_id ?? "4f1c-mock";
   emit({ type: "session_changed", session: { ...session } });
 }
