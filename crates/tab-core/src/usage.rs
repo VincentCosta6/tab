@@ -20,7 +20,9 @@ pub fn billing_from_init(v: &Value) -> &'static str {
 pub fn record_rate_limit(store: &Store, info: &Value) {
     let now = Utc::now();
     let window = |name: &str, w: &Value| PlanWindow {
+        agent: "claude_code".into(),
         window: name.to_string(),
+        label: None,
         utilization: w["utilization"].as_f64(),
         resets_at: w["resetsAt"]
             .as_i64()
@@ -79,14 +81,18 @@ pub fn record_claude_result(
     }
 }
 
-/// Highest utilization across the plan's windows, refreshed in the last 6 hours.
+/// Highest utilization across Claude Code's plan windows, refreshed in the last 6 hours.
 pub fn plan_peak(store: &Store) -> Option<f64> {
     let fresh = Utc::now() - chrono::Duration::hours(6);
     store
         .plan_windows()
         .ok()?
         .into_iter()
-        .filter(|w| w.updated_at > fresh && w.resets_at.is_none_or(|r| r > Utc::now()))
+        .filter(|w| {
+            w.agent == "claude_code"
+                && w.updated_at > fresh
+                && w.resets_at.is_none_or(|r| r > Utc::now())
+        })
         .filter_map(|w| w.utilization)
         .reduce(f64::max)
 }
@@ -139,7 +145,9 @@ pub fn plan_share(
         .iter()
         .filter(|a| a.updated_at >= since)
         .filter_map(|a| {
-            let b = before.iter().find(|b| b.window == a.window)?;
+            let b = before
+                .iter()
+                .find(|b| b.agent == a.agent && b.window == a.window)?;
             if b.resets_at != a.resets_at {
                 return None;
             }
@@ -208,7 +216,9 @@ mod tests {
         let start = Utc::now() - Duration::minutes(30);
         let resets = Some(start + Duration::hours(4));
         let w = |name: &str, u: f64, at, resets_at| PlanWindow {
+            agent: "claude_code".into(),
             window: name.into(),
+            label: None,
             utilization: Some(u),
             resets_at,
             status: "allowed".into(),

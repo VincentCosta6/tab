@@ -3853,6 +3853,19 @@ pub fn run() {
                 lsp: Arc::new(LspHub::new()),
                 data_dir: data_dir.clone(),
             };
+            // Poll installed harnesses for their plan usage limits shortly
+            // after launch and every five minutes, so Antigravity, Codex and
+            // Claude Code limits stay current even between turns.
+            {
+                let hub = hub.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    loop {
+                        hub.refresh_usage_limits().await;
+                        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                    }
+                });
+            }
             // Clean out old attachments, chat folders and review checkouts:
             // shortly after launch, then every few hours.
             {

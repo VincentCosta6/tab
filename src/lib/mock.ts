@@ -960,15 +960,22 @@ export const mockApi = {
         case "deps_types": return [];
         case "gh_status": return gh;
         case "usage_summary": {
+          const in2h = new Date(Date.now() + 2 * 3600_000).toISOString();
           const in3h = new Date(Date.now() + 3 * 3600_000).toISOString();
+          const in13h = new Date(Date.now() + 13 * 3600_000).toISOString();
           const in4d = new Date(Date.now() + 4 * 86400_000).toISOString();
           const now = new Date().toISOString();
           return {
             today_usd: 3.42, month_usd: 41.8, today_agent_usd: 3.31, today_ranker_usd: 0.11, today_turns: 14, today_tokens: 912_000,
             billing: "subscription",
             windows: [
-              { window: "five_hour", utilization: 0.34, resets_at: in3h, status: "allowed", updated_at: now },
-              { window: "seven_day", utilization: 0.82, resets_at: in4d, status: "allowed_warning", updated_at: now },
+              { agent: "claude_code", window: "five_hour", utilization: 0.34, resets_at: in3h, status: "allowed", updated_at: now },
+              { agent: "claude_code", window: "seven_day", utilization: 0.82, resets_at: in4d, status: "allowed_warning", updated_at: now },
+              { agent: "antigravity", window: "gemini-5h", label: "Gemini Models · 5h", utilization: 0.57, resets_at: in3h, status: "allowed", updated_at: now },
+              { agent: "antigravity", window: "gemini-weekly", label: "Gemini Models · Weekly", utilization: 0.15, resets_at: in4d, status: "allowed", updated_at: now },
+              { agent: "antigravity", window: "3p-5h", label: "Claude and GPT models · 5h", utilization: 0, resets_at: in2h, status: "allowed", updated_at: now },
+              { agent: "codex", window: "five_hour", label: "5-hour window", utilization: 0.13, resets_at: in2h, status: "allowed", updated_at: now },
+              { agent: "codex", window: "seven_day", label: "Weekly", utilization: 0.2, resets_at: in13h, status: "allowed", updated_at: now },
             ],
           };
         }

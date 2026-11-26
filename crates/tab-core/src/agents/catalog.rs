@@ -9,12 +9,15 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[cfg(test)]
 use super::default_command;
 use super::{AgentHub, command};
 use crate::model::AgentKind;
+use crate::store::PlanWindow;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Harness {
@@ -37,6 +40,9 @@ pub struct Harness {
     pub small_model: Option<String>,
     /// How to ask it which models it offers.
     pub list_models: Option<ListModels>,
+    /// How to ask it for its current plan usage limits without running a turn.
+    #[serde(default)]
+    pub usage_limits: Option<ListModels>,
     /// Its model in each built-in model family (`fast`, `balanced`,
     /// `deep`), which seeds those families. Where the harness has aliases
     /// that follow its releases (Claude Code's `haiku`), those.
@@ -526,29 +532,34 @@ fn family_version(id: &str) -> (&str, Vec<u64>) {
 }
 
 /// For a protocol listing, the line that answers tab's request.
-fn answer(listed: &str, format: Option<&str>) -> Option<serde_json::Value> {
+fn answer(listed: &str, format: Option<&str>) -> Option<Value> {
     listed
         .lines()
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .find(|v| match format {
             Some("claude_initialize") => {
                 v["type"] == "control_response" && v["response"]["request_id"] == "tab_models"
             }
-            Some("codex_model_list") => v["id"] == 2,
+            Some("claude_usage") => {
+                v["type"] == "control_response" && v["response"]["request_id"] == "tab_usage"
+            }
+            Some("codex_model_list" | "codex_rate_limits") => v["id"] == 2,
             _ => false,
         })
 }
 
-async fn list_output(h: &Harness, exe: &Path) -> String {
+async fn run_probe(h: &Harness, exe: &Path, spec: &ListModels, label: &str) -> String {
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    let Some(list) = &h.list_models else {
-        return String::new();
-    };
-    if list.stdin.is_empty() {
+    let dir = std::env::temp_dir();
+    if spec.stdin.is_empty() {
         let out = tokio::time::timeout(
             Duration::from_secs(20),
-            command(exe).args(&list.args).output(),
+            command(exe)
+                .args(&spec.args)
+                .current_dir(&dir)
+                .stdin(Stdio::null())
+                .output(),
         )
         .await;
         return match out {
@@ -558,21 +569,24 @@ async fn list_output(h: &Harness, exe: &Path) -> String {
     }
     // A protocol: send the requests, keep stdin open (closing it can end
     // the process before it answers), read until the answer, then stop it.
-    let format = Some(list.format.as_str());
+    let format = Some(spec.format.as_str());
     let run = async {
         let mut child = command(exe)
-            .args(&list.args)
+            .args(&spec.args)
+            .current_dir(&dir)
+            .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .ok()?;
         let mut stdin = child.stdin.take()?;
-        let input: String = list.stdin.iter().map(|l| format!("{l}\n")).collect();
+        let input: String = spec.stdin.iter().map(|l| format!("{l}\n")).collect();
         stdin.write_all(input.as_bytes()).await.ok()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if answer(&line, format).is_some() {
+                let _ = child.kill().await;
                 return Some(line);
             }
         }
@@ -581,9 +595,232 @@ async fn list_output(h: &Harness, exe: &Path) -> String {
     match tokio::time::timeout(Duration::from_secs(30), run).await {
         Ok(Some(line)) => line,
         _ => {
-            tracing::warn!(harness = %h.id, "couldn't list the harness's models");
+            tracing::debug!(harness = %h.id, what = label, "harness probe didn't answer");
             String::new()
         }
+    }
+}
+
+async fn list_output(h: &Harness, exe: &Path) -> String {
+    let Some(list) = &h.list_models else {
+        return String::new();
+    };
+    run_probe(h, exe, list, "models").await
+}
+
+fn limit_status(utilization: f64) -> String {
+    if utilization >= 1.0 {
+        "rejected".into()
+    } else if utilization >= 0.75 {
+        "allowed_warning".into()
+    } else {
+        "allowed".into()
+    }
+}
+
+fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
+}
+
+fn codex_window_name(mins: Option<i64>, slot: &str) -> (String, String) {
+    match mins {
+        Some(300) => ("five_hour".into(), "5-hour window".into()),
+        Some(10080) => ("seven_day".into(), "Weekly".into()),
+        Some(m) if m > 0 && m % 1440 == 0 => {
+            let d = m / 1440;
+            (format!("{d}d"), format!("{d}-day window"))
+        }
+        Some(m) if m > 0 && m % 60 == 0 => {
+            let h = m / 60;
+            (format!("{h}h"), format!("{h}-hour window"))
+        }
+        Some(m) if m > 0 => (format!("{m}m"), format!("{m}-minute window")),
+        _ => (slot.into(), slot.into()),
+    }
+}
+
+/// Parses a harness's usage limits probe output into stored `PlanWindow`s.
+/// Returns `None` when the output couldn't be parsed or rate limits aren't
+/// available (e.g. API key login), so existing windows aren't wiped on error.
+pub fn parse_usage_limits(h: &Harness, raw: &str, now: DateTime<Utc>) -> Option<Vec<PlanWindow>> {
+    let format = h.usage_limits.as_ref()?.format.as_str();
+    match format {
+        "antigravity_usage" => {
+            let v: Value = serde_json::from_str(raw.trim()).or_else(|_| {
+                raw.lines()
+                    .rev()
+                    .find_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+                    .ok_or(())
+            }).ok()?;
+            if v["status"].as_str() != Some("SUCCESS") && v["command"]["name"].as_str() != Some("usage") {
+                return None;
+            }
+            let groups = v["command"]["data"]["groups"].as_array()?;
+            let mut out = Vec::new();
+            for group in groups {
+                let gname = group["name"].as_str().unwrap_or("").trim();
+                for bucket in group["buckets"].as_array().into_iter().flatten() {
+                    let Some(rem) = bucket["remaining_fraction"].as_f64() else {
+                        continue;
+                    };
+                    let utilization = (1.0 - rem).clamp(0.0, 1.0);
+                    let win_kind = bucket["window"].as_str().unwrap_or("");
+                    let window = bucket["id"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("{gname}:{win_kind}"));
+                    let win_short = match win_kind {
+                        "5h" => "5h",
+                        "weekly" => "Weekly",
+                        other if !other.is_empty() => other,
+                        _ => bucket["name"].as_str().unwrap_or("Limit"),
+                    };
+                    let label = if gname.is_empty() {
+                        Some(win_short.to_string())
+                    } else {
+                        Some(format!("{gname} · {win_short}"))
+                    };
+                    let resets_at = bucket["reset_time"].as_str().and_then(parse_rfc3339);
+                    out.push(PlanWindow {
+                        agent: h.id.clone(),
+                        window,
+                        label,
+                        utilization: Some(utilization),
+                        resets_at,
+                        status: limit_status(utilization),
+                        updated_at: now,
+                    });
+                }
+            }
+            Some(out)
+        }
+        "codex_rate_limits" => {
+            let v = answer(raw, Some(format))?;
+            let result = v.get("result")?;
+            let mut entries: Vec<(String, &Value)> = Vec::new();
+            if let Some(map) = result["rateLimitsByLimitId"].as_object()
+                && !map.is_empty()
+            {
+                for (k, val) in map {
+                    entries.push((k.clone(), val));
+                }
+            } else if result["rateLimits"].is_object() {
+                let id = result["rateLimits"]["limitId"]
+                    .as_str()
+                    .unwrap_or("codex")
+                    .to_string();
+                entries.push((id, &result["rateLimits"]));
+            } else {
+                return None;
+            }
+            let multi = entries.len() > 1;
+            let mut out = Vec::new();
+            for (limit_id, entry) in entries {
+                let limit_name = entry["limitName"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                for slot in ["primary", "secondary"] {
+                    let Some(obj) = entry.get(slot).and_then(Value::as_object) else {
+                        continue;
+                    };
+                    let Some(pct) = obj.get("usedPercent").and_then(Value::as_f64) else {
+                        continue;
+                    };
+                    let utilization = (pct / 100.0).clamp(0.0, 1.0);
+                    let resets_at = obj
+                        .get("resetsAt")
+                        .and_then(Value::as_i64)
+                        .and_then(|s| Utc.timestamp_opt(s, 0).single());
+                    let mins = obj.get("windowDurationMins").and_then(Value::as_i64);
+                    let (key, friendly) = codex_window_name(mins, slot);
+                    let window = if !multi && limit_id == "codex" {
+                        key
+                    } else {
+                        format!("{limit_id}:{key}")
+                    };
+                    let label = match limit_name {
+                        Some(n) => Some(format!("{n} · {friendly}")),
+                        None if multi && limit_id != "codex" => Some(format!("{limit_id} · {friendly}")),
+                        None => Some(friendly),
+                    };
+                    out.push(PlanWindow {
+                        agent: h.id.clone(),
+                        window,
+                        label,
+                        utilization: Some(utilization),
+                        resets_at,
+                        status: limit_status(utilization),
+                        updated_at: now,
+                    });
+                }
+            }
+            Some(out)
+        }
+        "claude_usage" => {
+            let v = answer(raw, Some(format))?;
+            if v["response"]["subtype"].as_str() != Some("success") {
+                return None;
+            }
+            let resp = &v["response"]["response"];
+            if resp["rate_limits_available"].as_bool() != Some(true) {
+                return None;
+            }
+            let rl = &resp["rate_limits"];
+            let mut out = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for key in ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"] {
+                let Some(obj) = rl.get(key).and_then(Value::as_object) else {
+                    continue;
+                };
+                let Some(pct) = obj.get("utilization").and_then(Value::as_f64) else {
+                    continue;
+                };
+                let utilization = (pct / 100.0).clamp(0.0, 1.0);
+                let resets_at = obj
+                    .get("resets_at")
+                    .and_then(Value::as_str)
+                    .and_then(parse_rfc3339);
+                seen.insert(key.to_string());
+                out.push(PlanWindow {
+                    agent: h.id.clone(),
+                    window: key.to_string(),
+                    label: None,
+                    utilization: Some(utilization),
+                    resets_at,
+                    status: limit_status(utilization),
+                    updated_at: now,
+                });
+            }
+            for item in resp["model_scoped"].as_array().into_iter().flatten() {
+                let Some(name) = item["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                let Some(pct) = item["utilization"].as_f64() else {
+                    continue;
+                };
+                let key = format!("seven_day_{}", name.to_lowercase().replace(' ', "_"));
+                if !seen.insert(key.clone()) {
+                    continue;
+                }
+                let utilization = (pct / 100.0).clamp(0.0, 1.0);
+                let resets_at = item["resets_at"].as_str().and_then(parse_rfc3339);
+                out.push(PlanWindow {
+                    agent: h.id.clone(),
+                    window: key,
+                    label: Some(format!("Weekly ({name})")),
+                    utilization: Some(utilization),
+                    resets_at,
+                    status: limit_status(utilization),
+                    updated_at: now,
+                });
+            }
+            Some(out)
+        }
+        _ => None,
     }
 }
 
@@ -627,6 +864,49 @@ impl AgentHub {
             out.extend(options(h, &listed));
         }
         out
+    }
+
+    /// Probes one installed harness for its current plan usage limits and
+    /// stores the snapshot. Skips harnesses without a probe or already being
+    /// probed right now.
+    pub async fn refresh_usage_limits_for(&self, kind: AgentKind) {
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+        static IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+        struct Guard(String);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                IN_FLIGHT.lock().unwrap().remove(&self.0);
+            }
+        }
+        let h = harness(kind);
+        let Some(spec) = &h.usage_limits else {
+            return;
+        };
+        let Some(exe) = self.executable(kind) else {
+            return;
+        };
+        if !IN_FLIGHT.lock().unwrap().insert(h.id.clone()) {
+            return;
+        }
+        let _guard = Guard(h.id.clone());
+        let raw = run_probe(h, &exe, spec, "usage_limits").await;
+        if let Some(windows) = parse_usage_limits(h, &raw, Utc::now())
+            && let Err(e) = self.store.plan_windows_replace(&h.id, &windows)
+        {
+            tracing::warn!(harness = %h.id, error = %e, "couldn't store plan windows");
+        }
+    }
+
+    /// Probes every installed harness that reports plan limits, in parallel.
+    pub async fn refresh_usage_limits(&self) {
+        let futs: Vec<_> = harnesses()
+            .iter()
+            .filter(|h| h.usage_limits.is_some())
+            .filter_map(|h| h.kind())
+            .map(|k| self.refresh_usage_limits_for(k))
+            .collect();
+        futures_util::future::join_all(futs).await;
     }
 }
 
@@ -836,5 +1116,65 @@ mod tests {
             assert_eq!(f.candidates.len(), seeded.count(), "{f:?}");
         }
         assert_eq!(all[0].candidates[0].model, "haiku");
+    }
+
+    #[test]
+    fn antigravity_usage_limits_parse_groups_and_remaining_fraction() {
+        let raw = r#"{"conversation_id":"","status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.85,"reset_time":"2026-12-02T18:53:02Z"},{"id":"gemini-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":0.2,"reset_time":"2026-11-25T23:53:02Z"}]},{"name":"Claude and GPT models","buckets":[{"id":"3p-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":1,"reset_time":"2026-11-26T01:33:00Z"}]}]}}}"#;
+        let now = Utc::now();
+        let ws = parse_usage_limits(harness(AgentKind::Antigravity), raw, now).unwrap();
+        assert_eq!(ws.len(), 3);
+        assert_eq!(ws[0].agent, "antigravity");
+        assert_eq!(ws[0].window, "gemini-weekly");
+        assert_eq!(ws[0].label.as_deref(), Some("Gemini Models · Weekly"));
+        assert!((ws[0].utilization.unwrap() - 0.15).abs() < 1e-6);
+        assert_eq!(ws[0].status, "allowed");
+        assert!(ws[0].resets_at.is_some());
+
+        assert_eq!(ws[1].window, "gemini-5h");
+        assert_eq!(ws[1].label.as_deref(), Some("Gemini Models · 5h"));
+        assert!((ws[1].utilization.unwrap() - 0.8).abs() < 1e-6);
+        assert_eq!(ws[1].status, "allowed_warning");
+
+        assert_eq!(ws[2].window, "3p-5h");
+        assert_eq!(ws[2].utilization, Some(0.0));
+        assert!(parse_usage_limits(harness(AgentKind::Antigravity), "", now).is_none());
+    }
+
+    #[test]
+    fn codex_rate_limits_parse_primary_and_secondary() {
+        let raw = r#"{"id":1,"result":{"codexHome":"/tmp"}}
+{"id":2,"result":{"rateLimits":{"limitId":"codex","limitName":null,"primary":{"usedPercent":13,"windowDurationMins":300,"resetsAt":1795639764},"secondary":{"usedPercent":82,"windowDurationMins":10080,"resetsAt":1795644314}},"rateLimitsByLimitId":{"codex":{"limitId":"codex","limitName":null,"primary":{"usedPercent":13,"windowDurationMins":300,"resetsAt":1795639764},"secondary":{"usedPercent":82,"windowDurationMins":10080,"resetsAt":1795644314}}}}}"#;
+        let now = Utc::now();
+        let ws = parse_usage_limits(harness(AgentKind::Codex), raw, now).unwrap();
+        assert_eq!(ws.len(), 2);
+        assert_eq!(ws[0].agent, "codex");
+        assert_eq!(ws[0].window, "five_hour");
+        assert_eq!(ws[0].label.as_deref(), Some("5-hour window"));
+        assert!((ws[0].utilization.unwrap() - 0.13).abs() < 1e-6);
+        assert_eq!(ws[0].status, "allowed");
+        assert_eq!(ws[0].resets_at.unwrap().timestamp(), 1795639764);
+
+        assert_eq!(ws[1].window, "seven_day");
+        assert_eq!(ws[1].label.as_deref(), Some("Weekly"));
+        assert!((ws[1].utilization.unwrap() - 0.82).abs() < 1e-6);
+        assert_eq!(ws[1].status, "allowed_warning");
+    }
+
+    #[test]
+    fn claude_usage_limits_parse_rate_limits_and_model_scoped() {
+        let raw = r#"{"type":"control_response","response":{"subtype":"success","request_id":"tab_usage","response":{"rate_limits_available":true,"rate_limits":{"five_hour":null,"seven_day":{"utilization":69,"resets_at":"2026-11-26T10:00:00Z"}},"model_scoped":[{"display_name":"Fable","utilization":1,"resets_at":"2026-11-26T10:00:00Z"}]}}}"#;
+        let now = Utc::now();
+        let ws = parse_usage_limits(harness(AgentKind::ClaudeCode), raw, now).unwrap();
+        assert_eq!(ws.len(), 2);
+        assert_eq!(ws[0].agent, "claude_code");
+        assert_eq!(ws[0].window, "seven_day");
+        assert!((ws[0].utilization.unwrap() - 0.69).abs() < 1e-6);
+        assert_eq!(ws[1].window, "seven_day_fable");
+        assert_eq!(ws[1].label.as_deref(), Some("Weekly (Fable)"));
+        assert!((ws[1].utilization.unwrap() - 0.01).abs() < 1e-6);
+
+        let unavailable = r#"{"type":"control_response","response":{"subtype":"success","request_id":"tab_usage","response":{"rate_limits_available":false}}}"#;
+        assert!(parse_usage_limits(harness(AgentKind::ClaudeCode), unavailable, now).is_none());
     }
 }
