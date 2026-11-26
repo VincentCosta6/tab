@@ -171,7 +171,7 @@ Updates only come from the release marked latest. Releases cut with **Run workfl
 
 ## iOS (later)
 
-The workflow has an `ios` job that's switched off. tab's desktop engine (agents, the local hub, the sandbox) can't run on iOS, so the phone app will be a client of the hub, not this app recompiled. When that exists, you'll need the following in the same Apple Developer account:
+The workflow has an `ios` job that's switched off. tab's desktop engine (agents, the local hub, the sandbox) can't run on iOS, so the phone app (`apps/mobile/`) is a client of the hub, not this app recompiled. Run it with `pnpm mobile ios dev` (after `pnpm mobile ios init` once). To ship it you'll need the following in the same Apple Developer account:
 
 1. **App ID**: Certificates, IDs & Profiles → **Identifiers** → **+** → App IDs → App, with an explicit bundle ID (see the bundle identifier note above) and any capabilities it uses, like push notifications.
 2. **Apple Distribution certificate**: Certificates → **+** → **Apple Distribution**, using the same CSR steps as above. Export it as a `.p12`.
@@ -179,4 +179,4 @@ The workflow has an `ios` job that's switched off. tab's desktop engine (agents,
 4. **The app in App Store Connect**: Apps → **+** → New App, with that bundle ID.
 5. **Secrets**: `IOS_CERTIFICATE` (the `.p12`, base64), `IOS_CERTIFICATE_PASSWORD`, and `IOS_MOBILE_PROVISION` (the profile, base64). Tauri's iOS build reads these. Uploading to TestFlight can reuse the App Store Connect API key from the macOS steps.
 
-Then run `pnpm tauri ios init`, commit `src-tauri/gen/apple`, and turn the job on.
+Then run `pnpm mobile ios init`, commit `apps/mobile/src-tauri/gen/apple`, and point the job at `apps/mobile` and turn it on. The phone app's identifier is `dev.tab.mobile`.
