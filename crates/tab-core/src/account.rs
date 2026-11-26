@@ -202,12 +202,28 @@ pub fn parse_callback(request_line: &str) -> Callback {
     let (Some("GET"), Some(target)) = (parts.next(), parts.next()) else {
         return Callback::Other;
     };
-    let Ok(u) = reqwest::Url::parse(&format!("http://127.0.0.1{target}")) else {
-        return Callback::Other;
-    };
-    if u.path() != CALLBACK_PATH {
-        return Callback::Other;
+    match reqwest::Url::parse(&format!("http://127.0.0.1{target}")) {
+        Ok(u) if u.path() == CALLBACK_PATH => callback_of(&u),
+        _ => Callback::Other,
     }
+}
+
+/// Reads the callback out of the link the sign-in page came back to on a
+/// phone, `<scheme>://auth/callback?code=...` ([`mobile_redirect`]).
+pub fn parse_mobile_callback(url: &str) -> Callback {
+    match reqwest::Url::parse(url) {
+        Ok(u) if u.host_str() == Some("auth") && u.path() == "/callback" => callback_of(&u),
+        _ => Callback::Other,
+    }
+}
+
+/// Where the sign-in page sends a phone back: the app's own link scheme,
+/// which Supabase must list among its redirect URLs.
+pub fn mobile_redirect(scheme: &str) -> String {
+    format!("{scheme}://auth/callback")
+}
+
+fn callback_of(u: &reqwest::Url) -> Callback {
     let mut code = None;
     let mut error = None;
     let mut description = None;
@@ -362,7 +378,9 @@ fn session_from(body: &str, now: i64) -> Result<Session, SignInError> {
     })
 }
 
-async fn exchange(
+/// Trades the code the sign-in page came back with for a session, with
+/// the verifier its PKCE challenge was made from.
+pub async fn exchange(
     cfg: &SupabaseConfig,
     code: &str,
     verifier: &str,
@@ -599,6 +617,15 @@ mod tests {
             Callback::Error("User cancelled".into())
         );
         assert_eq!(parse_callback("GET /favicon.ico HTTP/1.1"), Callback::Other);
+        assert_eq!(
+            parse_mobile_callback(&format!("{}?code=abc", mobile_redirect("tabqueue"))),
+            Callback::Code("abc".into())
+        );
+        assert_eq!(
+            parse_mobile_callback("tabqueue://auth/callback?error=access_denied"),
+            Callback::Error("access_denied".into())
+        );
+        assert_eq!(parse_mobile_callback("tabqueue://chat/1"), Callback::Other);
         assert_eq!(
             parse_callback("POST /auth/callback?code=x HTTP/1.1"),
             Callback::Other

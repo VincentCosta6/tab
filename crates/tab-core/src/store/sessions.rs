@@ -296,6 +296,15 @@ impl Store {
         self.session_get(id)
     }
 
+    /// Puts a chat on a task. Fails if the task isn't here (yet).
+    pub fn session_set_item(&self, id: &str, item_id: &str) -> anyhow::Result<Option<Session>> {
+        self.conn().execute(
+            "UPDATE sessions SET item_id = ?2 WHERE id = ?1",
+            params![id, item_id],
+        )?;
+        self.session_get(id)
+    }
+
     /// Sets the permission mode a chat runs in.
     pub fn session_set_mode(&self, id: &str, mode: &str) -> anyhow::Result<Option<Session>> {
         self.conn().execute(

@@ -512,7 +512,13 @@ export type Placement =
   | { type: "anywhere" }
   | { type: "computers" }
   | { type: "cloud" }
-  | { type: "prefer_computer"; minutes: number };
+  | { type: "prefer_computer"; minutes: number }
+  /** tab cloud first, then computers after `minutes`: how a chat started from the phone runs by default. */
+  | { type: "prefer_cloud"; minutes: number }
+  /** Only `spec.runner`, which the person picked. Never on a workflow step. */
+  | { type: "pinned" };
+/** A chat the person started for a runner to run (mirrors tab_domain::runner::ChatStart). */
+export interface ChatStart { item?: string; title: string; from: string }
 /** One harness and model a family may run on; an empty model is the harness's default. */
 export interface FamilyCandidate { harness: string; model: string }
 /** A named, ordered list of models an agent step can ask for. Tried in order. */
@@ -530,7 +536,7 @@ export type JobState =
   | { state: "failed"; error: string; finished_at: string };
 export interface Job {
   id: string; run_id: string; step_id: string; workflow_id: string;
-  spec: { prompt: string; repo: string; harness: string; model: string; placement: Placement };
+  spec: { prompt: string; repo: string; harness: string; model: string; placement: Placement; runner?: string; chat?: ChatStart };
   state: JobState; attempts: number; max_attempts: number; created_at: string; deadline: string;
   /** What it needed in tab cloud and didn't have. */
   missing?: CloudGap[];

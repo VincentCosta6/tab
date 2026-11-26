@@ -910,6 +910,8 @@ function placementLabel(p: Placement): string {
     case "computers": return "your computers";
     case "cloud": return "tab cloud";
     case "prefer_computer": return `a computer, then tab cloud after ${p.minutes} min`;
+    case "prefer_cloud": return `tab cloud, then a computer after ${p.minutes} min`;
+    case "pinned": return "one runner";
   }
 }
 
@@ -945,7 +947,8 @@ function AgentFields({ step, vars, set }: { step: AgentStep; vars: { path: strin
       {!step.harness && !step.model && step.family && <FamilyNote id={step.family} />}
       <Field label="Where it may run" help={cloud ? undefined : "tab cloud runs agents on paid plans once your hub is in tab cloud."}>
         <select className="wf-select" value={place} onChange={(e) => ag((s) => {
-          const t = e.target.value as Placement["type"];
+          // A step is never pinned to one runner, and prefer_cloud is for chats started away from a computer.
+          const t = e.target.value as "computers" | "prefer_computer" | "cloud" | "anywhere";
           s.placement = t === "prefer_computer" ? { type: t, minutes: 15 } : { type: t };
         })}>
           <option value="computers">Only my computers</option>
@@ -1012,7 +1015,7 @@ function FamilyNote({ id }: { id: string }) {
 
 /** Who could take this step's job right now. */
 function RunnerList({ runners, placement }: { runners: Runner[]; placement: Placement }) {
-  const allowed = (r: Runner) => placement.type === "anywhere" || placement.type === "prefer_computer" || (placement.type === "cloud" ? r.kind === "cloud" : r.kind === "computer");
+  const allowed = (r: Runner) => placement.type === "anywhere" || placement.type === "prefer_computer" || placement.type === "prefer_cloud" || (placement.type === "cloud" ? r.kind === "cloud" : r.kind === "computer");
   const shown = runners.filter(allowed);
   if (!shown.length) return <p className="subtle">No runner can take it yet. {placement.type === "cloud" ? "Move your hub to tab cloud in Settings → Hub." : "Open tab on a computer."}</p>;
   return (

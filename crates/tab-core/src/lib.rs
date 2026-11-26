@@ -63,7 +63,7 @@ pub mod vault;
 pub mod workflow;
 pub mod workspace;
 
-pub use tab_domain::{autofix, families, links, model, runner};
+pub use tab_domain::{autofix, delegate, families, links, model, runner};
 
 pub use config::TabConfig;
 pub use engine::{Change, Engine, EngineEvent, EngineHandle};

@@ -741,6 +741,13 @@ pub fn validate(
                         "Only tab cloud runners take this step, which needs a paid plan.",
                     ));
                 }
+                // A step names no runner, so a pinned job would never run.
+                if matches!(placement, crate::runner::Placement::Pinned) {
+                    out.push(Issue::err(
+                        at,
+                        "A workflow step can't be pinned to one runner; pick where it may run.",
+                    ));
+                }
             }
         }
         for r in refs {
@@ -1348,6 +1355,21 @@ mod tests {
         assert!(
             !saved.enabled,
             "a missing family is an error, so it's saved off"
+        );
+    }
+
+    #[test]
+    fn an_agent_step_cant_be_pinned_to_a_runner() {
+        let mut w = agent_step("", "");
+        if let StepKind::Agent { placement, .. } = &mut w.steps[0].kind {
+            *placement = crate::runner::Placement::Pinned;
+        }
+        let issues = validate(&w, &[], &[], &[]);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.error && i.message.contains("pinned to one runner")),
+            "{issues:?}"
         );
     }
 

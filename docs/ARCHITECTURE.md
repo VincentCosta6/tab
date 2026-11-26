@@ -60,6 +60,8 @@ crates/tab-core/        The desktop engine. No Tauri dependency, fully unit test
   config.rs             TabConfig (profile, ranking, connectors map)
 crates/tab-runner/      tab, headless: a hub's cloud runner, in a container tab cloud starts next to the hub
 src-tauri/              Desktop shell: Tauri commands + event forwarding
+apps/mobile/            The phone app (Tauri 2): a client of the person's cloud hub. src-tauri/ syncs a
+                        copy like the cloud runner does and hands chats to runners; src/ is its UI
 src/                    React UI
   design/               Design system: tokens.css, components, icons, blocks, markdown
   modules/              registry.ts + built-in modules (work, connections, settings)
@@ -71,7 +73,7 @@ scripts/storage-tests.sh  The full storage suite, outside CI (see Storage tests)
 
 **tab cloud (built)** is the private `tab-infra` repo, all workers-rs: an edge Worker (`api.tabqueue.com`, the only public route: verifies the caller and routes to their hubs), a hub Durable Object per person or team running `tab-hub` on its built-in SQLite, accounts in D1, files in R2, and, on paid plans, a container running `tab-runner` beside the hub. The two repos share the API in `tab-protocol` (see CLAUDE.md).
 
-Coming next (designed): `apps/mobile/`, `crates/tab-hub-org/` (org features).
+Coming next (designed): `crates/tab-hub-org/` (org features).
 
 **Where things run today.** The desktop app runs its own hub (`tab_core::local_hub::LocalHub`): a `tab-hub` on SQLite in `hub.db` next to `tab.db`. The hub's change log is the source of truth; `tab.db` is this device's copy, kept because it holds the indexes, full-text search and vectors every screen reads. The engine keeps its SQL, and `store::hub_sync` keeps the copy and the hub in step:
 
@@ -120,6 +122,17 @@ A session runs on one device: it has the agent's own history and the working cop
 - **Stored messages and status** reach watchers through sync, like any record. **Streamed reply text and approval prompts** are published live and never stored (nothing else goes live: no tool calls, no tool progress, and long strings in a prompt's tool input are cut at 2,000 characters); a watcher joining mid-turn gets a snapshot (the reply so far, open prompts) because the runner is told when watchers change.
 - **Steering** is a `SteerCommand` (`message` with text and file hashes, `approval`, `interrupt`, `stop`). The runner fetches attached files from the hub, then the message steers the running turn or starts the next one. As in Claude Code's terminal, the agent reads a steering message at its next step, after the running tool ends. While a tool holds it, the chat offers **Send now** (`interrupt`, Esc in the terminal): tab sends Claude Code's interrupt, the tool is stopped, and the turn carries on with the queued message. The hub routes by the session record's `device`; if that device isn't connected, steering is refused with a message saying so. Only the runner may publish for a session.
 - **On the desktop**, the app watches the sessions other devices run while they're mid-turn, shows their live events in the chat, and sends what the person types or answers there to the runner.
+
+### Chats started on a phone (built)
+
+A phone runs no agents. A chat started there is a job with no workflow behind it (`tab_domain::runner::Job::chat`, `JobSpec.chat` naming its task, title and the device it came from) that one of the person's runners takes, through the same leases as a workflow's jobs. Where it may run comes from the person's choice (`tab_domain::delegate::RunOn`):
+
+- **Auto** (the default) prefers tab cloud: the job is `prefer_cloud`, so the cloud runner has it to itself for 3 minutes (`CLOUD_FIRST_MINUTES`, long enough to wake it) and then any computer that's online may take it. Without a cloud runner on the plan, or when it lacks the harness, it's for computers.
+- **tab cloud**, **any computer**, or **one runner** (`pinned`, with `JobSpec.runner`). Apps from before `prefer_cloud` and `pinned` can't read those jobs, so they leave them alone. Workflow steps are never pinned.
+
+`delegate::plan` decides the placement and says who will most likely take it (a runner that's awake and can, waking tab cloud, waiting, or never), so the phone says so before sending, wakes the cloud runner when that's the plan, and refuses a chat nothing could run. A runner keys the chat `chat:<job>`: on a computer that's the person's own chat (their trust, not the review policy `job:` chats get), titled as they named it and on its task; the cloud runner gives every chat the review policy, as before. The job ends with the chat's first turn; after that the chat lives on that runner and the phone steers it like any other device.
+
+The phone signs in with Supabase like the desktop, but the page comes back to the app's link (`tabqueue://auth/callback`, which Supabase must list among its redirect URLs) rather than a loopback listener. It needs the person's hub in tab cloud.
 
 Next: "Continue on this device" (hand a session to another device: code over a git branch, the transcript and agent history as an encrypted file in the file store, a `session:<id>` lease to fence the old runner), then end-to-end encryption of message bodies and files with routing metadata left readable.
 
