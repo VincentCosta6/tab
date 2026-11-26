@@ -188,7 +188,10 @@ impl Store {
                     window: r.get(1)?,
                     label: r.get(2)?,
                     utilization: r.get(3)?,
-                    resets_at: r.get::<_, Option<String>>(4)?.map(|s| parse_ts(&s)).transpose()?,
+                    resets_at: r
+                        .get::<_, Option<String>>(4)?
+                        .map(|s| parse_ts(&s))
+                        .transpose()?,
                     status: r.get(5)?,
                     updated_at: parse_ts(&r.get::<_, String>(6)?)?,
                 })

@@ -1167,10 +1167,7 @@ fn auto_allow_permission(
         .or_else(|| tool.map(|t| t.name.as_str()))
         .unwrap_or("tool");
     let kind = f.kind.or_else(|| tool.and_then(|t| t.kind));
-    let input = f
-        .raw_input
-        .as_ref()
-        .or_else(|| tool.map(|t| &t.input));
+    let input = f.raw_input.as_ref().or_else(|| tool.map(|t| &t.input));
 
     if is_allowed_mcp_tool(name, events.mcp_tool_name.as_deref(), &events.allowed) {
         return true;
@@ -1383,7 +1380,11 @@ fn split_safe_shell(cmd: &str) -> Option<Vec<Vec<String>>> {
                     return None;
                 }
                 segments.push(std::mem::take(&mut current));
-                i += if bytes.get(i + 1) == Some(&b'|') { 2 } else { 1 };
+                i += if bytes.get(i + 1) == Some(&b'|') {
+                    2
+                } else {
+                    1
+                };
             }
             b'&' => {
                 if bytes.get(i + 1) != Some(&b'&') {
@@ -1406,7 +1407,9 @@ fn split_safe_shell(cmd: &str) -> Option<Vec<Vec<String>>> {
                 i += 1;
                 if cmd[i..].starts_with("&1") {
                     i += 2;
-                    if bytes.get(i).is_some_and(|c| !matches!(c, b' ' | b'\t' | b';' | b'|' | b'&'))
+                    if bytes
+                        .get(i)
+                        .is_some_and(|c| !matches!(c, b' ' | b'\t' | b';' | b'|' | b'&'))
                     {
                         return None;
                     }
@@ -1417,7 +1420,9 @@ fn split_safe_shell(cmd: &str) -> Option<Vec<Vec<String>>> {
                 }
                 if cmd[i..].starts_with("/dev/null") {
                     i += "/dev/null".len();
-                    if bytes.get(i).is_some_and(|c| !matches!(c, b' ' | b'\t' | b';' | b'|' | b'&'))
+                    if bytes
+                        .get(i)
+                        .is_some_and(|c| !matches!(c, b' ' | b'\t' | b';' | b'|' | b'&'))
                     {
                         return None;
                     }
@@ -1474,17 +1479,15 @@ fn is_safe_simple_command(words: &[String], brokered: bool, sandboxed: bool) -> 
                     | "-fprintf"
             )
         }),
-        "rg" if sandboxed => !args
-            .iter()
-            .any(|a| a == "--pre" || a.starts_with("--pre=")),
+        "rg" if sandboxed => !args.iter().any(|a| a == "--pre" || a.starts_with("--pre=")),
         "fd" if sandboxed => !args.iter().any(|a| {
             matches!(a.as_str(), "-x" | "-X" | "--exec" | "--exec-batch")
                 || a.starts_with("--exec=")
                 || a.starts_with("--exec-batch=")
         }),
-        "sort" if sandboxed => !args
-            .iter()
-            .any(|a| a == "-o" || a.starts_with("-o") || a == "--output" || a.starts_with("--output=")),
+        "sort" if sandboxed => !args.iter().any(|a| {
+            a == "-o" || a.starts_with("-o") || a == "--output" || a.starts_with("--output=")
+        }),
         p if sandboxed => matches!(
             p,
             "ls" | "grep"
@@ -3143,7 +3146,11 @@ mod tests {
 
     #[test]
     fn allowed_mcp_tools_match_antigravity_and_reject_spoofs() {
-        let allowed = vec!["tab".to_string(), "linear".to_string(), "my-mcp".to_string()];
+        let allowed = vec![
+            "tab".to_string(),
+            "linear".to_string(),
+            "my-mcp".to_string(),
+        ];
         let f = Some("mcp_{server}_{tool}");
         assert!(is_allowed_mcp_tool("mcp_tab_tab_project", f, &allowed));
         assert!(is_allowed_mcp_tool("mcp_tab_tab_search", f, &allowed));
@@ -3239,12 +3246,9 @@ mod tests {
         std::fs::write(&allowed_file, "ok").unwrap();
         std::fs::write(&hidden_file, "shh").unwrap();
 
-        let mut policy = crate::sandbox::Sandbox::new(
-            crate::sandbox::SandboxConfig::default(),
-            None,
-            None,
-        )
-        .chat_policy();
+        let mut policy =
+            crate::sandbox::Sandbox::new(crate::sandbox::SandboxConfig::default(), None, None)
+                .chat_policy();
         policy.open.push(crate::sandbox::real(&dir));
         policy.hide.push(crate::sandbox::real(&hidden_dir));
 

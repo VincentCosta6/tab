@@ -648,13 +648,17 @@ pub fn parse_usage_limits(h: &Harness, raw: &str, now: DateTime<Utc>) -> Option<
     let format = h.usage_limits.as_ref()?.format.as_str();
     match format {
         "antigravity_usage" => {
-            let v: Value = serde_json::from_str(raw.trim()).or_else(|_| {
-                raw.lines()
-                    .rev()
-                    .find_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
-                    .ok_or(())
-            }).ok()?;
-            if v["status"].as_str() != Some("SUCCESS") && v["command"]["name"].as_str() != Some("usage") {
+            let v: Value = serde_json::from_str(raw.trim())
+                .or_else(|_| {
+                    raw.lines()
+                        .rev()
+                        .find_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+                        .ok_or(())
+                })
+                .ok()?;
+            if v["status"].as_str() != Some("SUCCESS")
+                && v["command"]["name"].as_str() != Some("usage")
+            {
                 return None;
             }
             let groups = v["command"]["data"]["groups"].as_array()?;
@@ -744,7 +748,9 @@ pub fn parse_usage_limits(h: &Harness, raw: &str, now: DateTime<Utc>) -> Option<
                     };
                     let label = match limit_name {
                         Some(n) => Some(format!("{n} · {friendly}")),
-                        None if multi && limit_id != "codex" => Some(format!("{limit_id} · {friendly}")),
+                        None if multi && limit_id != "codex" => {
+                            Some(format!("{limit_id} · {friendly}"))
+                        }
                         None => Some(friendly),
                     };
                     out.push(PlanWindow {
@@ -772,7 +778,12 @@ pub fn parse_usage_limits(h: &Harness, raw: &str, now: DateTime<Utc>) -> Option<
             let rl = &resp["rate_limits"];
             let mut out = Vec::new();
             let mut seen = std::collections::HashSet::new();
-            for key in ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"] {
+            for key in [
+                "five_hour",
+                "seven_day",
+                "seven_day_opus",
+                "seven_day_sonnet",
+            ] {
                 let Some(obj) = rl.get(key).and_then(Value::as_object) else {
                     continue;
                 };
@@ -796,7 +807,11 @@ pub fn parse_usage_limits(h: &Harness, raw: &str, now: DateTime<Utc>) -> Option<
                 });
             }
             for item in resp["model_scoped"].as_array().into_iter().flatten() {
-                let Some(name) = item["display_name"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                let Some(name) = item["display_name"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                else {
                     continue;
                 };
                 let Some(pct) = item["utilization"].as_f64() else {

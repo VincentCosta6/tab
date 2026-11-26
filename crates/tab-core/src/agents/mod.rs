@@ -3274,7 +3274,8 @@ mod rewind_tests {
     fn coordinator_project_checkouts_include_project_repos() {
         let store = Arc::new(Store::in_memory().unwrap());
         let (tx, _rx) = tokio::sync::broadcast::channel(16);
-        let dir = std::env::temp_dir().join(format!("tab-coord-checkouts-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("tab-coord-checkouts-{}", uuid::Uuid::new_v4()));
         let repo_dir = dir.join("repo");
         std::fs::create_dir_all(&repo_dir).unwrap();
         let hub = AgentHub::new(store.clone(), tx, AgentConfig::default(), dir.join("hub"));
