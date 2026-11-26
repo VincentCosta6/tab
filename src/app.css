@@ -1,11 +1,11 @@
 /* Layout of the shell and the built-in modules. */
 
 .shell { display: grid; grid-template-columns: 84px minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr); height: 100%; }
-.nav { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-2); padding: var(--space-3) var(--space-2); background: var(--bg-sunken); border-right: 1px solid var(--border); }
+.nav { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); padding: var(--space-2) 5px; background: var(--bg-sunken); border-right: 1px solid var(--border); }
 .nav-brand { display: grid; place-items: center; padding: var(--space-2) 0 var(--space-3); }
 .nav-group { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
 .nav-footer { margin-top: auto; }
-.nav-item { display: grid; justify-items: center; gap: 2px; padding: var(--space-2) 0; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg-muted); cursor: pointer; font-size: var(--text-xs); }
+.nav-item { display: grid; justify-items: center; gap: 2px; padding: 6px 0; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--fg-muted); cursor: pointer; font-size: var(--text-xs); }
 .nav-item:hover { background: var(--bg-hover); color: var(--fg); }
 .nav-item.active { background: var(--bg-raised); color: var(--fg); box-shadow: var(--shadow-sm); }
 .main { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-rows: minmax(0, 1fr); }
@@ -561,26 +561,29 @@ button.header-chip:hover { background: var(--bg-hover); color: var(--fg); }
 /* Same three rows in every phase, so the nav doesn't jump as an update runs. */
 /* "Not now" floats in the corner on hover, so the name keeps the row. */
 
-/* Agent spend (bottom left) */
-.usage { position: relative; margin-bottom: var(--space-2); }
-.usage-chip { width: 100%; display: grid; justify-items: center; gap: 3px; padding: var(--space-2) 6px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); color: var(--fg); cursor: pointer; }
+/* Agent spend & harness usage limits (bottom left) */
+.usage { position: relative; margin-bottom: var(--space-1); }
+.usage-chip { width: 100%; display: grid; gap: 2px; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-raised); color: var(--fg); cursor: pointer; text-align: left; }
 .usage-chip:hover, .usage-chip.active { border-color: var(--border-strong, var(--border)); box-shadow: var(--shadow-sm); }
-.usage-chip.over .usage-amount { color: var(--tone-danger-fg); }
-.usage-amount { font-weight: 600; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
-.usage-caption { font-size: 10px; color: var(--fg-muted); margin-top: -3px; }
-.usage-mini { display: grid; grid-template-columns: 16px 1fr; align-items: center; gap: 4px; width: 100%; }
-.usage-mini-label { font-size: 9px; color: var(--fg-muted); text-align: right; }
-.usage-mini-bar { height: 4px; border-radius: var(--radius-pill); background: var(--bg-sunken); overflow: hidden; }
-.usage-mini-bar > span { display: block; height: 100%; background: var(--tone-fg); border-radius: inherit; }
-.usage-pop { position: absolute; left: calc(100% + 12px); bottom: 0; z-index: 40; width: 300px; display: grid; gap: var(--space-3); padding: var(--space-4); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg, var(--shadow-sm)); }
+.usage-chip.over .usage-row-pct { color: var(--tone-danger-fg); }
+.usage-row { display: flex; align-items: center; gap: 2px; min-width: 0; padding: 1px 0; line-height: 1.25; }
+.usage-row-icon { flex: none; display: inline-grid; place-items: center; width: 11px; height: 11px; }
+.usage-row-pct { font-weight: 600; font-size: 10.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-row-reset { margin-left: auto; font-size: 9.5px; color: var(--fg-subtle); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-pop { position: absolute; left: calc(100% + 10px); bottom: 0; z-index: 40; width: 300px; max-height: calc(100vh - 176px); overflow-y: auto; display: grid; gap: var(--space-2); padding: var(--space-3); background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow-lg, var(--shadow-sm)); }
+.usage-section { display: grid; gap: var(--space-2); }
+.usage-section + .usage-section { padding-top: var(--space-2); border-top: 1px solid var(--border); }
+.usage-harness { display: grid; gap: 6px; }
+.usage-harness + .usage-harness { padding-top: var(--space-2); border-top: 1px solid var(--border); }
+.usage-harness-head { display: flex; align-items: center; gap: 6px; font-size: var(--text-sm); font-weight: 600; color: var(--fg); }
 .usage-pop-head { display: grid; gap: 2px; }
 .usage-pop-head .subtle { font-size: var(--text-xs); }
 .usage-stats { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
 .usage-stats > div { display: grid; }
-.usage-big { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.usage-big { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .usage-split { font-size: var(--text-xs); line-height: 1.5; }
-.usage-window { display: grid; gap: 4px; font-size: var(--text-sm); }
-.usage-window-head { display: flex; justify-content: space-between; }
+.usage-window { display: grid; gap: 3px; font-size: var(--text-xs); }
+.usage-window-head { display: flex; justify-content: space-between; gap: var(--space-2); }
 .usage-window .subtle { font-size: var(--text-xs); }
 .usage-pop > button { justify-self: start; }
 

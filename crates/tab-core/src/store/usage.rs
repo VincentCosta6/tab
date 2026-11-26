@@ -1,4 +1,4 @@
-//! Agent spend and Claude plan limits.
+//! Agent spend and per-harness plan limits.
 
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 use rusqlite::params;
@@ -19,11 +19,16 @@ pub struct NewUsage {
     pub output_tokens: i64,
 }
 
-/// A Claude plan window such as `five_hour` or `seven_day`.
+/// A harness plan window such as `five_hour`, `seven_day` or `gemini-5h`.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PlanWindow {
+    pub agent: String,
     pub window: String,
-    /// 0.0 to 1.0, when Claude Code reports it.
+    /// Optional display label when the harness names the bucket itself
+    /// (e.g. Antigravity's "Gemini Models · 5h").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// 0.0 to 1.0, share of the window used.
     pub utilization: Option<f64>,
     pub resets_at: Option<DateTime<Utc>>,
     pub status: String,
@@ -124,25 +129,68 @@ impl Store {
 
     pub fn plan_window_set(&self, w: &PlanWindow) -> anyhow::Result<()> {
         self.conn().execute(
-            "INSERT INTO plan_limits (window, utilization, resets_at, status, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (window) DO UPDATE SET utilization = excluded.utilization, resets_at = excluded.resets_at,
-                 status = excluded.status, updated_at = excluded.updated_at",
-            params![w.window, w.utilization, w.resets_at.map(ts), w.status, ts(w.updated_at)],
+            "INSERT INTO plan_limits (agent, window, label, utilization, resets_at, status, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (agent, window) DO UPDATE SET
+                 label = COALESCE(excluded.label, plan_limits.label),
+                 utilization = excluded.utilization,
+                 resets_at = excluded.resets_at,
+                 status = excluded.status,
+                 updated_at = excluded.updated_at",
+            params![
+                w.agent,
+                w.window,
+                w.label,
+                w.utilization,
+                w.resets_at.map(ts),
+                w.status,
+                ts(w.updated_at),
+            ],
         )?;
+        Ok(())
+    }
+
+    /// Replaces one harness's stored plan windows with a fresh snapshot,
+    /// leaving other harnesses' windows untouched.
+    pub fn plan_windows_replace(&self, agent: &str, windows: &[PlanWindow]) -> anyhow::Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM plan_limits WHERE agent = ?1", [agent])?;
+        for w in windows {
+            tx.execute(
+                "INSERT INTO plan_limits (agent, window, label, utilization, resets_at, status, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    agent,
+                    w.window,
+                    w.label,
+                    w.utilization,
+                    w.resets_at.map(ts),
+                    w.status,
+                    ts(w.updated_at),
+                ],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
     pub fn plan_windows(&self) -> anyhow::Result<Vec<PlanWindow>> {
         let conn = self.conn();
         let rows = conn
-            .prepare("SELECT window, utilization, resets_at, status, updated_at FROM plan_limits ORDER BY window")?
+            .prepare(
+                "SELECT agent, window, label, utilization, resets_at, status, updated_at
+                 FROM plan_limits ORDER BY agent, window",
+            )?
             .query_map([], |r| {
                 Ok(PlanWindow {
-                    window: r.get(0)?,
-                    utilization: r.get(1)?,
-                    resets_at: r.get::<_, Option<String>>(2)?.map(|s| parse_ts(&s)).transpose()?,
-                    status: r.get(3)?,
-                    updated_at: parse_ts(&r.get::<_, String>(4)?)?,
+                    agent: r.get(0)?,
+                    window: r.get(1)?,
+                    label: r.get(2)?,
+                    utilization: r.get(3)?,
+                    resets_at: r.get::<_, Option<String>>(4)?.map(|s| parse_ts(&s)).transpose()?,
+                    status: r.get(5)?,
+                    updated_at: parse_ts(&r.get::<_, String>(6)?)?,
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -221,7 +269,9 @@ mod tests {
 
         for u in [0.5, 0.81] {
             s.plan_window_set(&PlanWindow {
+                agent: "claude_code".into(),
                 window: "seven_day".into(),
+                label: None,
                 utilization: Some(u),
                 resets_at: None,
                 status: "allowed".into(),
@@ -229,7 +279,25 @@ mod tests {
             })
             .unwrap();
         }
-        assert_eq!(s.plan_windows().unwrap()[0].utilization, Some(0.81));
+        s.plan_windows_replace(
+            "antigravity",
+            &[PlanWindow {
+                agent: "antigravity".into(),
+                window: "gemini-5h".into(),
+                label: Some("Gemini Models · 5h".into()),
+                utilization: Some(0.57),
+                resets_at: None,
+                status: "allowed".into(),
+                updated_at: now,
+            }],
+        )
+        .unwrap();
+        let ws = s.plan_windows().unwrap();
+        assert_eq!(ws.len(), 2);
+        assert_eq!(ws[0].agent, "antigravity");
+        assert_eq!(ws[0].label.as_deref(), Some("Gemini Models · 5h"));
+        assert_eq!(ws[1].agent, "claude_code");
+        assert_eq!(ws[1].utilization, Some(0.81));
     }
 
     #[test]

@@ -95,6 +95,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migrations/028_workflow_rollups.sql"),
     include_str!("migrations/029_project_routing.sql"),
     include_str!("migrations/030_autofix.sql"),
+    include_str!("migrations/031_harness_plan_limits.sql"),
 ];
 
 pub(crate) fn ts(t: DateTime<Utc>) -> String {

@@ -49,6 +49,27 @@
       ],
       "format": "claude_initialize"
     },
+    "usage_limits": {
+      "args": [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--tools",
+        ""
+      ],
+      "stdin": [
+        "{\"type\":\"control_request\",\"request_id\":\"tab_init\",\"request\":{\"subtype\":\"initialize\"}}",
+        "{\"type\":\"control_request\",\"request_id\":\"tab_usage\",\"request\":{\"subtype\":\"get_usage\"}}"
+      ],
+      "format": "claude_usage"
+    },
     "families": {
       "fast": "haiku",
       "balanced": "sonnet",
@@ -210,6 +231,17 @@
       ],
       "format": "codex_model_list"
     },
+    "usage_limits": {
+      "args": [
+        "app-server"
+      ],
+      "stdin": [
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"tab\",\"version\":\"0\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\"}",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":{}}"
+      ],
+      "format": "codex_rate_limits"
+    },
     "families": {
       "fast": "gpt-6-luna",
       "balanced": "gpt-6-sol",
@@ -294,6 +326,15 @@
         "models"
       ],
       "format": "slug_label_lines"
+    },
+    "usage_limits": {
+      "args": [
+        "-p",
+        "/usage",
+        "--output-format",
+        "json"
+      ],
+      "format": "antigravity_usage"
     },
     "families": {},
     "install": {

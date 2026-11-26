@@ -1696,6 +1696,16 @@ impl AgentHub {
             hub.drop_approvals(&session.id);
             // However the turn ended, the thread now says more about the work.
             titler::spawn(hub.clone(), session.id.clone(), titler::Pass::TurnEnded);
+            // Refresh the harness's plan limits after a turn (Claude Code
+            // streams `rate_limit_event` live; other harnesses like
+            // Antigravity and Codex report limits on demand).
+            if session.agent != AgentKind::ClaudeCode {
+                let hub = hub.clone();
+                let kind = session.agent;
+                tokio::spawn(async move {
+                    hub.refresh_usage_limits_for(kind).await;
+                });
+            }
             match result {
                 Ok(()) if cancel.is_cancelled() => {
                     hub.post(

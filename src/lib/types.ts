@@ -1210,7 +1210,9 @@ export interface BudgetConfig {
 }
 
 export interface PlanWindow {
+  agent: AgentKind;
   window: string;
+  label?: string | null;
   utilization: number | null;
   resets_at: string | null;
   status: string;

@@ -96,7 +96,12 @@ impl Watch {
                 .unwrap_or(self.started)
                 .min(self.started);
             if matches!(store.plan_used_elsewhere(&self.session, since), Ok(false)) {
-                let after = store.plan_windows().unwrap_or_default();
+                let after: Vec<PlanWindow> = store
+                    .plan_windows()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|w| usage.harness.is_empty() || w.agent == usage.harness)
+                    .collect();
                 usage.plan_share = crate::usage::plan_share(&self.plan, &after, self.started);
             }
         }
