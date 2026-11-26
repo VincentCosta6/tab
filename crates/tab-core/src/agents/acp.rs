@@ -138,8 +138,24 @@ async fn run(
     let exe = start.program;
     let mut args = start.args;
     args.extend(spec.args_for(strict));
+    if kind == AgentKind::Antigravity {
+        // Give Antigravity the chat's project repos and attachments as
+        // workspace folders so reading them doesn't prompt as outside cwd.
+        let mut dirs = hub.project_checkouts(session);
+        let attachments = hub.attachments_dir();
+        if attachments.is_dir() {
+            dirs.push(attachments);
+        }
+        dirs.sort();
+        dirs.dedup();
+        for d in dirs.into_iter().filter(|d| d.is_dir()) {
+            args.push("--add-dir".into());
+            args.push(d.into_os_string());
+        }
+    }
     policy.readable.extend(start.readable);
     let cwd = std::path::Path::new(&session.cwd);
+    let effective_policy = crate::sandbox::current().starting_in(&policy, &exe, cwd);
     let mut prepared = crate::sandbox::current()
         .command(&exe, &args, cwd, &policy)
         .await?;
@@ -211,10 +227,17 @@ async fn run(
             .unwrap_or(0.0);
         events.cost_file = Some(file);
     }
+    let coordinator =
+        super::coordinator::project_of(hub.store.session_key(&session.id)?.as_deref()).is_some();
     events.strict = strict;
     events.mcp_tool_name = spec.mcp_tool_name.clone();
     events.foreign = foreign;
     events.allowed = vec!["tab".to_string()];
+    events.coordinator = coordinator;
+    events.brokered = policy.brokered;
+    events.sandboxed = sandboxed;
+    events.cwd = Some(cwd.to_path_buf());
+    events.policy = Some(effective_policy);
     let session_meta = claude.as_ref().map(|c| c.meta.clone());
     let claude_resume = claude.as_ref().map(|c| c.resume.clone());
     // The mode the session starts in: Claude Code's from its setup, other
@@ -222,9 +245,6 @@ async fn run(
     let start_mode = match &claude {
         Some(c) => Some(c.mode.clone()),
         None => {
-            let coordinator =
-                super::coordinator::project_of(hub.store.session_key(&session.id)?.as_deref())
-                    .is_some();
             let mode = if coordinator {
                 "default"
             } else {
@@ -1091,13 +1111,17 @@ fn on_request(conn: &Conn, events: &Translator, id: Value, method: &str, params:
             return;
         }
     };
-    let hub = events.hub.clone();
-    let sid = events.session_id.clone();
-    let conn = conn.clone();
     let tool = events
         .tools
         .get(req.tool_call.tool_call_id.0.as_ref())
         .cloned();
+    if auto_allow_permission(events, &req, tool.as_ref()) {
+        conn.respond(id, Ok(permission_answer(&req.options, &Decision::Allow)));
+        return;
+    }
+    let hub = events.hub.clone();
+    let sid = events.session_id.clone();
+    let conn = conn.clone();
     tokio::spawn(async move {
         let f = &req.tool_call.fields;
         let name = f
@@ -1118,6 +1142,416 @@ fn on_request(conn: &Conn, events: &Translator, id: Value, method: &str, params:
         let d = hub.request_approval(&sid, &name, summary, input).await;
         conn.respond(id, Ok(permission_answer(&req.options, &d)));
     });
+}
+
+/// Permissions tab answers itself without interrupting the person:
+/// - MCP tools on tab's own server and tab-brokered remote servers, where
+///   `crate::mcp` already applies per-tool policies, `coordinator::needs_person`,
+///   vault/browser cards, and woken-turn guards (matching `allowedTools` in
+///   `claude::acp_setup`).
+/// - For a non-Claude coordinator forced into `default` mode (Antigravity):
+///   file reads allowed by the sandbox policy, brokered `git`/`gh` commands
+///   (matching `Bash(git:*)`/`Bash(gh:*)` in `claude::acp_setup`), and
+///   read-only local search/listing commands when the OS sandbox is enforced
+///   (matching Claude Code's built-in Read/Grep/Glob, which Antigravity runs
+///   through `run_command`). Risky, mutating, network, and edit calls still ask.
+fn auto_allow_permission(
+    events: &Translator,
+    req: &acp::RequestPermissionRequest,
+    tool: Option<&Tool>,
+) -> bool {
+    let f = &req.tool_call.fields;
+    let name = f
+        .name
+        .as_deref()
+        .or_else(|| tool.map(|t| t.name.as_str()))
+        .unwrap_or("tool");
+    let kind = f.kind.or_else(|| tool.and_then(|t| t.kind));
+    let input = f
+        .raw_input
+        .as_ref()
+        .or_else(|| tool.map(|t| &t.input));
+
+    if is_allowed_mcp_tool(name, events.mcp_tool_name.as_deref(), &events.allowed) {
+        return true;
+    }
+    if !events.coordinator || events.raw.is_some() {
+        return false;
+    }
+    if matches!(kind, Some(acp::ToolKind::Read)) || name == "read_file" {
+        let Some(path) = input.and_then(extract_read_path) else {
+            return false;
+        };
+        let path = std::path::Path::new(path);
+        let resolved = if path.is_absolute() {
+            crate::sandbox::real(path)
+        } else if let Some(cwd) = &events.cwd {
+            crate::sandbox::real(&cwd.join(path))
+        } else {
+            return false;
+        };
+        return events
+            .policy
+            .as_ref()
+            .is_none_or(|p| p.allows(&resolved, crate::sandbox::Access::Read));
+    }
+    if matches!(kind, Some(acp::ToolKind::Execute))
+        || matches!(name, "run_command" | "bash" | "Bash" | "execute")
+    {
+        let Some(cmd) = input.and_then(extract_command_line) else {
+            return false;
+        };
+        return coordinator_safe_command(cmd, events.brokered, events.sandboxed);
+    }
+    false
+}
+
+fn extract_read_path(input: &Value) -> Option<&str> {
+    ["Path", "path", "file_path", "filePath", "AbsolutePath"]
+        .into_iter()
+        .find_map(|k| input.get(k).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn extract_command_line(input: &Value) -> Option<&str> {
+    ["CommandLine", "command", "cmd"]
+        .into_iter()
+        .find_map(|k| input.get(k).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Whether `name` is a tool from tab's MCP server or one of the remote MCP
+/// servers tab added (`allowed`), which `crate::mcp` gates itself.
+fn is_allowed_mcp_tool(name: &str, format: Option<&str>, allowed: &[String]) -> bool {
+    let matches_server = |server: &str| allowed.iter().any(|a| a == server);
+    if let Some(rest) = name.strip_prefix("mcp__")
+        && let Some((server, _)) = rest.split_once("__")
+    {
+        return matches_server(server);
+    }
+    match format {
+        Some("mcp.{server}.{tool}") => name
+            .strip_prefix("mcp.")
+            .and_then(|r| r.split_once('.'))
+            .is_some_and(|(server, _)| matches_server(server)),
+        Some("mcp_{server}_{tool}") => {
+            let Some(rest) = name.strip_prefix("mcp_") else {
+                return false;
+            };
+            allowed.iter().any(|s| {
+                if s == "tab" {
+                    // Every tab MCP tool starts with `tab_` (`mcp_tab_tab_*`),
+                    // so a personal server named `tab_*` won't match.
+                    rest.starts_with("tab_tab_")
+                } else {
+                    let sanitized = s.replace('-', "_");
+                    rest.starts_with(&format!("{s}_")) || rest.starts_with(&format!("{sanitized}_"))
+                }
+            })
+        }
+        Some("{server}_{tool}") => allowed.iter().any(|s| {
+            if s == "tab" {
+                name.starts_with("tab_tab_")
+            } else {
+                name.starts_with(&format!("{s}_"))
+            }
+        }),
+        _ => false,
+    }
+}
+
+/// Whether a coordinator's shell command is safe to auto-approve:
+/// - brokered `git` (without config/exec overrides) and `gh`, matching
+///   `Bash(git:*)` and `Bash(gh:*)` in `claude::acp_setup`, and
+/// - under an enforced OS sandbox, strictly read-only local inspection/search
+///   commands (`ls`, `rg`, `grep`, `find` without exec/delete, `cat`, `head`,
+///   `tail`, `wc`, etc.) so harnesses without built-in Grep/Glob/LS can search
+///   code without prompting on every step.
+///
+/// Any shell substitution, subshell, backgrounding, file redirection (except
+/// `2>/dev/null` and `2>&1`), environment override, or non-allowlisted command
+/// returns `false` so the person is asked.
+fn coordinator_safe_command(cmd: &str, brokered: bool, sandboxed: bool) -> bool {
+    let Some(segments) = split_safe_shell(cmd) else {
+        return false;
+    };
+    !segments.is_empty()
+        && segments
+            .iter()
+            .all(|words| is_safe_simple_command(words, brokered, sandboxed))
+}
+
+/// Splits a shell command into simple-command word lists on `&&`, `||`, `;`,
+/// and `|`, rejecting newlines, command/process substitutions, subshells,
+/// backgrounding, unbalanced quotes, and redirections other than `2>/dev/null`
+/// and `2>&1`.
+fn split_safe_shell(cmd: &str) -> Option<Vec<Vec<String>>> {
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    let mut segments: Vec<Vec<String>> = Vec::new();
+    let mut current: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+
+    let flush_word = |word: &mut String, in_word: &mut bool, current: &mut Vec<String>| {
+        if *in_word {
+            current.push(std::mem::take(word));
+            *in_word = false;
+        }
+    };
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'\n' | b'\r' => return None,
+            b' ' | b'\t' => {
+                flush_word(&mut word, &mut in_word, &mut current);
+                i += 1;
+            }
+            b'\'' => {
+                in_word = true;
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    if bytes[i] == b'\n' || bytes[i] == b'\r' {
+                        return None;
+                    }
+                    i += 1;
+                }
+                if i >= bytes.len() {
+                    return None; // unclosed single quote
+                }
+                word.push_str(&cmd[start..i]);
+                i += 1;
+            }
+            b'"' => {
+                in_word = true;
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    match bytes[i] {
+                        b'\n' | b'\r' | b'`' => return None,
+                        b'$' if bytes.get(i + 1) == Some(&b'(') => return None,
+                        b'\\' => {
+                            i += 1;
+                            if i >= bytes.len() {
+                                return None;
+                            }
+                            let c = cmd[i..].chars().next()?;
+                            word.push(c);
+                            i += c.len_utf8();
+                        }
+                        _ => {
+                            let c = cmd[i..].chars().next()?;
+                            word.push(c);
+                            i += c.len_utf8();
+                        }
+                    }
+                }
+                if i >= bytes.len() {
+                    return None; // unclosed double quote
+                }
+                i += 1;
+            }
+            b'\\' => {
+                in_word = true;
+                i += 1;
+                if i >= bytes.len() {
+                    return None;
+                }
+                let c = cmd[i..].chars().next()?;
+                if c == '\n' || c == '\r' {
+                    return None;
+                }
+                word.push(c);
+                i += c.len_utf8();
+            }
+            b'`' | b'(' | b')' | b'<' => return None,
+            b'$' if bytes.get(i + 1) == Some(&b'(') => return None,
+            b';' => {
+                flush_word(&mut word, &mut in_word, &mut current);
+                if current.is_empty() {
+                    return None;
+                }
+                segments.push(std::mem::take(&mut current));
+                i += 1;
+            }
+            b'|' => {
+                flush_word(&mut word, &mut in_word, &mut current);
+                if current.is_empty() {
+                    return None;
+                }
+                segments.push(std::mem::take(&mut current));
+                i += if bytes.get(i + 1) == Some(&b'|') { 2 } else { 1 };
+            }
+            b'&' => {
+                if bytes.get(i + 1) != Some(&b'&') {
+                    return None; // backgrounding or `&>`
+                }
+                flush_word(&mut word, &mut in_word, &mut current);
+                if current.is_empty() {
+                    return None;
+                }
+                segments.push(std::mem::take(&mut current));
+                i += 2;
+            }
+            b'>' => {
+                // Only harmless stderr redirects (`2>/dev/null`, `2>&1`) are allowed.
+                if word != "2" {
+                    return None;
+                }
+                word.clear();
+                in_word = false;
+                i += 1;
+                if cmd[i..].starts_with("&1") {
+                    i += 2;
+                    if bytes.get(i).is_some_and(|c| !matches!(c, b' ' | b'\t' | b';' | b'|' | b'&'))
+                    {
+                        return None;
+                    }
+                    continue;
+                }
+                while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+                    i += 1;
+                }
+                if cmd[i..].starts_with("/dev/null") {
+                    i += "/dev/null".len();
+                    if bytes.get(i).is_some_and(|c| !matches!(c, b' ' | b'\t' | b';' | b'|' | b'&'))
+                    {
+                        return None;
+                    }
+                    continue;
+                }
+                return None;
+            }
+            _ => {
+                in_word = true;
+                let c = cmd[i..].chars().next()?;
+                word.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+
+    flush_word(&mut word, &mut in_word, &mut current);
+    if !current.is_empty() {
+        segments.push(current);
+    } else if !segments.is_empty() {
+        // Trailing operator (`ls &&` or `ls |`).
+        return None;
+    }
+    Some(segments)
+}
+
+fn is_safe_simple_command(words: &[String], brokered: bool, sandboxed: bool) -> bool {
+    let Some(first) = words.first() else {
+        return false;
+    };
+    if first.is_empty() || first.contains('=') {
+        return false;
+    }
+    let prog = match first.rsplit_once('/') {
+        None => first.as_str(),
+        Some(("/bin" | "/usr/bin" | "/opt/homebrew/bin" | "/usr/local/bin", name)) => name,
+        Some(_) => return false,
+    };
+    let args = &words[1..];
+    match prog {
+        "gh" => brokered,
+        "git" => brokered && !git_has_exec_flag(args),
+        "find" if sandboxed => !args.iter().any(|a| {
+            matches!(
+                a.as_str(),
+                "-exec"
+                    | "-execdir"
+                    | "-ok"
+                    | "-okdir"
+                    | "-delete"
+                    | "-fls"
+                    | "-fprint"
+                    | "-fprint0"
+                    | "-fprintf"
+            )
+        }),
+        "rg" if sandboxed => !args
+            .iter()
+            .any(|a| a == "--pre" || a.starts_with("--pre=")),
+        "fd" if sandboxed => !args.iter().any(|a| {
+            matches!(a.as_str(), "-x" | "-X" | "--exec" | "--exec-batch")
+                || a.starts_with("--exec=")
+                || a.starts_with("--exec-batch=")
+        }),
+        "sort" if sandboxed => !args
+            .iter()
+            .any(|a| a == "-o" || a.starts_with("-o") || a == "--output" || a.starts_with("--output=")),
+        p if sandboxed => matches!(
+            p,
+            "ls" | "grep"
+                | "egrep"
+                | "fgrep"
+                | "cat"
+                | "head"
+                | "tail"
+                | "wc"
+                | "tree"
+                | "diff"
+                | "stat"
+                | "file"
+                | "pwd"
+                | "which"
+                | "basename"
+                | "dirname"
+                | "realpath"
+                | "readlink"
+                | "echo"
+                | "printf"
+                | "true"
+                | "false"
+                | "test"
+                | "["
+                | "uniq"
+                | "cut"
+                | "tr"
+                | "nl"
+                | "rev"
+                | "comm"
+                | "join"
+                | "paste"
+                | "column"
+                | "fold"
+                | "fmt"
+                | "strings"
+                | "md5"
+                | "shasum"
+                | "sha256sum"
+                | "du"
+                | "df"
+                | "uname"
+                | "date"
+                | "id"
+                | "whoami"
+                | "hostname"
+                | "jq"
+        ),
+        _ => false,
+    }
+}
+
+fn git_has_exec_flag(args: &[String]) -> bool {
+    args.iter().any(|a| {
+        a == "-c"
+            || a.starts_with("-c")
+            || a == "--config-env"
+            || a.starts_with("--config-env=")
+            || a == "--exec-path"
+            || a.starts_with("--exec-path=")
+            || a == "--upload-pack"
+            || a.starts_with("--upload-pack=")
+            || a == "--receive-pack"
+            || a.starts_with("--receive-pack=")
+            || a.contains("ext::")
+    })
 }
 
 /// Claude Code's AskUserQuestion, from the form claude-agent-acp turns it
@@ -1370,6 +1804,7 @@ impl Conn {
 #[derive(Clone)]
 struct Tool {
     name: String,
+    kind: Option<acp::ToolKind>,
     title: String,
     input: Value,
     creates: bool,
@@ -1404,14 +1839,25 @@ struct Translator {
     said_anything: bool,
     finished: bool,
     strict: bool,
-    /// How the agent names MCP tools (`mcp__{server}__{tool}` or
-    /// `{server}_{tool}`), to spot servers tab didn't add.
+    /// How the agent names MCP tools (`mcp__{server}__{tool}`,
+    /// `mcp_{server}_{tool}`, `mcp.{server}.{tool}` or `{server}_{tool}`), to
+    /// spot servers tab didn't add and auto-allow tab's own.
     mcp_tool_name: Option<String>,
     /// MCP servers tab added.
     allowed: Vec<String>,
     /// The person's servers strict mode turned off.
     foreign: Vec<String>,
     leaked: Option<String>,
+    /// Whether this chat is a project's coordinator.
+    coordinator: bool,
+    /// Whether `gh` and `git` are brokered through tab.
+    brokered: bool,
+    /// Whether tab's OS sandbox is enforced on this turn.
+    sandboxed: bool,
+    /// Working directory of this chat, to resolve relative read paths.
+    cwd: Option<std::path::PathBuf>,
+    /// Effective sandbox policy for checking read permissions.
+    policy: Option<crate::sandbox::Policy>,
     /// Claude Code: its own messages, which tab reads the chat from (with
     /// everything tab's Claude Code reader does), instead of the updates.
     raw: Option<super::claude::Parser>,
@@ -1439,6 +1885,11 @@ impl Translator {
             allowed: Vec::new(),
             foreign: Vec::new(),
             leaked: None,
+            coordinator: false,
+            brokered: false,
+            sandboxed: false,
+            cwd: None,
+            policy: None,
             raw: None,
         }
     }
@@ -1486,6 +1937,7 @@ impl Translator {
                     output: String::new(),
                     title: tc.title.clone(),
                     name,
+                    kind: Some(tc.kind),
                     input,
                 };
                 self.hub.post(
@@ -1805,6 +2257,12 @@ fn foreign_server(
         && let Some((server, _)) = rest.split_once('.')
     {
         return (!allowed.iter().any(|a| a == server)).then(|| server.to_string());
+    }
+    if format == Some("mcp_{server}_{tool}")
+        && let Some(rest) = name.strip_prefix("mcp_")
+        && !is_allowed_mcp_tool(name, format, allowed)
+    {
+        return Some(rest.split('_').next().unwrap_or(rest).to_string());
     }
     if format == Some("{server}_{tool}") {
         return foreign
@@ -2681,5 +3139,205 @@ mod tests {
             Incoming::Notification { .. } => panic!("expected a request"),
         }
         agent.await.unwrap();
+    }
+
+    #[test]
+    fn allowed_mcp_tools_match_antigravity_and_reject_spoofs() {
+        let allowed = vec!["tab".to_string(), "linear".to_string(), "my-mcp".to_string()];
+        let f = Some("mcp_{server}_{tool}");
+        assert!(is_allowed_mcp_tool("mcp_tab_tab_project", f, &allowed));
+        assert!(is_allowed_mcp_tool("mcp_tab_tab_search", f, &allowed));
+        assert!(is_allowed_mcp_tool("mcp_linear_list_issues", f, &allowed));
+        assert!(is_allowed_mcp_tool("mcp_my_mcp_search", f, &allowed));
+        // A personal server named `tab_evil` doesn't match `tab`'s `tab_*` tools.
+        assert!(!is_allowed_mcp_tool("mcp_tab_evil_run", f, &allowed));
+        assert!(!is_allowed_mcp_tool("mcp_slack_post", f, &allowed));
+        assert!(!is_allowed_mcp_tool("run_command", f, &allowed));
+        // Strict mode spots foreign Antigravity MCP servers.
+        assert_eq!(
+            foreign_server("mcp_tab_tab_project", f, &allowed, &[]),
+            None
+        );
+        assert_eq!(
+            foreign_server("mcp_slack_post", f, &allowed, &[]),
+            Some("slack".into())
+        );
+    }
+
+    #[test]
+    fn coordinator_safe_commands_allow_reads_and_brokered_git_and_block_risky() {
+        for ok in [
+            "ls -la /repo",
+            "rg -n \"foo|bar\" /repo/src",
+            "grep -rn 'hello world' /repo 2>/dev/null | head -n 50",
+            "find /repo -name '*.rs' 2>/dev/null",
+            "git -C /repo grep -n foo && ls /repo",
+            "git status; git log -n 10 --oneline",
+            "gh pr list --state open",
+            "cat Cargo.toml 2>&1 | wc -l",
+            "fd -e rs . /repo",
+            "sort /tmp/a | uniq -c",
+        ] {
+            assert!(
+                coordinator_safe_command(ok, true, true),
+                "expected safe: {ok}"
+            );
+        }
+        // Without the OS sandbox, local shell reads ask; brokered git/gh stay allowed.
+        assert!(coordinator_safe_command("git status", true, false));
+        assert!(coordinator_safe_command("gh pr list", true, false));
+        assert!(!coordinator_safe_command("ls -la", true, false));
+        // Without brokering, git/gh ask.
+        assert!(!coordinator_safe_command("git status", false, true));
+        assert!(!coordinator_safe_command("gh pr list", false, true));
+
+        for blocked in [
+            "",
+            "curl https://example.com",
+            "rm -rf /tmp/x",
+            "python3 -c 'print(1)'",
+            "bash -c 'ls'",
+            "ls && curl https://example.com",
+            "git status; rm foo",
+            "ls $(curl https://example.com)",
+            "echo \"$(whoami)\"",
+            "echo `whoami`",
+            "ls > /tmp/out",
+            "cat a >> /tmp/out",
+            "ls < /etc/passwd",
+            "ls &\ncurl https://example.com",
+            "ls\nrm -rf /",
+            "(ls)",
+            "find /repo -delete",
+            "find /repo -exec rm {} +",
+            "rg --pre cat foo /repo",
+            "fd -x rm . /repo",
+            "sort -o /tmp/out /tmp/in",
+            "git -c core.sshCommand=evil fetch",
+            "git --exec-path=/tmp status",
+            "git clone ext::sh",
+            "GIT_SSH_COMMAND=evil git fetch",
+            "/tmp/evil ls",
+            "ls 'unterminated",
+            "ls &&",
+        ] {
+            assert!(
+                !coordinator_safe_command(blocked, true, true),
+                "expected blocked: {blocked}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn antigravity_coordinator_auto_allows_safe_ops_and_prompts_for_risky() {
+        let (hub, _store, s) = hub_and_session("tab-acp-test-coord-perms");
+        let dir = std::env::temp_dir().join(format!("tab-acp-coord-{}", uuid::Uuid::new_v4()));
+        let allowed_file = dir.join("open.txt");
+        let hidden_dir = dir.join("secret");
+        let hidden_file = hidden_dir.join("key.txt");
+        std::fs::create_dir_all(&hidden_dir).unwrap();
+        std::fs::write(&allowed_file, "ok").unwrap();
+        std::fs::write(&hidden_file, "shh").unwrap();
+
+        let mut policy = crate::sandbox::Sandbox::new(
+            crate::sandbox::SandboxConfig::default(),
+            None,
+            None,
+        )
+        .chat_policy();
+        policy.open.push(crate::sandbox::real(&dir));
+        policy.hide.push(crate::sandbox::real(&hidden_dir));
+
+        let mut t = Translator::new(hub.clone(), s.id.clone(), AgentKind::Antigravity);
+        t.mcp_tool_name = Some("mcp_{server}_{tool}".into());
+        t.allowed = vec!["tab".into(), "linear".into()];
+        t.coordinator = true;
+        t.brokered = true;
+        t.sandboxed = true;
+        t.cwd = Some(dir.clone());
+        t.policy = Some(policy);
+
+        let perm = |name: &str, kind: &str, raw_input: Value| -> acp::RequestPermissionRequest {
+            serde_json::from_value(json!({
+                "sessionId": "s1",
+                "toolCall": {
+                    "toolCallId": "c1",
+                    "name": name,
+                    "kind": kind,
+                    "title": name,
+                    "rawInput": raw_input,
+                },
+                "options": [
+                    { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                    { "optionId": "deny", "name": "Deny", "kind": "reject_once" }
+                ]
+            }))
+            .unwrap()
+        };
+
+        assert!(auto_allow_permission(
+            &t,
+            &perm("mcp_tab_tab_project", "other", json!({})),
+            None,
+        ));
+        assert!(auto_allow_permission(
+            &t,
+            &perm("mcp_linear_list_issues", "other", json!({})),
+            None,
+        ));
+        assert!(auto_allow_permission(
+            &t,
+            &perm("read_file", "read", json!({ "Path": allowed_file })),
+            None,
+        ));
+        assert!(!auto_allow_permission(
+            &t,
+            &perm("read_file", "read", json!({ "Path": hidden_file })),
+            None,
+        ));
+        assert!(auto_allow_permission(
+            &t,
+            &perm(
+                "run_command",
+                "execute",
+                json!({ "CommandLine": "git grep foo && ls -la" })
+            ),
+            None,
+        ));
+        assert!(!auto_allow_permission(
+            &t,
+            &perm(
+                "run_command",
+                "execute",
+                json!({ "CommandLine": "curl https://example.com" })
+            ),
+            None,
+        ));
+        assert!(!auto_allow_permission(
+            &t,
+            &perm("edit_file", "edit", json!({ "Path": allowed_file })),
+            None,
+        ));
+        assert!(!auto_allow_permission(
+            &t,
+            &perm("read_url", "fetch", json!({ "url": "https://example.com" })),
+            None,
+        ));
+
+        // Non-coordinator: MCP tools still auto-allow, but explicit `Ask first`
+        // commands and reads still prompt.
+        t.coordinator = false;
+        assert!(auto_allow_permission(
+            &t,
+            &perm("mcp_tab_tab_project", "other", json!({})),
+            None,
+        ));
+        assert!(!auto_allow_permission(
+            &t,
+            &perm("run_command", "execute", json!({ "CommandLine": "ls -la" })),
+            None,
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

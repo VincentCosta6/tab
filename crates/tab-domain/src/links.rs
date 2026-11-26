@@ -57,6 +57,7 @@ pub fn is_creator(tool: &str, input: &Value) -> bool {
             .any(|c| cmd.contains(c));
     }
     !tool.starts_with("mcp__tab__")
+        && !tool.starts_with("mcp_tab_")
         && !tool.starts_with("tab_")
         && tool.to_lowercase().contains("create")
 }
@@ -117,6 +118,9 @@ mod tests {
         assert!(is_creator("mcp__linear__create_issue", &json!({})));
         assert!(!is_creator("mcp__linear__list_issues", &json!({})));
         assert!(!is_creator("mcp__tab__tab_create_task", &json!({})));
+        // Antigravity's names
+        assert!(!is_creator("mcp_tab_tab_create_task", &json!({})));
+        assert!(is_creator("mcp_linear_create_issue", &json!({})));
         // opencode's names
         assert!(is_creator("bash", &json!({"command": "gh pr create"})));
         assert!(is_creator("github_create_pull_request", &json!({})));

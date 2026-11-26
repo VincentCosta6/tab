@@ -988,13 +988,20 @@ impl AgentHub {
     /// `tab_project_repo` tool, or a record synced from another device) and
     /// write a checkout's worktree list, so anything wider than a code
     /// folder is left out ([`crate::sandbox::Sandbox::too_wide`]).
-    fn project_checkouts(&self, session: &Session) -> Vec<PathBuf> {
+    pub(crate) fn project_checkouts(&self, session: &Session) -> Vec<PathBuf> {
         let sb = crate::sandbox::current();
         let project = session
             .item_id
             .as_deref()
             .and_then(|id| self.store.get(id).ok().flatten())
-            .and_then(|i| i.project_id);
+            .and_then(|i| i.project_id)
+            .or_else(|| {
+                self.store
+                    .session_key(&session.id)
+                    .ok()
+                    .flatten()
+                    .and_then(|k| coordinator::project_of(Some(&k)).map(str::to_string))
+            });
         let Some(project) = project else {
             return Vec::new();
         };
@@ -3251,5 +3258,45 @@ mod rewind_tests {
             .map(|m| m.content)
             .collect();
         assert_eq!(left, ["one"]);
+    }
+
+    #[test]
+    fn coordinator_project_checkouts_include_project_repos() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let dir = std::env::temp_dir().join(format!("tab-coord-checkouts-{}", uuid::Uuid::new_v4()));
+        let repo_dir = dir.join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        let hub = AgentHub::new(store.clone(), tx, AgentConfig::default(), dir.join("hub"));
+        let now = Utc::now();
+        let project = store
+            .project_save(None, "Tab", "#7c5cff", "code", now)
+            .unwrap();
+        store
+            .repo_save(
+                &project.id,
+                "owner/tab",
+                Some(&repo_dir.to_string_lossy()),
+                None,
+                "you",
+                now,
+            )
+            .unwrap();
+        let session = store
+            .session_create_keyed(
+                &coordinator::key(&project.id),
+                AgentKind::Antigravity,
+                "Coordinator · Tab",
+                &dir.to_string_lossy(),
+                now,
+            )
+            .unwrap();
+        let checkouts = hub.project_checkouts(&session);
+        assert!(
+            checkouts.contains(&crate::sandbox::real(&repo_dir)),
+            "expected coordinator checkouts to include {}: {checkouts:?}",
+            repo_dir.display()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
