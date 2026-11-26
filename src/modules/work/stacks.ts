@@ -27,9 +27,14 @@ const rank = (i: QueueItem) => urgencyRank[i.ranking?.urgency ?? "today"];
  * its most urgent member, the lead, so it ranks and groups like that one;
  * `stacks` is keyed by the lead's id. Other rows keep their order.
  */
-export function stack(top: QueueItem[], stacks: (kind: string) => boolean): { top: QueueItem[]; stacks: Map<string, Stack> } {
+export function stack(
+  top: QueueItem[],
+  stacks: (kind: string) => boolean,
+  exclude?: (item: QueueItem) => boolean,
+): { top: QueueItem[]; stacks: Map<string, Stack> } {
   const groups = new Map<string, { kind: string; label: string; items: QueueItem[] }>();
   for (const i of top) {
+    if (exclude?.(i)) continue;
     const e = stacks(i.kind) && i.entities.find((x) => x.rel === "container");
     if (!e) continue;
     const id = `stack:${i.kind}|${e.key}`;

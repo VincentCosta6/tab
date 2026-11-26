@@ -9,7 +9,7 @@
 //   5. everything in Context is finished ("Merged")
 //   6. idle
 
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../../lib/api";
 import { keys } from "../../lib/query";
@@ -87,7 +87,7 @@ export function useMarkSeen(itemId: string | null, a: AgentActivity | undefined)
 /** Where each item's Context stands, for the given items, kept fresh. */
 export function useContextStatus(ids: string[]): Map<string, ContextStatus[]> {
   const sorted = [...ids].sort();
-  const { data = {} } = useQuery({
+  const { data } = useQuery({
     queryKey: keys.contextStatus(sorted),
     queryFn: () => api.contextStatus(sorted),
     enabled: sorted.length > 0,
@@ -95,7 +95,7 @@ export function useContextStatus(ids: string[]): Map<string, ContextStatus[]> {
     refetchInterval: 60_000,
     placeholderData: (prev) => prev,
   });
-  return new Map(Object.entries(data));
+  return useMemo(() => new Map(Object.entries(data ?? {})), [data]);
 }
 
 // --- The row's one status -------------------------------------------------

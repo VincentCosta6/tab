@@ -2003,22 +2003,12 @@ fn agent_mcp_servers(
 /// left out.
 #[tauri::command]
 async fn agent_activity(state: State<'_, AppState>) -> CmdResult<Vec<serde_json::Value>> {
-    let sessions = state.store.sessions_recent(300).map_err(err)?;
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
+    let sessions = state.store.sessions_for_active_items().map_err(err)?;
+    let mut out = Vec::with_capacity(sessions.len());
     for s in sessions {
-        let Some(item) = s.item_id.clone() else {
+        let Some(item) = s.item_id else {
             continue;
         };
-        // Newest session per item only.
-        if !seen.insert(item.clone()) {
-            continue;
-        }
-        // A chat marked done no longer asks for the person: keep it off the
-        // Work badge and the list's agent dots.
-        if matches!(state.store.get(&item), Ok(Some(i)) if i.state == ItemState::Done) {
-            continue;
-        }
         let waiting = !state.hub.pending_approvals(&s.id).is_empty();
         let status = if waiting {
             "needs_input".to_string()

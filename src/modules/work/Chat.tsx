@@ -31,6 +31,7 @@ export function openOnboarding() {
 
 import { openItem, openLink } from "../../lib/links";
 import { LinkBar } from "./LinkBar";
+import { noteAgentActivity } from "./optimistic";
 export { openItem, takePendingOpen } from "../../lib/links";
 
 /**
@@ -84,6 +85,7 @@ export function ChatView({ item, body, showBody = true, onSent, focus }: { item:
         running: true,
         messages: (c?.messages ?? []).filter((m) => m.id > 0),
       }));
+      noteAgentActivity(qc, item.id, { ...started.session, status: "working" });
       qc.invalidateQueries({ queryKey: keys.chat(item.id) });
     } catch (e) {
       setError(String(e));
@@ -96,6 +98,7 @@ export function ChatView({ item, body, showBody = true, onSent, focus }: { item:
     try {
       const started = await api.chatShell(item.id, command);
       qc.setQueryData<Chat>(keys.chat(item.id), (c) => ({ session: started.session, approvals: c?.approvals ?? [], running: c?.running ?? false, messages: c?.messages ?? [] }));
+      noteAgentActivity(qc, item.id, started.session);
       qc.invalidateQueries({ queryKey: keys.chat(item.id) });
     } catch (e) {
       setError(String(e));

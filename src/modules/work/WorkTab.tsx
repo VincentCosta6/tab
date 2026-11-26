@@ -12,7 +12,7 @@ import { SessionPill, StatusPill, sessionLook } from "./SessionPill";
 import { taskStatus, unread, useContextStatus, useMarkSeen, useSeen, type TaskStatus } from "./taskStatus";
 import { setHere, takePendingDone } from "../../lib/nav";
 import { keys } from "../../lib/query";
-import type { AgentActivity, ItemState, ItemWorkflowStatus, QueueItem, Urgency } from "../../lib/types";
+import type { AgentActivity, ItemState, ItemWorkflowStatus, QueueItem } from "../../lib/types";
 import { WorkflowPill } from "./WorkflowStatus";
 import { takePendingOpen } from "./Chat";
 import { ItemPane } from "./ItemPane";
@@ -24,18 +24,24 @@ import { SnoozeMenu, snoozeOptions } from "./SnoozeMenu";
 import { ScoreBreakdown } from "./ScoreBreakdown";
 import { api } from "../../lib/api";
 import { actOnItem, type ItemAction } from "./optimistic";
-import { afterBlockers, nest } from "./followups";
+import { nest } from "./followups";
+import { groupQueue, isInProgress, isRowQuiet, type GroupQueueContext, type QueueGroupKind } from "./queueGroups";
 import { isStackId, stack, type Stack } from "./stacks";
 import { StackPane, plural } from "./StackPane";
 
-const urgencyOrder: Urgency[] = ["now", "today", "this_week", "whenever"];
-const urgencyHeading: Record<Urgency, string> = { now: "Now", today: "Today", this_week: "This week", whenever: "Whenever" };
+const groupHeading: Record<QueueGroupKind, string> = {
+  in_progress: "In progress",
+  now: "Now",
+  today: "Today",
+  this_week: "This week",
+  whenever: "Whenever",
+};
 const NEW = "__new__";
 const viewLabel: Record<ItemState, string> = { open: "Queue", snoozed: "Snoozed", done: "Done" };
 const appIcon = (icon: string) => (hasBrand(icon) ? <Brand name={icon} size={12} /> : <Icon name={icon} size={12} />);
 type Leaving = "done" | "away";
 /** A row animating out, kept drawn after the optimistic update drops it from the list. */
-type Ghost = { kind: Leaving; item: QueueItem; after: string | null };
+type Ghost = { kind: Leaving; item: QueueItem; after: string | null; inProgress: boolean; quiet: boolean };
 const WIDTH_KEY = "tab.queueWidth";
 const OPEN_FOLLOWUPS_KEY = "tab.openFollowups";
 const DEFAULT_LIST_WIDTH = 420;
@@ -115,11 +121,25 @@ export function WorkTab() {
     }
     return out;
   }, [visible, leaving]);
+  const activity = useAgentActivity();
+  const workflows = useWorkflowActivity();
+  const seen = useSeen();
+  // Only items with a chat get a task status; that keeps the lookups few.
+  const contextStatus = useContextStatus(drawn.filter((i) => activity.has(i.id)).map((i) => i.id));
+  const pinnedInProgress = useMemo(() => new Set([...leaving.values()].filter((g) => g.inProgress).map((g) => g.item.id)), [leaving]);
+  const pinnedQuiet = useMemo(() => new Set([...leaving.values()].filter((g) => g.quiet).map((g) => g.item.id)), [leaving]);
   // Follow-ups fold under the task they came from, and swarms of one kind
   // (a project's errors) into a stack; search and the other views stay flat.
+  // Items actively being worked on stay out of stacks so they sit in In progress.
   const nested = view === "open" && !query;
   const { top: threads, children } = useMemo(() => (nested ? nest(drawn) : { top: drawn, children: new Map<string, QueueItem[]>() }), [drawn, nested]);
-  const { top, stacks } = useMemo(() => (nested ? stack(threads, (k) => !!kind(k).stack) : { top: threads, stacks: new Map<string, Stack>() }), [threads, nested, kind]);
+  const { top, stacks } = useMemo(
+    () =>
+      nested
+        ? stack(threads, (k) => !!kind(k).stack, (i) => pinnedInProgress.has(i.id) || isInProgress(i.id, activity, workflows, children))
+        : { top: threads, stacks: new Map<string, Stack>() },
+    [threads, nested, kind, pinnedInProgress, activity, workflows, children],
+  );
   // Each stack, and each of its members, to the stack's lead row.
   const leadOf = useMemo(() => {
     const m = new Map<string, string>();
@@ -127,20 +147,12 @@ export function WorkTab() {
     return m;
   }, [stacks]);
   const openStack = isStackId(selected) ? [...stacks.values()].find((st) => st.id === selected) : undefined;
-  const activity = useAgentActivity();
-  // Threads with an agent at work on them are today's business, whatever they scored.
-  const busy = [...activity.values()].filter((a) => a.status === "working" || a.status === "needs_input").map((a) => a.item_id).sort().join(" ");
-  const grouped = useMemo(() => {
-    if (!nested) return [{ urgency: null as Urgency | null, items: top }];
-    const atWork = new Set(busy.split(" "));
-    const urgency = (i: QueueItem): Urgency => {
-      const u = i.ranking?.urgency ?? "today";
-      return atWork.has(i.id) && (u === "this_week" || u === "whenever") ? "today" : u;
-    };
-    return urgencyOrder
-      .map((u) => ({ urgency: u as Urgency | null, items: afterBlockers(top.filter((i) => urgency(i) === u)) }))
-      .filter((g) => g.items.length);
-  }, [top, nested, busy]);
+  const isUnread = useCallback((a: AgentActivity | undefined) => unread(a, seen), [seen]);
+  const queueCtx: GroupQueueContext = useMemo(
+    () => ({ nested, activity, workflows, contextStatus, isUnread, children, pinnedInProgress, pinnedQuiet }),
+    [nested, activity, workflows, contextStatus, isUnread, children, pinnedInProgress, pinnedQuiet],
+  );
+  const grouped = useMemo(() => groupQueue(top, queueCtx), [top, queueCtx]);
   const titles = useMemo(() => new Map(all.map((i) => [i.id, i.title])), [all]);
   const [openFollowups, setOpenFollowups] = useState<ReadonlySet<string>>(() => {
     try {
@@ -228,9 +240,9 @@ export function WorkTab() {
     setSelected((s) => {
       if (s === NEW || (s && live.some((i) => i.id === s)) || (isStackId(s) && leadOf.has(s))) return s;
       recheck.current = null;
-      return live[0]?.id ?? null;
+      return shown[0] ?? live[0]?.id ?? null;
     });
-  }, [live, leadOf]);
+  }, [live, leadOf, shown]);
   // A chat started elsewhere (e.g. "Set up with assistant" in Connections).
   useEffect(() => {
     const open = () => {
@@ -248,8 +260,8 @@ export function WorkTab() {
     return () => window.removeEventListener("tab:open-item", open);
   }, [qc]);
   useEffect(() => {
-    if (!selected && live.length) setSelected(live[0].id);
-  }, [live, selected]);
+    if (!selected && (shown.length || live.length)) setSelected(shown[0] ?? live[0].id);
+  }, [live, shown, selected]);
 
   const move = useCallback(
     (delta: number) => {
@@ -272,16 +284,16 @@ export function WorkTab() {
     (id: string, done = false) => {
       if (id !== selected) return;
       let next: string | null;
-      if (done) next = live.find((i) => i.id !== id)?.id ?? NEW;
+      if (done) next = shown.find((x) => x !== id) ?? NEW;
       else {
-        const idx = live.findIndex((i) => i.id === id);
-        next = (live[idx + 1] ?? live[idx - 1])?.id ?? null;
+        const idx = shown.indexOf(id);
+        next = (idx >= 0 ? (shown[idx + 1] ?? shown[idx - 1]) : shown.find((x) => x !== id)) ?? null;
       }
       setSelected(next);
       setArrived(next);
       if (next && next !== NEW) document.getElementById(`row-${next}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     },
-    [live, selected],
+    [shown, selected],
   );
 
   const dropGhost = useCallback((id: string) => setLeaving((m) => {
@@ -299,7 +311,9 @@ export function WorkTab() {
       if (leaving.has(item.id)) return;
       const done = action === "done";
       const idx = visible.findIndex((i) => i.id === item.id);
-      setLeaving((m) => new Map(m).set(item.id, { kind: done ? "done" : "away", item, after: idx > 0 ? visible[idx - 1].id : null }));
+      const inProgress = isInProgress(item.id, activity, workflows, children);
+      const quiet = nested && isRowQuiet(item.id, queueCtx);
+      setLeaving((m) => new Map(m).set(item.id, { kind: done ? "done" : "away", item, after: idx > 0 ? visible[idx - 1].id : null, inProgress, quiet }));
       advance(item.id, done);
       const anim = animateOut(item.id, done);
       const ok = await actOnItem(qc, item, action).catch((e) => (console.warn("item action failed", e), false));
@@ -312,7 +326,7 @@ export function WorkTab() {
       await anim;
       dropGhost(item.id);
     },
-    [advance, dropGhost, leaving, visible, qc],
+    [advance, dropGhost, leaving, visible, qc, activity, workflows, children, nested, queueCtx],
   );
 
   // A whole stack at once: the row folds away like one item's, then each
@@ -368,13 +382,9 @@ export function WorkTab() {
     return () => window.removeEventListener("keydown", onKey);
   }, [move]);
 
-  const workflows = useWorkflowActivity();
-  const seen = useSeen();
   // Opening a chat reads its latest reply.
   const openId = selected && selected !== NEW && !isStackId(selected) ? selected : null;
   useMarkSeen(openId, openId ? activity.get(openId) : undefined);
-  // Only items with a chat get a task status; that keeps the lookups few.
-  const contextStatus = useContextStatus(drawn.filter((i) => activity.has(i.id)).map((i) => i.id));
   const stackRow = (st: Stack): React.ReactNode => {
     const open = unfolded.has(st.id);
     return (
@@ -399,9 +409,10 @@ export function WorkTab() {
     const kids = children.get(i.id);
     const open = unfolded.has(i.id);
     const waiting = (i.blocked_by ?? []).map((b) => titles.get(b) ?? "another task");
+    const quiet = nested && isRowQuiet(i.id, queueCtx);
     return (
       <div key={i.id} className={cx("thread", kids && "has-kids")} style={{ "--depth": depth } as React.CSSProperties}>
-        <QueueRow item={i} agent={activity.get(i.id)} workflow={workflows.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} waiting={waiting} hideProject={!!project} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => (setClicked((c) => ({ id: i.id, n: c.n + 1 })), setSelected(i.id))} onAct={(a) => act(i, a)} />
+        <QueueRow item={i} agent={activity.get(i.id)} workflow={workflows.get(i.id)} status={taskStatus(activity.get(i.id), contextStatus.get(i.id), unread(activity.get(i.id), seen))} waiting={waiting} hideProject={!!project} quiet={quiet} selected={i.id === selected} leaving={leaving.get(i.id)?.kind} onSelect={() => (setClicked((c) => ({ id: i.id, n: c.n + 1 })), setSelected(i.id))} onAct={(a) => act(i, a)} />
         {kids && !open && (
           <button className="thread-more" aria-expanded={false} onClick={() => toggleFollowups(i.id)}>
             {kids.length} follow-up{kids.length === 1 ? "" : "s"}
@@ -482,8 +493,8 @@ export function WorkTab() {
           {grouped.map((g) => {
             const rows = g.items.filter((i) => drawnTops.has(i.id));
             return rows.length > 0 && (
-              <div key={g.urgency ?? "all"}>
-                {g.urgency && <div className={cx("urgency-group", `urgency-${g.urgency}`)}>{urgencyHeading[g.urgency]}</div>}
+              <div key={g.kind ?? "all"}>
+                {g.kind && <div className={cx("urgency-group", `urgency-${g.kind}`)}>{groupHeading[g.kind]}</div>}
                 {rows.map((i) => row(i))}
               </div>
             );
@@ -535,7 +546,7 @@ function byline(item: QueueItem): string {
   return [actor, same(item.context) ? null : item.context].filter(Boolean).join(" · ");
 }
 
-export function QueueRow({ item, agent, workflow, status, waiting, hideProject, selected, leaving, onSelect, onAct, compact }: {
+export function QueueRow({ item, agent, workflow, status, waiting, hideProject, quiet, selected, leaving, onSelect, onAct, compact }: {
   item: QueueItem;
   /** The queue is filtered to one project, so naming it on each row repeats it. */
   hideProject?: boolean;
@@ -546,6 +557,8 @@ export function QueueRow({ item, agent, workflow, status, waiting, hideProject, 
   workflow?: ItemWorkflowStatus;
   /** The task's one status; without it the row shows the agent's. */
   status?: TaskStatus | null;
+  /** Actively working in the background and doesn't need attention right now. */
+  quiet?: boolean;
   selected: boolean;
   /** Animating out: "done" strikes it through first. */
   leaving?: Leaving;
@@ -571,7 +584,7 @@ export function QueueRow({ item, agent, workflow, status, waiting, hideProject, 
   );
   const snoozed = item.state === "snoozed" && item.snoozed_until && <Badge icon="clock">{timeUntil(item.snoozed_until)}</Badge>;
   return (
-    <div id={compact ? undefined : `row-${item.id}`} role="option" aria-selected={selected} className={cx("row", selected && "selected", menu && "menu-open", compact && "compact", leaving && "leaving", leaving === "done" && "leaving-done")} onClick={onSelect}
+    <div id={compact ? undefined : `row-${item.id}`} role="option" aria-selected={selected} className={cx("row", selected && "selected", quiet && "row-quiet", menu && "menu-open", compact && "compact", leaving && "leaving", leaving === "done" && "leaving-done")} onClick={onSelect}
       onContextMenu={(e) => (e.preventDefault(), setMenu(false), setCtx({ x: e.clientX, y: e.clientY }))}>
       <span className="row-glyph">
         <SourceGlyph kind={item.kind} source={item.source} icon={k.icon} tone={k.tone} size={compact ? 24 : 28} />

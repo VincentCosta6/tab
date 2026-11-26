@@ -9,6 +9,7 @@ import { keys } from "../../lib/query";
 import type { Chat } from "../../lib/types";
 import type { ItemAction } from "./optimistic";
 import { SnoozeMenu } from "./SnoozeMenu";
+import { noteAgentActivity } from "./optimistic";
 import type { Stack } from "./stacks";
 import { QueueRow } from "./WorkTab";
 
@@ -46,6 +47,7 @@ export function StackPane({ stack: s, project, onAct, onSelect, onStarted }: {
       const { item, session } = await api.chatSend(null, text, into);
       qc.setQueryData(keys.item(item.id), item);
       qc.setQueryData<Chat>(keys.chat(item.id), { session, messages: [], approvals: [], running: true });
+      noteAgentActivity(qc, item.id, { ...session, status: "working" });
       await Promise.all(s.items.map((i) => api.contextAdd(item.id, { section: "context", ref_item_id: i.id, title: i.title, added_by: "user" })));
       qc.invalidateQueries({ queryKey: keys.allItems });
       onStarted(item.id);

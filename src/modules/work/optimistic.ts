@@ -1,8 +1,29 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { api } from "../../lib/api";
 import { keys } from "../../lib/query";
-import type { ItemState, QueueItem } from "../../lib/types";
+import type { AgentActivity, ItemState, QueueItem, Session } from "../../lib/types";
 import { confirmDone } from "./doneGuard";
+
+/**
+ * Optimistically records a started chat in the agent-activity cache so the
+ * item enters "In progress" immediately instead of waiting for the debounced
+ * session_changed refetch.
+ */
+export function noteAgentActivity(
+  qc: QueryClient,
+  itemId: string,
+  session: Pick<Session, "agent" | "status" | "updated_at">,
+) {
+  qc.setQueryData<AgentActivity[]>(keys.agentActivity, (prev = []) => {
+    const entry: AgentActivity = {
+      item_id: itemId,
+      agent: session.agent,
+      status: session.status,
+      updated_at: session.updated_at,
+    };
+    return [entry, ...prev.filter((a) => a.item_id !== itemId)];
+  });
+}
 
 export type ItemAction = "done" | "reopen" | { snooze: number };
 

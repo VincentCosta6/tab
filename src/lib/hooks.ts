@@ -1,5 +1,6 @@
 // Query hooks. Components read through these so caching rules live in one place.
 
+import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { keys } from "./query";
@@ -93,14 +94,14 @@ export function useSaveConfig() {
 
 /** Busy, waiting or failed agents by item. Kept live by session events. */
 export function useAgentActivity(): Map<string, AgentActivity> {
-  const { data = [] } = useQuery({ queryKey: keys.agentActivity, queryFn: api.agentActivity, staleTime: 0, refetchInterval: 30_000 });
-  return new Map(data.map((a) => [a.item_id, a]));
+  const { data } = useQuery({ queryKey: keys.agentActivity, queryFn: api.agentActivity, staleTime: 0, refetchInterval: 30_000 });
+  return useMemo(() => new Map((data ?? []).map((a) => [a.item_id, a])), [data]);
 }
 
 /** Each item's workflow status, like `useAgentActivity`. Kept live by run and session events. */
 export function useWorkflowActivity(): Map<string, ItemWorkflowStatus> {
-  const { data = [] } = useQuery({ queryKey: keys.workflowActivity, queryFn: api.workflowActivity, staleTime: 0, refetchInterval: 30_000 });
-  return new Map(data.map((s) => [s.item_id, s]));
+  const { data } = useQuery({ queryKey: keys.workflowActivity, queryFn: api.workflowActivity, staleTime: 0, refetchInterval: 30_000 });
+  return useMemo(() => new Map((data ?? []).map((s) => [s.item_id, s])), [data]);
 }
 
 /** Polls quickly while the index is busy, slowly otherwise. */

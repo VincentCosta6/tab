@@ -6,6 +6,7 @@ import { api } from "../../lib/api";
 import { keys } from "../../lib/query";
 import type { Chat } from "../../lib/types";
 import { Composer } from "./Chat";
+import { noteAgentActivity } from "./optimistic";
 import { cx } from "../../design/components";
 import { ProjectPicker, useProjectTint, useRememberedProject } from "./Projects";
 
@@ -35,6 +36,7 @@ export function NewChat({ onStarted, project: filtered }: { onStarted: (itemId: 
       const { item, session } = await api.chatSend(null, text, project, attachments);
       qc.setQueryData(keys.item(item.id), item);
       qc.setQueryData<Chat>(keys.chat(item.id), { session, messages: [], approvals: [], running: true });
+      noteAgentActivity(qc, item.id, { ...session, status: "working" });
       qc.invalidateQueries({ queryKey: keys.allItems });
       onStarted(item.id);
     } catch (e) {
@@ -51,6 +53,7 @@ export function NewChat({ onStarted, project: filtered }: { onStarted: (itemId: 
       const { item, session } = await api.chatShell(null, command, project);
       qc.setQueryData(keys.item(item.id), item);
       qc.setQueryData<Chat>(keys.chat(item.id), { session, messages: [], approvals: [], running: false });
+      noteAgentActivity(qc, item.id, session);
       qc.invalidateQueries({ queryKey: keys.chat(item.id) });
       qc.invalidateQueries({ queryKey: keys.allItems });
       onStarted(item.id);
