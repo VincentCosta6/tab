@@ -1466,7 +1466,7 @@ fn vault_tools(coordinator: bool) -> Value {
             },
             {
                 "name": "tab_vault_get",
-                "description": "Read one vault entry. Values are masked unless you name them in `reveal`, which asks the person to release them to you (\"file\" releases a file's text). Ask for only what the task needs, and don't repeat released values in your reply unless the person asked for them.",
+                "description": "Read one vault entry. Values are masked unless you name them in `reveal`, which asks the person to release them to you (\"file\" releases a file's text, with numbers masked unless the person allows the full text). Fields with `revealable: false` are kept private from agents and are never released: if the task needs one, ask the person to enter it themselves. Ask for only what the task needs, and don't repeat released values in your reply unless the person asked for them.",
                 "inputSchema": { "type": "object", "properties": {
                     "id": { "type": "string", "description": "The entry id from tab_vault_search." },
                     "reveal": { "type": "array", "items": { "type": "string" }, "description": "Field names to see in full, or \"file\"." },
@@ -1477,7 +1477,7 @@ fn vault_tools(coordinator: bool) -> Value {
     } else {
         json!([{
             "name": "tab_vault_request",
-            "description": "Ask the person for fields from the project's encrypted vault (e.g. EIN, bank routing number), with why you need them. They see an approval card; if they approve, the values are in this tool's result only. Don't save them anywhere or repeat them beyond what the task needs.",
+            "description": "Ask the person for fields from the project's encrypted vault (e.g. EIN, bank routing number), with why you need them. They see an approval card; if they approve, the values are in this tool's result. Fields the person keeps private from agents (tax ids, account numbers, passwords, unless they chose otherwise) are never shared: if the task needs one, ask the person to enter it themselves. Don't save values anywhere or repeat them beyond what the task needs.",
             "inputSchema": { "type": "object", "properties": {
                 "fields": { "type": "array", "items": { "type": "string" }, "description": "Field names, e.g. [\"EIN\", \"State tax ID\"]." },
                 "why": { "type": "string", "description": "What you need them for, shown to the person." }
@@ -1485,6 +1485,9 @@ fn vault_tools(coordinator: bool) -> Value {
         }])
     }
 }
+
+/// What an agent is told about fields the person keeps private from agents.
+const PRIVATE_NOTE: &str = "The person keeps these private from agents, so they weren't shared and won't be. Don't ask for them again: where the task needs one, tell the person and let them enter it themselves.";
 
 /// Who in a chat may use the vault, and for which project.
 struct VaultRole {
@@ -1832,8 +1835,21 @@ impl McpServer {
                 let v = self
                     .vault_open(session, "let the coordinator read it")
                     .await?;
+                let (e, _) = v.get(project, id, &[], &who)?;
+                // Private fields never reach an agent, so the person isn't
+                // asked about them.
+                let private: Vec<String> = e
+                    .fields
+                    .iter()
+                    .filter(|f| !f.revealable)
+                    .filter(|f| reveal.iter().any(|r| r.eq_ignore_ascii_case(&f.label)))
+                    .map(|f| f.label.clone())
+                    .collect();
+                let reveal: Vec<String> = reveal
+                    .into_iter()
+                    .filter(|r| !private.iter().any(|p| p.eq_ignore_ascii_case(r)))
+                    .collect();
                 if !reveal.is_empty() {
-                    let (e, _) = v.get(project, id, &[], &who)?;
                     let fields: Vec<Value> = e
                         .fields
                         .iter()
@@ -1853,7 +1869,7 @@ impl McpServer {
                     self.vault_ask(
                         session,
                         format!("Show {} from {} to the coordinator", names.join(", "), e.title),
-                        json!({ "kind": "release", "entry": e.title, "fields": fields, "file": reveal.iter().any(|r| r == "file"), "why": why }),
+                        json!({ "kind": "release", "entry": e.title, "fields": fields, "file": reveal.iter().any(|r| r == "file"), "file_full": e.file_revealable == Some(true), "why": why }),
                     )
                     .await
                     .inspect_err(|_| {
@@ -1880,6 +1896,10 @@ impl McpServer {
                         "Released for this task only: don't repeat these values unless the person asked for them. The saved chat shows them masked."
                     );
                 }
+                if !private.is_empty() {
+                    out["kept_private"] = json!(private);
+                    out["private_note"] = json!(PRIVATE_NOTE);
+                }
                 Ok(text(serde_json::to_string_pretty(&out)?))
             }
             "tab_vault_request" if !role.coordinator => {
@@ -1898,6 +1918,38 @@ impl McpServer {
                     None,
                     Some(json!({ "fields": fields, "why": why })),
                 )?;
+                // With the vault open, don't ask the person about what only
+                // private fields answer: they can't be shared anyway.
+                if v.is_open() {
+                    let found = v.find_fields(project, &fields)?;
+                    let shareable = |w: &String| {
+                        found.iter().any(|(e, labels)| {
+                            e.fields.iter().any(|f| {
+                                f.revealable
+                                    && labels.contains(&f.label)
+                                    && (crate::e2e::label_matches(w, &f.label)
+                                        || crate::e2e::label_matches(w, &e.title))
+                            })
+                        })
+                    };
+                    let private = |w: &String| {
+                        found.iter().any(|(e, labels)| {
+                            e.fields.iter().any(|f| {
+                                !f.revealable
+                                    && labels.contains(&f.label)
+                                    && (crate::e2e::label_matches(w, &f.label)
+                                        || crate::e2e::label_matches(w, &e.title))
+                            })
+                        })
+                    };
+                    if !fields.iter().any(shareable) && fields.iter().any(private) {
+                        return Ok(text(serde_json::to_string_pretty(&json!({
+                            "shared": [],
+                            "kept_private": fields.iter().filter(|w| private(w)).collect::<Vec<_>>(),
+                            "note": PRIVATE_NOTE,
+                        }))?));
+                    }
+                }
                 self.vault_ask(
                     session,
                     format!("Share {} from the vault with this chat", fields.join(", ")),
@@ -1928,30 +1980,46 @@ impl McpServer {
                     Some(json!({ "fields": fields, "why": why })),
                 )?;
                 let mut shared = Vec::new();
+                let mut private = Vec::new();
                 for (entry, labels) in v.find_fields(project, &fields)? {
-                    let (e, _) = v.get(project, &entry.id, &labels, &who)?;
+                    let (open, closed): (Vec<_>, Vec<_>) = entry
+                        .fields
+                        .iter()
+                        .filter(|f| labels.contains(&f.label))
+                        .partition(|f| f.revealable);
+                    private.extend(
+                        closed
+                            .into_iter()
+                            .map(|f| json!({ "entry": entry.title, "field": f.label })),
+                    );
+                    if open.is_empty() {
+                        continue;
+                    }
+                    let open: Vec<String> = open.into_iter().map(|f| f.label.clone()).collect();
+                    let (e, _) = v.get(project, &entry.id, &open, &who)?;
                     for f in e.fields.into_iter().filter(|f| f.value.is_some()) {
                         shared
                             .push(json!({ "entry": e.title, "field": f.label, "value": f.value }));
                     }
                 }
+                let answers = |w: &String, s: &Value| {
+                    crate::e2e::label_matches(w, s["field"].as_str().unwrap_or_default())
+                        || crate::e2e::label_matches(w, s["entry"].as_str().unwrap_or_default())
+                };
                 let missing: Vec<&String> = fields
                     .iter()
-                    .filter(|w| {
-                        !shared.iter().any(|s| {
-                            crate::e2e::label_matches(w, s["field"].as_str().unwrap_or_default())
-                                || crate::e2e::label_matches(
-                                    w,
-                                    s["entry"].as_str().unwrap_or_default(),
-                                )
-                        })
-                    })
+                    .filter(|w| !shared.iter().chain(&private).any(|s| answers(w, s)))
                     .collect();
-                Ok(text(serde_json::to_string_pretty(&json!({
+                let mut out = json!({
                     "shared": shared,
                     "not_in_vault": missing,
                     "note": "For this task only: don't save these anywhere or repeat them beyond what the task needs. The saved chat shows them masked.",
-                }))?))
+                });
+                if !private.is_empty() {
+                    out["kept_private"] = json!(private);
+                    out["private_note"] = json!(PRIVATE_NOTE);
+                }
+                Ok(text(serde_json::to_string_pretty(&out)?))
             }
             _ => anyhow::bail!("{name} isn't available in this chat"),
         }
@@ -5160,7 +5228,42 @@ rl.on('line', (l) => {
             "{found}"
         );
 
-        // A thread asks; the person approves on the card.
+        // The EIN is a number, so it's private from agents by default:
+        // asking gets no card and no value, from a thread or the coordinator.
+        let kept = server
+            .call(
+                Some(&worker.id),
+                "tab_vault_request",
+                json!({ "fields": ["ein"], "why": "the W-9" }),
+            )
+            .await
+            .unwrap()
+            .to_string();
+        assert!(
+            kept.contains("kept_private") && !kept.contains("3456789"),
+            "{kept}"
+        );
+        let entry_id = vault.entries(&p.id).unwrap()[0].id.clone();
+        let kept = server
+            .call(
+                Some(&coordinator.id),
+                "tab_vault_get",
+                json!({ "id": entry_id, "reveal": ["EIN"], "why": "the W-9" }),
+            )
+            .await
+            .unwrap()
+            .to_string();
+        assert!(
+            kept.contains("kept_private") && !kept.contains("3456789"),
+            "{kept}"
+        );
+
+        // Once the person lets agents ask for it, a thread asks and the
+        // person approves on the card.
+        vault
+            .set_revealable(&p.id, &entry_id, Some("EIN"), true)
+            .await
+            .unwrap();
         let mut rx = events.subscribe();
         let answer = {
             let hub = hub.clone();
@@ -5225,7 +5328,7 @@ rl.on('line', (l) => {
         answer.await.unwrap();
         assert!(err.contains("declined"), "{err}");
         let log = vault.audit_log(None, 50).unwrap();
-        for a in ["search", "request", "approve", "reveal"] {
+        for a in ["search", "request", "approve", "reveal", "share_on"] {
             assert!(log.iter().any(|x| x.action == a), "no {a}");
         }
     }

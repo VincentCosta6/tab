@@ -75,12 +75,52 @@ pub struct Body {
     pub fields: Vec<Field>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<FileInfo>,
+    /// Whether agents may read a file's text in full. Off (or unset), its
+    /// numbers come to them masked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_revealable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Field {
     pub label: String,
     pub value: String,
+    /// Whether the person may release this field to an agent. Unset, it
+    /// follows [`revealable_by_default`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revealable: Option<bool>,
+}
+
+impl Field {
+    pub fn is_revealable(&self) -> bool {
+        self.revealable
+            .unwrap_or_else(|| revealable_by_default(&self.label, &self.value))
+    }
+}
+
+/// Whether a field the person hasn't decided on may be shown to agents:
+/// not when it holds a number (tax ids, account and card numbers) or reads
+/// like a password or key. Those stay in tab unless the person says so.
+pub fn revealable_by_default(label: &str, value: &str) -> bool {
+    const SECRET: &[&str] = &[
+        "password",
+        "passcode",
+        "passphrase",
+        "pin",
+        "secret",
+        "token",
+        "key",
+        "ssn",
+        "social",
+        "cvv",
+        "cvc",
+        "security",
+    ];
+    let label = label.to_lowercase();
+    index::numbers(value).is_empty()
+        && !label
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| SECRET.contains(&w))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -100,6 +140,9 @@ pub struct Entry {
     pub fields: Vec<FieldView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<FileInfo>,
+    /// Files only: whether agents may read its text in full.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_revealable: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -108,6 +151,8 @@ pub struct Entry {
 pub struct FieldView {
     pub label: String,
     pub masked: String,
+    /// Whether the person lets agents be shown it.
+    pub revealable: bool,
     /// Only when released.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
@@ -900,13 +945,18 @@ impl E2e {
                 .map(|f| FieldView {
                     label: f.label.clone(),
                     masked: crypto::mask(&f.value),
-                    value: reveal
-                        .iter()
-                        .any(|l| l.eq_ignore_ascii_case(&f.label))
-                        .then(|| f.value.clone()),
+                    revealable: f.is_revealable(),
+                    // A private field is never released, whatever was asked.
+                    value: (f.is_revealable()
+                        && reveal.iter().any(|l| l.eq_ignore_ascii_case(&f.label)))
+                    .then(|| f.value.clone()),
                 })
                 .collect(),
             file: body.file.clone(),
+            file_revealable: body
+                .file
+                .is_some()
+                .then(|| body.file_revealable.unwrap_or(false)),
             created_at: r.created_at,
             updated_at: r.updated_at,
         }
@@ -957,18 +1007,19 @@ impl E2e {
             if label.is_empty() {
                 continue;
             }
+            let was = old
+                .fields
+                .iter()
+                .find(|o| o.label.eq_ignore_ascii_case(label));
             let value = match &f.value {
                 Some(v) => v.trim().to_string(),
-                None => old
-                    .fields
-                    .iter()
-                    .find(|o| o.label.eq_ignore_ascii_case(label))
-                    .map(|o| o.value.clone())
-                    .unwrap_or_default(),
+                None => was.map(|o| o.value.clone()).unwrap_or_default(),
             };
             fields.push(Field {
                 label: label.into(),
                 value,
+                // What the person chose for agents carries over an edit.
+                revealable: was.and_then(|o| o.revealable),
             });
         }
         let body = Body {
@@ -976,6 +1027,7 @@ impl E2e {
             note: input.note.trim().into(),
             fields,
             file: old.file,
+            file_revealable: old.file_revealable,
         };
         let now = Utc::now();
         self.write_entry(project_id, &id, &kind, url.as_deref(), &body, now)?;
@@ -1036,6 +1088,45 @@ impl E2e {
         )?;
         self.reindex().await;
         Ok(())
+    }
+
+    /// Whether agents may be shown a field (`label`), or a file's full text
+    /// (`label: None`). Only the person sets this.
+    pub async fn set_revealable(
+        &self,
+        project_id: &str,
+        id: &str,
+        label: Option<&str>,
+        on: bool,
+    ) -> anyhow::Result<Entry> {
+        let r = self.entry_resource(project_id, id)?;
+        let mut b = self.open_entry(&r)?;
+        let what = match label {
+            Some(label) => {
+                let f = b
+                    .fields
+                    .iter_mut()
+                    .find(|f| f.label.eq_ignore_ascii_case(label))
+                    .ok_or_else(|| anyhow::anyhow!("no field {label}"))?;
+                f.revealable = Some(on);
+                f.label.clone()
+            }
+            None => {
+                anyhow::ensure!(b.file.is_some(), "that entry has no file");
+                b.file_revealable = Some(on);
+                "file".into()
+            }
+        };
+        self.write_entry(project_id, id, &r.kind, r.url.as_deref(), &b, Utc::now())?;
+        self.audit(
+            if on { "share_on" } else { "share_off" },
+            &Reader::PERSON,
+            Some(project_id),
+            Some(id),
+            Some(json!({ "title": b.title, "fields": [what] })),
+        )?;
+        let r = self.entry_resource(project_id, id)?;
+        Ok(self.view(&r, &b, &[]))
     }
 
     /// One field's value, for the person (the eye button).
@@ -1147,21 +1238,34 @@ impl E2e {
         let r = self.entry_resource(project_id, id)?;
         let b = self.open_entry(&r)?;
         let v = self.view(&r, &b, reveal);
+        let full = b.file_revealable.unwrap_or(false);
         let text = if reveal.iter().any(|l| l == "file") {
             self.with_open(|o| Ok(o.index.text(&r.id)))?
+                .map(|t| if full { t } else { index::mask_numbers(&t) })
         } else {
             None
         };
         remember(v.fields.iter().filter_map(|f| f.value.clone()));
-        if let Some(t) = &text {
+        if let (Some(t), true) = (&text, full) {
             remember(index::numbers(t));
         }
+        // Only what was actually released is logged as seen.
+        let seen: Vec<&str> = reveal
+            .iter()
+            .filter(|l| {
+                *l == "file"
+                    || v.fields
+                        .iter()
+                        .any(|f| f.value.is_some() && f.label.eq_ignore_ascii_case(l))
+            })
+            .map(String::as_str)
+            .collect();
         self.audit(
-            if reveal.is_empty() { "get" } else { "reveal" },
+            if seen.is_empty() { "get" } else { "reveal" },
             who,
             Some(project_id),
             Some(id),
-            Some(json!({ "title": b.title, "fields": reveal })),
+            Some(json!({ "title": b.title, "fields": seen })),
         )?;
         Ok((v, text))
     }

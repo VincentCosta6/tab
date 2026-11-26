@@ -4064,6 +4064,7 @@ pub fn run() {
             vault::vault_entry_save,
             vault::vault_entry_delete,
             vault::vault_reveal,
+            vault::vault_set_revealable,
             vault::vault_file_add,
             vault::vault_file_export,
             vault::vault_audit,

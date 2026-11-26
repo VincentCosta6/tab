@@ -235,6 +235,14 @@ async fn agents_see_masked_values_and_released_ones_are_redacted() {
 
     let (masked, _) = a.get(&w.project, &e.id, &[], &coord).unwrap();
     assert_eq!(masked.fields[0].value, None);
+    // A number is private from agents until the person says otherwise:
+    // asking for it releases nothing.
+    assert!(!masked.fields[0].revealable);
+    let (kept, _) = a.get(&w.project, &e.id, &["EIN".into()], &coord).unwrap();
+    assert_eq!(kept.fields[0].value, None);
+    a.set_revealable(&w.project, &e.id, Some("ein"), true)
+        .await
+        .unwrap();
     let (shown, _) = a.get(&w.project, &e.id, &["EIN".into()], &coord).unwrap();
     assert_eq!(shown.fields[0].value.as_deref(), Some("12-3456789"));
     // Once released, it's masked in what's stored and synced.
@@ -252,8 +260,10 @@ async fn agents_see_masked_values_and_released_ones_are_redacted() {
         }],
         ..ein(Some(e.id.clone()))
     };
-    a.save(&w.project, edited).await.unwrap();
+    let saved = a.save(&w.project, edited).await.unwrap();
     assert_eq!(a.reveal(&w.project, &e.id, "EIN").unwrap(), "12-3456789");
+    // And keeps what the person chose for agents.
+    assert!(saved.fields[0].revealable);
 
     // Locked, nothing reads.
     a.lock();
@@ -350,4 +360,53 @@ fn plaintext_vault_resources_are_refused() {
             .resource_save(&w.project, &input, "agent", Utc::now())
             .is_err()
     );
+}
+
+#[test]
+fn numbers_and_passwords_are_private_from_agents_by_default() {
+    for (label, value) in [
+        ("EIN", "12-3456789"),
+        ("Account number", "9800 1234 5521"),
+        ("Portal password", "correct horse"),
+        ("API key", "abc"),
+        ("PIN", "12"),
+        ("SSN", "n/a"),
+    ] {
+        assert!(!revealable_by_default(label, value), "{label}");
+    }
+    for (label, value) in [
+        ("Legal name", "Acme Widgets LLC"),
+        ("State", "CA"),
+        ("Keyboard layout", "US"),
+    ] {
+        assert!(revealable_by_default(label, value), "{label}");
+    }
+}
+
+#[tokio::test]
+async fn a_files_numbers_are_masked_for_agents_until_the_person_allows_the_full_text() {
+    let w = World::new();
+    let laptop = w.device("laptop");
+    let a = w.as_(&laptop);
+    a.create().await.unwrap();
+    let e = a
+        .add_file(&w.project, "w2.txt", b"Employer EIN 98-7654321\nWages paid")
+        .await
+        .unwrap();
+    assert_eq!(e.file_revealable, Some(false));
+    let coord = Reader {
+        actor: "coordinator",
+        session_id: Some("s1"),
+    };
+    let (_, text) = a.get(&w.project, &e.id, &["file".into()], &coord).unwrap();
+    let text = text.unwrap();
+    assert!(
+        text.contains("Wages paid") && !text.contains("7654321"),
+        "{text}"
+    );
+    a.set_revealable(&w.project, &e.id, None, true)
+        .await
+        .unwrap();
+    let (_, text) = a.get(&w.project, &e.id, &["file".into()], &coord).unwrap();
+    assert!(text.unwrap().contains("98-7654321"));
 }

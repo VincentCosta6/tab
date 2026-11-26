@@ -1054,7 +1054,12 @@ function VaultApproval({ approval }: { approval: Approval }) {
         </div>
       )}
       {input.why && <p className="vault-approval-why"><span className="subtle">Why:</span> {input.why}</p>}
-      {input.kind !== "unlock" && <p className="subtle vault-approval-note">Only this one answer gets the values; the saved chat shows them masked. Logged in the vault's activity.</p>}
+      {input.kind !== "unlock" && (
+        <p className="subtle vault-approval-note">
+          The agent sees these values in full. They go to its model provider and stay in the agent's own chat log on this computer; only tab's saved chat shows them masked.
+          {" "}Fields you keep private from agents aren't shared. Logged in the vault's activity.
+        </p>
+      )}
       {error && <div className="chat-error"><Icon name="x-circle" size={14} /> {error}</div>}
       <div className="toolbar">
         <Button size="sm" variant="primary" icon="check" disabled={busy} onClick={allow}>{input.kind === "unlock" ? "Unlock" : input.kind === "release" ? "Show to the coordinator" : "Share"}</Button>

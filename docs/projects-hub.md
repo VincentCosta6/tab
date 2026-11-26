@@ -90,6 +90,13 @@ an existing device (or your recovery key) lets it in; indexing happens only on d
   you reveal them. A worker thread calls `tab_vault_request(fields, why)`, which shows an approval card;
   approved values are passed in that one tool result only. Synced transcripts store the masked form;
   compaction summaries drop vault values. Every read goes to an append-only `vault_audit`.
+- **Private fields.** A released value still reaches the model provider and the harness's own
+  transcript (e.g. `~/.claude/projects/*.jsonl`), which tab can't mask, and the approval card says so.
+  So each field carries `revealable` (unset: `e2e::revealable_by_default`, off for anything with a
+  number or a password-like label). A private field is never released, whatever an agent asks: no card
+  is shown for it and the result lists it under `kept_private`. A file's text comes to agents with its
+  numbers masked unless the person allows the full text. Only the person changes these, on the Vault
+  screen, after a confirm; each change is audited (`share_on` / `share_off`).
 
 ### As built (phase 4)
 

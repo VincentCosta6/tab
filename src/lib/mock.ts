@@ -52,7 +52,7 @@ const mockVault = {
     { id: "device-pc", name: "DESKTOP-7Q2", state: "active", code: "105 337", this: false, approved_by: "Vincent's MacBook Pro", created_at: ago(60 * 24 * 12) },
     { id: "device-new", name: "Vincent's iPad", state: "pending", code: "731 064", this: false, approved_by: null, created_at: ago(3) },
   ] as VaultDevice[],
-  entries: [] as (Omit<VaultEntry, "fields"> & { fields: { label: string; value: string }[] })[],
+  entries: [] as (Omit<VaultEntry, "fields"> & { fields: { label: string; value: string; revealable?: boolean }[] })[],
   audit: [] as VaultAudit[],
 };
 function vaultLog(action: string, actor: VaultAudit["actor"], detail: VaultAudit["detail"] = null, resource_id: string | null = null) {
@@ -78,7 +78,15 @@ function vaultSeed(projectId: string) {
   );
 }
 const vaultOpen = () => mockVault.openUntil > Date.now();
-const vaultView = (e: (typeof mockVault.entries)[number]): VaultEntry => ({ ...e, fields: e.fields.map((f) => ({ label: f.label, masked: vaultMask(f.value) })) });
+// Like `e2e::revealable_by_default`: numbers and passwords stay private unless the person says.
+const vaultRevealable = (f: { label: string; value: string; revealable?: boolean }) =>
+  f.revealable ?? (!f.value.split(/[\s,;()]+/).some((w) => (w.match(/\d/g)?.length ?? 0) >= 4)
+    && !f.label.toLowerCase().split(/[^a-z0-9]+/).some((w) => ["password", "passcode", "passphrase", "pin", "secret", "token", "key", "ssn", "social", "cvv", "cvc", "security"].includes(w)));
+const vaultView = (e: (typeof mockVault.entries)[number]): VaultEntry => ({
+  ...e,
+  fields: e.fields.map((f) => ({ label: f.label, masked: vaultMask(f.value), revealable: vaultRevealable(f) })),
+  ...(e.file ? { file_revealable: e.file_revealable ?? false } : {}),
+});
 function vaultMustBeOpen() {
   if (!vaultOpen()) throw new Error("The vault is locked. Unlock it on this device first.");
 }
@@ -430,7 +438,10 @@ export const mockApi = {
           if (!input.title.trim()) throw new Error("a vault entry needs a name");
           const now = new Date().toISOString();
           const old = mockVault.entries.find((e) => e.id === input.id);
-          const fields = input.fields.filter((f) => f.label.trim()).map((f) => ({ label: f.label.trim(), value: f.value ?? old?.fields.find((o) => o.label === f.label)?.value ?? "" }));
+          const fields = input.fields.filter((f) => f.label.trim()).map((f) => {
+            const was = old?.fields.find((o) => o.label === f.label);
+            return { label: f.label.trim(), value: f.value ?? was?.value ?? "", revealable: was?.revealable };
+          });
           if (old) Object.assign(old, { title: input.title, note: input.note, fields, updated_at: now });
           const e = old ?? { id: `ve-${Date.now()}`, project_id: args.projectId, kind: "note" as const, title: input.title, note: input.note, fields, created_at: now, updated_at: now };
           if (!old) mockVault.entries.push(e);
@@ -452,6 +463,19 @@ export const mockApi = {
           const v = mockVault.entries.find((e) => e.id === args.id)?.fields.find((f) => f.label === args.label)?.value ?? "";
           vaultLog("reveal", "person", { fields: [args.label] }, args.id);
           return v;
+        }
+        case "vault_set_revealable": {
+          vaultMustBeOpen();
+          const e = mockVault.entries.find((x) => x.id === args.id);
+          if (!e) throw new Error(`no vault entry ${args.id} in this project`);
+          if (args.label == null) e.file_revealable = !!args.on;
+          else {
+            const f = e.fields.find((x) => x.label === args.label);
+            if (!f) throw new Error(`no field ${args.label}`);
+            f.revealable = !!args.on;
+          }
+          vaultLog(args.on ? "share_on" : "share_off", "person", { title: e.title, fields: [args.label ?? "file"] }, e.id);
+          return vaultView(e);
         }
         case "vault_file_export": vaultMustBeOpen(); return `~/Downloads/${mockVault.entries.find((e) => e.id === args.id)?.file?.name ?? "file"}`;
         case "vault_audit": return mockVault.audit.map((a) => (vaultOpen() ? a : { ...a, detail: null }));
