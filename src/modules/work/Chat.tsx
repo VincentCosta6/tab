@@ -514,7 +514,7 @@ function ProgressBar({ messages, results, running, folded, writing }: { messages
     if (step || m.kind !== "tool") continue;
     const tool = m.meta?.tool;
     if (isStepTool(tool) || tool === "AskUserQuestion") continue;
-    step = m.content.replace(/^mcp__tab__/, "tab: ").split("\n")[0];
+    step = m.content.replace(/^(?:Run )?(?:mcp__tab__|mcp_tab_)/, "tab: ").split("\n")[0];
   }
   if (!running && !todos.length) return null;
   const done = todos.filter((t) => t.status === "completed").length;
@@ -716,8 +716,8 @@ function Thinking({ run }: { run: SessionMessage[] }) {
   );
 }
 
-/** A tool's short name: `mcp__tab__tab_search` reads as tab_search. */
-const toolName = (t: string) => t.replace(/^mcp__[^_]+(?:_[^_]+)*?__/, "").split(":")[0];
+/** A tool's short name: `mcp__tab__tab_search` or `mcp_tab_tab_search` reads as tab_search. */
+const toolName = (t: string) => t.replace(/^mcp__[^_]+(?:_[^_]+)*?__/, "").replace(/^mcp_tab_(?=tab_)/, "").split(":")[0];
 
 /**
  * One tool call: a single line (first line of the command, cut to fit),
@@ -725,14 +725,14 @@ const toolName = (t: string) => t.replace(/^mcp__[^_]+(?:_[^_]+)*?__/, "").split
  */
 function ToolRow({ m, result }: { m: SessionMessage; result?: SessionMessage }) {
   const tool: string = m.meta?.tool ?? "";
-  const label = m.content.replace(/^mcp__tab__/, "tab: ");
+  const label = m.content.replace(/^(?:Run )?(?:mcp__tab__|mcp_tab_)/, "tab: ");
   const [first, ...more] = label.split("\n");
   const command: string | undefined = typeof m.meta?.input?.command === "string" ? m.meta.input.command : undefined;
   const long = !!command && (command.includes("\n") || command.length > 120);
   return (
     <details className={cx("msg-tool", result?.meta?.is_error && "failed")}>
       <summary title={label.length > 300 ? label.slice(0, 300) + "…" : label}>
-        <Icon name={tool.startsWith("mcp__tab") || tool.startsWith("tab_") ? "graph" : "terminal"} size={12} />
+        <Icon name={tool.startsWith("mcp__tab") || tool.startsWith("mcp_tab_") || tool.startsWith("tab_") ? "graph" : "terminal"} size={12} />
         <span className="msg-tool-name">{first}{more.length > 0 && " …"}</span>
         {result?.meta?.is_error && <span className="msg-tool-flag">failed</span>}
       </summary>
